@@ -7,7 +7,7 @@
 # No prebuilt component wheels and no checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.11.0, triton 3.6.0, torchvision 0.24.1, aiter v0.1.17, vLLM v0.27.1,
+# stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
 # all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 7.14.
 ARG ROCM_BASE=rocm/dev-ubuntu-24.04:7.14.0-full@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
 ARG GFX_ARCH=gfx1201
@@ -20,38 +20,56 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a08e551cb33850e4740772b38217fc1796a66da2506
 # resulting wheel reports, so `pip show`, `importlib.metadata`, and the startup banner all agree
 # with what was actually built.
 # torch/triton/torchvision are NOT free choices, and the number to read is not the one in
-# pyproject.toml. vLLM 0.27.1's build-system asks for `torch == 2.13.0`, but that is the CUDA
-# build: upstream's own ROCm image (docker/Dockerfile.rocm_base) builds PYTORCH_BRANCH=release/2.11
-# with torchvision v0.24.1, and requirements/rocm.txt pins no torch at all. release/2.11 is
-# therefore the combination upstream actually tests on ROCm, unchanged from 0.26.0. torch 2.11.0
-# pins triton 3.6.0. Building against newer ones means running a combination upstream never tests:
-# 0.5.0-0.5.4 did exactly that (torch 2.13 / triton 3.7.1 / torchvision 0.28) because
-# `use_existing_torch.py` strips the pin, and those builds hang the GPU under load where 0.4.0 --
-# which used this sanctioned trio -- does not.
-ARG TORCH_VERSION=2.11.0
-ARG TRITON_VERSION=3.6.0
+# pyproject.toml. At 0.27.1 upstream's own ROCm image (docker/Dockerfile.rocm_base) built
+# PYTORCH_BRANCH=release/2.11 with torchvision v0.24.1 and triton 3.6.0 -- the sanctioned trio this
+# fork used to build against, and requirements/rocm.txt itself pins no torch at all.
+# RE-VERIFIED AT THIS BUMP (2026-09, fetched docker/Dockerfile.rocm_base from the v0.29.0 tag
+# directly): upstream's OWN rocm_base Dockerfile has since moved to PYTORCH_BRANCH="6bbd260"
+# (release/2.12 as of 08/02), TRITON_BRANCH="f0b55c0" (release/internal/3.7.x as of 08/18) and
+# AITER_BRANCH="v0.1.19" -- none of which is torch 2.14.0 / triton 3.8.0 / aiter 0.1.21.post2.
+# This bump is therefore, again, a combination upstream does not itself test on ROCm -- the exact
+# risk category that made 0.5.0-0.5.4 hang the GPU under load (torch 2.13 / triton 3.7.1 /
+# torchvision 0.28, reachable only because `use_existing_torch.py` strips the pin). Carried forward
+# anyway because it is what this fork's target stack (vLLM 0.29.0 + newer aiter for gfx1201 MXFP4)
+# needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
+# startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
+ARG TORCH_VERSION=2.14.0
+ARG TRITON_VERSION=3.8.0
 ARG TORCHVISION_VERSION=0.24.1
-ARG AITER_VERSION=0.1.17
-ARG VLLM_VERSION=0.27.1
+ARG AITER_VERSION=0.1.21.post2
+ARG VLLM_VERSION=0.29.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
 # turned the global read into AmbiguousGlobalPerLayerAttributeError, which no released vLLM config
-# convertor handles -- a Gemma-4 checkpoint then fails during argument parsing, before a model or
-# an attention backend exists. 5.14.1 is the last release before that change and loads every
-# architecture this image serves.
-ARG TRANSFORMERS_VERSION=5.14.1
+# convertor handled at the time -- a Gemma-4 checkpoint then failed during argument parsing, before
+# a model or an attention backend exists. 5.14.1 was the last release before that change.
+# BUMPED to 5.17.0 for the vLLM 0.29.0 stack. NOT independently re-verified against a live Gemma-4
+# checkpoint load (no GPU in this environment) -- static check only: the exact
+# `AmbiguousGlobalPerLayerAttributeError` class name is absent from configuration_utils.py and
+# configuration_gemma3.py at the v5.17.0 tag, and configuration_utils.py's per-layer-config handling
+# (`per_layer_config` / HeterogeneousConfigMixin) reads as a broader rewrite of that mechanism, not
+# merely a patch on top of 5.15.0's -- consistent with the bug having been designed away rather than
+# left in place, but this is inference from source shape, not a passing load test. Re-check this the
+# first time a Gemma-4 checkpoint is actually served on this image.
+ARG TRANSFORMERS_VERSION=5.17.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
 ARG RBT_VERSION=rocm-6.4.4
-# R4D: the HIP kernel library for this GPU -- attention, gated delta net, all-reduce and a
-# skinny bf16 GEMM. It is a library of gfx1201 kernels rather than a part of this image, so it
-# lives in its own repository and is pinned here like any other component; R4D_REPO exists so a
-# fork or a local mirror can be substituted without editing the build. The tag is asserted against
-# the version the built library reports, so a stale clone fails the build instead of shipping.
+# R4D: the HIP kernel library for this GPU -- attention, gated delta net, all-reduce, a skinny bf16
+# GEMM and (since this pin) the OCP-MXFP4 x fp8 skinny GEMM gemm_mxfp4a8_nt_m64. It is a library of
+# gfx1201 kernels rather than a part of this image, so it lives in its own repository and is pinned
+# here like any other component; R4D_REPO exists so a fork or a local mirror can be substituted
+# without editing the build.
+# R4D_VERSION is a raw commit SHA, not a tag -- see the full rationale and the matching clone/
+# assertion change at the point of use in the assemble stage (grep this file for "libr4d"). Short
+# version: no tag has gemm_mxfp4a8_nt_m64 yet (`git ls-remote --tags` still shows only v0.4.0 and
+# v0.5.0), so this pins to a fixed SHA on main rather than to the moving branch name -- a moving
+# branch as a pin has already run a production service into a hanging download once in this
+# homelab, which is the entire reason this is a SHA and not just `main`.
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
-ARG R4D_VERSION=v0.5.0
+ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
 
 # =====================================================================================
 # STAGE 1 builder: compile the stack from source into /wheels
@@ -216,7 +234,7 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
-     radiance_r4d_attn.py radiance_gdn.py radiance_w4.py ${SP}/
+     radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 
@@ -227,14 +245,7 @@ COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # patch_conv1d_blockn widens the gated-delta-net prefill conv1d channel block to a 16-byte-per-lane
 # access; bit-identical, and it defuses a 2**14-byte row pitch the caller's split() view creates.
 # patch_r4d is the whole libr4d integration in one patch, switchable at run time with
-# patch_dflash2 backports DFlash2 speculative decoding (vllm-project/vllm#52816, merged ten days
-# after 0.27.1 was tagged): a block-diffusion drafter that proposes a whole block of positions in
-# one backbone pass and walks a candidate path through the target head's top-K per position. It
-# carries two new upstream modules, installed from /opt/patches/dflash2/. patch_dflash_base
-# must run FIRST: DFlash2 subclasses the DFlash speculator, and 0.27.1's copy of that base
-# predates three correctness fixes it relies on. Without them the drafter runs, reports a
-# healthy acceptance curve, and emits garbled text -- the rejected suffix of the previous
-# step is loaded back as accepted context.
+# RADIANCE_USE_R4D (see patch_r4d.py's own docstring for the three integration points).
 # patch_dflash_fused_kv_fp8 lets that drafter be an fp8 checkpoint: the context-KV precompute
 # fuses every layer's K/V projection by slicing the raw parameter, which is neither the right
 # dtype nor the right row layout once the weights are quantized and preshuffled.
@@ -256,40 +267,95 @@ COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # update on the decode path), and the FLA chunk path still gets the fused scan for any step shape
 # the layer hook declines. The two patches above tune that FLA path, which is what runs when
 # RADIANCE_USE_R4D=0.
+# DROPPED at the vLLM 0.29.0 bump, now native upstream (anchor-by-anchor verification in
+# sly/README.md): patch_dflash2 (DFlash2 speculative decoding, vllm-project/vllm#52816, merged into
+# vLLM itself ten days after 0.27.1 was tagged) and patch_dflash_base (the three DFlash correctness
+# fixes DFlash2 depended on, including full cp_rank/cp_local_slot() context-parallelism support) --
+# both now live in vllm/v1/worker/gpu/spec_decode/dflash/speculator.py. patch_radiance_fusion is
+# also dropped: AiterRMSNormQuantFusionPass.is_rdna_aiter_enabled() (vllm/compilation/passes/fusion/
+# rocm_aiter_fusion.py, vllm/_aiter_ops.py) now reaches the same fusion automatically.
+# sly/patch_quark_mxfp4.py puts the RadianceMxfp4W4A8LinearKernel plugin (sly/mxfp4/radiance_mxfp4.py
+# + the radiance_mxfp4_fp8.hip kernel built below) at the head of ROCm's MXFP4 kernel list, and
+# separately relaxes aiter's CDNA-only MXFP4 gates so its own Triton gemm_afp4wfp4 path is reachable
+# on gfx1201 -- RADIANCE_MXFP4=1 for the aiter path, RADIANCE_MXFP4_W4A8=1 for the hand-written
+# kernel layered on top; see sly/README.md for why both are needed rather than either alone.
+# sly/patch_short_prefill.py fixes a gated-delta-net metadata-classification bug where a 1-token
+# prefill (the common case for a cache-hit continuation) is misclassified as a decode step.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
-COPY dflash2/ /opt/patches/dflash2/
+COPY sly/ /opt/patches/sly/
+# PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
+# (/opt/patches/sly), not cwd, at sys.path[0] -- without this, the sly/ entries' `from _patchlib
+# import apply` would not find /opt/patches/_patchlib.py. The top-level entries already have
+# /opt/patches as their own script directory, so this is a no-op for them.
 RUN set -eu; cd /opt/patches; \
     for p in patch_gfx1201 patch_radiance_dispatch patch_skinny_gemm patch_unified_attention_lds \
-             patch_gdn_wmma patch_preshuffle patch_radiance_fusion install_radiance_hooks \
+             patch_gdn_wmma patch_preshuffle install_radiance_hooks \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
-             patch_dynamo_metrics patch_conv1d_blockn patch_r4d patch_dflash_base patch_dflash2 \
-             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata; do \
-      echo "== applying $p =="; python "$p.py"; \
+             patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
+             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
+             sly/patch_quark_mxfp4 sly/patch_short_prefill; do \
+      echo "== applying $p =="; \
+      PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
     python -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('${SP}/radiance_*.py')]; print('radiance modules parse OK')"
 
 # --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
 # One shared object holding every hand-written kernel this image runs: paged attention (prefill and
 # decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
-# its exact and its 6-bit-packed form, and the skinny bf16 GEMM. Built here rather than in the
+# its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
+# fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
+# path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
 # builder stage because it has to be compiled by the same hipcc the venv loads it against.
 # ARGs are declared at the point of use: they are cache-key instructions, so putting them at the top
 # of the stage would invalidate the wheel install above on every kernel bump.
 ARG R4D_REPO
 ARG R4D_VERSION
-RUN git clone --depth 1 -b ${R4D_VERSION} ${R4D_REPO} /src/libr4d \
- && cd /src/libr4d && GFX_ARCH=${GFX_ARCH} OUT=${SP}/r4d.so ./build.sh \
- && WANT=$(echo "${R4D_VERSION}" | sed 's/^v//') \
+# R4D_VERSION is a commit SHA (see the ARG's own comment at the top of the file for why), so the
+# clone can't use `git clone --depth 1 -b <ref>` -- that resolves tags and branches, not arbitrary
+# SHAs. `git fetch <sha>` instead, confirmed against Codeberg's Gitea directly (a live
+# `git fetch --depth 1 origin <sha>` against this exact repo returned the object, i.e.
+# uploadpack.allowAnySHA1InWant is on) -- so this stays a shallow single-object fetch, not a full
+# clone. This ALSO changes the shape of the correctness check below: the previous version compared
+# `r4d.__version__` (from `#define R4D_VERSION "..."` in r4d.h) against the pinned tag, but that
+# macro was NOT bumped by either of the two PRs merged into main after v0.5.0 -- confirmed via
+# `git log -p -- r4d.h` against the live repo, it still reads "0.5.0" at this exact commit. Asserting
+# a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
+# original check was actually protecting against), not the self-reported semver string, which prints
+# only as informational context alongside it.
+RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
+ && git init -q && git remote add origin ${R4D_REPO} \
+ && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
+ && GOT=$(git rev-parse HEAD) \
+ && [ "$GOT" = "${R4D_VERSION}" ] \
+    || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
+ && GFX_ARCH=${GFX_ARCH} OUT=${SP}/r4d.so ./build.sh \
  && python -c "import sys, torch, r4d; \
-assert r4d.__version__ == sys.argv[1], 'r4d reports ' + r4d.__version__ + ', pinned tag is ' + sys.argv[1]; \
-print('r4d', r4d.__version__, 'built:'); \
-[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$WANT" \
- && rm -rf /src/libr4d
+print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
+      'upstream past 0.5.0 since the tag -- informational only) built:'); \
+[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$GOT" \
+ && cd / && rm -rf /src/libr4d
+
+# --- RADIANCE MXFP4 W4A8: the hand-written fp8-WMMA GEMM kernel for gfx1201, compiled here for the
+#     same reason as R4D above -- it has to link against the same hipcc/ROCm toolchain the venv
+#     loads it against, and this is the only stage that has the full (unpruned) ROCm dev tree. ---
+# sly/mxfp4/radiance_mxfp4_fp8.hip is a SINGLE-FILE pybind11 extension (no torch/ATen headers --
+# every exported fn takes raw `uintptr_t` addresses, see its own PYBIND11_MODULE block), unlike
+# R4D's multi-translation-unit build.sh, so it compiles with one hipcc invocation rather than a
+# library build script. It has to be importable as the bare module name `radiance_mxfp4_fp8`
+# (`import radiance_mxfp4_fp8 as _ext` in sly/mxfp4/radiance_mxfp4.py, copied to ${SP}/ above) --
+# same trick as r4d.so above: CPython's default EXTENSION_SUFFIXES includes plain ".so", so an
+# unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
+# renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
+# never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
+ && python -c "import radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
 
 # --- strip debug symbols from the installed extensions (worth ~1 GB) ---
 # These are release builds, but they still carry .debug_* sections that nothing reads at runtime.
-# R4D is excluded: it is tiny and carries device fatbins.
-RUN find /opt/vllm -type f -name '*.so*' ! -name 'r4d.so' \
+# R4D and the MXFP4 kernel above are both excluded: tiny, and both carry device fatbins.
+RUN find /opt/vllm -type f -name '*.so*' ! -name 'r4d.so' ! -name 'radiance_mxfp4_fp8.so' \
       -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true; \
     echo "extensions stripped"
