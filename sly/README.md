@@ -13,6 +13,7 @@ AMD Radeon AI PRO R9700.
 | `mxfp4/radiance_mxfp4.py` | `RadianceMxfp4W4A8LinearKernel`-Plugin (dispatcht große M auf den HIP-Kernel, sonst AITER) |
 | `mxfp4/radiance_mxfp4_fp8.hip` | Hand-geschriebener fp8-WMMA-W4A8-GEMM-Kernel (Prefill), von [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4) |
 | `mxfp4-configs/` | Getunete MXFP4-GEMM-Configs (JSON, wie `fp8-configs/`) — noch leer, folgt nach erstem echten GPU-Tuning-Lauf |
+| `patch_short_prefill.py` | GDN-Fix: 1-Token-Prefill wird nicht mehr fälschlich als Decode klassifiziert (Subagent E, ursprünglich vllm5-Bind-Mount-Patch für 0.28.0, hier verbatim gegen 0.29.0 verifiziert) |
 
 **Kernel-Entscheidung (Subagent C1, abgeschlossen)**: kein Entweder-Oder — beide
 Pfade werden gebraucht, geschichtet:
