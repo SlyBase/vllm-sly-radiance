@@ -43,6 +43,43 @@ vLLM 0.29.0 + Triton 3.8.0 verifiziert — alle vier Anchors (gcn-arch-Env,
 AITER-CDNA-Gate, Triton-`HIPDriver.is_active`, AITER-Sampler-Gate) matchen
 verbatim, keine Änderung nötig.
 
+**`patch_unified_attention_lds.py` (Top-Level, LDS-Fix + bf16-Tuning für gfx1201)
+auf aiter 0.1.21.post2 portiert**: AITER hat zwischen der alten Version (die
+dieser Patch ursprünglich patchte) und `0.1.21.post2` die komplette
+Config-Auswahl in `unified_attention.py` umgebaut — `select_3d_config`/
+`select_2d_config` (Python-elif-Ketten) sind weg, ersetzt durch
+tabellengetriebene JSON-Configs (`get_unified_attention_config()` in
+`unified_attention_utils.py`, geladen per `json.load()` — also reine Daten,
+nicht Python, `_patchlib.apply()`/`ast.parse()` kann dort also nicht ansetzen).
+Der Patch wurde komplett neu geschrieben (6 Hunks statt 3) gegen die reale,
+per `raw.githubusercontent.com` geladene `0.1.21.post2`-Quelle:
+- **LDS-Fit-Klemme** (Korrektheit, unbedingt, 2D **und** 3D) sitzt jetzt in
+  `_unified_attention_2d_triton()`/`_unified_attention_3d_triton()`, direkt
+  nach dem Config-Lookup, vor dem jeweiligen Kernel-Launch.
+- **Konsistenz-Problem gelöst**: `kernel_unified_attention_3d` und
+  `reduce_segments` leiten aus demselben `TILE_SIZE` unabhängig voneinander
+  ihre Segment-Aufteilung ab (`tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS
+  * TILE_SIZE)`) — würde man `TILE_SIZE` nur lokal in
+  `_unified_attention_3d_triton()` klemmen, liefe `reduce_segments` mit dem
+  alten Wert weiter und würde stillschweigend falsche Segmente mergen. Fix:
+  `_unified_attention_3d_triton()` gibt sein (geklemmtes/getuntes) `TILE_SIZE`
+  jetzt per `return` zurück, der einzige Call-Site in `unified_attention()`
+  fängt das ab und reicht denselben Wert an den nachfolgenden
+  `_reduce_segments_triton()`-Call weiter.
+- **bf16/fp16-3D-Decode-Tuning** (TILE16/warps4/stages2/waves2, plus
+  passendes `num_warps=4` im Reduce-Kernel) strukturell an die neue Stelle
+  portiert, hinter `DEVICE_ARCH == "gfx1201"` gated (neu ggü. dem alten Patch —
+  die alte RDNA-Verzweigung war implizit, die neue Architektur ist arch-
+  agnostisch, ein ungegatetes Override hätte andere Archs auf diesem Fork
+  mit-getroffen).
+Verifiziert (ohne GPU): Anchor-Match (alle 6 Stellen `count==1` gegen die
+echte `0.1.21.post2`-Datei), `ast.parse()`, idempotenter Zweitlauf (NOOP),
+`py_compile` — alles grün (`patch-verify-e2/` im Scratchpad, nicht Teil des
+Commits). **Offen**: ob TILE16/warps4/stages2/waves2 in der neuen
+Tabellenstruktur weiterhin do_bench-optimal sind, muss auf echter R9700-
+Hardware neu vermessen werden — hier nur strukturell/korrekt an die neue
+Stelle portiert, nicht neu getuned.
+
 **Offener Punkt für Subagent B**: der `.hip`-Kernel selbst braucht noch
 Build-Wiring im Dockerfile (Compile-Schritt + Extension-Load, analog zu
 `radiance_kernels.py`s Pattern für die anderen `.hip`-Kernel in diesem Repo,
