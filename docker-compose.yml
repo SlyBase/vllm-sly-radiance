@@ -102,6 +102,15 @@ services:
       VLLM_ROCM_USE_AITER_RMSNORM: "0"
       # radiance rms+group-fp8-quant fusion coverage fix (also baked default 1; explicit here).
       RADIANCE_FUSE_RMS_QUANT: "1"
+      # MXFP4 (e.g. amd/Qwen3.8-27B-Quark-AWQ-MXFP4), NOT relevant to the FP8 serve above -- default
+      # "0" here since this compose file serves FP8. RADIANCE_MXFP4=1 unlocks AITER's Triton
+      # gemm_afp4wfp4 on gfx1201 (required for any MXFP4 layer to run natively instead of falling
+      # back to the bf16-dequant emulation kernel); RADIANCE_MXFP4_W4A8=1 additionally layers the
+      # hand-written fp8-WMMA RadianceMxfp4W4A8LinearKernel on top for large-M (prefill) shapes.
+      # See sly/README.md for why both are needed together. Set both to "1" and swap the model path
+      # in `command:` above to serve an MXFP4 checkpoint instead.
+      RADIANCE_MXFP4: "${RADIANCE_MXFP4:-0}"
+      RADIANCE_MXFP4_W4A8: "${RADIANCE_MXFP4_W4A8:-0}"
       # master switch for the hand-written gfx1201 kernel library: attention, the gated delta net,
       # vision attention, the all-reduce and the skinny GEMM. Set "0" and every one of them reverts
       # to the stock path (also drop --attention-backend=R4D above, which then refuses to start).
