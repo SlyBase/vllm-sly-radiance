@@ -69,9 +69,14 @@ LAYER_IMPORT_NEW = (
 )
 
 # Anchored on the warm-up early return, which is unique to _forward_core (the ROCm entry point
-# passes v_dim instead) and sits after the metadata is resolved.
+# passes v_dim instead) and sits after the metadata is resolved. vLLM 0.29.0 added a dict-keyed
+# resolution step in front of the None check (multiple attn backends can now share the forward
+# context), so the anchor includes that resolution rather than just the final check.
 LAYER_OLD = (
-    "        if attn_metadata_raw is None:\n"
+    "        attn_metadata = None\n"
+    "        if isinstance(attn_metadata_raw, dict):\n"
+    "            attn_metadata = attn_metadata_raw.get(self.prefix)\n"
+    "        if attn_metadata is None:\n"
     "            self._warmup_prefill_kernels(mixed_qkv, 0)\n"
     "            return\n"
 )
