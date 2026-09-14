@@ -71,8 +71,17 @@ LAYER_IMPORT_NEW = (
 # Anchored on the warm-up early return, which is unique to _forward_core (the ROCm entry point
 # passes v_dim instead) and sits after the metadata is resolved. vLLM 0.29.0 added a dict-keyed
 # resolution step in front of the None check (multiple attn backends can now share the forward
-# context), so the anchor includes that resolution rather than just the final check.
+# context), so the anchor includes that resolution rather than just the final check. vLLM 0.29.0
+# also added a second, undocstringed _forward_core_fused_norm with the exact same resolution
+# block for its fused-RMSNorm path (the one this patch deliberately does not touch, see the
+# module docstring's "NOT PATCHED" note) -- the docstring's closing Args line pins the anchor to
+# _forward_core alone, since _forward_core_fused_norm has no docstring at all.
 LAYER_OLD = (
+    "            core_attn_out: Pre-allocated output buffer for attention results.\n"
+    '        """\n'
+    "        forward_context = get_forward_context()\n"
+    "        attn_metadata_raw = forward_context.attn_metadata\n"
+    "\n"
     "        attn_metadata = None\n"
     "        if isinstance(attn_metadata_raw, dict):\n"
     "            attn_metadata = attn_metadata_raw.get(self.prefix)\n"
