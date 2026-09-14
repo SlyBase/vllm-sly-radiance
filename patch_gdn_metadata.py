@@ -36,38 +36,36 @@ from _patchlib import apply
 F = Path(sysconfig.get_paths()["purelib"]) / "vllm/v1/attention/backends/gdn_attn.py"
 
 MASK_OLD = """        spec_sequence_masks_cpu: torch.Tensor | None = None
-        if (
-            not self.use_spec_decode
-            or num_decode_draft_tokens_cpu is None
-            or num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            .sum()
-            .item()
-            == 0
-        ):
+        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks_cpu.sum().item()"""
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if (
+                num_spec_decodes == 0
+                or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
+                == 0
+            ):
+                num_spec_decodes = 0
+                spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
+            else:
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )"""
 
 MASK_NEW = """        spec_sequence_masks_cpu: torch.Tensor | None = None
         # --- RADIANCE (patch_gdn_metadata.py): one numpy pass over the same buffer
-        # instead of mask / index / sum / item and then the mask a second time.
+        # instead of mask / sum / item, reused below for the request-count bookkeeping
+        # instead of building the mask a second time. vLLM 0.29.0 moved the "nothing
+        # to do" check from the outer condition (summing the raw draft-token buffer)
+        # into a nested check on the already-built mask -- both read the same values,
+        # so the numpy mask/sum computed once up front covers both.
         _r_np = _RADIANCE_GDN_META and num_decode_draft_tokens_cpu is not None
         _ndt_np = num_decode_draft_tokens_cpu.numpy() if _r_np else None
         _mask_np = None if _ndt_np is None else _ndt_np >= 0
-        if (
-            not self.use_spec_decode
-            or num_decode_draft_tokens_cpu is None
-            or (
-                int(_ndt_np[_mask_np].sum()) == 0
-                if _r_np
-                else num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-                .sum()
-                .item()
-                == 0
-            )
-        ):
+        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
@@ -76,14 +74,33 @@ MASK_NEW = """        spec_sequence_masks_cpu: torch.Tensor | None = None
                 num_spec_decodes = int(_mask_np.sum())
             else:
                 spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
-                num_spec_decodes = spec_sequence_masks_cpu.sum().item()"""
+                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if (
+                num_spec_decodes == 0
+                or (
+                    int(_ndt_np[_mask_np].sum()) == 0
+                    if _r_np
+                    else num_decode_draft_tokens_cpu[spec_sequence_masks_cpu]
+                    .sum()
+                    .item()
+                    == 0
+                )
+            ):
+                num_spec_decodes = 0
+                spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
+            else:
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )"""
 
 LENS_OLD = """            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
+            non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
             # Use CPU tensors to avoid CPU-GPU sync
-            non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+            non_spec_query_lens_cpu = query_lens_cpu[non_spec_sequence_masks_cpu]
             num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
             # Exclude zero-length padded sequences from prefill count.
             num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
@@ -101,6 +118,10 @@ LENS_NEW = """            query_lens = query_start_loc[1:] - query_start_loc[:-1
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
             # Use CPU tensors to avoid CPU-GPU sync
+            # --- RADIANCE: vLLM 0.29.0 precomputes non_spec_sequence_masks_cpu as a
+            # tensor negation; the numpy path below negates _mask_np instead (one
+            # numpy op, not a dispatch), so that variable is only built on the
+            # fallback branch, where it is still the cheapest way to get it.
             if _r_np:
                 # --- RADIANCE: same integers, one numpy pass. `size` is the numpy
                 # spelling of `size(0)` for these 1-D per-request vectors.
@@ -115,7 +136,8 @@ LENS_NEW = """            query_lens = query_start_loc[1:] - query_start_loc[:-1
                     int(_qlen_np.sum()) - num_prefill_tokens - num_decode_tokens
                 )
             else:
-                non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+                non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
+                non_spec_query_lens_cpu = query_lens_cpu[non_spec_sequence_masks_cpu]
                 num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
                 # Exclude zero-length padded sequences from prefill count.
                 num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
