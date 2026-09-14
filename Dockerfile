@@ -100,7 +100,7 @@ ENV PATH=/opt/py/bin:$PATH
 # tag). --no-build-isolation means it is NOT auto-installed: without it here setuptools silently
 # ignores `use_scm_version` and the wheel is stamped 0.0.0.
 RUN pip install -U pip wheel setuptools "setuptools-scm>=8.0" "cmake<4" ninja pybind11 numpy \
-      pyyaml typing_extensions cffi requests
+      pyyaml typing_extensions cffi requests build
 RUN mkdir -p /wheels
 
 # --- torch (AOTriton off: its gfx1201 source-configure fails and vLLM never uses torch
@@ -113,8 +113,8 @@ RUN git clone --depth 1 -b v${TORCH_VERSION} --recurse-submodules --shallow-subm
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
        USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 USE_AOTRITON=0 \
        PYTORCH_BUILD_VERSION=${TORCH_VERSION}+rocm7.14 PYTORCH_BUILD_NUMBER=1 \
-       python setup.py bdist_wheel \
-    && cp dist/*.whl /wheels/ && pip install dist/*.whl && rm -rf /src/pytorch
+       python -m build --wheel --no-isolation --outdir /wheels . \
+    && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
 # --- triton ---
 RUN git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/triton.git /src/triton \
