@@ -116,12 +116,18 @@ RUN for i in 1 2 3 4 5; do \
             https://github.com/pytorch/pytorch.git /src/pytorch && break; \
         echo "torch clone attempt $i failed, retrying in 10s..." >&2; sleep 10; \
     done; test -d /src/pytorch/.git
+# MAX_JOBS caps ninja's parallelism (default: one job per core, 14 here). Some of ATen's
+# generated Register*.cpp translation units are heavy enough under GCC (3-4GB+ RSS each) that
+# 14-wide hit the LXC's 24GB cgroup limit and the kernel OOM-killer took cc1plus out mid-build
+# (confirmed via dmesg on the pve host) -- silent from ninja's side, just "subcommand failed"
+# with no compiler error above it. 6 jobs keeps worst-case peak comfortably under the limit.
 RUN cd /src/pytorch \
     && pip install -r requirements.txt \
     && python tools/amd_build/build_amd.py \
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
        USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 USE_AOTRITON=0 \
        PYTORCH_BUILD_VERSION=${TORCH_VERSION}+rocm7.14 PYTORCH_BUILD_NUMBER=1 \
+       MAX_JOBS=6 \
        python -m build --wheel --no-isolation --outdir /wheels . \
     && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
