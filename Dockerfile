@@ -105,9 +105,18 @@ RUN mkdir -p /wheels
 
 # --- torch (AOTriton off: its gfx1201 source-configure fails and vLLM never uses torch
 #     SDPA-flash; USE_MAGMA=0: base has no magma) ---
-RUN git clone --depth 1 -b v${TORCH_VERSION} --recurse-submodules --shallow-submodules \
-        https://github.com/pytorch/pytorch.git /src/pytorch \
-    && cd /src/pytorch \
+# Cloning is its own layer, split from the ~90min compile below: --recurse-submodules pulls
+# dozens of third-party repos one after another, and any single flaky GitHub fetch aborts the
+# whole clone (observed in practice -- transient, not a real outage, but git only retries a
+# given submodule once before giving up). A shallow submodule clone can't be resumed in place,
+# so each retry starts clean; `test -d .../.git` makes the RUN fail loudly if all attempts do.
+RUN for i in 1 2 3 4 5; do \
+        rm -rf /src/pytorch; \
+        git clone --depth 1 -b v${TORCH_VERSION} --recurse-submodules --shallow-submodules \
+            https://github.com/pytorch/pytorch.git /src/pytorch && break; \
+        echo "torch clone attempt $i failed, retrying in 10s..." >&2; sleep 10; \
+    done; test -d /src/pytorch/.git
+RUN cd /src/pytorch \
     && pip install -r requirements.txt \
     && python tools/amd_build/build_amd.py \
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
