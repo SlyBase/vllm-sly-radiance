@@ -347,10 +347,15 @@ print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ +
 # unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
 # renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
 # never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
+# torch is imported before the extension for the same reason as R4D's check above and the
+# release-stage JIT probe below: a bare HIP extension has no ROCm entry in ld.so.conf and cannot
+# resolve libamdhip64 on its own, so `import radiance_mxfp4_fp8` alone fails with
+# "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
+# fine -- torch's import is what actually pulls the runtime into the process.
 RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       $(python -m pybind11 --includes) \
       /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
- && python -c "import radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
+ && python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
 
 # --- strip debug symbols from the installed extensions (worth ~1 GB) ---
 # These are release builds, but they still carry .debug_* sections that nothing reads at runtime.
