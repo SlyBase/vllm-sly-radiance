@@ -82,7 +82,13 @@ ARG TORCHVISION_VERSION
 ARG AITER_VERSION
 # Build parallelism, as an ARG so a build can be told to leave the box some headroom:
 #   docker build --build-arg MAX_JOBS=16 .
-ARG MAX_JOBS=32
+# Lowered from 32 (effectively 14, one per LXC core): this host has only 29 GB physical RAM shared
+# with a 6 GB VM and another LXC, on top of this LXC's own 24 GB memory cgroup -- already
+# oversubscribed on paper before any build runs. A wide ninja job here does not just risk a
+# cgroup-local OOM-kill, it can push the WHOLE HOST into a global OOM (kernel picks victims
+# system-wide, "global_oom" in dmesg, observed killing unrelated processes in other cgroups) and
+# has crashed pve3 outright more than once. 4 keeps every stage's worst-case peak well under budget.
+ARG MAX_JOBS=4
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTORCH_ROCM_ARCH=${GFX_ARCH} \
     ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm \
@@ -120,14 +126,22 @@ RUN for i in 1 2 3 4 5; do \
 # generated Register*.cpp translation units are heavy enough under GCC (3-4GB+ RSS each) that
 # 14-wide hit the LXC's 24GB cgroup limit and the kernel OOM-killer took cc1plus out mid-build
 # (confirmed via dmesg on the pve host) -- silent from ninja's side, just "subcommand failed"
-# with no compiler error above it. 6 jobs keeps worst-case peak comfortably under the limit.
+# with no compiler error above it.
+# 6 was NOT enough of a cut: it still OOM-killed on the same file (RegisterCompositeExplicitAutograd)
+# in two separate attempts, and raising the LXC's own swap ceiling to compensate was the wrong lever
+# -- it let this one cgroup's virtual footprint (mem + swap) exceed the ENTIRE host's physical
+# budget once the co-resident VM and other containers are counted, so instead of a contained,
+# cgroup-local OOM-kill, the kernel's OOM killer went "global_oom" and started taking down
+# unrelated processes / the host itself (repeated pve3 crashes, confirmed via dmesg across boots).
+# 3 is the actual fix: keep peak concurrent heavy-file RSS low enough that this LXC never gets
+# close to its own 24 GB ceiling in the first place, so any OOM (if it still happens) stays local.
 RUN cd /src/pytorch \
     && pip install -r requirements.txt \
     && python tools/amd_build/build_amd.py \
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
        USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 USE_AOTRITON=0 \
        PYTORCH_BUILD_VERSION=${TORCH_VERSION}+rocm7.14 PYTORCH_BUILD_NUMBER=1 \
-       MAX_JOBS=6 \
+       MAX_JOBS=3 \
        python -m build --wheel --no-isolation --outdir /wheels . \
     && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
