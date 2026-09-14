@@ -12,7 +12,7 @@ AMD Radeon AI PRO R9700.
 | `patch_quark_mxfp4.py` | AITER-Triton-MXFP4-Gate für gfx1201 (5 Hunks) + Registrierung des HIP-Kernel-Plugins |
 | `mxfp4/radiance_mxfp4.py` | `RadianceMxfp4W4A8LinearKernel`-Plugin (dispatcht große M auf den HIP-Kernel, sonst AITER) |
 | `mxfp4/radiance_mxfp4_fp8.hip` | Hand-geschriebener fp8-WMMA-W4A8-GEMM-Kernel (Prefill), von [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4) |
-| `mxfp4-configs/` | Getunete MXFP4-GEMM-Configs (JSON, wie `fp8-configs/`) — noch leer, folgt nach erstem echten GPU-Tuning-Lauf |
+| `mxfp4-configs/` | MXFP4-GEMM-Configs für AITERs Config-Lookup (JSON, wie `fp8-configs/`) — `gfx1201/.../gemm_afp4wfp4/DEFAULT.json` ist aktuell AITERs eigener gfx950/gfx1250-Default (beide Dateien byte-identisch, also schon AITERs generischer/portabler Fallback statt echtem Per-Arch-Tuning); AITER hat für diese GEMM-Familie **kein** gfx1201-Tuning und bricht ohne Config-Datei hart mit `AssertionError` ab (kein eingebauter Fallback). Reale R9700-Zahlen sind Task-#7-Arbeit (Kernel-Profiling) |
 | `patch_short_prefill.py` | GDN-Fix: 1-Token-Prefill wird nicht mehr fälschlich als Decode klassifiziert (Subagent E, ursprünglich vllm5-Bind-Mount-Patch für 0.28.0, hier verbatim gegen 0.29.0 verifiziert) |
 
 **Kernel-Entscheidung (Subagent C1, abgeschlossen)**: kein Entweder-Oder — beide

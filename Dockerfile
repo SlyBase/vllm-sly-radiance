@@ -237,6 +237,16 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
+# aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
+# gfx12x) hard-asserts on a missing DEFAULT.json -- there is no built-in fallback, and aiter ships
+# no gfx1201 tuning for this GEMM family at all (only gfx950/gfx1250). The values here are aiter's
+# own gfx950 and gfx1250 DEFAULT.json, which are byte-identical to each other across those two very
+# different architectures -- evidence this is already aiter's generic/portable default rather than
+# a per-arch tuning, so reusing it on gfx1201 is functionally correct, just unmeasured on this card.
+# Real R9700 numbers are Task #7 (kernel-level MXFP4 profiling) work; until then this only affects
+# the AITER fallback path for shapes the RadianceMxfp4W4A8LinearKernel hip kernel declines (M<=256,
+# i.e. decode), since prefill's large-M shapes go through that kernel instead.
+COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 
 # --- gfx1201 fixes and tuned-kernel patches ---
 # Each patch edits a vLLM (or aiter/triton) source file in place and checks for source drift before
