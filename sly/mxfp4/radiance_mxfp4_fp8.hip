@@ -1022,7 +1022,11 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
 // Sized DEC_KS(4) x 64 rows x N(<=32768) x 4 B = 32 MiB, allocated in radiance_mxfp4.py. 64 rows
 // because a dflash drafter at SPEC=7 reaches M = max_num_seqs x 8 = 64. Single-stream decode per
 // rank is assumed. split_k_for() may choose a narrower split, which only shrinks the requirement.
-#define DEC_MAX_N 32768
+// 36864 (288 n-tiles), not 32768: Qwen3.8-27B at TP=1 has a fused gate_up of N = 2 x 17408 = 34816,
+// which the smaller bound silently pushed to the folded (prefill-tuned) kernel -- 64 calls/step at
+// ~420 us instead of ~190 us, i.e. 30 of 72 ms per DFlash step (rocprofv3, 2026-09-14). The scratch
+// and the block counter in radiance_mxfp4.py are sized to the same constant.
+#define DEC_MAX_N 36864
 #define DEC_KS 4
 #define DEC_DWN 8           // waves per decode block; the N tile is DEC_DWN*16 = 128 wide
 

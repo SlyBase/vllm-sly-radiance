@@ -320,6 +320,11 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # kernel layered on top; see sly/README.md for why both are needed rather than either alone.
 # sly/patch_short_prefill.py fixes a gated-delta-net metadata-classification bug where a 1-token
 # prefill (the common case for a cache-hit continuation) is misclassified as a decode step.
+# sly/patch_dflash_w4_packed.py lets the DFlash drafter be a compressed-tensors W4A16 checkpoint
+# (qkv_proj has weight_packed, no raw .weight -- deferred + dequantised like the fp8 case);
+# sly/patch_gdn_nonspec_mask.py defines non_spec_sequence_masks_cpu on patch_gdn_metadata's numpy
+# path (UnboundLocalError at engine init as soon as --speculative-config is set). Both are
+# prerequisites for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -332,7 +337,8 @@ RUN set -eu; cd /opt/patches; \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
-             sly/patch_quark_mxfp4 sly/patch_short_prefill; do \
+             sly/patch_quark_mxfp4 sly/patch_short_prefill \
+             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \

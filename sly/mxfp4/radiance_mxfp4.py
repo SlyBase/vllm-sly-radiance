@@ -728,12 +728,12 @@ def _make_kernel_class():
                     # a 16-concurrent serve sets RADIANCE_MXFP4_DECODE_MAX_M=128 and pays the
                     # extra 32 MiB only then.
                     _decode_scratch[0] = torch.empty(
-                        4 * max(64, DECODE_MAX_M) * 32768, dtype=torch.float32,
+                        4 * max(64, DECODE_MAX_M) * 36864, dtype=torch.float32,  # DEC_MAX_N in the .hip
                         device=layer.weight.device)
                     # Block counter for the fused reduction, one int per n-block. MUST start
                     # zeroed; the kernel's last-arriving block resets it, so it stays that way.
                     _decode_scratch[1] = torch.zeros(
-                        32768 // 128 + 8, dtype=torch.int32, device=layer.weight.device)
+                        36864 // 128 + 8, dtype=torch.int32, device=layer.weight.device)  # DEC_MAX_N // n-tile
                     _ext.set_decode_scratch(_decode_scratch[0].data_ptr(),
                                             _decode_scratch[0].numel() * 4,
                                             _decode_scratch[1].data_ptr())
