@@ -1,182 +1,295 @@
-# vllm-radiance
+# vllm-sly-radiance
 
-A vLLM inference server image for the **AMD Radeon AI PRO R9700 (gfx1201 / RDNA4)**. It bundles a working
-ROCm + PyTorch + Triton + AITER + vLLM stack with the RDNA4 patches and custom kernels needed to run vLLM on
-this card, plus RDNA4-tuned GEMM / attention / all-reduce paths and a dynamic MTP draft controller, so you
-don't have to build the stack yourself.
+A vLLM inference image for the **AMD Radeon AI PRO R9700 (gfx1201 / RDNA4)** that runs
+**MXFP4 (Quark) checkpoints** — built, measured and operated on a single R9700 with
+`amd/Qwen3.8-27B-Quark-AWQ-MXFP4` plus DFlash2 speculative decoding.
 
-> **Status: super early dev (v0.7.4). Experimental.** Everything here was built and measured on a few exact
-> setups: **Qwen3.8-27B-FP8** and **Qwen3.6-27B-FP8** (gated-delta-net hybrids, architecturally identical),
-> **Qwen3.6-35B-A3B-FP8** (fine-grained MoE, 256 experts / top-8), and
-> **Gemma-4-31B-it-FP8** (block-fp8, sliding + global attention, vision), all with fp8 (or bf16/`auto`) KV
-> cache on two R9700 GPUs (tensor parallel). Other models, non-FP8 weights, single or
-> 3+ GPUs, and non-R9700 hardware are untested. Expect rough edges and breaking changes. Not production
-> hardened. Use at your own risk.
+> **Status: experimental, single-GPU, single-model.** Everything below was measured on exactly one
+> setup: one R9700 (32 GB, 32 CUs), `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` (gated-delta-net hybrid) with
+> the `syvai/Qwen3.8-27B-DFlash2-W4A16` drafter, fp8 KV cache, ROCm 10.0, vLLM 0.29.0. Other MXFP4
+> models, tensor parallel and non-R9700 hardware are untested. Expect breaking changes.
 
-This repository is the **source** for the image published as `stilldeadcode/vllm-radiance` on Docker Hub.
-See **[DOCKERHUB.md](DOCKERHUB.md)** for the full description, the complete environment-variable / knob
-reference, tested configuration, and stack versions.
+## Lineage
+
+This repository is a fork that stacks three layers:
+
+| Layer | Source | What it contributes |
+|---|---|---|
+| **vLLM 0.29.0** | [vllm-project/vllm](https://github.com/vllm-project/vllm) (tag `v0.29.0`) | The inference engine. Built from source for `PYTORCH_ROCM_ARCH=gfx1201`. |
+| **vllm-radiance** | [StillDeadcode/vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance) (Codeberg) | The RDNA4 image: ROCm + PyTorch + Triton + AITER + vLLM build pipeline, the gfx1201 correctness patches (`patch_gfx1201.py`, `patch_unified_attention_lds.py`, …), the [libr4d](https://codeberg.org/StillDeadcode/libr4d) hand-written kernel library (paged attention, fused GDN prefill scan, skinny bf16 GEMM, P2P all-reduce), DFlash/MTP draft support, the entrypoint and bandwidth sweep. Upstream targets **FP8** checkpoints on two R9700 (TP=2). |
+| **radiance-vllm-mxfp4** | [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4) (Codeberg) | MXFP4 on RDNA4: the Quark-loader gates that unlock AITER's native Triton MXFP4 GEMM (`gemm_afp4wfp4`) on gfx1201, and the hand-written fp8-WMMA W4A8 HIP kernel (`radiance_mxfp4_fp8.hip`) with its `RadianceMxfp4W4A8LinearKernel` plugin. Written against vLLM 0.27.1. |
+
+`main` mirrors upstream vllm-radiance; **`sly/main`** is the integration branch. Everything SlyBase
+adds lives in [`sly/`](sly/) (patches, kernels, configs, benches) and is wired into the `Dockerfile`
+via the same `_patchlib.apply()` mechanism upstream uses — anchor-based, idempotent, verified with
+`ast.parse()` at build time. `sly/README.md` (German) is the per-patch reference.
+
+## What was changed on top
+
+Chronological summary of the tunings and kernel work in `sly/main` (versions = `VERSION` file /
+image tag `vllm-sly-radiance:<version>-rocm10.0`).
+
+### MXFP4 on gfx1201 (0.1.0 – 0.1.2)
+
+- **Quark/MXFP4 loader for vLLM 0.29.0** (`sly/patch_quark_mxfp4.py`, 5 hunks). ggz14's patches
+  targeted 0.27.1; vLLM 0.29 added two more CDNA-only gates around the AITER custom op, so two hunks
+  are new. `RADIANCE_MXFP4=1` unlocks AITER's Triton `gemm_afp4wfp4` (native W4A4) — without it every
+  MXFP4 linear layer silently falls back to `EmulationMxfp4LinearKernel` (bf16 dequant + `F.linear`).
+- **AITER `gemm_afp4wfp4` config for gfx1201** (`sly/mxfp4-configs/`). AITER has no gfx1201 tuning
+  for this GEMM family and aborts with `AssertionError` without a config file; the gfx950 default it
+  would otherwise use needs 67–100 KiB of LDS and crashes the EngineCore on the first request
+  (`OutOfResources`, RDNA4 has 64 KiB). Fixed by probing every M bucket on the card
+  (`num_stages` 3→2), then tuned the M ≤ 8 decode bucket.
+- **W4A8 HIP kernel layered on top** (`sly/mxfp4/radiance_mxfp4_fp8.hip`,
+  `sly/mxfp4/radiance_mxfp4.py`). `RADIANCE_MXFP4_W4A8=1` registers ggz14's fp8-WMMA kernel at the
+  head of vLLM's ROCm kernel list; it takes the shapes it supports and everything else falls back to
+  the AITER path — both are needed, layered, no either/or.
+- **`DEC_MAX_N` 32768 → 36864.** Qwen3.8-27B at TP=1 has a fused `gate_up_proj` with N = 34816, one
+  above the old limit, so the decode-critical GEMM was silently routed to the folded prefill kernel
+  (64 calls/step at ~420 µs instead of ~190 µs = 30 of 72 ms per DFlash step). Scratch and
+  block-counter sizing in the plugin grew to match. DFlash step 67 → 48 ms.
+- **"Track A" decode routing.** `RADIANCE_MXFP4_W4A8_MIN_M=0` + `RADIANCE_MXFP4_DECODE_MAX_M=64` send
+  the decode shapes (M ≤ 64 = 8 sequences × 8 tokens at k=7) to the HIP split-K decode kernel instead
+  of AITER's Triton GEMM: 1.85× on the decode GEMMs (6.9 → 12.9 tok/s in the isolated A/B, before
+  the other work below).
+
+### DFlash2 speculative decoding with a W4A16 drafter (0.1.2, 0.1.4)
+
+- **`sly/patch_dflash_w4_packed.py`** — lets the DFlash drafter be a compressed-tensors W4A16
+  checkpoint (`qkv_proj` has `weight_packed`, no raw `.weight`; deferred and dequantised through its
+  own forward like the fp8 case).
+- **`sly/patch_gdn_nonspec_mask.py`** — upstream's `patch_gdn_metadata` numpy path leaves
+  `non_spec_sequence_masks_cpu` unset → `UnboundLocalError` at engine init as soon as
+  `--speculative-config` is given.
+- **gfx1201 tile table for the drafter GEMMs** (`sly/patch_w4a16_tiles.py`,
+  `sly/bench_w4a16_tiles.py`). vLLM's `rdna_hybrid_w4a16.py` routes M ≤ 5 to the HIP skinny kernel and
+  everything else to a Triton kernel whose gfx12x heuristic was tuned on Llama-3.1-8B: at M ≤ 32 it
+  picks 16×16 tiles (2176 workgroups for the 34816-wide `gate_up`, 267 GB/s). A DFlash drafter never
+  sees M ≤ 5 (block size 8 → M = 8 × sequences). The table is keyed by `(group_size, K, N, M bucket
+  8/16/32/40/64)` for the four drafter shapes and was measured DRAM-cold on the R9700: `gate_up`
+  1.7–3.5×, `down` 1.5–2.6×, `qkv` 1.5–2.4× at M ≤ 32. Step gap 43.4 → 42.0 ms.
+  `RADIANCE_W4A16_TILES=0` restores the stock heuristic (A/B without a rebuild).
+
+### fp8 lm_head (0.1.3)
+
+`sly/mxfp4/radiance_lmhead_fp8.py` + `sly/patch_lmhead_fp8.py`. The Quark checkpoint lists
+`lm_head` in its `exclude` list, so the 248320 × 5120 vocabulary projection ran as a bf16 GEMM —
+2.54 GB of weight traffic per call, and DFlash calls the shared head twice per step (8.6 of ~49 ms).
+`RADIANCE_LMHEAD_FP8=1` quantises the weight per output channel to fp8 after loading and runs it
+row-wise through `torch._scaled_mm` (hipBLASLt) with per-token fp8 activations. Step 48 → 44.5 ms,
+1.27 GiB returned to the KV cache. GSM8K (cot, zero-shot, greedy, 200 tasks): 0.830 ± 0.027 vs
+0.835 ± 0.026 for bf16 — no measurable loss.
+
+### Gated-delta-net / attention
+
+- **`sly/patch_short_prefill.py`** — a 1-token prefill was misclassified as decode in the GDN
+  metadata builder (wrong state for the first token of a short prompt).
+- **`patch_unified_attention_lds.py` ported to aiter 0.1.21.post2** — AITER replaced its
+  `select_3d_config`/`select_2d_config` elif chains with JSON-driven config tables between the
+  version upstream patched and 0.1.21.post2; the patch was rewritten (6 hunks): LDS clamp for gfx1201,
+  `TILE_SIZE` return for `reduce_segments`, gfx1201-gated bf16 3D decode tuning.
+- **bf16 SSM state** (runtime flag, `--mamba-ssm-cache-dtype bfloat16`): halves the GDN state pages
+  (attention block 1664 → 896 tokens), KV 101k → 133k tokens on the 32 GB card, concurrent-request
+  ceiling ~6 → ~12. GSM8K unchanged (0.835), needle-in-haystack 3/3 at 12k and 24k tokens.
+
+### Build
+
+- ROCm base overridable (`--build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full`); the
+  production image is built on ROCm 10.0.
+- PyTorch 2.14.0, Triton 3.8.0, aiter 0.1.21.post2, transformers 5.17.0, vLLM 0.29.0; libr4d pinned
+  by commit.
+- `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
+  submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.
+- The HIP kernel is a single-file pybind11 extension compiled with the image's own `hipcc` in the
+  assemble stage; the patch scripts (`/opt/patches`) never reach the final image.
+
+## Results
+
+BetterBench 0.4.0 `--decode --concurrency` against the production container (2026-09-15, image
+0.1.4, all knobs from the *Options* section below). Reference: the same model family as INT4
+(`w4a16`) on stock vLLM on the same card.
+
+| Concurrency | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| **MXFP4 + DFlash2 k=7 (this image)** tok/s | **99** | **177** | **276** | **348** | **361** |
+| INT4 reference tok/s | 77 | 114 | 175 | 214 | 205 |
+| Δ | +29 % | +56 % | +58 % | +62 % | +76 % |
+
+Single-stream median 120 tok/s, DFlash step gap 42.0 ms, KV cache 8.57 GiB / 133k fp8 tokens at
+`--max-model-len 32768 --gpu-memory-utilization 0.95`. Profile of one step (conc 1): decode GEMMs
+26.7 ms at ~540 GB/s (84 % of the R9700's read peak — the remaining gap is launch overhead and small
+elementwise kernels, not the GEMMs).
+
+Progression: 0.1.0 → 0.1.2 (DEC_MAX_N) step 67 → 48 ms; 0.1.3 (fp8 lm_head) 44.5 ms; bf16 SSM state
++ 0.1.4 (drafter tiles) 42.0 ms.
+
+## Options
+
+### Environment knobs (read at import time)
+
+Production values first; everything else is tuning/diagnostic and off by default.
+
+| Variable | Default | Production | Meaning |
+|---|---|---|---|
+| `RADIANCE_MXFP4` | `0` | `1` | Unlock AITER's Triton `gemm_afp4wfp4` (native MXFP4 W4A4) on gfx1201. **Required** for any MXFP4 model; without it vLLM emulates in bf16. |
+| `RADIANCE_MXFP4_W4A8` | `0` | `1` | Register `RadianceMxfp4W4A8LinearKernel` (the HIP fp8-WMMA kernel) ahead of the AITER path. |
+| `RADIANCE_MXFP4_W4A8_MIN_M` | `256` | `0` | Smallest M the HIP kernel accepts for the folded (prefill) path. `0` = also small M. |
+| `RADIANCE_MXFP4_DECODE_MAX_M` | `0` | `64` | Largest M routed to the HIP split-K decode kernel; above it the folded kernel takes over. Should be ≥ `max_num_seqs × (num_speculative_tokens + 1)`. |
+| `RADIANCE_MXFP4_SANITIZE` | `0` | `0` | `nan_to_num` on activations before the quant kernel. Was needed before the libr4d GDN path was fixed; costs 0.9 ms/step. |
+| `RADIANCE_LMHEAD_FP8` | `0` | `1` | fp8 per-output-channel lm_head via `torch._scaled_mm` (see above). Not compatible with `--hf-overrides '{"head_dtype": "float32"}'`. |
+| `RADIANCE_LMHEAD_FP8_MIN_M` | `16` | – | Pads M below this for hipBLASLt. |
+| `RADIANCE_W4A16_TILES` | `1` | – | `0` disables the gfx1201 drafter tile table (stock heuristic). |
+| `GPU_MAX_HW_QUEUES` | ROCm default | `2` | ROCm HW queue count; 2 measured best for this single-process setup. |
+| `RADIANCE_MXFP4_DECODE_KS` | auto | – | Force the decode kernel's split-K factor (A/B control). |
+| `RADIANCE_MXFP4_DECODE_BK` | auto (64) | – | `128` pins the old BK=128 decode tiling. |
+| `RADIANCE_MXFP4_DECODE_NT` | `0` | – | Non-temporal weight loads in the decode kernel. |
+| `RADIANCE_MXFP4_TN4_MIN_M` | `2048` | – | M from which the folded kernel uses the wide TN=4 tile. |
+| `RADIANCE_MXFP4_A_TILED_MIN_M` | `0` | – | Tiled-A layout for very large M (must exceed 512 and `DECODE_MAX_M`). |
+| `RADIANCE_MXFP4_WPERM` / `RADIANCE_MXFP4_R4D_DECODE_MAX_M` | `0` / `0` | – | Experimental: fragment-order weights + libr4d's `gemm_mxfp4a8_nt_m64` decode kernel. |
+| `RADIANCE_MXFP4_MHIST` | `0` | – | Print every distinct `(N, K, M)` the plugin sees once (which M the decode path really issues). |
+| `RADIANCE_MXFP4_DEBUG`, `_CHECKX`, `_CHECKALL`, `_REFLINEAR`, `_SHADOW`, `_SYNC`, `_KERNEL_N`, `_KERNEL_NK` | off | – | Correctness/diagnostic switches, see the header of `sly/mxfp4/radiance_mxfp4.py`. |
+
+Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
+`RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
+and the draft-controller knobs.
+
+### Launch arguments (production)
+
+The image sets `vllm serve` as `ENTRYPOINT`; pass vLLM arguments directly.
+
+```bash
+docker run --rm --name vllm7-mxfp4 \
+  --device=/dev/kfd --device=/dev/dri \
+  --group-add video --group-add render \
+  --security-opt seccomp=unconfined --ipc=host \
+  -e HIP_VISIBLE_DEVICES=0 \
+  -e HF_HUB_OFFLINE=1 \
+  -e GPU_MAX_HW_QUEUES=2 \
+  -e RADIANCE_MXFP4=1 \
+  -e RADIANCE_MXFP4_W4A8=1 \
+  -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
+  -e RADIANCE_MXFP4_DECODE_MAX_M=64 \
+  -e RADIANCE_MXFP4_SANITIZE=0 \
+  -e RADIANCE_LMHEAD_FP8=1 \
+  -p 8000:8000 \
+  -v /root/hf-cache:/root/.cache/huggingface \
+  -v /root/vllm7-cache/triton:/root/.triton \
+  -v /root/vllm7-cache/torch_compile:/root/.cache/vllm/torch_compile_cache \
+  -v /root/vllm7-cache/aiter:/root/.aiter \
+  vllm-sly-radiance:$(cat VERSION)-rocm10.0 \
+  --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 \
+  --quantization quark \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.95 \
+  --kv-cache-dtype fp8 \
+  --mamba-ssm-cache-dtype bfloat16 \
+  --speculative-config.method dflash \
+  --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
+  --speculative-config.num_speculative_tokens 7 \
+  --speculative-config.draft_sample_method probabilistic \
+  --speculative-config.attention_backend TRITON_ATTN \
+  --max-num-seqs 8 \
+  --max-num-batched-tokens 2048 \
+  --attention-backend ROCM_AITER_UNIFIED_ATTN \
+  --compilation-config.cudagraph_mode FULL_AND_PIECEWISE \
+  --enable-prefix-caching \
+  --skip-mm-profiling --enable-mm-embeds \
+  --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  --reasoning-parser qwen3 \
+  --default-chat-template-kwargs '{"reasoning_effort": "medium"}' \
+  --port 8000
+```
+
+Why these values:
+
+| Argument | Note |
+|---|---|
+| `--quantization quark` | The checkpoint's quant method (fp4 + e8m0 scales); set explicitly rather than trusting auto-detect. |
+| `--kv-cache-dtype fp8` | 133k tokens of KV on 32 GB; `auto` (bf16) halves that. |
+| `--mamba-ssm-cache-dtype bfloat16` | Halves the GDN state pages (see above). The model config defaults to float32. Changing this invalidates the compile cache. |
+| `--speculative-config.*` | DFlash2 with the W4A16 drafter. `num_speculative_tokens 7` is the drafter's maximum (block size 8). `TRITON_ATTN` for the drafter; the target uses `ROCM_AITER_UNIFIED_ATTN`. |
+| `--max-num-seqs 8` | `8 × (7 + 1) = 64` = `RADIANCE_MXFP4_DECODE_MAX_M`; more sequences would push decode batches onto the folded kernel. In practice the KV cache caps 20k-context requests at ~12. |
+| `--max-num-batched-tokens 2048` | Halves peak activation memory during profiling (KV 3.2 → 7.45 GiB before the fp8/bf16 wins); prefill chunking costs nothing measurable here. |
+| `--compilation-config.cudagraph_mode FULL_AND_PIECEWISE` | Full CUDA graphs for decode, piecewise for prefill. |
+| `--skip-mm-profiling --enable-mm-embeds --limit-mm-per-prompt.* 0` | Text-only serving of a VL-capable architecture; skips the vision profiling allocation. |
+| `HIP_VISIBLE_DEVICES=0` | Hosts with an iGPU (gfx1103) next to the R9700 would otherwise initialise both. |
+
+**Compile cache:** the first start after an image or config change compiles fresh and the memory
+profiler sees ~2 GiB more peak → ~2 GiB less KV cache. Restart once with a warm cache. Startup is
+4–6 minutes with a warm cache.
 
 ## Build
 
-Everything the build needs is in this directory (a flat Docker build context). The version string lives in
-one place, the `VERSION` file, which the tag and the build-arg both read:
+Everything the build needs is in this directory (flat Docker context). Multi-stage: **builder**
+(PyTorch, Triton, torchvision, AITER, vLLM from source for gfx1201) → **rocmprune** → **assemble**
+(wheels, upstream RDNA4 patches, then the `sly/` patches, libr4d, the HIP kernel) → **final**
+(clean `ubuntu:24.04` + pruned ROCm + venv + entrypoint).
 
 ```bash
-docker build -t vllm-radiance:$(cat VERSION) --build-arg RADIANCE_VERSION=$(cat VERSION) .
+git clone https://github.com/SlyBase/vllm-sly-radiance.git
+cd vllm-sly-radiance && git checkout sly/main
+
+docker build \
+  --build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full \
+  -t vllm-sly-radiance:$(cat VERSION)-rocm10.0 .
 ```
 
-That single command builds everything from source, in four stages. **builder** compiles PyTorch, Triton,
-torchvision, AITER, and vLLM for `PYTORCH_ROCM_ARCH=gfx1201` against the official `rocm/dev-ubuntu-24.04`
-base (digest-pinned) and leaves the wheels in `/wheels` (it also builds `rocm-bandwidth-test` for the startup
-sweep). **rocmprune** (`prune_rocm.sh`) cuts the 19 GB ROCm tree down to this one GPU architecture.
-**assemble** installs the wheels, applies the RDNA4 correctness patches, and clones and compiles
-[libr4d](https://codeberg.org/StillDeadcode/libr4d) -- the hand-written gfx1201 kernel library (paged
-attention, the fused gated-delta-net prefill scan, the P2P all-reduce, the skinny bf16 GEMM) -- with the
-image's own `hipcc`. **final** is the release image: a clean `ubuntu:24.04` that receives only the pruned ROCm tree, the
-venv, and the entrypoint, so neither the build toolchain nor the wheels ever reach the published image. No
-prebuilt component wheels, no rotating wheel indexes, and no checked-in binaries go into the image. It is a
-long build (a full PyTorch compile); expect it to run for hours on a many-core box.
+A cold build compiles PyTorch and takes hours (`MAX_JOBS=4` by default — raise it on a box with
+RAM to spare). With the builder stage cached, a change to the `sly/` layer rebuilds in ~10 minutes.
+The build needs no GPU, so it can run next to a serving container.
 
-That structure is what keeps the download reasonable: the stock ROCm base is 7.4 GiB compressed on its own,
-most of it device code for GPUs this image cannot run on. Pruning it to gfx1201 and shipping an allowlist
-takes the image from 9.35 GiB compressed to **3.66 GiB**. Note the prune must happen in a stage the release
-stage copies *from* -- deleting files in a layer stacked on the base reclaims nothing.
-
-The release stage still ships a working **compiler** (hipcc, g++, and the C++/Python headers). That is
-not slack to trim: AITER JIT-compiles its kernels on first use, inside the running container, so an
-image without those headers boots and then dies on the first AITER module build. The build asserts it
-by compiling and importing a pybind11 HIP module.
-
-The component pins are the `ARG`s at the top of the `Dockerfile` (`TORCH_VERSION`, `TRITON_VERSION`,
-`TORCHVISION_VERSION`, `AITER_VERSION`, `VLLM_VERSION`). Each one is both the git tag that gets compiled and
-the version the resulting wheel reports, and the build asserts the two agree, so `pip show` and the startup
-banner can be trusted. If you just want a known-good image without building, pull the published one:
-`docker pull stilldeadcode/vllm-radiance`.
-
-**Do not bump torch / triton / torchvision on their own.** They are not independent choices: vLLM pins the
-torch version it is tested against, torch pins its triton, and torchvision ships a matching release. The
-build runs vLLM's own `use_existing_torch.py`, which *strips* those pins -- but that exists so pip does not
-re-download torch, not as licence to install a newer one. Builds 0.5.0 through 0.5.4 compiled against a
-newer trio and hung a GPU under sustained tensor-parallel load; restoring the pinned versions fixed it with
-no code change. If you override these with `--build-arg`, move them together and soak-test under real load.
-
-## Run
-
-`docker-compose.yml` is the canonical way to serve. Point it at your model directory and your GPU group GIDs,
-then:
+Smoke test:
 
 ```bash
-# put your model at ./models/Qwen/Qwen3.8-27B-FP8  (or set MODELS=/your/model/dir)
-docker compose up -d          # start; follow with: docker compose logs -f
-docker compose down           # stop
+docker run --rm --device=/dev/kfd --device=/dev/dri -e HIP_VISIBLE_DEVICES=0 \
+  --entrypoint python3 vllm-sly-radiance:$(cat VERSION)-rocm10.0 \
+  -c "from vllm.model_executor.layers.quantization.quark import QuarkConfig; print('OK')"
 ```
 
-The compose defaults target **Qwen3.8-27B-FP8**, the model the image is tuned around: a gated-delta-net
-hybrid of 64 layers (48 linear attention + 16 full attention), hidden 5120, attention `head_dim` 256 with 6
-query heads per KV head, GDN key/value head dim 128 and a width-4 causal conv. **Qwen3.6-27B-FP8 has exactly
-the same shape**, so it takes the same tuned paths and the same flags; only the checkpoint path changes. Both
-carry their MTP head in the checkpoint, so speculative decoding needs no separate drafter, and both are
-vision-language checkpoints served text-only here via `--language-model-only`.
+## Repository layout
 
-To serve the fine-grained-MoE **Qwen3.6-35B-A3B-FP8**, point it
-at that model and raise the batch-token budget: `--max-num-batched-tokens` must be **≥ 2240** (align mode
-reconciles the GDN state to attention block size 2240). Its tuned
-MoE config and the R4D gate GEMM are baked in and turn on automatically.
+```
+Dockerfile                    build pipeline (upstream + sly/ patch loop + HIP kernel compile)
+VERSION                       image version (0.1.4)
+_patchlib.py                  anchor-based, idempotent patch helper (upstream)
+patch_*.py, radiance_*.py     upstream vllm-radiance RDNA4 patches and runtime modules
+sly/
+  README.md                   per-patch reference (German)
+  patch_quark_mxfp4.py        Quark/MXFP4 loader gates for vLLM 0.29.0 + kernel plugin registration
+  patch_short_prefill.py      GDN 1-token-prefill fix
+  patch_dflash_w4_packed.py   W4A16 (compressed-tensors) DFlash drafter
+  patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path
+  patch_lmhead_fp8.py         hook radiance_lmhead_fp8 into QuarkConfig
+  patch_w4a16_tiles.py        gfx1201 tile table for the drafter GEMMs
+  bench_w4a16_tiles.py        tile sweep that produced the table
+  mxfp4/radiance_mxfp4.py     RadianceMxfp4W4A8LinearKernel plugin (dispatch, scratch, knobs)
+  mxfp4/radiance_mxfp4_fp8.hip  fp8-WMMA W4A8 GEMM: folded prefill + split-K decode kernels
+  mxfp4/radiance_lmhead_fp8.py  fp8 lm_head
+  mxfp4-configs/              AITER gemm_afp4wfp4 config for gfx1201
+```
 
-To serve **Gemma-4-31B-it-FP8** (block-fp8, e.g. `RedHatAI/gemma-4-31B-it-FP8-block`), just point the compose
-at it: the quantization is auto-detected from `config.json` (compressed-tensors, 128x128 blocks), the tuned
-GEMM configs load by shape, and the long-context prefill attention path is tuned for its head-512 global
-layers. Drop the Qwen-specific `--mamba-cache-mode` and chat template / tool-reasoning parsers (it is not a
-GDN hybrid and uses its own template). Its vision tower works as-is. Note it is a *big-KV* model (60 layers,
-50 sliding + 10 global), so give it a smaller `--max-model-len` than the Qwen models at the same
-`--gpu-memory-utilization`.
+## Branches and syncing with upstream
 
-Gemma-4-31B also supports **MTP speculative decoding** for a large decode speedup, using Google's official
-drafter `google/gemma-4-31B-it-assistant` (vLLM loads it as an MTP model). It is lossless (the target
-verifies every drafted token) and the dynamic draft controller applies to it. Its one requirement on this
-card: the drafter has a head-512 layer, so pass `"attention_backend":"ROCM_AITER_UNIFIED_ATTN"` in the
-speculative config (the usual `flash_attn` caps at head 256). For example:
-`--speculative-config '{"method":"mtp","model":"/models/google/gemma-4-31B-it-assistant","num_speculative_tokens":8,"attention_backend":"ROCM_AITER_UNIFIED_ATTN","disable_padded_drafter_batch":true}' --no-async-scheduling`.
+```
+main       mirror of StillDeadcode/vllm-radiance (Codeberg)
+sly/main   integration branch = main + sly/ (this README, VERSION, Dockerfile wiring)
+```
 
-All tunables are `${VAR:-default}` in the compose file; override via the shell or a `.env` file without
-editing it. The full knob list (kernel toggles, draft controller, AITER routing, …) is in
-[DOCKERHUB.md](DOCKERHUB.md).
+```bash
+git remote add upstream https://codeberg.org/StillDeadcode/vllm-radiance.git
+git fetch upstream
+git checkout main && git merge --ff-only upstream/main
+git checkout sly/main && git merge main     # re-verify every sly/ anchor afterwards
+```
 
-## What's inside
+## Credits
 
-Everything below is baked into the image; the tuned paths are env-gated and on by default. See
-**[DOCKERHUB.md](DOCKERHUB.md)** for the per-knob reference: every flag, its default, and what it does.
+- [StillDeadcode](https://codeberg.org/StillDeadcode) — vllm-radiance and libr4d, the RDNA4
+  foundation this image is built on.
+- [ggz14](https://codeberg.org/ggz14) — radiance-vllm-mxfp4: the MXFP4 loader work and the W4A8
+  HIP kernel.
+- [vLLM](https://github.com/vllm-project/vllm), [AITER](https://github.com/ROCm/aiter),
+  [DFlash](https://github.com/vllm-project/vllm/pull/52816).
 
-- **gfx1201 correctness patches** (always on): GPU enumeration, AITER enablement, native sampler fallback,
-  MTP drafter unpad + multimodal draft-mask alignment, tool-parser + `from_json` chat-template filter, and
-  an attention LDS fit that shrinks the staged K/V tile into the R9700's 64 KiB shared memory for any head
-  size and KV dtype (AITER sizes it for a larger LDS; without this, 2-byte KV at head 256 and fp8 KV at
-  head 512 both abort at CUDA-graph capture).
-- **RDNA4-tuned kernels**: preshuffled FP8 blockscale GEMM, unified-attention tiling (fp8 + bf16/`auto` KV,
-  plus a head-size-keyed long-context prefill config for models with large attention heads such as Gemma's
-  head-512 global layers), fused RMSNorm+quant, an fp16 matrix-core (WMMA) gated-delta-net path, a
-  widened channel block for the gated-delta-net prefill convolution (a 16-byte-per-lane access instead
-  of 4, which also defuses a power-of-two row pitch the layer's `split()` view creates: 2.2x on that
-  kernel, bit-identical), a TP=2 P2P
-  one-shot all-reduce (optional compressed payload), and a native head_dim-72 ViT flash kernel for multimodal
-  vision encoders.
-- **R4D attention** (opt-in, `--attention-backend R4D`): purpose-built attention kernels for this GPU, written
-  in HIP rather than tuned out of a vendor library. They compute the score matrix transposed, `S^T = K.Q^T`,
-  so a wave32 matrix-core fragment hands each lane exactly one query row and the softmax never leaves the
-  lane, at a *smaller* error against an fp32 reference than the kernel it replaces. Measured in the serve
-  against the tuned AITER unified attention on the same image: **+14.6% prefill throughput at 64K context**
-  (the attention kernel itself is 1.65x, and it is 34% of prefill GPU time there), +4.1% at 16K, and decode
-  unchanged within noise -- attention is only ~7% of a speculative decode step.
-  Needs head_dim 256, paged block 16, 6 query heads per KV head, causal attention and a bf16 or fp8 KV
-  cache; any other shape is refused at startup with the reason, and nothing changes unless you ask for it.
-- **Fine-grained MoE support** (e.g. Qwen3.6-35B-A3B): RDNA4-tuned fused-MoE Triton configs (always on;
-  removes the stock config's `M>=96` cliff for a lower prefill TTFT, lossless), plus the skinny bf16 GEMM
-  below on the MoE gate. Both inert on models they do not apply to.
-- **Skinny bf16 GEMM** (`RADIANCE_SKINNY_GEMM`, on): a projection small enough that rocBLAS lays it out as a
-  handful of workgroups leaves most of the machine idle. The R4D split-K kernel takes those shapes for `M` in
-  `[6,64]`. The default set is the ones that are a clear win alone; `all` adds shapes that differ from
-  rocBLAS at a bf16 ULP, most importantly the gated-delta-net `in_proj_ba` -- 480 KiB run 48 times per step,
-  28.5us against 3.6us.
-- **Lossless dynamic MTP drafting**: a per-request confidence gate plus verbatim n-gram tail that varies
-  draft depth without changing what the model verifies. `mtp` only -- it works by stopping a serial loop of
-  draft forwards early, and a `dflash` drafter has no such loop (it emits every position in one graphed pass).
-- **The tuned drafter stack** (`RADIANCE_FAST_DRAFT`, one switch, opt-in): the draft head at 2 bits with an
-  exact rerank (any drafter), plus a `dflash` drafter's decoder projections packed to signed symmetric int4
-  -- one f16 scale per 128 input channels, no zero point, 4.25 bits per weight -- on two purpose-built
-  gfx1201 kernels. Below 16 rows an f16 matrix-core kernel, which is already at the memory roofline there;
-  above it an int8 one, because gfx1201's f16 matrix instruction is *half* the rate of its int8 one and a
-  quarter of its int4 one. One packed weight feeds both: the nibble is a two's complement code the int8
-  kernel reads by shifting it into a byte's high half, and the f16 kernel converts to offset binary in one
-  XOR per dword. Codes are derived at load from the weight, so there is no calibration data, no offline step
-  and nothing on disk. On Qwen3.8-27B with the DFlash2 drafter the draft pass falls 9.1% at a drafter batch
-  of 64; with `RADIANCE_SKINNY_GEMM=all` the decode step falls 5.1% for +3.5% tokens/s over four paired
-  compiles. Lossless in the same sense as any drafting change: the target verifies every proposed token with
-  its own untouched weights.
-- **Prefix caching that works on the GDN hybrid** (enabled in the compose): hybrid models leave automatic
-  prefix caching off by default, so it is turned on explicitly with `--enable-prefix-caching
-  --mamba-cache-mode=align`. Align mode snapshots and restores the linear-attention (GDN) recurrent state at
-  block boundaries (verified bit-identical to full recompute, including under MTP), giving a large TTFT drop
-  on shared prefixes (system prompts, RAG, agentic context).
-- **Startup topology + bandwidth sweep** (`RADIANCE_RUN_BWTEST`, on by default): device list, P2P access
-  matrix, NUMA distances, and peak uni/bidirectional copy bandwidth per agent pair, from a
-  `rocm-bandwidth-test` compiled into the image. Backgrounded and about a second, so it never delays the
-  serve. Set `0` to skip.
-- **Optional NUMA pinning** (`--numa-bind`, off by default) for multi-NUMA-node hosts.
-
-## Layout
-
-Flat build context: the runtime Python modules (`radiance_*.py`), the `patch_*.py` fixes, the `fp8-configs/`
-and `moe-configs/` GEMM configs, the chat templates, `Dockerfile`, and `docker-compose.yml` all live at the repo
-root so `docker build .` works directly. `prune_rocm.sh` is the ROCm slimming step (it self-checks: the
-arch's own kernels must survive and hipcc must still link a HIP shared object, since AITER JITs at runtime).
-
-The HIP kernels are no longer in this repo. They live in
-[libr4d](https://codeberg.org/StillDeadcode/libr4d), a library of kernels for gfx1201 rather than for
-any one model, and are pinned by tag (`R4D_VERSION` in the `Dockerfile`), which the build asserts
-against the version the compiled library reports. `make r4d` clones and builds that pinned tag here
-for development, so a locally built `r4d.so` matches the one in the image.
-
-R4D entry points are named for the geometry they are compiled for -- `attn_decode_h256_gqa6_fp8kv`,
-`gdn_chunk_scan_k128_v128_c64_bf16`, `ar_oneshot_2rank_exact` -- and reject a mismatch rather than
-running, so which kernels an engine binds is visible in the startup log and in `r4d.kernels()`.
+License: same as upstream vllm-radiance (see `LICENSE`).
