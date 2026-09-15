@@ -263,7 +263,8 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
-     radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py ${SP}/
+     radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
+     sly/mxfp4/radiance_lmhead_fp8.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -325,6 +326,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # sly/patch_gdn_nonspec_mask.py defines non_spec_sequence_masks_cpu on patch_gdn_metadata's numpy
 # path (UnboundLocalError at engine init as soon as --speculative-config is set). Both are
 # prerequisites for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
+# sly/patch_lmhead_fp8.py hooks radiance_lmhead_fp8.py into QuarkConfig.get_quant_method: with
+# RADIANCE_LMHEAD_FP8=1 the (Quark-excluded, otherwise bf16) lm_head is quantised to fp8 per
+# output channel after loading and applied via row-wise torch._scaled_mm -- halves the 2.54 GB
+# of weight traffic that the target verify and the DFlash draft each pull per step.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -338,7 +343,7 @@ RUN set -eu; cd /opt/patches; \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
-             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask; do \
+             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
