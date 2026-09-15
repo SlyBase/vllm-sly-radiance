@@ -51,7 +51,10 @@ image tag `vllm-sly-radiance:<version>-rocm10.0`).
 - **"Track A" decode routing.** `RADIANCE_MXFP4_W4A8_MIN_M=0` + `RADIANCE_MXFP4_DECODE_MAX_M=64` send
   the decode shapes (M ≤ 64 = 8 sequences × 8 tokens at k=7) to the HIP split-K decode kernel instead
   of AITER's Triton GEMM: 1.85× on the decode GEMMs (6.9 → 12.9 tok/s in the isolated A/B, before
-  the other work below).
+  the other work below). Raised to `128` afterwards: the kernel choice is baked in at CUDA-graph
+  capture time and the capture sizes 72–128 (prefill+decode mixed steps, short prefills — ~20 % of
+  the iterations at concurrency 8/16) were still hitting the folded prefill kernel. Conc 8/16
+  348/357 → 368/371 tok/s, TTFT p50 −14…−23 %, exact-reference check 0 wrong, +36 MiB scratch.
 
 ### DFlash2 speculative decoding with a W4A16 drafter (0.1.2, 0.1.4)
 
@@ -114,6 +117,7 @@ BetterBench 0.4.0 `--decode --concurrency` against the production container (202
 | **MXFP4 + DFlash2 k=7 (this image)** tok/s | **99** | **177** | **276** | **348** | **361** |
 | INT4 reference tok/s | 77 | 114 | 175 | 214 | 205 |
 | Δ | +29 % | +56 % | +58 % | +62 % | +76 % |
+| … with `DECODE_MAX_M=128` (conc-only run) | 99 | 178 | 280 | **368** | **371** |
 
 Single-stream median 120 tok/s, DFlash step gap 42.0 ms, KV cache 8.57 GiB / 133k fp8 tokens at
 `--max-model-len 32768 --gpu-memory-utilization 0.95`. Profile of one step (conc 1): decode GEMMs
@@ -134,7 +138,7 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_MXFP4` | `0` | `1` | Unlock AITER's Triton `gemm_afp4wfp4` (native MXFP4 W4A4) on gfx1201. **Required** for any MXFP4 model; without it vLLM emulates in bf16. |
 | `RADIANCE_MXFP4_W4A8` | `0` | `1` | Register `RadianceMxfp4W4A8LinearKernel` (the HIP fp8-WMMA kernel) ahead of the AITER path. |
 | `RADIANCE_MXFP4_W4A8_MIN_M` | `256` | `0` | Smallest M the HIP kernel accepts for the folded (prefill) path. `0` = also small M. |
-| `RADIANCE_MXFP4_DECODE_MAX_M` | `0` | `64` | Largest M routed to the HIP split-K decode kernel; above it the folded kernel takes over. Should be ≥ `max_num_seqs × (num_speculative_tokens + 1)`. |
+| `RADIANCE_MXFP4_DECODE_MAX_M` | `0` | `128` | Largest M routed to the HIP split-K decode kernel; above it the folded kernel takes over. Must cover `max_num_seqs × (num_speculative_tokens + 1)` = 64 for pure decode; 128 also covers the CUDA-graph capture sizes of the mixed prefill+decode steps. |
 | `RADIANCE_MXFP4_SANITIZE` | `0` | `0` | `nan_to_num` on activations before the quant kernel. Was needed before the libr4d GDN path was fixed; costs 0.9 ms/step. |
 | `RADIANCE_LMHEAD_FP8` | `0` | `1` | fp8 per-output-channel lm_head via `torch._scaled_mm` (see above). Not compatible with `--hf-overrides '{"head_dtype": "float32"}'`. |
 | `RADIANCE_LMHEAD_FP8_MIN_M` | `16` | – | Pads M below this for hipBLASLt. |
@@ -168,7 +172,7 @@ docker run --rm --name vllm7-mxfp4 \
   -e RADIANCE_MXFP4=1 \
   -e RADIANCE_MXFP4_W4A8=1 \
   -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
-  -e RADIANCE_MXFP4_DECODE_MAX_M=64 \
+  -e RADIANCE_MXFP4_DECODE_MAX_M=128 \
   -e RADIANCE_MXFP4_SANITIZE=0 \
   -e RADIANCE_LMHEAD_FP8=1 \
   -p 8000:8000 \
@@ -209,7 +213,7 @@ Why these values:
 | `--kv-cache-dtype fp8` | 133k tokens of KV on 32 GB; `auto` (bf16) halves that. |
 | `--mamba-ssm-cache-dtype bfloat16` | Halves the GDN state pages (see above). The model config defaults to float32. Changing this invalidates the compile cache. |
 | `--speculative-config.*` | DFlash2 with the W4A16 drafter. `num_speculative_tokens 7` is the drafter's maximum (block size 8). `TRITON_ATTN` for the drafter; the target uses `ROCM_AITER_UNIFIED_ATTN`. |
-| `--max-num-seqs 8` | `8 × (7 + 1) = 64` = `RADIANCE_MXFP4_DECODE_MAX_M`; more sequences would push decode batches onto the folded kernel. In practice the KV cache caps 20k-context requests at ~12. |
+| `--max-num-seqs 8` | `8 × (7 + 1) = 64` decode tokens per step, well inside `RADIANCE_MXFP4_DECODE_MAX_M=128`. In practice the KV cache caps 20k-context requests at ~12. |
 | `--max-num-batched-tokens 2048` | Halves peak activation memory during profiling (KV 3.2 → 7.45 GiB before the fp8/bf16 wins); prefill chunking costs nothing measurable here. |
 | `--compilation-config.cudagraph_mode FULL_AND_PIECEWISE` | Full CUDA graphs for decode, piecewise for prefill. |
 | `--skip-mm-profiling --enable-mm-embeds --limit-mm-per-prompt.* 0` | Text-only serving of a VL-capable architecture; skips the vision profiling allocation. |
