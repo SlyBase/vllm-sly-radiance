@@ -330,6 +330,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # RADIANCE_LMHEAD_FP8=1 the (Quark-excluded, otherwise bf16) lm_head is quantised to fp8 per
 # output channel after loading and applied via row-wise torch._scaled_mm -- halves the 2.54 GB
 # of weight traffic that the target verify and the DFlash draft each pull per step.
+# sly/patch_w4a16_tiles.py adds a gfx1201 per-shape tile table to rdna_hybrid_w4a16.py for the
+# DFlash2 W4A16 drafter (the stock gfx12x heuristic was tuned on Llama-3.1-8B shapes and picks
+# 16x16 tiles at M<=32 -- 2176 workgroups for the 34816-wide gate_up); measured with
+# sly/bench_w4a16_tiles.py, RADIANCE_W4A16_TILES=0 falls back to the heuristic.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -343,7 +347,8 @@ RUN set -eu; cd /opt/patches; \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
-             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8; do \
+             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
+             sly/patch_w4a16_tiles; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
