@@ -14,11 +14,14 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--quick", action="store_true")
 ap.add_argument("--out", default="/root/w4a16_tiles.json")
 ap.add_argument("--iters", type=int, default=40)
+ap.add_argument("--fc", action="store_true", help="only the DFlash2 fc layer (K = 5 x 5120 aux -> N 5120, ReplicatedLinear)")
 args = ap.parse_args()
 
 GS = 128
 # (Name, N, K) des Drafts: 5 Layer, hidden 5120, 32x128 q / 8x128 kv, inter 17408
 SHAPES = [("qkv", 6144, 5120), ("o", 5120, 4096), ("gate_up", 34816, 5120), ("down", 5120, 17408)]
+if args.fc:
+    SHAPES = [("fc", 5120, 25600)]  # combine_hidden_states -> self.model.fc, M = Target-Token je Step (8 x Seqs)
 MS = [8, 16, 32, 40, 64] if not args.quick else [8, 40]
 dev = torch.device("cuda")
 torch.manual_seed(0)
