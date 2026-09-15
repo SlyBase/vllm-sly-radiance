@@ -83,6 +83,23 @@ row-wise through `torch._scaled_mm` (hipBLASLt) with per-token fp8 activations. 
 1.27 GiB returned to the KV cache. GSM8K (cot, zero-shot, greedy, 200 tasks): 0.830 ± 0.027 vs
 0.835 ± 0.026 for bf16 — no measurable loss.
 
+### int4 lm_head (0.1.5)
+
+`sly/mxfp4/radiance_lmhead_int4.py` + `sly/patch_lmhead_int4.py`, opt-in via `RADIANCE_LMHEAD_INT4=1`
+(takes precedence over the fp8 knob). The fp8 head already runs at the bandwidth ceiling (1.27 GB per
+call at 543 GB/s = 2.34 ms, twice per DFlash step = 11 % of the 42 ms step), so the only lever left
+is bytes: int4 with group-128 bf16 scales is 656 MB per call. The weight is quantised after loading
+(symmetric, per-group MSE clip search over ratios 1.0…0.8, 1.6 s), packed with vLLM's
+`pack_int4_exllama_shuffle` and applied on the same W4A16 kernel path as the drafter
+(`torch.ops.vllm.rdna_hybrid_w4a16_apply`: HIP skinny kernel at M ≤ 5, else the Triton kernel with
+five lm_head rows added to the gfx1201 tile table — the stock 16-column tiles would make it *slower*
+than fp8: 2623 vs 2459 µs at M = 8, with the table 1305 µs / 502 GB/s). No activation quant launch.
+Offline error on the real weight: 10.8 % of the logit RMS vs 3.7 % for fp8 (int4 ≈ 3× fp8, as
+expected from the formats). The error does not reach the argmax on real decode distributions: in a
+same-window A/B against the fp8 head GSM8K went 0.850 → 0.840 (5 vs 3 paired flips, noise) and
+the mean accepted tokens per step 4.33 → 4.31. The freed 0.6 GB goes to the KV cache (133k → 141k
+tokens).
+
 ### Gated-delta-net / attention
 
 - **`sly/patch_short_prefill.py`** — a 1-token prefill was misclassified as decode in the GDN
@@ -118,6 +135,7 @@ BetterBench 0.4.0 `--decode --concurrency` against the production container (202
 | INT4 reference tok/s | 77 | 114 | 175 | 214 | 205 |
 | Δ | +29 % | +56 % | +58 % | +62 % | +76 % |
 | … with `DECODE_MAX_M=128` (conc-only run) | 99 | 178 | 280 | **368** | **371** |
+| … + int4 lm_head (0.1.5, conc-only A/B run; fp8 head in the same window: 99 / 180 / 286 / 356 / 364) | **105** | **187** | **293** | 354 | **371** |
 
 Single-stream median 120 tok/s, DFlash step gap 42.0 ms, KV cache 8.57 GiB / 133k fp8 tokens at
 `--max-model-len 32768 --gpu-memory-utilization 0.95`. Profile of one step (conc 1): decode GEMMs
@@ -125,7 +143,8 @@ Single-stream median 120 tok/s, DFlash step gap 42.0 ms, KV cache 8.57 GiB / 133
 elementwise kernels, not the GEMMs).
 
 Progression: 0.1.0 → 0.1.2 (DEC_MAX_N) step 67 → 48 ms; 0.1.3 (fp8 lm_head) 44.5 ms; bf16 SSM state
-+ 0.1.4 (drafter tiles) 42.0 ms.
++ 0.1.4 (drafter tiles) 42.0 ms; 0.1.5 (int4 lm_head) 39.7 ms at conc 1 (41.9 ms at conc 2, conc 8
+unchanged), KV 141k tokens.
 
 ## Options
 
@@ -140,9 +159,12 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_MXFP4_W4A8_MIN_M` | `256` | `0` | Smallest M the HIP kernel accepts for the folded (prefill) path. `0` = also small M. |
 | `RADIANCE_MXFP4_DECODE_MAX_M` | `0` | `128` | Largest M routed to the HIP split-K decode kernel; above it the folded kernel takes over. Must cover `max_num_seqs × (num_speculative_tokens + 1)` = 64 for pure decode; 128 also covers the CUDA-graph capture sizes of the mixed prefill+decode steps. |
 | `RADIANCE_MXFP4_SANITIZE` | `0` | `0` | `nan_to_num` on activations before the quant kernel. Was needed before the libr4d GDN path was fixed; costs 0.9 ms/step. |
-| `RADIANCE_LMHEAD_FP8` | `0` | `1` | fp8 per-output-channel lm_head via `torch._scaled_mm` (see above). Not compatible with `--hf-overrides '{"head_dtype": "float32"}'`. |
+| `RADIANCE_LMHEAD_FP8` | `0` | `1` | fp8 per-output-channel lm_head via `torch._scaled_mm` (see above); fallback when `RADIANCE_LMHEAD_INT4` is unset. Not compatible with `--hf-overrides '{"head_dtype": "float32"}'`. |
 | `RADIANCE_LMHEAD_FP8_MIN_M` | `16` | – | Pads M below this for hipBLASLt. |
 | `RADIANCE_W4A16_TILES` | `1` | – | `0` disables the gfx1201 drafter tile table (stock heuristic). |
+| `RADIANCE_LMHEAD_INT4` | `0` | `1` | int4 (W4A16, group-128 bf16 scales) lm_head on the drafter's Triton/HIP kernel path (see above); takes precedence over `RADIANCE_LMHEAD_FP8`. Same `head_dtype` limitation. |
+| `RADIANCE_LMHEAD_INT4_GS` | `128` | – | Group size of the int4 lm_head (64 measured: −8 % error for 2× scale bytes, not worth it). |
+| `RADIANCE_LMHEAD_INT4_CLIP` | `mse` | – | Per-group scale search over clip ratios 1.0…0.8 by least squared error; `rtn` = plain amax/7 (−14 % vs +0 % error, 1.6 s vs 0.3 s at load). |
 | `GPU_MAX_HW_QUEUES` | ROCm default | `2` | ROCm HW queue count; 2 measured best for this single-process setup. |
 | `RADIANCE_MXFP4_DECODE_KS` | auto | – | Force the decode kernel's split-K factor (A/B control). |
 | `RADIANCE_MXFP4_DECODE_BK` | auto (64) | – | `128` pins the old BK=128 decode tiling. |
@@ -175,6 +197,7 @@ docker run --rm --name vllm7-mxfp4 \
   -e RADIANCE_MXFP4_DECODE_MAX_M=128 \
   -e RADIANCE_MXFP4_SANITIZE=0 \
   -e RADIANCE_LMHEAD_FP8=1 \
+  -e RADIANCE_LMHEAD_INT4=1 \
   -p 8000:8000 \
   -v /root/hf-cache:/root/.cache/huggingface \
   -v /root/vllm7-cache/triton:/root/.triton \

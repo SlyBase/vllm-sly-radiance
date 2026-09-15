@@ -11,8 +11,11 @@ file already carries (_GFX1X_PREFILL_OVERRIDES) is consulted in the gfx1151 bran
 
 This adds a gfx12x override table keyed by (group_size, K, N, M bucket) for the four drafter
 shapes of syvai/Qwen3.8-27B-DFlash2-W4A16 (hidden 5120, 32x128 q / 8x128 kv, intermediate
-17408, gs=128), measured DRAM-cold with sly/bench_w4a16_tiles.py on the R9700. Any shape or
-M bucket not in the table falls through to the stock heuristic unchanged.
+17408, gs=128), its fc layer, and the int4 lm_head of sly/mxfp4/radiance_lmhead_int4.py
+(N=248320: the stock 16-column tiles mean 15520 workgroups, 250 GB/s -- slower than the fp8
+hipBLASLt head it replaces; with the table 502 GB/s at M=8), all measured DRAM-cold with
+sly/bench_w4a16_tiles.py on the R9700. Any shape or M bucket not in the table falls through
+to the stock heuristic unchanged.
 RADIANCE_W4A16_TILES=0 disables the table (A/B control, no rebuild).
 """
 
@@ -61,6 +64,14 @@ apply(F,
       '    (128, 25600, 5120, 32): (32, 32, 128, 4, None),\n'
       '    (128, 25600, 5120, 40): (64, 32, 128, 4, None),\n'
       '    (128, 25600, 5120, 64): (64, 32, 128, 4, None),\n'
+      '    # lm_head int4 (sly/mxfp4/radiance_lmhead_int4.py, RADIANCE_LMHEAD_INT4=1)  N=248320\n'
+      '    # K=5120 -- verify M = 8 x seqs, draft bootstrap M = 7 x seqs; 656 MB per call\n'
+      '    # (2623/2709/5327/2715/2824 us -> 1305/1333/1585/2099/2185; fp8 hipBLASLt: 2459-2623)\n'
+      '    (128, 5120, 248320, 8): (16, 64, 128, 4, 1),\n'
+      '    (128, 5120, 248320, 16): (16, 64, 128, 4, 1),\n'
+      '    (128, 5120, 248320, 32): (32, 128, 64, 8, None),\n'
+      '    (128, 5120, 248320, 40): (64, 128, 64, 8, None),\n'
+      '    (128, 5120, 248320, 64): (64, 64, 64, 4, 1),\n'
       '}\n'
       '_GFX12X_DRAFT_BUCKETS = (8, 16, 32, 40, 64)\n'
       '\n'

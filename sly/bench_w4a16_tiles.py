@@ -15,6 +15,7 @@ ap.add_argument("--quick", action="store_true")
 ap.add_argument("--out", default="/root/w4a16_tiles.json")
 ap.add_argument("--iters", type=int, default=40)
 ap.add_argument("--fc", action="store_true", help="only the DFlash2 fc layer (K = 5 x 5120 aux -> N 5120, ReplicatedLinear)")
+ap.add_argument("--lmhead", action="store_true", help="only the int4 lm_head (N 248320, K 5120; sly/mxfp4/radiance_lmhead_int4.py)")
 args = ap.parse_args()
 
 GS = 128
@@ -22,6 +23,8 @@ GS = 128
 SHAPES = [("qkv", 6144, 5120), ("o", 5120, 4096), ("gate_up", 34816, 5120), ("down", 5120, 17408)]
 if args.fc:
     SHAPES = [("fc", 5120, 25600)]  # combine_hidden_states -> self.model.fc, M = Target-Token je Step (8 x Seqs)
+if args.lmhead:
+    SHAPES = [("lm_head", 248320, 5120)]  # RadianceLMHeadInt4: verify M = 8 x Seqs, draft M = 7 x Seqs
 MS = [8, 16, 32, 40, 64] if not args.quick else [8, 40]
 dev = torch.device("cuda")
 torch.manual_seed(0)

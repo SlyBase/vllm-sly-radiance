@@ -264,7 +264,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
-     sly/mxfp4/radiance_lmhead_fp8.py ${SP}/
+     sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -334,6 +334,11 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # DFlash2 W4A16 drafter (the stock gfx12x heuristic was tuned on Llama-3.1-8B shapes and picks
 # 16x16 tiles at M<=32 -- 2176 workgroups for the 34816-wide gate_up); measured with
 # sly/bench_w4a16_tiles.py, RADIANCE_W4A16_TILES=0 falls back to the heuristic.
+# sly/patch_lmhead_int4.py hooks radiance_lmhead_int4.py in front of the fp8 block: with
+# RADIANCE_LMHEAD_INT4=1 the lm_head is quantised to int4 (group-128 bf16 scales, MSE clip
+# search) after loading and applied on the drafter's W4A16 kernel path (656 MB per call instead
+# of fp8's 1.27 GB; the tile table above carries the lm_head entries). Must run after
+# patch_lmhead_fp8 (it anchors on that block).
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -348,7 +353,7 @@ RUN set -eu; cd /opt/patches; \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles; do \
+             sly/patch_w4a16_tiles sly/patch_lmhead_int4; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \

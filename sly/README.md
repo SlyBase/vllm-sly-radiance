@@ -1,113 +1,116 @@
-# sly/ — SlyBase-Ergänzungen zu vllm-radiance
+# sly/ — SlyBase additions to vllm-radiance
 
-Dieses Verzeichnis enthält alle SlyBase-eigenen Patches und Configs on top of
+This directory contains all of SlyBase's own patches and configs on top of
 [StillDeadcode/vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance).
-Ziel: RDNA4/gfx1201-MXFP4-Support für `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` auf
+Goal: RDNA4/gfx1201 MXFP4 support for `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` on
 AMD Radeon AI PRO R9700.
 
-## Inhalt
+## Contents
 
-| Datei | Zweck |
+| File | Purpose |
 |---|---|
-| `patch_quark_mxfp4.py` | AITER-Triton-MXFP4-Gate für gfx1201 (5 Hunks) + Registrierung des HIP-Kernel-Plugins |
-| `mxfp4/radiance_mxfp4.py` | `RadianceMxfp4W4A8LinearKernel`-Plugin (dispatcht große M auf den HIP-Kernel, sonst AITER) |
-| `mxfp4/radiance_mxfp4_fp8.hip` | Hand-geschriebener fp8-WMMA-W4A8-GEMM-Kernel (Prefill), von [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4). **2026-09-15**: `DEC_MAX_N` 32768 → 36864 — Qwen3.8-27B (TP=1) hat einen fusionierten gate_up mit N = 34816, den die alte Grenze still in den Folded-(Prefill-)Kernel schickte (64 Calls/Step à ~420 µs statt ~190 µs = 30 von 72 ms je DFlash-Step); Scratch + Block-Counter in `radiance_mxfp4.py` passend vergrößert |
-| `mxfp4-configs/` | MXFP4-GEMM-Configs für AITERs Config-Lookup (JSON, wie `fp8-configs/`) — `gfx1201/.../gemm_afp4wfp4/DEFAULT.json` war ursprünglich AITERs eigener gfx950/gfx1250-Default 1:1 übernommen; AITER hat für diese GEMM-Familie **kein** gfx1201-Tuning und bricht ohne Config-Datei hart mit `AssertionError` ab (kein eingebauter Fallback). **2026-09-14 (Task #5, Build #8 First-Request-Crash)**: dieser Default crashte den EngineCore beim allerersten echten Request mit `triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 67584-100352, Hardware limit: 65536` — gfx950/gfx1250 haben deutlich mehr LDS pro CU (`_LDS_CAP_BYTES` in aiter: gfx1250=327680, gfx950=163840; **gfx1201 fehlt in dieser Map komplett**), gfx1201/RDNA4 hat nur 64KiB. Gefixt per Brute-Force-Probe direkt auf der R9700 (echter `gemm_afp4wfp4()`-Launch pro M-Bucket, bei `OutOfResources` `num_stages` schrittweise runter, bis der Launch durchläuft): alle 8 Buckets brauchten nur `num_stages` 3→2 (bzw. 2→1 für `any`) reduziert, `BLOCK_SIZE_*` unverändert. Das ist ein reiner Korrektheits-Fix (macht den Kernel überhaupt lauffähig) — **echtes do_bench-Perf-Tuning der Blockgrößen selbst ist weiterhin offene Task-#7-Arbeit** |
-| `patch_short_prefill.py` | GDN-Fix: 1-Token-Prefill wird nicht mehr fälschlich als Decode klassifiziert (Subagent E, ursprünglich vllm5-Bind-Mount-Patch für 0.28.0, hier verbatim gegen 0.29.0 verifiziert) |
-| `patch_dflash_w4_packed.py` | DFlash-Drafter als compressed-tensors-W4A16-Checkpoint (`syvai/Qwen3.8-27B-DFlash2-W4A16`): `qkv_proj` hat `weight_packed`, kein rohes `.weight` → wie der fp8-Fall deferred + über den eigenen Forward dequantisiert (portiert vom vllm5-Bind-Mount-Patch 0.27.1, verifiziert 0.29.0 / vllm7 2026-09-15) |
-| `mxfp4/radiance_lmhead_fp8.py` | `RadianceLMHeadFp8` (`RADIANCE_LMHEAD_FP8=1`): der Quark-excluded lm_head (bf16, 248320 × 5120 = 2,54 GB je Call, mit DFlash 2 Calls/Step = 8,6 von ~49 ms) wird nach dem Laden per Output-Channel nach fp8 quantisiert und über row-wise `torch._scaled_mm` (hipBLASLt) mit per-Token-fp8-Aktivierung gerechnet; 1,27 GiB frei für den KV-Cache. `RADIANCE_LMHEAD_FP8_MIN_M` (Default 16) polstert kleine M für hipBLASLt auf |
-| `patch_lmhead_fp8.py` | Einhängen von `radiance_lmhead_fp8` in `QuarkConfig.get_quant_method` (vor dem Exclude-Zweig, der sonst `UnquantizedLinearMethod` liefert) |
-| `patch_gdn_nonspec_mask.py` | `patch_gdn_metadata`s numpy-Pfad lässt `non_spec_sequence_masks_cpu` unbelegt → `UnboundLocalError` beim Engine-Init, sobald `--speculative-config` gesetzt ist; Einzeiler, der den Tensor aus der numpy-Maske rekonstruiert |
-| `patch_w4a16_tiles.py` | gfx1201-Tile-Tabelle für den DFlash2-W4A16-Drafter in `rdna_hybrid_w4a16.py`: der HIP-Skinny-Kernel greift nur bei M ≤ 5, der Drafter hat immer M = 8 × Seqs → immer Triton, und dessen gfx12x-Heuristik (auf Llama-3.1-8B getunt) wählt bei M ≤ 32 16×16-Tiles (gate_up N=34816: 2176 Workgroups, 267 GB/s). Tabelle `(gs, K, N, M-Bucket 8/16/32/40/64)` für qkv/o/gate_up/down, DRAM-kalt gemessen mit `bench_w4a16_tiles.py` (2026-09-15): gate_up 1,7–3,5×, down 1,5–2,6×, qkv 1,5–2,4× bei M ≤ 32, 1,03–1,43× bei M = 40/64. `RADIANCE_W4A16_TILES=0` = Stock-Heuristik (A/B ohne Rebuild). Seit 2026-09-15 (ungebaut, fährt mit dem nächsten Build mit) zusätzlich `fc` (`combine_hidden_states`, K=25600, läuft vor dem Draft-Padding bei M = 8 × Seqs): 288/293/575/316/326 → 205/205/205/286/294 µs (bit-identisch; je Step ≤ 0,4 ms, unter BetterBench-Auflösung, daher kein eigener Build) |
-| `bench_w4a16_tiles.py` | Tile-Sweep für `_triton_w4a16_skinny_fmt_kernel` (BLOCK_M/N/K, num_warps, num_stages; Gewichts-Rotation ≥ 160 MB gegen L2-Hits; `--fc` = nur die fc-Schicht) — Quelle der Tabelle in `patch_w4a16_tiles.py` |
+| `patch_quark_mxfp4.py` | AITER Triton MXFP4 gate for gfx1201 (5 hunks) + registration of the HIP kernel plugin |
+| `mxfp4/radiance_mxfp4.py` | `RadianceMxfp4W4A8LinearKernel` plugin (dispatches large M to the HIP kernel, otherwise AITER) |
+| `mxfp4/radiance_mxfp4_fp8.hip` | Hand-written fp8 WMMA W4A8 GEMM kernel (prefill), from [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4). **2026-09-15**: `DEC_MAX_N` 32768 → 36864 — Qwen3.8-27B (TP=1) has a fused gate_up with N = 34816, which the old limit silently routed into the folded (prefill) kernel (64 calls/step at ~420 µs instead of ~190 µs = 30 of 72 ms per DFlash step); scratch + block counter in `radiance_mxfp4.py` enlarged accordingly |
+| `mxfp4-configs/` | MXFP4 GEMM configs for AITER's config lookup (JSON, like `fp8-configs/`) — `gfx1201/.../gemm_afp4wfp4/DEFAULT.json` was originally taken 1:1 from AITER's own gfx950/gfx1250 default; AITER has **no** gfx1201 tuning for this GEMM family and hard-fails without a config file with an `AssertionError` (no built-in fallback). **2026-09-14 (Task #5, Build #8 first-request crash)**: this default crashed the EngineCore on the very first real request with `triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 67584-100352, Hardware limit: 65536` — gfx950/gfx1250 have significantly more LDS per CU (`_LDS_CAP_BYTES` in aiter: gfx1250=327680, gfx950=163840; **gfx1201 is missing from this map entirely**), gfx1201/RDNA4 only has 64KiB. Fixed via brute-force probing directly on the R9700 (real `gemm_afp4wfp4()` launch per M bucket, stepping `num_stages` down on `OutOfResources` until the launch succeeds): all 8 buckets only needed `num_stages` reduced 3→2 (or 2→1 for `any`), `BLOCK_SIZE_*` unchanged. This is a pure correctness fix (makes the kernel runnable at all) — **actual do_bench perf tuning of the block sizes themselves remains open Task #7 work** |
+| `patch_short_prefill.py` | GDN fix: 1-token prefill is no longer misclassified as decode (Subagent E, originally a vllm5 bind-mount patch for 0.28.0, verified here verbatim against 0.29.0) |
+| `patch_dflash_w4_packed.py` | DFlash drafter as a compressed-tensors W4A16 checkpoint (`syvai/Qwen3.8-27B-DFlash2-W4A16`): `qkv_proj` has `weight_packed`, no raw `.weight` → deferred like the fp8 case + dequantized via its own forward (ported from the vllm5 bind-mount patch 0.27.1, verified against 0.29.0 / vllm7 2026-09-15) |
+| `mxfp4/radiance_lmhead_fp8.py` | `RadianceLMHeadFp8` (`RADIANCE_LMHEAD_FP8=1`): the Quark-excluded lm_head (bf16, 248320 × 5120 = 2.54 GB per call, with DFlash 2 calls/step = 8.6 of ~49 ms) is quantized to fp8 per output channel after loading and computed via row-wise `torch._scaled_mm` (hipBLASLt) with per-token fp8 activation; frees up 1.27 GiB for the KV cache. `RADIANCE_LMHEAD_FP8_MIN_M` (default 16) pads small M for hipBLASLt |
+| `patch_lmhead_fp8.py` | Hooks `radiance_lmhead_fp8` into `QuarkConfig.get_quant_method` (before the exclude branch that would otherwise return `UnquantizedLinearMethod`) |
+| `patch_gdn_nonspec_mask.py` | `patch_gdn_metadata`'s numpy path leaves `non_spec_sequence_masks_cpu` unassigned → `UnboundLocalError` on engine init as soon as `--speculative-config` is set; one-liner that reconstructs the tensor from the numpy mask |
+| `patch_w4a16_tiles.py` | gfx1201 tile table for the DFlash2 W4A16 drafter in `rdna_hybrid_w4a16.py`: the HIP skinny kernel only kicks in at M ≤ 5, the drafter always has M = 8 × seqs → always Triton, and its gfx12x heuristic (tuned on Llama-3.1-8B) picks 16×16 tiles at M ≤ 32 (gate_up N=34816: 2176 workgroups, 267 GB/s). Table `(gs, K, N, M bucket 8/16/32/40/64)` for qkv/o/gate_up/down (0.1.5: + fc + the int4 lm_head, N=248320: stock 2623/2709/5327/2715/2824 → 1305/1333/1585/2099/2185 µs at M = 8/16/32/40/64), measured DRAM-cold with `bench_w4a16_tiles.py` (2026-09-15): gate_up 1.7–3.5×, down 1.5–2.6×, qkv 1.5–2.4× at M ≤ 32, 1.03–1.43× at M = 40/64. `RADIANCE_W4A16_TILES=0` = stock heuristic (A/B without a rebuild). As of 2026-09-15 (not yet built, will ship with the next build) additionally `fc` (`combine_hidden_states`, K=25600, runs before draft padding at M = 8 × seqs): 288/293/575/316/326 → 205/205/205/286/294 µs (bit-identical; ≤ 0.4 ms per step, below BetterBench resolution, hence no dedicated build) |
+| `bench_w4a16_tiles.py` | Tile sweep for `_triton_w4a16_skinny_fmt_kernel` (BLOCK_M/N/K, num_warps, num_stages; weight rotation ≥ 160 MB against L2 hits; `--fc` = fc layer only, `--lmhead` = the int4 lm_head shape only) — source of the table in `patch_w4a16_tiles.py` |
+| `mxfp4/radiance_lmhead_int4.py` | `RadianceLMHeadInt4` (`RADIANCE_LMHEAD_INT4=1`, 0.1.5): the lm_head as int4 W4A16 (symmetric, group-128 bf16 scales, `RADIANCE_LMHEAD_INT4_GS`) on the drafter's kernel path (`torch.ops.vllm.rdna_hybrid_w4a16_apply`: HIP `wvSplitK_int4_g` at M ≤ 5, else the Triton skinny kernel with the lm_head rows of the tile table). Quantised after loading in 8192-row chunks with a per-group MSE clip search (`RADIANCE_LMHEAD_INT4_CLIP=mse`, ratios 1.0…0.8, 1.6 s; `rtn` = plain amax/7), packed with vLLM's `pack_int4_exllama_shuffle`. 656 MB per call instead of fp8's 1.27 GB (already at 543 GB/s = 85 % of the read peak, so bytes were the only lever left): offline M = 8 2459 → 1305 µs (502 GB/s), 0.61 GiB more KV. Error ~3× fp8 (rms 10.8 % vs 3.7 % of the logit rms on the real weight; argmax flips on a flat random proxy 24 % vs 10 %) — ships only behind the GSM8K / accept-length gate |
+| `patch_lmhead_int4.py` | Hooks `radiance_lmhead_int4` in front of the fp8 block in `QuarkConfig.get_quant_method` (int4 wins when both envs are set); anchors on the fp8 block, so it runs after `patch_lmhead_fp8` in the Dockerfile loop |
+| `check_lmhead_int4.py` | Offline numerics + timing of the lm_head variants on the real weight (fp32 reference, fp8, int4 g128 mse/rtn, g64): logit error, argmax flips, top-16 overlap, HIP-vs-Triton path consistency, per-call time per M. Throwaway container with the GPU exclusive and the HF cache mounted |
 
-**Kernel-Entscheidung (Subagent C1, abgeschlossen)**: kein Entweder-Oder — beide
-Pfade werden gebraucht, geschichtet:
+**Kernel decision (Subagent C1, completed)**: not an either/or — both
+paths are needed, layered:
 
-1. **Pflicht-Basis**: `patch_quark_mxfp4.py`-Hunks 2–5 schalten AITERs
-   Triton-`gemm_afp4wfp4` (natives MXFP4-W4A4) auf gfx1201 frei
-   (`RADIANCE_MXFP4=1`). Ohne das fällt jede MXFP4-Linear-Layer auf
-   `EmulationMxfp4LinearKernel` (BF16-Dequant+F.linear) zurück.
-2. **Optimierung obendrauf**: `RadianceMxfp4W4A8LinearKernel`
-   (`mxfp4/radiance_mxfp4.py` + `.hip`-Kernel, `RADIANCE_MXFP4_W4A8=1`) wird
-   per Hunk 1 an den Kopf der ROCm-Kernel-Liste gesetzt und übernimmt große-M
-   (Prefill-)Shapes mit fp8-Aktivierungen (1.6–1.9x schneller als der getunte
-   AITER-Pfad, laut ggz14s `PERFORMANCE.md`); `can_implement()`/`is_supported()`
-   lehnen für alles andere ab und die Anfrage fällt zurück auf (1).
+1. **Mandatory base**: `patch_quark_mxfp4.py` hunks 2–5 enable AITER's
+   Triton `gemm_afp4wfp4` (native MXFP4 W4A4) on gfx1201
+   (`RADIANCE_MXFP4=1`). Without this, every MXFP4 linear layer falls
+   back to `EmulationMxfp4LinearKernel` (BF16 dequant + F.linear).
+2. **Optimization on top**: `RadianceMxfp4W4A8LinearKernel`
+   (`mxfp4/radiance_mxfp4.py` + `.hip` kernel, `RADIANCE_MXFP4_W4A8=1`) is
+   placed at the head of the ROCm kernel list via hunk 1 and takes over
+   large-M (prefill) shapes with fp8 activations (1.6–1.9x faster than the
+   tuned AITER path, per ggz14's `PERFORMANCE.md`); `can_implement()`/
+   `is_supported()` reject everything else and the request falls back to (1).
 
-Alle 5 Hunks in `patch_quark_mxfp4.py` wurden gegen den echten vLLM-0.29.0-Quellcode
-(Tag `v0.29.0`) getestet: Anchor-Match + `ast.parse()` + idempotenter
-Zweitlauf (NOOP) + `py_compile`, alles grün. Details/Begründung je Hunk im
-Docstring der Datei. Zwei der fünf Hunks (4 + 5) sind **neu gegenüber
-ggz14s Original** — vLLM hat zwischen 0.27 und 0.29 zwei zusätzliche
-CDNA-only-Gates um den AITER-Custom-Op gezogen, die ggz14s 0.27.1-Ziel noch
-nicht kannte.
+All 5 hunks in `patch_quark_mxfp4.py` were tested against the real
+vLLM 0.29.0 source (tag `v0.29.0`): anchor match + `ast.parse()` + idempotent
+second run (NOOP) + `py_compile`, all green. Details/rationale per hunk are
+in the file's docstring. Two of the five hunks (4 + 5) are **new relative to
+ggz14's original** — between 0.27 and 0.29, vLLM added two additional
+CDNA-only gates around the AITER custom op that ggz14's 0.27.1 target
+didn't yet know about.
 
-`patch_gfx1201.py` (Top-Level, von `StillDeadcode/vllm-radiance` geerbt, byte-
-identisch mit ggz14s Version) ist bereits im Baum und wurde ebenfalls gegen
-vLLM 0.29.0 + Triton 3.8.0 verifiziert — alle vier Anchors (gcn-arch-Env,
-AITER-CDNA-Gate, Triton-`HIPDriver.is_active`, AITER-Sampler-Gate) matchen
-verbatim, keine Änderung nötig.
+`patch_gfx1201.py` (top level, inherited from `StillDeadcode/vllm-radiance`,
+byte-identical to ggz14's version) is already in the tree and was likewise
+verified against vLLM 0.29.0 + Triton 3.8.0 — all four anchors (gcn-arch env,
+AITER CDNA gate, Triton `HIPDriver.is_active`, AITER sampler gate) match
+verbatim, no change needed.
 
-**`patch_unified_attention_lds.py` (Top-Level, LDS-Fix + bf16-Tuning für gfx1201)
-auf aiter 0.1.21.post2 portiert**: AITER hat zwischen der alten Version (die
-dieser Patch ursprünglich patchte) und `0.1.21.post2` die komplette
-Config-Auswahl in `unified_attention.py` umgebaut — `select_3d_config`/
-`select_2d_config` (Python-elif-Ketten) sind weg, ersetzt durch
-tabellengetriebene JSON-Configs (`get_unified_attention_config()` in
-`unified_attention_utils.py`, geladen per `json.load()` — also reine Daten,
-nicht Python, `_patchlib.apply()`/`ast.parse()` kann dort also nicht ansetzen).
-Der Patch wurde komplett neu geschrieben (6 Hunks statt 3) gegen die reale,
-per `raw.githubusercontent.com` geladene `0.1.21.post2`-Quelle:
-- **LDS-Fit-Klemme** (Korrektheit, unbedingt, 2D **und** 3D) sitzt jetzt in
-  `_unified_attention_2d_triton()`/`_unified_attention_3d_triton()`, direkt
-  nach dem Config-Lookup, vor dem jeweiligen Kernel-Launch.
-- **Konsistenz-Problem gelöst**: `kernel_unified_attention_3d` und
-  `reduce_segments` leiten aus demselben `TILE_SIZE` unabhängig voneinander
-  ihre Segment-Aufteilung ab (`tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS
-  * TILE_SIZE)`) — würde man `TILE_SIZE` nur lokal in
-  `_unified_attention_3d_triton()` klemmen, liefe `reduce_segments` mit dem
-  alten Wert weiter und würde stillschweigend falsche Segmente mergen. Fix:
-  `_unified_attention_3d_triton()` gibt sein (geklemmtes/getuntes) `TILE_SIZE`
-  jetzt per `return` zurück, der einzige Call-Site in `unified_attention()`
-  fängt das ab und reicht denselben Wert an den nachfolgenden
-  `_reduce_segments_triton()`-Call weiter.
-- **bf16/fp16-3D-Decode-Tuning** (TILE16/warps4/stages2/waves2, plus
-  passendes `num_warps=4` im Reduce-Kernel) strukturell an die neue Stelle
-  portiert, hinter `DEVICE_ARCH == "gfx1201"` gated (neu ggü. dem alten Patch —
-  die alte RDNA-Verzweigung war implizit, die neue Architektur ist arch-
-  agnostisch, ein ungegatetes Override hätte andere Archs auf diesem Fork
-  mit-getroffen).
-Verifiziert (ohne GPU): Anchor-Match (alle 6 Stellen `count==1` gegen die
-echte `0.1.21.post2`-Datei), `ast.parse()`, idempotenter Zweitlauf (NOOP),
-`py_compile` — alles grün (`patch-verify-e2/` im Scratchpad, nicht Teil des
-Commits). **Offen**: ob TILE16/warps4/stages2/waves2 in der neuen
-Tabellenstruktur weiterhin do_bench-optimal sind, muss auf echter R9700-
-Hardware neu vermessen werden — hier nur strukturell/korrekt an die neue
-Stelle portiert, nicht neu getuned.
+**`patch_unified_attention_lds.py` (top level, LDS fix + bf16 tuning for
+gfx1201) ported to aiter 0.1.21.post2**: between the old version (which
+this patch originally targeted) and `0.1.21.post2`, AITER completely
+rebuilt the config selection in `unified_attention.py` — `select_3d_config`/
+`select_2d_config` (Python elif chains) are gone, replaced by table-driven
+JSON configs (`get_unified_attention_config()` in
+`unified_attention_utils.py`, loaded via `json.load()` — i.e. plain data,
+not Python, so `_patchlib.apply()`/`ast.parse()` can't anchor there). The
+patch was rewritten from scratch (6 hunks instead of 3) against the real
+`0.1.21.post2` source, fetched via `raw.githubusercontent.com`:
+- **LDS-fit clamp** (correctness, unconditional, 2D **and** 3D) now lives in
+  `_unified_attention_2d_triton()`/`_unified_attention_3d_triton()`, right
+  after the config lookup, before the respective kernel launch.
+- **Consistency issue resolved**: `kernel_unified_attention_3d` and
+  `reduce_segments` independently derive their segment split from the same
+  `TILE_SIZE` (`tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS *
+  TILE_SIZE)`) — if `TILE_SIZE` were only clamped locally in
+  `_unified_attention_3d_triton()`, `reduce_segments` would keep running
+  with the old value and silently merge the wrong segments. Fix:
+  `_unified_attention_3d_triton()` now returns its (clamped/tuned)
+  `TILE_SIZE`, the single call site in `unified_attention()` catches it and
+  passes the same value on to the subsequent `_reduce_segments_triton()`
+  call.
+- **bf16/fp16 3D decode tuning** (TILE16/warps4/stages2/waves2, plus a
+  matching `num_warps=4` in the reduce kernel) structurally ported to the
+  new location, gated behind `DEVICE_ARCH == "gfx1201"` (new relative to
+  the old patch — the old RDNA branch was implicit, the new architecture
+  code is arch-agnostic, and an ungated override would have hit other archs
+  on this fork too).
+Verified (without a GPU): anchor match (all 6 locations `count==1` against
+the real `0.1.21.post2` file), `ast.parse()`, idempotent second run (NOOP),
+`py_compile` — all green (`patch-verify-e2/` in the scratchpad, not part of
+the commit). **Open**: whether TILE16/warps4/stages2/waves2 are still
+do_bench-optimal in the new table structure needs to be re-measured on
+real R9700 hardware — here it was only ported structurally/correctly to the
+new location, not re-tuned.
 
-**Offener Punkt für Subagent B**: der `.hip`-Kernel selbst braucht noch
-Build-Wiring im Dockerfile (Compile-Schritt + Extension-Load, analog zu
-`radiance_kernels.py`s Pattern für die anderen `.hip`-Kernel in diesem Repo,
-z.B. R4D) — reine Python-Seite (Hunk 1 + `radiance_mxfp4.py`) ist fertig,
-die kompilierte `.so` fehlt noch.
+**Open item for Subagent B**: the `.hip` kernel itself still needs
+build wiring in the Dockerfile (compile step + extension load, analogous to
+`radiance_kernels.py`'s pattern for the other `.hip` kernels in this repo,
+e.g. R4D) — the pure Python side (hunk 1 + `radiance_mxfp4.py`) is done,
+the compiled `.so` is still missing.
 
-`RADIANCE_MXFP4_KERNEL`-Env aus der ursprünglichen Plan-Fassung entfällt —
-die Auswahl passiert automatisch über die Kernel-Priorität
-(`_POSSIBLE_MXFP4_KERNELS[ROCM]`), nicht über einen manuellen Schalter.
+The `RADIANCE_MXFP4_KERNEL` env var from the original plan draft is
+dropped — selection happens automatically via the kernel priority list
+(`_POSSIBLE_MXFP4_KERNELS[ROCM]`), not via a manual switch.
 
-## Git-Branching / Upstream-Merge
+## Git Branching / Upstream Merge
 
 ```
-main           ← upstream tracking (mirror von StillDeadcode/vllm-radiance, Codeberg)
-  └─ sly/main  ← Integration (alle sly-Patches auf main aufgebaut)
+main           ← upstream tracking (mirror of StillDeadcode/vllm-radiance, Codeberg)
+  └─ sly/main  ← integration (all sly patches built on top of main)
 ```
 
 Remotes:
 - `origin`   = `https://github.com/SlyBase/vllm-sly-radiance.git`
 - `upstream` = `https://codeberg.org/StillDeadcode/vllm-radiance.git`
 
-Merge-Prozedur bei Upstream-Updates:
+Merge procedure for upstream updates:
 
 ```bash
 git checkout main
@@ -117,8 +120,8 @@ git push origin main
 
 git checkout sly/main
 git rebase main
-# Patch-Anchor-Konflikte sind harte Fehler (_patchlib.apply() Uniqueness-Check) —
-# jeden betroffenen Patch in sly/ gegen den neuen Anchor-String re-verifizieren
+# Patch anchor conflicts are hard failures (_patchlib.apply() uniqueness check) —
+# re-verify every affected patch in sly/ against the new anchor string
 git push origin sly/main --force-with-lease
 ```
 
@@ -130,6 +133,6 @@ docker build --build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full \
 docker push ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm<ROCM_VERSION>
 ```
 
-`<VERSION>` = Inhalt von `../VERSION` (eigene SemVer, unabhängig von der
-upstream radiance-Version). `docker login ghcr.io` muss vorher lokal (auf
-LXC 2408) mit einem PAT mit `write:packages`-Scope eingerichtet sein.
+`<VERSION>` = content of `../VERSION` (own SemVer, independent of the
+upstream radiance version). `docker login ghcr.io` must be set up locally
+beforehand (on LXC 2408) with a PAT that has `write:packages` scope.
