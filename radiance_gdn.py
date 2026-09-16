@@ -57,7 +57,83 @@ _CONV_PREP = _bind("gdn_conv_prep", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v
                    chunk=CHUNK)
 _CONV_UPDATE = _bind("gdn_conv_update", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V)
 _KKT_SOLVE = _bind("gdn_kkt_solve", head_k=HEAD_K, chunk=CHUNK)
-_RECURRENT_UPDATE = _bind("gdn_recurrent_update", head_k=HEAD_K, head_v=HEAD_V)
+_RECURRENT_UPDATE = _bind("gdn_recurrent_update", head_k=HEAD_K, head_v=HEAD_V,
+                          state_dtype="fp32")
+_FUSED_UPDATE = _bind("gdn_fused_update", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V,
+                      state_dtype="fp32")
+
+
+# The select() key and the entry-point spelling are not the same string: the registry asks for
+# state_dtype="fp16" but names the kernel ..._f16state. Keep the pair explicit rather than deriving
+# one from the other -- a near-miss here does not fail loudly, it silently keeps the fp32 handle.
+_STATE_TAGS = {torch.bfloat16: ("bf16", "_bf16state"), torch.float16: ("fp16", "_f16state")}
+
+
+def _bind_narrow_state(op: str, tag: str, fragment: str, **geometry):
+    """The narrow-state entry point for `tag`, or None if this build has no such kernel.
+
+    A build predating the narrow state does not merely lack the kernel: its registry rows carry no
+    state_dtype constraint at all, so select() IGNORES the key and cheerfully returns the fp32
+    entry. Handing that a 16-bit cache makes it read twice the bytes the buffer holds, which faults
+    the queue rather than raising -- so trust the NAME, not the lookup.
+    """
+    if _r4d is None or not USE_R4D:
+        return None
+    name = _r4d.select(op, state_dtype=tag, **geometry)
+    if not name or fragment not in name:
+        return None
+    return getattr(_r4d, name, None)
+
+
+# One handle per (stage, state dtype). fp16 is the better 16-bit state on gfx1201 -- 10 mantissa
+# bits to bf16's 7, and one convert instruction per pair instead of three of software rounding --
+# so it is preferred where both exist, but the dispatch is by the CACHE's dtype, which vLLM decides
+# from --mamba-ssm-cache-dtype. bf16 stays for anything that needs fp32's exponent range.
+_RECURRENT_UPDATE_NARROW = {
+    dt: _bind_narrow_state("gdn_recurrent_update", tag, frag, head_k=HEAD_K, head_v=HEAD_V)
+    for dt, (tag, frag) in _STATE_TAGS.items()
+}
+_FUSED_UPDATE_NARROW = {
+    dt: _bind_narrow_state("gdn_fused_update", tag, frag, conv_width=CONV_WIDTH,
+                           head_k=HEAD_K, head_v=HEAD_V)
+    for dt, (tag, frag) in _STATE_TAGS.items()
+}
+# The fused decode step (conv -> grid barrier -> recurrent in ONE launch) removes one kernel
+# boundary per GDN layer per forward. Bit-identical to the pair by construction. Off by default
+# until the serving A/B has run; needs a build whose registry has gdn_fused_update.
+FUSED_UPDATE_ON = os.environ.get("RADIANCE_GDN_FUSED_UPDATE", "0") == "1" and _FUSED_UPDATE is not None
+# (seq, v-head) items above which the decode step takes the conv+recurrent PAIR instead of the
+# fused kernel; 32 = the fused kernel's FU_MAXWG, i.e. one sequence at H=24. Env-tunable for A/B.
+FUSED_MAX_ITEMS = int(os.environ.get("RADIANCE_GDN_FUSED_MAX_ITEMS", "32"))
+# patch_gdn_glue.py reads this: skip vLLM's .contiguous() on the (b, a) gate slices; the R4D
+# kernels take the row stride. Default 0 until the serving A/B lands.
+STRIDED_GATES = os.environ.get("RADIANCE_GDN_STRIDED_GATES", "0") == "1"
+# patch_gdn_glue.py reads this: allocate core_attn_out with torch.empty instead of torch.zeros.
+# Safe ONLY because the rx5 fused_update kernel zeroes the cudagraph pad rows [cu[N], o_rows)
+# itself (vLLM PR 28182 is why the fill exists), and the non-fused paths below zero the tail in
+# Python. Default 0 until the serving A/B lands.
+EMPTY_OUT = os.environ.get("RADIANCE_GDN_EMPTY_OUT", "0") == "1"
+
+
+def _zero_tail(core_attn_out, T):
+    """Pad rows [T, num_tokens) of the padded batch buffer, for paths that do not write them."""
+    if EMPTY_OUT and T < core_attn_out.shape[0]:
+        core_attn_out[T:].zero_()
+# The barrier counter must exist BEFORE any CUDA-graph capture replays the kernel, and must NOT
+# be allocated at import -- that grabs a CUDA context before vLLM sets the device and breaks its
+# memory snapshot (the split-K decode scratch learned the same lesson; it allocates at weight
+# load). init_fused_counter() is called from the post-load hook in radiance_gdnmerge.merge_model.
+_FUSED_CNT = None
+
+
+def init_fused_counter():
+    global _FUSED_CNT, FUSED_UPDATE_ON
+    if FUSED_UPDATE_ON and _FUSED_CNT is None:
+        try:
+            _FUSED_CNT = torch.zeros(1, dtype=torch.int32, device="cuda")
+        except Exception as _e:                      # noqa: BLE001
+            FUSED_UPDATE_ON = False
+            sys.stderr.write(f"[radiance.gdn] fused update disabled, no counter: {_e!r}\n")
 _GATED_RMSNORM = _bind("gdn_gated_rmsnorm", channels=HEAD_V)
 
 if ENABLED and _CHUNK_SCAN is None:
@@ -170,6 +246,29 @@ def fused_prefill(q, k, v, A, g, beta, scale, initial_state, output_final_state,
 # =================================================================================================
 
 ALL = ENABLED
+# Locate the first PREFILL kernel to emit a non-finite value. The NaN this fork sees (exactly one
+# head_v-wide head, one TP rank) appears during prefill, so a decode-only check cannot catch it.
+# Kept across the DFlash2 merge, which refactored the surrounding gates away: the RADIANCE_GDN_PATHS
+# / _NORM / _CHECK knobs no longer have use sites upstream and are dropped with them, but the
+# tracer's call sites in conv_prep / kkt_solve / chunk_scan survive and this is what feeds them.
+NANTRACE = os.environ.get("RADIANCE_GDN_NANTRACE", "0") == "1"
+_nan_seen = set()
+
+
+def _nt(tag, **tensors):
+    if not NANTRACE:
+        return
+    for name, t in tensors.items():
+        if t is None or not torch.is_tensor(t) or not t.is_floating_point():
+            continue
+        n = int((~torch.isfinite(t)).sum().item())
+        if n and (tag, name) not in _nan_seen:
+            _nan_seen.add((tag, name))
+            flat = (~torch.isfinite(t)).reshape(t.shape[0], -1) if t.dim() > 1 else None
+            cols = int(flat.any(0).sum().item()) if flat is not None else -1
+            sys.stderr.write(f"[radiance.gdn.nan] {tag}: {name} shape={tuple(t.shape)} "
+                             f"nonfinite={n} bad_cols={cols}\n")
+            sys.stderr.flush()
 SOFTPLUS_THRESHOLD = 20.0          # FLA's, and the value both kernels are validated against
 _fallbacks = {}
 _seen = set()
@@ -277,6 +376,32 @@ def conv_update(x, conv_w, conv_bias, conv_state, state_len_max, cache_idx, num_
     return q, k, v
 
 
+def fused_update(x, conv_w, conv_bias, conv_state, state_len_max, cache_idx, num_accepted,
+                 cu, num_seqs, T, H, Hg, max_query_len, a, b, A_log, dt_bias, ssm_state, o,
+                 sidx, scale, o_rows):
+    """conv_update + recurrent_update as one launch. Arguments are the union of the pair's.
+    o_rows is the PADDED row count of the buffer o lives in (core_attn_out.shape[0]): the kernel
+    zeroes rows [cu[num_seqs], o_rows) so the caller may allocate that buffer uninitialized."""
+    dev, dt = x.device, torch.bfloat16
+    q = torch.empty((T, Hg, HEAD_K), device=dev, dtype=dt)
+    k = torch.empty((T, Hg, HEAD_K), device=dev, dtype=dt)
+    v = torch.empty((T, H, HEAD_V), device=dev, dtype=dt)
+    _FU = _FUSED_UPDATE_NARROW.get(ssm_state.dtype) or _FUSED_UPDATE
+    _FU(
+        x.data_ptr(), x.stride(0), conv_w.data_ptr(),
+        conv_bias.data_ptr() if conv_bias is not None else 0,
+        conv_state.data_ptr(), conv_state.stride(0), conv_state.stride(1), conv_state.stride(2),
+        state_len_max, cache_idx.data_ptr(), cache_idx.stride(0),
+        num_accepted.data_ptr() if num_accepted is not None else 0,
+        cu.data_ptr(), num_seqs, H, Hg, HEAD_K, HEAD_V, CONV_WIDTH, max_query_len,
+        q.data_ptr(), k.data_ptr(), v.data_ptr(),
+        a.data_ptr(), b.data_ptr(), a.stride(0), a.dtype == torch.bfloat16,
+        A_log.data_ptr(), dt_bias.data_ptr(),
+        ssm_state.data_ptr(), ssm_state.stride(0), ssm_state.stride(1),
+        o.data_ptr(), sidx.data_ptr(), sidx.stride(0),
+        float(scale), SOFTPLUS_THRESHOLD, _FUSED_CNT.data_ptr(), int(o_rows), _stream())
+
+
 def kkt_solve(k, beta, g, cu, num_seqs, T, H, Hg):
     """A = (I + strict_lower(diag(beta) K K^T e^dg))^-1 per chunk; the fp32 gram stays in LDS."""
     A = torch.empty((T, H, CHUNK), device=k.device, dtype=torch.bfloat16)
@@ -288,10 +413,11 @@ def kkt_solve(k, beta, g, cu, num_seqs, T, H, Hg):
 
 def recurrent_update(q, k, v, a, b, A_log, dt_bias, ssm_state, o, cu, sidx, num_accepted,
                      num_seqs, H, Hg, scale, z_gate=None, norm=None):
+    _RU = _RECURRENT_UPDATE_NARROW.get(ssm_state.dtype) or _RECURRENT_UPDATE
     # The slot and head strides come from the tensor: vLLM pads the mamba page to the attention
     # page size, so a slot is wider than H*V*K and deriving it from the shape reads the wrong
     # memory for every slot but the first.
-    _RECURRENT_UPDATE(
+    _RU(
         q.data_ptr(), k.data_ptr(), v.data_ptr(), a.data_ptr(), b.data_ptr(),
         a.stride(0), a.dtype == torch.bfloat16, A_log.data_ptr(), dt_bias.data_ptr(),
         ssm_state.data_ptr(), ssm_state.stride(0), ssm_state.stride(1),
@@ -328,7 +454,16 @@ def _plan(self, mixed_qkv, b, a, core_attn_out):
     kv = self.kv_cache
     conv_state = kv[0] if _conv_state_dim_first() else kv[0].transpose(-1, -2)
     ssm_state = kv[1]
-    if ssm_state.dtype != torch.float32:
+    # The temporal state may be fp32 (the HF config's mamba_ssm_dtype) or 16-bit
+    # (--mamba-ssm-cache-dtype=float16/bfloat16, which halves the state traffic that is the whole
+    # cost of the decode kernels). Each width needs a kernel compiled for it; decline rather than
+    # fault if this libr4d has only the fp32 one.
+    if ssm_state.dtype in (torch.bfloat16, torch.float16):
+        if (_RECURRENT_UPDATE_NARROW.get(ssm_state.dtype) is None
+                or _FUSED_UPDATE_NARROW.get(ssm_state.dtype) is None):
+            return no(f"ssm state is {ssm_state.dtype} but this libr4d has no matching "
+                      f"narrow-state kernel")
+    elif ssm_state.dtype != torch.float32:
         return no(f"ssm state dtype {ssm_state.dtype}")
     if ssm_state.stride(2) != ssm_state.shape[3] or ssm_state.stride(3) != 1:
         return no(f"ssm state [V,K] block is not packed: strides {tuple(ssm_state.stride())}")
@@ -398,13 +533,30 @@ def forward_core_fused(self, mixed_qkv, b, a, core_attn_out) -> bool:
         nseq = md.num_spec_decodes
         maxq = sidx.size(-1)
         cu = md.spec_query_start_loc[: nseq + 1]
+        o = core_attn_out[:T].view(T, H, HEAD_V)
+        # The fused kernel's resident grid is capped at 32 workgroups (deadlock-free barrier), so
+        # past one sequence it work-loops nseq*H (seq, head) items over 32 WGs while the pair's
+        # recurrent kernel launches one WG per item. Microbench 2026-09-02 (gdn_decode_bench.py,
+        # one state slot per candidate): N=1 fused 32.0 / pair 26.6 us at T=8 -- but in the serve
+        # the fused step measured -0.4% (its barrier hides one launch gap); N=2 40.2 / 31.2,
+        # N=4 60.1 / 45.8, N=8 89.8 / 72.9 us. So: fused for a single sequence, the pair beyond.
+        # Serve-level (2026-09-02): conc-4 32.8-33.4 -> 31.7-33.0, conc-8 43.0-45.2 -> 43.3-47.3
+        # ms/step, single-stream unchanged -- neutral, because at conc-8 the step is paced by the
+        # serial CPU/IPC chain, not the GPU. Kept: less GPU time for the same step.
+        if FUSED_UPDATE_ON and nseq * H <= FUSED_MAX_ITEMS:
+            fused_update(mixed_qkv, conv_w, self.conv1d.bias, conv_state,
+                         (4 - 1) + (maxq - 1), sidx[:, 0][:nseq], md.num_accepted_tokens,
+                         cu, nseq, T, H, Hg, maxq, a, b, A_log, dt_bias, ssm_state, o, sidx,
+                         HEAD_K ** -0.5, core_attn_out.shape[0])
+            _first("decode(fused)")
+            return True
         q, k, v = conv_update(mixed_qkv, conv_w, self.conv1d.bias, conv_state,
                               (4 - 1) + (maxq - 1), sidx[:, 0][:nseq],
                               md.num_accepted_tokens, cu, nseq, T, H, Hg, maxq)
         _first("decode")
-        o = core_attn_out[:T].view(T, H, HEAD_V)
         recurrent_update(q, k, v, a, b, A_log, dt_bias, ssm_state, o, cu, sidx,
                          md.num_accepted_tokens, nseq, H, Hg, HEAD_K ** -0.5)
+        _zero_tail(core_attn_out, T)
         return True
 
     # ---- chunked prefill, with or without a spec group riding along --------------------------
@@ -436,8 +588,14 @@ def forward_core_fused(self, mixed_qkv, b, a, core_attn_out) -> bool:
         mixed_qkv, conv_w, self.conv1d.bias, conv_state,
         md.non_spec_state_indices_tensor, md.has_initial_state, a, b,
         A_log, dt_bias, cu, nseq, tp, H, Hg)
+    _nt("conv_prep.out", q=q, k=k, v=v, g=g, beta=beta)
+    _nt("conv_prep.in", mixed_qkv=mixed_qkv, a=a, b=b, A_log=A_log, dt_bias=dt_bias,
+        conv_w=conv_w, conv_state=conv_state)
     A = kkt_solve(k, beta, g, cu, nseq, tp, H, Hg)
-    initial_state = ssm_state[md.prefill_state_indices]
+    _nt("kkt_solve.out", A=A)
+    # chunk_scan takes an fp32 initial state (it bails otherwise); the paged cache may be
+    # bf16, and the write-back below already narrows with .to(ssm_state.dtype).
+    initial_state = ssm_state[md.prefill_state_indices].float()
     initial_state[~md.prefill_has_initial_state, ...] = 0
     o_buf = (core_attn_out[:tp].view(1, tp, H, HEAD_V) if spec_o is None
              else torch.empty((1, tp, H, HEAD_V), device=mixed_qkv.device,
@@ -447,9 +605,13 @@ def forward_core_fused(self, mixed_qkv, b, a, core_attn_out) -> bool:
                         True, cu, None, out=o_buf)
     if out is None:
         raise RuntimeError("radiance_gdn: chunk_scan declined a shape the preamble accepted")
+    _nt("chunk_scan.in", initial_state=initial_state)
+    _nt("chunk_scan.out", o=out[0] if isinstance(out, (tuple, list)) else out,
+        final_state=out[1] if isinstance(out, (tuple, list)) else None)
     ssm_state[md.prefill_state_indices] = out[1].to(ssm_state.dtype)
     if spec_o is not None:
         dst = core_attn_out[:T]
         dst.index_copy_(0, md.spec_token_indx, spec_o)
         dst.index_copy_(0, md.non_spec_token_indx, o_buf.squeeze(0))
+    _zero_tail(core_attn_out, T)
     return True

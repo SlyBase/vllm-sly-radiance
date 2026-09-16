@@ -122,6 +122,27 @@ A site is fused only if every consumer is a folded radiance W4A8 layer at TP=1; 
 `compile_factors()` so a flip never replays a stale AOT graph. Production since 2026-09-16; measurements:
 see *Results*.
 
+### upstream/ggz14 merged (0.2.0)
+
+`main` carries the full [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)
+history (243 commits since the common base `e1c99aa`). What is **active** in the image did not change:
+the Dockerfile keeps our pins, our patch loop and the `sly/` MXFP4 stack; ggz14's own top-level
+`radiance_mxfp4.py` / `patch_quark_mxfp4.py` / `radiance_mxfp4_fp8.hip` / `mxfp4-configs/` stay in the
+tree unused (the `sly/` copies are the evolved, production-validated variants). ggz14's ~24 extra
+`patch_*.py` are listed with a reason in `ci/unused_patches.txt`; most of them are applied by ggz14 at
+container start (`serve-mxfp4.sh`) together with libr4d additions from `r4d_radiance_extras.patch`
+(narrow bf16/fp16 SSM state, fused GDN decode step, 3-rank all-reduce), which this image does not
+build. Auto-merged changes to files that *are* in the image (`radiance_gdn.py` narrow-state /
+fused-update binding — resolves to `None` on the pinned libr4d, so bf16 SSM state keeps falling back
+to FLA exactly as before; `patch_gdn_metadata.py` / `patch_r4d.py` gained 0.29 anchor variants via
+`_patchlib.apply_any`; `radiance_r4d_attn.py` 0.29 KV-layout hook; `radiance_gemm.py` paroquant
+fallback that is never taken; `radiance_drafthead.py` fp8-head support behind the unset
+`RADIANCE_FAST_DRAFT`) were reviewed as behaviour-neutral for this configuration. Kept ours instead
+of ggz14's: `patch_dflash_fused_kv_fp8.py` (`sly/patch_dflash_w4_packed.py` anchors on its
+`_DFLASH_FP8` text) and the `radiance_preamble.py` banner. Candidates for follow-up steps, each with
+its own A/B: libr4d extras (bf16 SSM state on R4D instead of FLA), `patch_kv_group_size`,
+`patch_gdn_shared_build`, `patch_topk_*`, `patch_dflash_selector_topk`, `patch_dynwidth`.
+
 ### Gated-delta-net / attention
 
 - **`sly/patch_short_prefill.py`** — a 1-token prefill was misclassified as decode in the GDN
