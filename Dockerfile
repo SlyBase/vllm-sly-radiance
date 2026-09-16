@@ -276,7 +276,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
-     sly/mxfp4/radiance_fused_norm.py ${SP}/
+     sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -370,7 +370,8 @@ RUN set -eu; cd /opt/patches; \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_fused_norm_quant; do \
+             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_fused_norm_quant \
+             sly/patch_kv_groups sly/patch_embed_int8; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
