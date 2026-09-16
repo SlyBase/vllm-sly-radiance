@@ -1084,13 +1084,21 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
 // six points. Note the two axes are coupled BOTH ways: at BK=64, down and out want KS=4 where at
 // BK=128 they want KS=2, so split_k_for's high-M band is a BK=128 property, not a shape property.
 //
-// RADIANCE_MXFP4_DECODE_BK=128 pins the old behaviour; that is the A/B control.
+// RADIANCE_MXFP4_DECODE_BK=128 pins the old behaviour; that is the A/B control. =64 forces the
+// BK=64 instantiation wherever one exists (split 1 and 4; split 2 has none and keeps 128) -- a
+// sweep knob for bench_decode_cells.py, never a production setting.
+//
+// 0.2.1: the tm==4/ks==1 rule is bypassed in the (8, 64] band by default (dec_tune16 in launch():
+// on the production shapes BK=64 measured 1.33x slower there); this function still decides the
+// M<=8 band (tm==1, always BK=128) and the RADIANCE_MXFP4_DECODE_TUNE16=0 control.
 static bool decode_bk64(int tm, int ks) {
-  static const bool pin128 = [] {
+  static const int pin = [] {
     const char *e = getenv("RADIANCE_MXFP4_DECODE_BK");
-    return e && atoi(e) == 128;
+    return e ? atoi(e) : 0;
   }();
-  return !pin128 && tm == 4 && ks == 1;
+  if (pin == 128) return false;
+  if (pin == 64) return ks != 2;
+  return tm == 4 && ks == 1;
 }
 
 static int split_k_for(int nblk, int M) {
@@ -1188,6 +1196,24 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
     //     (down goes non-monotonic: at M >= 96 the wide split + BK=64's occupancy wins,
     //      d4/b64 111.8 vs d2/b128 153.4 at M=128)
     //   nblk ~40, K <  6144 (out: 24 k-slabs)  -> dks1/bk128 (few slabs, splits never pay)
+    // M in (8, 64] -- 2..8 concurrent dflash sequences at SPEC=7 -- re-measured cell by cell on
+    // the PRODUCTION shapes (sly/mxfp4/bench_decode_cells.py, 2026-09-16, DRAM-fed, checkpoint
+    // weight order, 3x200 iters, run-to-run spread ~0.5%). The tier6 table above was taken on
+    // a different shape list (gate_up nblk 136, n8192/n7168) and two of its rules invert here:
+    //   * BK=64 at tm==4/ks==1 (decode_bk64) LOSES on gate_up nblk 272 (M=56/64: 327/326 us
+    //     against 245/257 at BK=128, -26/-23%) and on qkvz nblk 128 (128/129 vs 115/116 us,
+    //     -12/-11%). With 272 blocks the grid is 8.5 waves deep at DKS=1, so the LDS-occupancy
+    //     cliff that decided tier6 never bites; the halved K slab just doubles the staging trips.
+    //   * o_proj/out_proj (nblk 40, K=6144, 48 k-slabs) at M=16/24 want DKS=2, not the fill
+    //     rule's 4: 42.6/47.9 vs 45.5/50.6 us (-6.3/-5.5%). down (same nblk, 136 slabs) keeps 4.
+    //   Sub-threshold and left alone (<5%): down M=32..48 d4/b128 (-3..-4%), down M>=56 d4/b64
+    //   (-2..-3%), qkv M=64 d1 (-1.3%). Everything else was already on its best measured cell.
+    // RADIANCE_MXFP4_DECODE_TUNE16=0 restores the pre-0.2.1 band (fill rule + decode_bk64); that
+    // is the A/B control. The M<=8 band is untouched either way.
+    static const bool dec_tune16 = [] {
+      const char *e = getenv("RADIANCE_MXFP4_DECODE_TUNE16");
+      return !e || atoi(e) != 0;
+    }();
     int dks, bkx;
     if (M > 64) {
       if (dec_nblk >= 110)      { dks = 1; bkx = 64; }
@@ -1196,6 +1222,10 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       else if (K >= 6144)       { if (M <= 80) { dks = 2; bkx = 128; }
                                   else         { dks = DEC_KS; bkx = 64; } }
       else                      { dks = 1; bkx = 128; }
+    } else if (dec_tune16 && M > 8) {
+      dks = split_k_for(dec_nblk, M);
+      bkx = 128;                         // no BK=64 cell wins anywhere in (8, 64]
+      if (dks == DEC_KS && dec_nblk > 8 && K < 8192 && M >= 16 && M <= 24) dks = 2;
     } else {
       dks = split_k_for(dec_nblk, M);
       bkx = 0;   // resolved below from decode_bk64, exactly as shipped
