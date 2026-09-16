@@ -100,6 +100,26 @@ same-window A/B against the fp8 head GSM8K went 0.850 → 0.840 (5 vs 3 paired f
 the mean accepted tokens per step 4.33 → 4.31. The freed 0.6 GB goes to the KV cache (133k → 141k
 tokens).
 
+### Fused norm / activation + fp8 quant (0.1.6)
+
+`sly/mxfp4/radiance_fused_norm.py` + `sly/patch_fused_norm_quant.py`, opt-in via
+`RADIANCE_FUSED_NORM_QUANT=1`. Every W4A8 GEMM input used to be quantised by its own
+`scaled_fp8_quant` launch after an Inductor-generated norm/activation kernel. Three hand-written HIP
+kernels in `radiance_mxfp4_fp8.hip` do the elementwise step and the per-token fp8 quant (scale =
+max(amax/448, 1/(448·512)), e4m3 codes) in one pass and hand `(q, scale)` straight to
+`torch.ops.radiance.mxfp4_linear_pq`:
+
+- `radiance_add_rms_quant` — decoder `input_layernorm` / `post_attention_layernorm` (Gemma 1+w,
+  residual add in fp32) → `qkv_proj`, `in_proj_qkvz` + `in_proj_ba`, `gate_up_proj`.
+- `radiance_silu_mul_quant` — MLP `silu(gate) * up` → `down_proj` (MAXG raised 5 → 9 for the
+  17408-wide intermediate; scratch sizing only).
+- `radiance_gdn_norm_quant` — GDN gated per-head RMS norm (`((x·rsqrt)·w)·silu(z)`) → `out_proj`.
+
+A site is fused only if every consumer is a folded radiance W4A8 layer at TP=1; the per-fusion switches
+`RADIANCE_FUSED_NORM_QUANT_ADD_RMS/_SILU/_GDN` isolate one kernel. The knobs are added to vLLM's
+`compile_factors()` so a flip never replays a stale AOT graph. Production since 2026-09-16; measurements:
+see *Results*.
+
 ### Gated-delta-net / attention
 
 - **`sly/patch_short_prefill.py`** — a 1-token prefill was misclassified as decode in the GDN
@@ -136,6 +156,7 @@ BetterBench 0.4.0 `--decode --concurrency` against the production container (202
 | Δ | +29 % | +56 % | +58 % | +62 % | +76 % |
 | … with `DECODE_MAX_M=128` (conc-only run) | 99 | 178 | 280 | **368** | **371** |
 | … + int4 lm_head (0.1.5, conc-only A/B run; fp8 head in the same window: 99 / 180 / 286 / 356 / 364) | **105** | **187** | **293** | 354 | **371** |
+| … + fused norm/act + fp8 quant (0.1.6, conc-only A/B run; 0.1.5 in the same window: 105.0 / 186.9 / 292.3 / 356.5 / 364.0) | **108** | **190** | **298** | **376** | 363 |
 
 Single-stream median 120 tok/s, DFlash step gap 42.0 ms, KV cache 8.57 GiB / 133k fp8 tokens at
 `--max-model-len 32768 --gpu-memory-utilization 0.95`. Profile of one step (conc 1): decode GEMMs
@@ -144,7 +165,11 @@ elementwise kernels, not the GEMMs).
 
 Progression: 0.1.0 → 0.1.2 (DEC_MAX_N) step 67 → 48 ms; 0.1.3 (fp8 lm_head) 44.5 ms; bf16 SSM state
 + 0.1.4 (drafter tiles) 42.0 ms; 0.1.5 (int4 lm_head) 39.7 ms at conc 1 (41.9 ms at conc 2, conc 8
-unchanged), KV 141k tokens.
+unchanged), KV 141k tokens; 0.1.6 (fused norm/act + fp8 quant) +3.0 / +1.9 / +1.8 / +5.6 / −0.2 %
+at conc 1/2/4/8/16 (≈1 ms/step at conc 1), per-stream decode 128.7 → 133.5 tok/s at conc 1, TTFT p50
+105 → 102 ms, KV 146k tokens (+3.8 %, fewer Inductor intermediates), GSM8K 0.840 → 0.845 ± 0.026,
+mean tokens/step 4.312 → 4.314 (acceptance unchanged). Numerics (`sly/check_fused_norm.py`): the
+fused chain equals the unfused pq chain exactly; against eager/Inductor only fp8 rounding flips.
 
 ## Options
 
@@ -165,6 +190,8 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_LMHEAD_INT4` | `0` | `1` | int4 (W4A16, group-128 bf16 scales) lm_head on the drafter's Triton/HIP kernel path (see above); takes precedence over `RADIANCE_LMHEAD_FP8`. Same `head_dtype` limitation. |
 | `RADIANCE_LMHEAD_INT4_GS` | `128` | – | Group size of the int4 lm_head (64 measured: −8 % error for 2× scale bytes, not worth it). |
 | `RADIANCE_LMHEAD_INT4_CLIP` | `mse` | – | Per-group scale search over clip ratios 1.0…0.8 by least squared error; `rtn` = plain amax/7 (−14 % vs +0 % error, 1.6 s vs 0.3 s at load). |
+| `RADIANCE_FUSED_NORM_QUANT` | `0` | `1` | Fused add+rms_norm / silu·mul / GDN gated norm + per-token fp8 quant in front of the W4A8 GEMMs (see above). Needs `RADIANCE_MXFP4_W4A8=1`, `RADIANCE_MXFP4_W4A8_MIN_M=0`, `RADIANCE_MXFP4_SANITIZE=0`; part of the torch.compile cache key. |
+| `RADIANCE_FUSED_NORM_QUANT_ADD_RMS` / `_SILU` / `_GDN` | `1` | – | Per-fusion switches (only read when `RADIANCE_FUSED_NORM_QUANT=1`). |
 | `GPU_MAX_HW_QUEUES` | ROCm default | `2` | ROCm HW queue count; 2 measured best for this single-process setup. |
 | `RADIANCE_MXFP4_DECODE_KS` | auto | – | Force the decode kernel's split-K factor (A/B control). |
 | `RADIANCE_MXFP4_DECODE_BK` | auto (64) | – | `128` pins the old BK=128 decode tiling. |
@@ -198,6 +225,7 @@ docker run --rm --name vllm7-mxfp4 \
   -e RADIANCE_MXFP4_SANITIZE=0 \
   -e RADIANCE_LMHEAD_FP8=1 \
   -e RADIANCE_LMHEAD_INT4=1 \
+  -e RADIANCE_FUSED_NORM_QUANT=1 \
   -p 8000:8000 \
   -v /root/hf-cache:/root/.cache/huggingface \
   -v /root/vllm7-cache/triton:/root/.triton \

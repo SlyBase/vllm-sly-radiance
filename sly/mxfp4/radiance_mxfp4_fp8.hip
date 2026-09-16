@@ -1445,7 +1445,9 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
   gu += (long)row * 2 * N;
   if (!TILED) q += (long)row * N;
   const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in add_rms_quant
-  constexpr int MAXG = 5;                  // N <= 10240 (8704 in this model)
+  // N <= 72*256 = 18432 (Qwen3.8-27B TP=1: 17408). MAXG only sizes this thread-private
+  // scratch (NV/ART groups per thread), so raising it changes no arithmetic.
+  constexpr int MAXG = 9;
   const int NV = N >> 3;
   float pv[MAXG][8];
   int ng = 0;
@@ -1498,8 +1500,8 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
 
 static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N,
                                   uintptr_t stream, int tiled) {
-  if (N > 40 * ARNQ_T || (N & 7))
-    throw std::runtime_error("radiance_silu_mul_quant: N must be 8-aligned and <= 10240");
+  if (N > 72 * ARNQ_T || (N & 7))
+    throw std::runtime_error("radiance_silu_mul_quant: N must be 8-aligned and <= 18432");
   if (tiled && (N & 15)) throw std::runtime_error("radiance_silu_mul_quant: tiled needs N % 16 == 0");
   if (tiled) {
     if (M >= 2048)
