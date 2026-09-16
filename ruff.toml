@@ -1,0 +1,4 @@
+# CI runs `ruff check --select E9,F63,F7,F82` (syntax errors and undefined names only).
+# paroquant/bench_linear_tp2.py is an upstream/ggz14 bench script that references names it never
+# defines (F821); it is not part of the image and stays as upstream wrote it.
+extend-exclude = ["paroquant/bench_linear_tp2.py"]
