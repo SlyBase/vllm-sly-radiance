@@ -25,7 +25,7 @@ import argparse, csv, io, os, subprocess, sys
 SHAPES = [
     ("gate_up", 34816, 5120),   # nblk 272
     ("qkvz",    16384, 5120),   # nblk 128  (in_proj_qkv + in_proj_z)
-    ("qkv",      8192, 5120),   # nblk  64  (q + k + v)
+    ("qkv",     14336, 5120),   # nblk 112  (q + k + v, 16 attention layers)
     ("o_proj",   5120, 6144),   # nblk  40, K 6144
     ("out_proj", 5120, 6144),   # nblk  40, K 6144 (same shape as o_proj, distinct weights)
     ("down",     5120, 17408),  # nblk  40, K 17408
