@@ -1,0 +1,147 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency updates (vllm-sly-radiance)",
+  "labels": [
+    "dependencies"
+  ],
+  "automerge": false,
+  "prConcurrentLimit": 5,
+  "docker-compose": {
+    "enabled": false
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Dockerfile ARG version pins (github-releases / github-tags / pypi) with a `# renovate:` marker on the line above -- the Dockerfile is the single source of truth for every component version (ci/read_pins.py)",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>github-releases|github-tags|pypi) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\nARG [A-Z0-9_]+=(?<currentValue>[^\\s@]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\s"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Docker base images in ARGs: `# renovate: datasource=docker depName=<image> ...` above `ARG X=<image>:<tag>[@digest]`",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=docker depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s*\\nARG [A-Z0-9_]+=\\S+?:(?<currentValue>[^\\s@]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\s"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "libr4d: a raw commit SHA on Codeberg main, tracked as a git-refs digest (R4D_REPO must stay in sync with depName)",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=git-refs depName=(?<depName>\\S+) branch=(?<currentValue>\\S+)[^\\n]*\\nARG R4D_VERSION=(?<currentDigest>[a-f0-9]{40})\\s"
+      ],
+      "datasourceTemplate": "git-refs"
+    },
+    {
+      "customType": "regex",
+      "description": "Tool versions in workflow env blocks (`# renovate:` marker above `NAME: value`)",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?\\s+[A-Z0-9_]+:\\s+[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "PyTorch stack moves together (torch / triton / torchvision pins are a tested trio, see the Dockerfile comment)",
+      "matchDepNames": [
+        "pytorch/pytorch",
+        "triton-lang/triton",
+        "pytorch/vision"
+      ],
+      "groupName": "PyTorch stack",
+      "addLabels": [
+        "pytorch-stack"
+      ],
+      "prBodyNotes": [
+        "Tested trio: bump torch, triton and torchvision together. Patch anchors: patch_gfx1201 (triton driver.py), patch_dynamo_metrics (torch/_dynamo/utils.py) -- CI patch-dryrun must stay green, then a full builder-stage rebuild (hours) and an A/B on the GPU before the image goes to production."
+      ]
+    },
+    {
+      "description": "vLLM: every bump needs the patch dry run, a build and an A/B on the GPU",
+      "matchDepNames": [
+        "vllm-project/vllm"
+      ],
+      "addLabels": [
+        "vllm"
+      ],
+      "prBodyNotes": [
+        "Most patches anchor on vLLM source (see the Dockerfile loop). Expect anchor drift on minor bumps: fix the patches in the same PR, keep CI patch-dryrun green, then build.yml + A/B (func_check, BetterBench, GSM8K gate) before rollout."
+      ]
+    },
+    {
+      "description": "aiter: patch_unified_attention_lds / patch_radiance_dispatch / sly/patch_quark_mxfp4 anchor on it",
+      "matchDepNames": [
+        "ROCm/aiter"
+      ],
+      "addLabels": [
+        "aiter"
+      ],
+      "prBodyNotes": [
+        "aiter is compiled from source in the builder stage; anchors in patch_unified_attention_lds, patch_radiance_dispatch and sly/patch_quark_mxfp4 plus sly/mxfp4-configs need re-verification."
+      ]
+    },
+    {
+      "description": "ROCm base image: major/minor is a toolchain change (new hipcc, new compile cache key); keep as its own PR",
+      "matchDepNames": [
+        "rocm/dev-ubuntu-24.04"
+      ],
+      "addLabels": [
+        "rocm"
+      ],
+      "prBodyNotes": [
+        "A ROCm bump rebuilds every stage (cold build, hours) and invalidates the torch.compile / AOT caches on the GPU host (double start on rollout). Pin the same major.minor in the image tag (build.yml derives rocmX.Y from ROCM_BASE)."
+      ]
+    },
+    {
+      "description": "Release base: Ubuntu release must match the ROCm base (venv python 3.12) -- digest updates only",
+      "matchDepNames": [
+        "ubuntu"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "rocm_bandwidth_test: rocm-7.x tags need the new cmake framework (clang>=19, vendored submodules) -- stay on 6.x",
+      "matchDepNames": [
+        "ROCm/rocm_bandwidth_test"
+      ],
+      "allowedVersions": "<7.0.0"
+    },
+    {
+      "description": "GitHub Actions in one PR",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "CI lint tools in one PR",
+      "matchDepNames": [
+        "ruff",
+        "hadolint/hadolint",
+        "rhysd/actionlint"
+      ],
+      "groupName": "CI tools"
+    }
+  ]
+}

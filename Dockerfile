@@ -10,11 +10,13 @@
 # stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
 # all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
+# renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
 ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
 ARG GFX_ARCH=gfx1201
 # The release stage starts from a clean distro image rather than the ROCm base, and COPYs in only
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's
 # interpreter (python 3.12.3) matches.
+# renovate: datasource=docker depName=ubuntu versioning=ubuntu
 ARG RELEASE_BASE=ubuntu:24.04@sha256:a08e551cb33850e4740772b38217fc1796a66da2506d312abe51acda354ff061
 
 # Component pins, in one place. Each is both the git tag that gets compiled and the version the
@@ -34,10 +36,15 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a08e551cb33850e4740772b38217fc1796a66da2506
 # anyway because it is what this fork's target stack (vLLM 0.29.0 + newer aiter for gfx1201 MXFP4)
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
+# renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCH_VERSION=2.14.0
+# renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.8.0
+# renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCHVISION_VERSION=0.24.1
+# renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
 ARG AITER_VERSION=0.1.21.post2
+# renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG VLLM_VERSION=0.29.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
@@ -53,10 +60,12 @@ ARG VLLM_VERSION=0.29.0
 # merely a patch on top of 5.15.0's -- consistent with the bug having been designed away rather than
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
 # first time a Gemma-4 checkpoint is actually served on this image.
+# renovate: datasource=pypi depName=transformers versioning=pep440
 ARG TRANSFORMERS_VERSION=5.17.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
+# renovate: datasource=github-tags depName=ROCm/rocm_bandwidth_test versioning=regex:^rocm-(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
 ARG RBT_VERSION=rocm-6.4.4
 # R4D: the HIP kernel library for this GPU -- attention, gated delta net, all-reduce, a skinny bf16
 # GEMM and (since this pin) the OCP-MXFP4 x fp8 skinny GEMM gemm_mxfp4a8_nt_m64. It is a library of
@@ -70,6 +79,7 @@ ARG RBT_VERSION=rocm-6.4.4
 # branch as a pin has already run a production service into a hanging download once in this
 # homelab, which is the entire reason this is a SHA and not just `main`.
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
+# renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
 ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
 
 # =====================================================================================
