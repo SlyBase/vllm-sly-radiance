@@ -54,7 +54,10 @@ mkdir -p "$SP/torch" && cp -r "$WORK/src/pytorch/torch/_dynamo" "$SP/torch/_dyna
 cp -r "$WORK/src/triton/python/triton"        "$SP/triton"
 mkdir -p "$SP/triton/backends/amd" && cp -r "$WORK/src/triton/third_party/amd/backend/." "$SP/triton/backends/amd/"
 # the assemble stage COPYs these before the loop; mirrored so a patch may anchor on them
-cp "$ROOT"/radiance_*.py "$ROOT"/sly/mxfp4/radiance_*.py "$SP/"
+# top-level first, then the sly/mxfp4 variants override same-named files (upstream/ggz14 carries a
+# top-level radiance_mxfp4.py the image never ships; GNU cp refuses two same-named sources in one call)
+cp "$ROOT"/radiance_*.py "$SP/"
+cp "$ROOT"/sly/mxfp4/radiance_*.py "$SP/"
 mkdir -p "$SP/aiter/ops/triton/configs" && cp -r "$ROOT/sly/mxfp4-configs/." "$SP/aiter/ops/triton/configs/"
 
 # --- skip allowlist ---
