@@ -11,6 +11,7 @@
 Exit 1 with a `FAIL` line per finding; `::error::` annotations for GitHub Actions.
 """
 import argparse
+import fnmatch
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,9 @@ NO_BUMP_PREFIXES = (".github/", "ci/", "docs/")
 NO_BUMP_FILES = {".gitignore", ".dockerignore", ".hadolint.yaml", "renovate.json", "Makefile",
                  "docker-compose.yml", "DOCKERHUB.md", "LICENSE"}
 NO_BUMP_SUFFIXES = (".md",)
+# Offline measurement / check tools under sly/: COPYed into the assemble stage with the rest of
+# sly/, but never executed by a build step and not part of the final image (only /opt/vllm is).
+NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py")
 
 failures = []
 
@@ -80,7 +84,8 @@ def check_version_bump(base):
                            check=True, capture_output=True, text=True).stdout.split()
     image_files = [f for f in files
                    if not f.startswith(NO_BUMP_PREFIXES) and f not in NO_BUMP_FILES
-                   and not f.endswith(NO_BUMP_SUFFIXES)]
+                   and not f.endswith(NO_BUMP_SUFFIXES)
+                   and not any(fnmatch.fnmatch(f, g) for g in NO_BUMP_GLOBS)]
     if not image_files:
         print("version bump: no image-relevant change")
         return
