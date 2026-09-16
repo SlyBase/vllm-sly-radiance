@@ -1,0 +1,56 @@
+# Daily mirror of the two Codeberg upstreams into origin/upstream/<name> (fast-forward only) and
+# a PR upstream/<name> -> main whenever the mirror has commits main does not. Nothing is merged
+# automatically; the PR body lists the new commits, the test-merge conflict status and the
+# changed files that are part of the image build (ci/upstream_sync.sh).
+#
+# Token: SYNC_TOKEN (fine-grained PAT, contents + pull-requests write) if set, else the default
+# GITHUB_TOKEN. With the default token (a) PR creation needs the org/repo setting "Allow GitHub
+# Actions to create and approve pull requests" and (b) the created PR does NOT trigger ci.yml
+# (GitHub suppresses workflow runs for events caused by GITHUB_TOKEN) -- so set SYNC_TOKEN.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: stilldeadcode
+            url: https://codeberg.org/StillDeadcode/vllm-radiance.git
+          - name: ggz14
+            url: https://codeberg.org/ggz14/radiance-vllm-mxfp4.git
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: mirror ${{ matrix.name }} and open/refresh the PR
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+          NAME: ${{ matrix.name }}
+          URL: ${{ matrix.url }}
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          if [ "$HAS_SYNC_TOKEN" != "true" ]; then
+            echo "::warning::SYNC_TOKEN not set -- using GITHUB_TOKEN; PRs it creates will not trigger ci.yml"
+          fi
+          ci/upstream_sync.sh "$NAME" "$URL"
