@@ -87,11 +87,17 @@ class RadianceEmbedInt8(UnquantizedEmbeddingMethod):
                 q[i:i + CHUNK_ROWS] = nib[:, 0::2] | (nib[:, 1::2] << 4)
                 scale[i:i + CHUNK_ROWS] = s.view(-1, k // g).to(torch.bfloat16)
                 del blk, s, nib
+        freed = (n * k * w.element_size() - q.numel() - scale.numel() * scale.element_size()) / 2**30
         layer.weight = Parameter(q, requires_grad=False)
         layer.weight_scale = Parameter(scale, requires_grad=False)
+        # Hand the bf16 segment back to the device right now: vLLM sizes the KV cache from
+        # hipMemGetInfo, and a cached-but-reserved hole that later loads (lm_head int4 runs
+        # after us) carve into is never released and never counted (s10e8b: 1.58 GiB lost).
+        del w
+        torch.cuda.empty_cache()
         logger.info(
-            "[radiance] embed_tokens quantised to int%d: [%d, %d], %.2f GiB freed",
-            BITS, n, k, (n * k * w.element_size() - q.numel() - scale.numel() * scale.element_size()) / 2**30,
+            "[radiance] embed_tokens quantised to int%d: [%d, %d], %.2f GiB freed, device free %.2f GiB",
+            BITS, n, k, freed, torch.cuda.mem_get_info()[0] / 2**30,
         )
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
