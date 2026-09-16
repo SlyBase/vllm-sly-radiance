@@ -19,14 +19,16 @@ This repository is a fork that stacks three layers:
 | **vllm-radiance** | [StillDeadcode/vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance) (Codeberg) | The RDNA4 image: ROCm + PyTorch + Triton + AITER + vLLM build pipeline, the gfx1201 correctness patches (`patch_gfx1201.py`, `patch_unified_attention_lds.py`, …), the [libr4d](https://codeberg.org/StillDeadcode/libr4d) hand-written kernel library (paged attention, fused GDN prefill scan, skinny bf16 GEMM, P2P all-reduce), DFlash/MTP draft support, the entrypoint and bandwidth sweep. Upstream targets **FP8** checkpoints on two R9700 (TP=2). |
 | **radiance-vllm-mxfp4** | [ggz14/radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4) (Codeberg) | MXFP4 on RDNA4: the Quark-loader gates that unlock AITER's native Triton MXFP4 GEMM (`gemm_afp4wfp4`) on gfx1201, and the hand-written fp8-WMMA W4A8 HIP kernel (`radiance_mxfp4_fp8.hip`) with its `RadianceMxfp4W4A8LinearKernel` plugin. Written against vLLM 0.27.1. |
 
-`main` mirrors upstream vllm-radiance; **`sly/main`** is the integration branch. Everything SlyBase
+**`main`** is the integration branch (upstream vllm-radiance + everything SlyBase adds); the two
+upstreams are mirrored read-only as `upstream/stilldeadcode` and `upstream/ggz14` (see
+[Branches, CI and upstream sync](#branches-ci-and-upstream-sync)). Everything SlyBase
 adds lives in [`sly/`](sly/) (patches, kernels, configs, benches) and is wired into the `Dockerfile`
 via the same `_patchlib.apply()` mechanism upstream uses — anchor-based, idempotent, verified with
 `ast.parse()` at build time. `sly/README.md` (German) is the per-patch reference.
 
 ## What was changed on top
 
-Chronological summary of the tunings and kernel work in `sly/main` (versions = `VERSION` file /
+Chronological summary of the tunings and kernel work on `main` (versions = `VERSION` file /
 image tag `vllm-sly-radiance:<version>-rocm10.0`).
 
 ### MXFP4 on gfx1201 (0.1.0 – 0.1.2)
@@ -323,19 +325,49 @@ sly/
   mxfp4-configs/              AITER gemm_afp4wfp4 config for gfx1201
 ```
 
-## Branches and syncing with upstream
+## Branches, CI and upstream sync
 
 ```
-main       mirror of StillDeadcode/vllm-radiance (Codeberg)
-sly/main   integration branch = main + sly/ (this README, VERSION, Dockerfile wiring)
+main                    integration branch = upstream vllm-radiance + sly/ (protected: PR + green `ci`)
+upstream/stilldeadcode  read-only mirror of StillDeadcode/vllm-radiance `main` (Codeberg)
+upstream/ggz14          read-only mirror of ggz14/radiance-vllm-mxfp4 `main` (Codeberg)
+archive/*               tags freezing the pre-2026-09 layout (sly/main, sly/b-*, sly/e2-*) — kept forever
+v0.1.1 … v0.1.6         annotated tags = the VERSION history (v0.1.0 has no unambiguous commit)
 ```
+
+Remotes on a dev machine: `origin` (GitHub) plus the two Codeberg upstreams:
 
 ```bash
-git remote add upstream https://codeberg.org/StillDeadcode/vllm-radiance.git
-git fetch upstream
-git checkout main && git merge --ff-only upstream/main
-git checkout sly/main && git merge main     # re-verify every sly/ anchor afterwards
+git remote add stilldeadcode https://codeberg.org/StillDeadcode/vllm-radiance.git
+git remote add ggz14 https://codeberg.org/ggz14/radiance-vllm-mxfp4.git
 ```
+
+Workflows (`.github/workflows/`):
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci` | PR, push to `main`, manual | `lint` (ruff E9/F63/F7/F82, shellcheck, hadolint, actionlint, `docker buildx build --check`), `patch-dryrun` (`ci/patch_dryrun.sh`: the pinned upstream sources from the Dockerfile ARGs in a venv, then the Dockerfile patch loop twice — pass 1 must apply every hunk, pass 2 must be all NOOP; `ci/patch_dryrun_skip.txt` is the documented skip allowlist), `consistency` (`ci/check_consistency.py`: every patch file is in the loop or in `ci/unused_patches.txt`, every `sly/patch_*.py` is documented in `sly/README.md`, image changes bump `VERSION`). The aggregate status **`ci`** is the required check on `main`. |
+| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.0` only for `v*` tags or the `push_ghcr` input. Build log is an artifact. |
+| `upstream-sync` | daily 04:00 UTC, manual | Fast-forwards `upstream/*` from Codeberg (never force) and opens/updates a PR `upstream/<name>` → `main` (label `upstream-sync`) listing the new commits, the test-merge conflict status and the image-relevant files. Never merges. Needs the `SYNC_TOKEN` secret (fine-grained PAT, contents + pull-requests write) to create PRs. |
+
+Renovate (`renovate.json`) tracks every Dockerfile ARG pin via the `# renovate:` markers above the
+ARGs (ROCm base image tag + digest, ubuntu digest, torch/triton/torchvision as one group, vLLM,
+AITER, transformers, rocm_bandwidth_test, libr4d commit) and the CI tool versions. No automerge —
+every bump goes through `ci`, and vLLM/AITER/ROCm bumps additionally need a build and an A/B run.
+
+Changing code:
+
+```bash
+git switch -c feat/my-change main
+# edit; bump VERSION for anything that changes the image (consistency enforces it on PRs)
+python3 ci/check_consistency.py --base origin/main && ci/patch_dryrun.sh
+git push -u origin feat/my-change && gh pr create
+# merge when `ci` is green — the VERSION bump on main then triggers `build`
+```
+
+Merging upstream: take the `upstream-sync` PR (or `git merge origin/upstream/<name>` on a branch),
+resolve the usual conflicts (Dockerfile pins + patch loop, `README.md`, `VERSION`) and re-verify
+every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
 
 ## Credits
 

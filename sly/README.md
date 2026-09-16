@@ -105,30 +105,43 @@ dropped — selection happens automatically via the kernel priority list
 ## Git Branching / Upstream Merge
 
 ```
-main           ← upstream tracking (mirror of StillDeadcode/vllm-radiance, Codeberg)
-  └─ sly/main  ← integration (all sly patches built on top of main)
+main                    ← integration (upstream + all sly patches), protected: PR + green `ci`
+upstream/stilldeadcode  ← read-only mirror of StillDeadcode/vllm-radiance main (Codeberg)
+upstream/ggz14          ← read-only mirror of ggz14/radiance-vllm-mxfp4 main (Codeberg)
+archive/*, v0.1.x       ← tags: frozen pre-2026-09 branches / VERSION history
 ```
 
 Remotes:
-- `origin`   = `https://github.com/SlyBase/vllm-sly-radiance.git`
-- `upstream` = `https://codeberg.org/StillDeadcode/vllm-radiance.git`
+- `origin`        = `https://github.com/SlyBase/vllm-sly-radiance.git`
+- `stilldeadcode` = `https://codeberg.org/StillDeadcode/vllm-radiance.git`
+- `ggz14`         = `https://codeberg.org/ggz14/radiance-vllm-mxfp4.git`
 
-Merge procedure for upstream updates:
+The `upstream-sync` workflow (daily 04:00 UTC) fast-forwards the `upstream/*`
+mirrors and opens or updates a PR `upstream/<name>` → `main` whenever a mirror
+has commits `main` lacks (commit list, test-merge conflict status, image-relevant
+files in the body). The mirrors are never edited by hand and never force-pushed.
+
+Manual merge procedure (same thing the PR does):
 
 ```bash
-git checkout main
-git fetch upstream
-git merge upstream/main
-git push origin main
-
-git checkout sly/main
-git rebase main
+git fetch origin
+git switch -c merge/stilldeadcode origin/main
+git merge origin/upstream/stilldeadcode
+# expected conflicts: Dockerfile (our pins + patch loop stay), README.md, VERSION (bump)
 # Patch anchor conflicts are hard failures (_patchlib.apply() uniqueness check) —
-# re-verify every affected patch in sly/ against the new anchor string
-git push origin sly/main --force-with-lease
+# re-verify every affected patch in sly/ against the new anchor string:
+ci/patch_dryrun.sh
+python3 ci/check_consistency.py --base origin/main
+git push -u origin merge/stilldeadcode && gh pr create
+# merge only when `ci` is green; never force-push main (branch protection)
 ```
 
 ## Build & Push
+
+The `build` workflow (`.github/workflows/build.yml`, self-hosted runner
+`rocm-build` in LXC 2408, CPU only) builds `vllm-sly-radiance:<VERSION>-rocm10.0`
+on every `VERSION` change on `main` and pushes it to ghcr.io for `v*` tags or
+`gh workflow run build.yml -f push_ghcr=true`. Manual equivalent:
 
 ```bash
 docker build -t ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm<ROCM_VERSION> .
