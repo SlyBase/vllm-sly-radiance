@@ -18,8 +18,10 @@ and replaces `layer.weight` in place (same name; int8 [V, H] or uint8 [V, H//2])
 and returns the model dtype -- plain torch ops, so torch.compile / CUDA graphs see an
 ordinary index_select + mul. TP=1 only (the fused embedding op reads layer.weight directly).
 
-Hooked in by sly/patch_embed_int8.py (QuarkConfig.get_quant_method, before the lm_head
-hooks; the knob is part of the torch.compile cache key).
+Hooked in by sly/patch_embed_int8.py in VocabParallelEmbedding.__init__ (Qwen3Next builds
+embed_tokens without quant_config, so QuarkConfig.get_quant_method never sees it); the knob
+is part of the torch.compile cache key. The DFlash drafter shares the target's module
+(llm_base_proposer._maybe_share_embeddings), so its lookups go through embedding() too.
 """
 
 import os
@@ -43,7 +45,7 @@ CHUNK_ROWS = 8192  # 8192 x 5120 fp32 = 168 MB transient per chunk
 
 
 def quant_method_for(layer: torch.nn.Module, prefix: str):
-    """QuarkConfig.get_quant_method hook: our method for an enabled embedding, else None."""
+    """VocabParallelEmbedding.__init__ hook: our method for an enabled embedding, else None."""
     if not ENABLED or not isinstance(layer, VocabParallelEmbedding):
         return None
     if isinstance(layer, ParallelLMHead) or getattr(layer, "tp_size", 1) != 1:
