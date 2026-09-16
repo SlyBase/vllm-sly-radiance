@@ -1,0 +1,13 @@
+# hadolint config for CI (.github/workflows/ci.yml). Threshold `warning` so new findings fail,
+# with the rule classes the inherited Dockerfile already trips ignored on purpose -- the build
+# is a from-source multistage with deliberate `cd`/pip patterns; restyling upstream's file for
+# the linter is not the goal. Remove an entry here only together with the matching cleanup.
+failure-threshold: warning
+ignored:
+  - DL3003  # `cd` inside RUN instead of WORKDIR (source builds in /src/<component>)
+  - DL3008  # unpinned apt packages (base image pins the distro release)
+  - DL3013  # unpinned pip packages (pip/wheel/setuptools bootstrap)
+  - DL3042  # pip without --no-cache-dir in the builder stage (cache is discarded with the stage)
+  - DL3059  # consecutive RUN instructions (kept separate for BuildKit layer caching)
+  - DL3064  # "sensitive" ARG/ENV names (false positive on *_VERSION / *_KEY style names)
+  - SC2046  # unquoted $(nproc)-style substitutions in build commands

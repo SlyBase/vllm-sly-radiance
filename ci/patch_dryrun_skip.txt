@@ -1,0 +1,4 @@
+# Patches the CI dry run must skip, one per line: `<loop name>  <reason>`.
+# Only for patches whose target files cannot be reconstructed from the pinned upstream
+# source trees (e.g. files generated at wheel-build time). Every skip is logged as
+# `SKIP <patch>: <reason>`; an entry that no longer matches a loop entry fails the run.

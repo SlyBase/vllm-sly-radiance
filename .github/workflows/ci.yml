@@ -1,0 +1,123 @@
+# CI for every pull request and every push to main: lint, a GPU-less dry run of the Dockerfile's
+# patch loop against the pinned upstream sources, and consistency checks between the loop, the
+# patch files and the docs. No image build here -- that is build.yml on the self-hosted ROCm
+# runner, triggered by a VERSION bump on main or a v* tag, never by a PR.
+#
+# The aggregate job `ci` is the status check the branch protection on main requires.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # renovate: datasource=pypi depName=ruff
+  RUFF_VERSION: 0.16.7
+  # renovate: datasource=docker depName=hadolint/hadolint
+  HADOLINT_VERSION: v2.15.1
+  # renovate: datasource=docker depName=rhysd/actionlint
+  ACTIONLINT_VERSION: 1.7.12
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ruff (syntax / undefined-name classes only)
+        run: |
+          pipx run "ruff==${RUFF_VERSION}" check --select E9,F63,F7,F82 --output-format github .
+
+      - name: shellcheck (severity error)
+        run: |
+          shellcheck --version | head -2
+          # shellcheck disable=SC2046
+          shellcheck -S error $(git ls-files '*.sh')
+
+      - name: hadolint
+        run: |
+          docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" \
+            "hadolint/hadolint:${HADOLINT_VERSION}" hadolint --config /.hadolint.yaml - < Dockerfile
+
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo "rhysd/actionlint:${ACTIONLINT_VERSION}" -color
+
+      - name: docker buildx build --check
+        run: docker buildx build --check .
+
+  patch-dryrun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # same minor as the image's venv (Ubuntu 24.04 python 3.12)
+          python-version: "3.12"
+
+      - name: pins
+        id: pins
+        run: |
+          python3 ci/read_pins.py
+          echo "key=$(python3 ci/read_pins.py | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: cache pinned upstream source trees
+        uses: actions/cache@v6
+        with:
+          path: .dryrun/src
+          key: dryrun-src-${{ steps.pins.outputs.key }}
+
+      - name: apply the Dockerfile patch loop twice (apply, then all-NOOP)
+        run: ci/patch_dryrun.sh
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: patch-dryrun-logs
+          path: .dryrun/pass*.log
+          if-no-files-found: ignore
+
+  consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: patch loop vs. files vs. docs (+ VERSION bump on PRs)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ -n "$BASE_REF" ] && [[ "$HEAD_REF" != upstream/* ]]; then
+            # upstream/* sync PRs are exempt: they never carry a VERSION bump until the merge is curated
+            python3 ci/check_consistency.py --base "origin/$BASE_REF"
+          else
+            python3 ci/check_consistency.py
+          fi
+
+  ci:
+    # aggregate status for the branch protection: one required check instead of three
+    needs: [lint, patch-dryrun, consistency]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: all jobs succeeded?
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq 'failure|cancelled|skipped'; then
+            echo "::error::a required job did not succeed"; exit 1
+          fi

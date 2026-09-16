@@ -1,0 +1,6 @@
+# patch_*.py files that exist in the tree but are intentionally NOT in the Dockerfile apply loop.
+# One per line: `<path>  <reason>`. check_consistency.py fails on any other patch file that is
+# neither in the loop nor listed here.
+patch_dflash2.py        DFlash2 (vllm-project/vllm#52816) is native upstream since the vLLM 0.29.0 bump; kept for the 0.27.x lineage
+patch_dflash_base.py    the three DFlash correctness fixes are native upstream since vLLM 0.29.0 (dflash/speculator.py)
+patch_radiance_fusion.py  AiterRMSNormQuantFusionPass.is_rdna_aiter_enabled() reaches the same fusion natively since vLLM 0.29.0 (see Dockerfile comment)

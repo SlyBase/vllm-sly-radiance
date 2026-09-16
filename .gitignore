@@ -16,3 +16,6 @@ libr4d/
 # editor / os
 *.swp
 .DS_Store
+
+# ci/patch_dryrun.sh work dir
+.dryrun/
