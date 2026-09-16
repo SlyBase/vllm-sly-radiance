@@ -1223,9 +1223,20 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
                                   else         { dks = DEC_KS; bkx = 64; } }
       else                      { dks = 1; bkx = 128; }
     } else if (dec_tune16 && M > 8) {
+      // An explicit RADIANCE_MXFP4_DECODE_KS / _BK wins over the table, so bench_decode_cells.py
+      // can still measure every cell of this band (2026-09-16 verification sweep: without this
+      // the d4 columns at M=16/24 and every b64 column silently re-measured the table's choice).
+      static const bool ks_forced = [] {
+        const char *e = getenv("RADIANCE_MXFP4_DECODE_KS");
+        return e && atoi(e) != 0;
+      }();
+      static const bool bk_pinned = [] {
+        const char *e = getenv("RADIANCE_MXFP4_DECODE_BK");
+        return e && (atoi(e) == 64 || atoi(e) == 128);
+      }();
       dks = split_k_for(dec_nblk, M);
-      bkx = 128;                         // no BK=64 cell wins anywhere in (8, 64]
-      if (dks == DEC_KS && dec_nblk > 8 && K < 8192 && M >= 16 && M <= 24) dks = 2;
+      bkx = bk_pinned ? 0 : 128;         // no BK=64 cell wins anywhere in (8, 64]
+      if (!ks_forced && dks == DEC_KS && dec_nblk > 8 && K < 8192 && M >= 16 && M <= 24) dks = 2;
     } else {
       dks = split_k_for(dec_nblk, M);
       bkx = 0;   // resolved below from decode_bk64, exactly as shipped
