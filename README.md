@@ -217,8 +217,9 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_FUSED_NORM_QUANT` | `0` | `1` | Fused add+rms_norm / silu·mul / GDN gated norm + per-token fp8 quant in front of the W4A8 GEMMs (see above). Needs `RADIANCE_MXFP4_W4A8=1`, `RADIANCE_MXFP4_W4A8_MIN_M=0`, `RADIANCE_MXFP4_SANITIZE=0`; part of the torch.compile cache key. |
 | `RADIANCE_FUSED_NORM_QUANT_ADD_RMS` / `_SILU` / `_GDN` | `1` | – | Per-fusion switches (only read when `RADIANCE_FUSED_NORM_QUANT=1`). |
 | `GPU_MAX_HW_QUEUES` | ROCm default | `2` | ROCm HW queue count; 2 measured best for this single-process setup. |
-| `RADIANCE_MXFP4_DECODE_KS` | auto | – | Force the decode kernel's split-K factor (A/B control). |
-| `RADIANCE_MXFP4_DECODE_BK` | auto (64) | – | `128` pins the old BK=128 decode tiling. |
+| `RADIANCE_MXFP4_DECODE_TUNE16` | `1` | – | 0.2.1 cell table for decode M in (8, 64] (2–8 concurrent sequences): BK=128 everywhere in the band and split-K 2 for o_proj/out_proj at M=16/24, measured with `sly/mxfp4/bench_decode_cells.py`. `0` = pre-0.2.1 fill rule + `decode_bk64` (A/B control). M ≤ 8 is never touched. |
+| `RADIANCE_MXFP4_DECODE_KS` | auto | – | Force the decode kernel's split-K factor (sweep/A-B knob, overrides the tables). |
+| `RADIANCE_MXFP4_DECODE_BK` | auto | – | `128` pins BK=128, `64` forces the BK=64 instantiation where one exists (split 1 and 4) — sweep knobs, never a production setting. |
 | `RADIANCE_MXFP4_DECODE_NT` | `0` | – | Non-temporal weight loads in the decode kernel. |
 | `RADIANCE_MXFP4_TN4_MIN_M` | `2048` | – | M from which the folded kernel uses the wide TN=4 tile. |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `0` | – | Tiled-A layout for very large M (must exceed 512 and `DECODE_MAX_M`). |
