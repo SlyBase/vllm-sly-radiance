@@ -1,0 +1,127 @@
+# Image build on the self-hosted ROCm runner (LXC 2408, label rocm-build). CPU-only: docker
+# build + an import smoke test without --device. The runner shares the LXC with the production
+# vllm7 container, so this workflow never starts a GPU container and never deploys (that stays
+# with Ansible + systemctl, see the homelab repo).
+#
+# Triggers: a VERSION bump on main, a v* tag, or manual dispatch. Never pull_request -- a PR
+# from a fork must not reach the self-hosted runner. Pushes the image to ghcr.io only for tags
+# or when asked (push_ghcr); a main-branch build is a build check, nothing more.
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      push_ghcr:
+        description: push the image to ghcr.io/slybase/vllm-sly-radiance
+        type: boolean
+        default: false
+      rocm_base:
+        description: override ARG ROCM_BASE (empty = Dockerfile default)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: [self-hosted, linux, x64, rocm-build]
+    timeout-minutes: 300
+    env:
+      REGISTRY_IMAGE: ghcr.io/slybase/vllm-sly-radiance
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: resolve version, ROCm base and tag
+        id: meta
+        env:
+          ROCM_BASE_INPUT: ${{ inputs.rocm_base }}
+        run: |
+          VER=$(tr -d '[:space:]' < VERSION)
+          eval "$(python3 ci/read_pins.py --shell)"
+          ROCM_BASE=${ROCM_BASE_INPUT:-$ROCM_BASE}
+          # rocm/dev-ubuntu-24.04:10.0.0-full@sha256:... -> rocm10.0
+          ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
+          TAG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          {
+            echo "version=$VER"; echo "rocm_base=$ROCM_BASE"; echo "tag=$TAG"
+            echo "remote_tag=${REGISTRY_IMAGE}:${VER}-rocm${ROCM_MM}"
+          } >> "$GITHUB_OUTPUT"
+          echo "building $TAG from $ROCM_BASE"
+          docker version --format 'docker {{.Server.Version}}'
+          df -h /var/lib/docker | tail -1
+
+      - name: docker build
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
+        run: |
+          set -o pipefail
+          DOCKER_BUILDKIT=1 docker build --progress=plain \
+            --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            -t "$TAG" . 2>&1 | tee build.log
+          docker image inspect "$TAG" --format 'size {{.Size}} id {{.Id}}'
+
+      - name: smoke test (CPU only, no --device)
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          docker run --rm --entrypoint python3 "$TAG" -c "
+          import vllm, radiance_mxfp4, radiance_fused_norm, radiance_lmhead_int4
+          from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+          v = open('/opt/radiance_version').read().strip()
+          assert v == '$VER', f'/opt/radiance_version {v} != VERSION $VER'
+          print('vllm', vllm.__version__, 'image', v, 'QuarkConfig', QuarkConfig.__name__)
+          " 2>&1 | tail -5
+
+      - name: login to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: push to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          REMOTE: ${{ steps.meta.outputs.remote_tag }}
+        run: |
+          docker tag "$TAG" "$REMOTE"
+          docker push "$REMOTE"
+          echo "pushed $REMOTE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: summary
+        if: always()
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
+        run: |
+          {
+            echo "- image: \`$TAG\`"
+            echo "- base: \`$ROCM_BASE\`"
+            echo "- runner: $(hostname), $(docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -c vllm-sly-radiance) local vllm-sly-radiance images"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ steps.meta.outputs.version }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: prune dangling images
+        if: always()
+        run: docker image prune -f >/dev/null || true

@@ -131,8 +131,7 @@ git push origin sly/main --force-with-lease
 ## Build & Push
 
 ```bash
-docker build --build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full \
-  -t ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm<ROCM_VERSION> .
+docker build -t ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm<ROCM_VERSION> .
 docker push ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm<ROCM_VERSION>
 ```
 

@@ -8,8 +8,9 @@
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
 # stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
-# all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 7.14.
-ARG ROCM_BASE=rocm/dev-ubuntu-24.04:7.14.0-full@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
+# all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
+# ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
+ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
 ARG GFX_ARCH=gfx1201
 # The release stage starts from a clean distro image rather than the ROCm base, and COPYs in only
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's

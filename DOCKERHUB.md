@@ -50,8 +50,8 @@ pulled from a prebuilt wheel index.
 | torchvision | 0.24.1 |
 | AITER | 0.1.17 |
 | transformers | 5.14.1 (pinned) |
-| ROCm userspace | 7.14, bundled |
-| Base | `rocm/dev-ubuntu-24.04:7.14.0-full` (Ubuntu 24.04, Python 3.12) |
+| ROCm userspace | 10.0, bundled |
+| Base | `rocm/dev-ubuntu-24.04:10.0.0-full` (Ubuntu 24.04, Python 3.12) |
 
 The PyTorch / Triton / torchvision versions are the ones upstream builds vLLM against **on ROCm**, not a
 newer combination chosen for this image. Read the ROCm numbers, not `pyproject.toml`: 0.27.1's build-system

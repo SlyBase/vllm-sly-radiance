@@ -134,8 +134,9 @@ see *Results*.
 
 ### Build
 
-- ROCm base overridable (`--build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full`); the
-  production image is built on ROCm 10.0.
+- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
+  production image is built on exactly that digest, Renovate tracks it); overridable with
+  `--build-arg ROCM_BASE=…`.
 - PyTorch 2.14.0, Triton 3.8.0, aiter 0.1.21.post2, transformers 5.17.0, vLLM 0.29.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
@@ -283,11 +284,9 @@ Everything the build needs is in this directory (flat Docker context). Multi-sta
 
 ```bash
 git clone https://github.com/SlyBase/vllm-sly-radiance.git
-cd vllm-sly-radiance && git checkout sly/main
+cd vllm-sly-radiance
 
-docker build \
-  --build-arg ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full \
-  -t vllm-sly-radiance:$(cat VERSION)-rocm10.0 .
+docker build -t vllm-sly-radiance:$(cat VERSION)-rocm10.0 .
 ```
 
 A cold build compiles PyTorch and takes hours (`MAX_JOBS=4` by default — raise it on a box with
