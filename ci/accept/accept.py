@@ -402,9 +402,15 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
             f"{s_now:.0f}s", f"<= {thresholds['startup_s_max_ratio']:.1f}x of {s_base:.0f}s",
             hard=False)
 
-    add("smoke", results.get("smoke", {}).get("ok"),
-        [c["name"] for c in results.get("smoke", {}).get("cases", []) if not c["ok"]] or "all pass",
-        "4/4 pass")
+    smoke = results.get("smoke", {})
+    if smoke.get("skipped"):
+        # A dry run never sends a request; reporting "all pass" here would claim
+        # a result nobody measured.
+        add("smoke", None, f"skipped ({smoke['skipped']})", "4/4 pass", hard=False)
+    else:
+        add("smoke", smoke.get("ok"),
+            [c["name"] for c in smoke.get("cases", []) if not c["ok"]] or "all pass",
+            "4/4 pass")
 
     bb = results.get("betterbench", {}).get("aggregate_tps", {})
     bb_base = baseline.get("aggregate_tps", {})
