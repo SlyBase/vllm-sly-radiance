@@ -16,6 +16,7 @@ ap.add_argument("--out", default="/root/w4a16_tiles.json")
 ap.add_argument("--iters", type=int, default=40)
 ap.add_argument("--fc", action="store_true", help="only the DFlash2 fc layer (K = 5 x 5120 aux -> N 5120, ReplicatedLinear)")
 ap.add_argument("--lmhead", action="store_true", help="only the int4 lm_head (N 248320, K 5120; sly/mxfp4/radiance_lmhead_int4.py)")
+ap.add_argument("--target", action="store_true", help="only the INT4 target shapes the drafter does not share (RedHatAI/Qwen3.8-27B-INT4)")
 args = ap.parse_args()
 
 GS = 128
@@ -25,6 +26,11 @@ if args.fc:
     SHAPES = [("fc", 5120, 25600)]  # combine_hidden_states -> self.model.fc, M = Target-Token je Step (8 x Seqs)
 if args.lmhead:
     SHAPES = [("lm_head", 248320, 5120)]  # RadianceLMHeadInt4: verify M = 8 x Seqs, draft M = 7 x Seqs
+if args.target:
+    # INT4-Target (compressed-tensors W4A16 g128): gate_up/down teilt es mit dem Draft, diese nicht.
+    # GDN in_proj_qkvz = qkv 10240 + z 6144; Attention qkv = q 12288 (mit Gate) + k,v 1024;
+    # GDN out_proj und Attention o_proj haben beide N 5120 x K 6144.
+    SHAPES = [("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("out_o", 5120, 6144)]
 MS = [8, 16, 32, 40, 64] if not args.quick else [8, 40]
 dev = torch.device("cuda")
 torch.manual_seed(0)
