@@ -356,6 +356,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # gated norm each end in the per-token fp8 quant (radiance_add_rms_quant / _silu_mul_quant /
 # _gdn_norm_quant in the .hip below) and hand (q, scale) straight to the W4A8 GEMM's pq entry,
 # plus the knob in vLLM's compile cache key. Anchors are the already-patched files, so it runs last.
+# sly/patch_mamba_align_retire.py backports vllm#55450 (0.2.3): align-mode Mamba state retirement
+# skips null gaps instead of stopping at them -- with async scheduling the stock code pinned one
+# gated-delta-net block per group per prefill chunk until the request finished (258k prompt: KV
+# pool exhausted, two self-preemptions).
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -371,7 +375,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8; do \
+             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
