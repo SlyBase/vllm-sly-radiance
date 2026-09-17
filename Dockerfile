@@ -363,6 +363,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # skips null gaps instead of stopping at them -- with async scheduling the stock code pinned one
 # gated-delta-net block per group per prefill chunk until the request finished (258k prompt: KV
 # pool exhausted, two self-preemptions).
+# sly/patch_rocm_load_max_split.py lets Worker.load_model's max_split_size_mb:20 allocator scope run
+# on ROCm (stock gates it on is_cuda()): without it, packed W4A16 weights were carved out of the
+# freed 2.37 GiB bf16 embed/lm_head segments and pinned them (INT4 target k=7: 2.9 GiB stranded,
+# 313k -> 386k KV tokens; MXFP4 prod: 376k -> 386k).
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -378,7 +382,8 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire; do \
+             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire \
+             sly/patch_rocm_load_max_split; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
