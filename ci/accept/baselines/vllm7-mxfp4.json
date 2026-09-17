@@ -1,0 +1,24 @@
+{
+  "_comment": "Reference numbers of the running production image. `full` comes from the 0.2.2/0.2.3 acceptance runs (betterbench config/default.json, LXC 2408, R9700, k=7, max-model-len 262144). `fast` and `mean_tokens_per_step` are still empty: calibrate once with `--mode fast --record-baseline` against the production image before the gate can judge them. Null/absent entries are skipped, not failed.",
+  "image": "vllm-sly-radiance:0.2.3-rocm10.0",
+  "measured": "2026-09-17",
+  "kv_tokens": 375820,
+  "startup_s": null,
+  "mean_tokens_per_step": null,
+  "acceptance_rate": null,
+  "gsm8k": 0.835,
+  "modes": {
+    "fast": {
+      "aggregate_tps": {}
+    },
+    "full": {
+      "aggregate_tps": {
+        "1": 109.8,
+        "2": 190.0,
+        "4": 305.0,
+        "8": 388.0,
+        "16": 385.8
+      }
+    }
+  }
+}

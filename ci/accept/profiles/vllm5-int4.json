@@ -1,0 +1,91 @@
+{
+  "description": "vllm5 (RedHatAI/Qwen3.8-27B-INT4, compressed-tensors W4A16 + DFlash2 k=7, same LXC 2408). Disabled unit, started by the gate only.",
+  "service": "docker-vllm5.service",
+  "model": "RedHatAI/Qwen3.8-27B-INT4",
+  "required_log_patterns": [
+    [
+      "int4 lm_head hook",
+      "lm_head -> int4 W4A16 \\(group 128"
+    ],
+    [
+      "int4 lm_head applied",
+      "lm_head quantised to int4 g128"
+    ],
+    [
+      "int4 embedding",
+      "embed_tokens quantised to int4"
+    ],
+    [
+      "skinny gemm",
+      "\\[radiance\\.gemm\\] skinny GEMM kernel ENABLED"
+    ],
+    [
+      "gdn chunk scan",
+      "\\[radiance\\.gdn\\] gdn_chunk_scan ENABLED"
+    ],
+    [
+      "dflash drafter",
+      "Resolved architecture: DFlash2DraftModel"
+    ]
+  ],
+  "forbidden_log_patterns": [
+    [
+      "python traceback",
+      "Traceback \\(most recent call last\\)"
+    ],
+    [
+      "engine died",
+      "EngineDeadError|Engine core proc .* died"
+    ],
+    [
+      "cuda graph capture failed",
+      "Capturing CUDA graphs? failed|CUDAGraph capture failed"
+    ]
+  ],
+  "known_warnings": [
+    "install_attn_config_hook failed",
+    "triton_bundler.py",
+    "Cubin file saved by TritonBundler not found",
+    "Failed to JIT torch c dlpack extension",
+    "torch/_inductor/"
+  ],
+  "smoke": [
+    {
+      "name": "arithmetic",
+      "prompt": "What is 17*23? Reply with the number only.",
+      "expect": "391",
+      "max_tokens": 512
+    },
+    {
+      "name": "reasoning parser",
+      "prompt": "A train leaves at 14:35 and arrives 2h47m later. What time does it arrive? Answer with HH:MM only.",
+      "expect": "17:22",
+      "max_tokens": 512
+    },
+    {
+      "name": "tool call",
+      "prompt": "What is the weather in Berlin? Use the tool.",
+      "expect_tool_call": "get_weather",
+      "max_tokens": 512
+    },
+    {
+      "name": "long prefill needle",
+      "expect": "MARKER-7731",
+      "max_tokens": 256,
+      "prompt_needle": {
+        "marker": "MARKER-7731",
+        "filler_sentences": 4000
+      },
+      "timeout": 900
+    }
+  ],
+  "thresholds": {
+    "kv_tokens_min_ratio": 0.98,
+    "aggregate_tps_min_ratio": 0.95,
+    "mean_tokens_per_step_min_delta": -0.1,
+    "gsm8k_min_delta": -0.05,
+    "startup_s_max_ratio": 1.5,
+    "preemptions_max": 0
+  },
+  "smoke_note": "Every answer is additionally checked for leaked <think>/</think> tags (reasoning parser armed); an empty reasoning_content is normal for easy prompts."
+}
