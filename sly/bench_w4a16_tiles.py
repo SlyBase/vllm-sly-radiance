@@ -29,8 +29,9 @@ if args.lmhead:
 if args.target:
     # INT4-Target (compressed-tensors W4A16 g128): gate_up/down teilt es mit dem Draft, diese nicht.
     # GDN in_proj_qkvz = qkv 10240 + z 6144; Attention qkv = q 12288 (mit Gate) + k,v 1024;
-    # GDN out_proj und Attention o_proj haben beide N 5120 x K 6144.
-    SHAPES = [("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("out_o", 5120, 6144)]
+    # GDN out_proj und Attention o_proj haben beide N 5120 x K 6144. Reihenfolge nach Bytes x Calls je Step
+    # (qkvz 48x43 MB, out_o 64x16 MB, attn_qkv 16x38 MB), damit ein abgebrochener Sweep die wichtigsten hat.
+    SHAPES = [("qkvz", 16384, 5120), ("out_o", 5120, 6144), ("attn_qkv", 14336, 5120)]
 MS = [8, 16, 32, 40, 64] if not args.quick else [8, 40]
 dev = torch.device("cuda")
 torch.manual_seed(0)

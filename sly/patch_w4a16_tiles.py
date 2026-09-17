@@ -13,7 +13,9 @@ This adds a gfx12x override table keyed by (group_size, K, N, M bucket) for the 
 shapes of syvai/Qwen3.8-27B-DFlash2-W4A16 (hidden 5120, 32x128 q / 8x128 kv, intermediate
 17408, gs=128), its fc layer, and the int4 lm_head of sly/mxfp4/radiance_lmhead_int4.py
 (N=248320: the stock 16-column tiles mean 15520 workgroups, 250 GB/s -- slower than the fp8
-hipBLASLt head it replaces; with the table 502 GB/s at M=8), all measured DRAM-cold with
+hipBLASLt head it replaces; with the table 502 GB/s at M=8), plus the three target shapes of a
+compressed-tensors INT4 Qwen3.8-27B that the drafter does not share (qkvz 16384x5120, attention
+qkv 14336x5120, out/o 5120x6144: stock 1.2-2.9x slower), all measured DRAM-cold with
 sly/bench_w4a16_tiles.py on the R9700. Any shape or M bucket not in the table falls through
 to the stock heuristic unchanged.
 RADIANCE_W4A16_TILES=0 disables the table (A/B control, no rebuild).
@@ -72,6 +74,27 @@ apply(F,
       '    (128, 5120, 248320, 32): (32, 128, 64, 8, None),\n'
       '    (128, 5120, 248320, 40): (64, 128, 64, 8, None),\n'
       '    (128, 5120, 248320, 64): (64, 64, 64, 4, 1),\n'
+      '    # INT4 target (RedHatAI/Qwen3.8-27B-INT4, compressed-tensors W4A16 g128): the shapes the drafter\n'
+      '    # does not share -- GDN in_proj_qkvz, attention qkv (q with gate), GDN out_proj = attention o_proj\n'
+      '    # (N 5120 x K 6144); bench_w4a16_tiles.py --target, 2026-09-17\n'
+      '    # INT4 target qkvz  N=16384  K=5120  (stock at M=8/16/32/40/64: 183/183/331/184/183 us -> 107/106/119/152/155)\n'
+      '    (128, 5120, 16384, 8): (16, 64, 128, 4, 1),\n'
+      '    (128, 5120, 16384, 16): (16, 32, 128, 2, 1),\n'
+      '    (128, 5120, 16384, 32): (32, 32, 128, 4, None),\n'
+      '    (128, 5120, 16384, 40): (64, 128, 128, 8, None),\n'
+      '    (128, 5120, 16384, 64): (64, 128, 64, 8, None),\n'
+      '    # INT4 target out_o  N=5120  K=6144  (stock at M=8/16/32/40/64: 78/80/142/105/97 us -> 61/61/61/79/81)\n'
+      '    (128, 6144, 5120, 8): (16, 16, 128, 2, 3),\n'
+      '    (128, 6144, 5120, 16): (16, 16, 128, 2, 3),\n'
+      '    (128, 6144, 5120, 32): (32, 32, 128, 4, None),\n'
+      '    (128, 6144, 5120, 40): (64, 32, 64, 4, None),\n'
+      '    (128, 6144, 5120, 64): (64, 32, 64, 4, None),\n'
+      '    # INT4 target attn_qkv  N=14336  K=5120  (stock at M=8/16/32/40/64: 157/163/330/169/185 us -> 93/97/116/145/146)\n'
+      '    (128, 5120, 14336, 8): (16, 64, 128, 4, 1),\n'
+      '    (128, 5120, 14336, 16): (16, 64, 128, 2, 1),\n'
+      '    (128, 5120, 14336, 32): (32, 64, 128, 4, None),\n'
+      '    (128, 5120, 14336, 40): (64, 64, 128, 4, 1),\n'
+      '    (128, 5120, 14336, 64): (64, 64, 128, 4, None),\n'
       '}\n'
       '_GFX12X_DRAFT_BUCKETS = (8, 16, 32, 40, 64)\n'
       '\n'
