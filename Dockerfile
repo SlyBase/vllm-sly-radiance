@@ -351,6 +351,9 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # search) after loading and applied on the drafter's W4A16 kernel path (656 MB per call instead
 # of fp8's 1.27 GB; the tile table above carries the lm_head entries). Must run after
 # patch_lmhead_fp8 (it anchors on that block).
+# sly/patch_lmhead_int4_ct.py puts the same hook into CompressedTensorsConfig.get_quant_method, for a
+# compressed-tensors W4A16 target (RedHatAI/Qwen3.8-27B-INT4, lm_head in `ignore` = bf16); the DFlash
+# drafter's head has no quant_config and is shared, so only the target head changes.
 # sly/patch_fused_norm_quant.py hooks radiance_fused_norm.py (0.1.6, RADIANCE_FUSED_NORM_QUANT=1,
 # default off) into Qwen3.5/Qwen3-Next: the decoder add+rms_norm, the MLP silu*up and the GDN
 # gated norm each end in the per-token fp8 quant (radiance_add_rms_quant / _silu_mul_quant /
@@ -374,7 +377,7 @@ RUN set -eu; cd /opt/patches; \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_fused_norm_quant \
+             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
