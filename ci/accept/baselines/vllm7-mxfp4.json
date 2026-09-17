@@ -1,15 +1,18 @@
 {
-  "_comment": "Reference numbers of the running production image. `full` comes from the 0.2.2/0.2.3 acceptance runs (betterbench config/default.json, LXC 2408, R9700, k=7, max-model-len 262144). `fast` and `mean_tokens_per_step` are still empty: calibrate once with `--mode fast --record-baseline` against the production image before the gate can judge them. Null/absent entries are skipped, not failed.",
+  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144). `full` comes from the 0.2.2/0.2.3 acceptance runs (betterbench config/default.json). `fast`, startup_s, mean_tokens_per_step and acceptance_rate were calibrated on 2026-09-17 with `--mode fast --record-baseline` against 0.2.3, i.e. through the gate's own path. Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'.",
   "image": "vllm-sly-radiance:0.2.3-rocm10.0",
   "measured": "2026-09-17",
   "kv_tokens": 375820,
-  "startup_s": null,
-  "mean_tokens_per_step": null,
-  "acceptance_rate": null,
+  "startup_s": 261.1,
+  "mean_tokens_per_step": 8.2792,
+  "acceptance_rate": 0.4638,
   "gsm8k": 0.835,
   "modes": {
     "fast": {
-      "aggregate_tps": {}
+      "aggregate_tps": {
+        "1": 108.62,
+        "8": 348.35
+      }
     },
     "full": {
       "aggregate_tps": {
@@ -20,5 +23,11 @@
         "16": 385.8
       }
     }
-  }
+  },
+  "recorded": {
+    "image": "vllm-sly-radiance:0.2.3-rocm10.0",
+    "at": "2026-09-17 21:51:32Z",
+    "mode": "fast"
+  },
+  "_note_fast_vs_full": "fast and full are NOT comparable: fast runs 24 requests at conc 1 and 8, full runs 48 at 1/2/4/8/16. conc 8 measures 348 t/s in fast against 388 in full - the same engine, just a shorter run. Judging a fast run against the full numbers would report a 10 % regression on every single build."
 }
