@@ -592,7 +592,14 @@ def main() -> int:
               "failed_checks": hard_fail, "checks": checks, "results": results}
     (out_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
-    if args.record_baseline and "error" not in results:
+    # A dry run measures nothing, so it must not touch the baseline. Without
+    # this guard it still stamped `recorded` into the file -- a calibration
+    # that never happened -- and the `aggregate_tps` assignment below would
+    # have replaced real numbers with `{}`. Same class of bug as "dry run must
+    # not report smoke as passed".
+    if args.record_baseline and args.dry_run:
+        log("DRY-RUN: not writing the baseline")
+    elif args.record_baseline and "error" not in results:
         new = dict(baseline_file)
         new["recorded"] = {"image": args.image, "at": meta["started"], "mode": args.mode}
         if results.get("start", {}).get("kv_tokens"):
@@ -603,10 +610,17 @@ def main() -> int:
             new["acceptance_rate"] = results["spec"].get("acceptance_rate")
         if results.get("gsm8k"):
             new["gsm8k"] = results["gsm8k"]["exact_match"]
-        modes = dict(new.get("modes", {}))
-        modes[args.mode] = {**modes.get(args.mode, {}),
-                            "aggregate_tps": results.get("betterbench", {}).get("aggregate_tps", {})}
-        new["modes"] = modes
+        # Only overwrite this mode's throughput when the benchmark actually
+        # produced numbers: `fast` and `full` use different concurrency levels,
+        # and an empty result here would silently blank the other mode's
+        # reference values.
+        measured_tps = results.get("betterbench", {}).get("aggregate_tps") or {}
+        if measured_tps:
+            modes = dict(new.get("modes", {}))
+            modes[args.mode] = {**modes.get(args.mode, {}), "aggregate_tps": measured_tps}
+            new["modes"] = modes
+        else:
+            log(f"no betterbench numbers -- keeping the existing '{args.mode}' aggregate_tps")
         baseline_path.write_text(json.dumps(new, indent=2) + "\n")
         log(f"baseline updated: {baseline_path}")
 
