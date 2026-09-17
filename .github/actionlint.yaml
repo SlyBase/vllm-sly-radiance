@@ -1,4 +1,7 @@
 self-hosted-runner:
   # LXC 2408 (pve3): GitHub Actions runner "lxc2408-rocm", CPU-only docker builds, see build.yml
+  # LXC 2412 (pve3): runner "lxc2412-accept", CPU-only, drives the GPU window in 2408 over SSH,
+  #                  see accept.yml
   labels:
     - rocm-build
+    - gpu-accept

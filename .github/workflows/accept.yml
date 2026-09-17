@@ -1,0 +1,176 @@
+# GPU acceptance gate: does this image still behave like production?
+#
+# There is exactly one R9700 (LXC 2408) and it runs the production vllm7. This workflow
+# therefore never starts anything itself: it runs on the CPU-only CI LXC (label gpu-accept)
+# and asks the restricted `gpu-window` helper in 2408 over SSH to hand the GPU over for a
+# measurement window and to give it back afterwards (Betriebsregel Nr. 1).
+#
+# Because the window takes production down for 20-70 minutes, the job sits in the protected
+# environment `gpu-window`: GitHub waits for a human approval before the runner does anything.
+# `gpu-window acquire` additionally refuses a window while the server is actually serving
+# (running/waiting requests or recent POST /v1/ lines) unless it is forced.
+#
+# Triggers
+#   - build.yml finished successfully on main or a tag  -> queued automatically, waits for approval
+#   - workflow_dispatch                                 -> choose image, profile, mode by hand
+#
+# Mode: `fast` (~25 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
+# for every build; `full` (~70 min: the whole conc sweep plus GSM8K) is selected automatically
+# when the major or minor part of VERSION changed, i.e. for a release, and can be forced by hand.
+name: accept
+
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "image tag to test (empty = vllm-sly-radiance:<VERSION>-rocm<mm>)"
+        type: string
+        default: ""
+      profile:
+        description: profile
+        type: choice
+        options: [vllm7-mxfp4, vllm5-int4]
+        default: vllm7-mxfp4
+      mode:
+        description: gate scope
+        type: choice
+        options: [fast, full]
+        default: fast
+      force:
+        description: take the GPU even if production saw recent traffic
+        type: boolean
+        default: false
+      record_baseline:
+        description: "calibration run: write the measured values into the baseline file"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One GPU, one window. Never cancel a running gate -- it has to reach its release step.
+concurrency:
+  group: gpu-window
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # Cheap, unprotected: decide what to test. No GPU, no runner from the homelab.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+      mode: ${{ steps.meta.outputs.mode }}
+      profile: ${{ steps.meta.outputs.profile }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # workflow_run runs against the default branch; check out the built commit instead
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: resolve image, version and mode
+        id: meta
+        env:
+          IMAGE_INPUT: ${{ inputs.image }}
+          MODE_INPUT: ${{ inputs.mode }}
+          PROFILE_INPUT: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          VER=$(tr -d '[:space:]' < VERSION)
+          eval "$(python3 ci/read_pins.py --shell)"
+          ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
+          IMAGE=${IMAGE_INPUT:-vllm-sly-radiance:${VER}-rocm${ROCM_MM}}
+
+          MODE=${MODE_INPUT:-fast}
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            # full gate only when major or minor moved (0.2.4 -> 0.3.0 yes, 0.2.4 -> 0.2.5 no)
+            PREV=$(git log -2 --format=%H -- VERSION | tail -1)
+            OLD=$(git show "${PREV}:VERSION" 2>/dev/null | tr -d '[:space:]' || echo "")
+            NEW_MM=$(echo "$VER" | cut -d. -f1,2)
+            OLD_MM=$(echo "$OLD" | cut -d. -f1,2)
+            if [ -z "$OLD" ] || [ "$NEW_MM" != "$OLD_MM" ]; then MODE=full; else MODE=fast; fi
+            echo "VERSION $OLD -> $VER, mode=$MODE"
+          fi
+
+          {
+            echo "image=$IMAGE"; echo "version=$VER"; echo "mode=$MODE"
+            echo "profile=${PROFILE_INPUT:-vllm7-mxfp4}"; echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: summary
+        run: |
+          {
+            echo "### Acceptance gate queued"
+            echo ""
+            echo "- image: \`${{ steps.meta.outputs.image }}\`"
+            echo "- profile: \`${{ steps.meta.outputs.profile }}\` · mode: \`${{ steps.meta.outputs.mode }}\`"
+            echo "- commit: \`${{ steps.meta.outputs.sha }}\`"
+            echo ""
+            echo "Waiting for approval of the **gpu-window** environment — production vllm7"
+            echo "goes down for the length of the window."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    needs: plan
+    runs-on: [self-hosted, linux, gpu-accept]
+    # Protected: a reviewer has to approve before production is touched.
+    environment: gpu-window
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: gpu-window status
+        env:
+          ACCEPT_SSH: ${{ vars.ACCEPT_SSH || 'gpuwin@192.168.178.51' }}
+        run: ssh -o BatchMode=yes "$ACCEPT_SSH" status
+
+      - name: run gate
+        id: gate
+        env:
+          ACCEPT_HOST: ${{ vars.ACCEPT_HOST || '192.168.178.51' }}
+          ACCEPT_SSH: ${{ vars.ACCEPT_SSH || 'gpuwin@192.168.178.51' }}
+          ACCEPT_BB_PYTHON: /opt/accept/venv/bin/python
+          ACCEPT_BB_DIR: /opt/accept/betterbench
+          ACCEPT_EVAL_PYTHON: /opt/accept/venv/bin/python
+        run: |
+          set -o pipefail
+          python3 ci/accept/accept.py \
+            --profile "ci/accept/profiles/${{ needs.plan.outputs.profile }}.json" \
+            --image "${{ needs.plan.outputs.image }}" \
+            --mode "${{ needs.plan.outputs.mode }}" \
+            --owner "gh-${{ github.run_id }}" \
+            --out "out/accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}" \
+            ${{ inputs.force && '--force' || '' }} \
+            ${{ inputs.record_baseline && '--record-baseline' || '' }}
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}
+          path: out/accept-*/
+          retention-days: 30
+
+      - name: production health (independent of the gate result)
+        if: always()
+        env:
+          ACCEPT_HOST: ${{ vars.ACCEPT_HOST || '192.168.178.51' }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${ACCEPT_HOST}:8000/health" || echo 000)
+          echo "production /health = $code"
+          test "$code" = "200"
+
+      - name: baseline diff
+        if: always() && inputs.record_baseline
+        run: git --no-pager diff -- ci/accept/baselines/ || true
