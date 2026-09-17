@@ -511,7 +511,12 @@ def main() -> int:
     thresholds = {**profile["thresholds"], **baseline.get("thresholds", {})}
     config = ROOT / "configs" / f"{args.mode}.json"
 
-    out_dir = Path(args.out)
+    # Absolute, because run_betterbench() hands --out straight to a subprocess
+    # that runs with cwd=--bb-dir (/opt/accept/betterbench). A relative --out
+    # made BetterBench write its results under the benchmark checkout while
+    # accept.py looked for them under its own cwd -- the benchmark ran fine and
+    # the run died afterwards on a missing file.
+    out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     base_url = f"http://{args.host}:{args.port}"
     started = datetime.now(timezone.utc)
