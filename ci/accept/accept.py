@@ -446,8 +446,13 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
     return checks
 
 
-def render_markdown(meta: dict, checks: list[dict], results: dict) -> str:
-    verdict = "PASS" if all(c["ok"] or not c["hard"] for c in checks) else "FAIL"
+def render_markdown(meta: dict, checks: list[dict], results: dict,
+                    hard_fail: list[str]) -> str:
+    # The verdict is decided once, in main(), and handed in here. Deriving it a
+    # second time from `checks` alone was wrong for exactly the case that
+    # matters: a run that aborts before BetterBench never produces those checks,
+    # so "no failed check" read as PASS.
+    verdict = "FAIL" if hard_fail else "PASS"
     soft = [c for c in checks if not c["ok"] and not c["hard"]]
     lines = [
         f"## Acceptance gate: **{verdict}**",
@@ -464,6 +469,9 @@ def render_markdown(meta: dict, checks: list[dict], results: dict) -> str:
         lines.append(f"| {c['name']} | {icon} | {c['actual']} | {c['expected']} |")
     if soft:
         lines += ["", f"_{len(soft)} soft check(s) missed -- not blocking._"]
+    if results.get("error"):
+        lines += ["", f"**The run aborted: `{results['error']}`** -- every check below "
+                      "the abort never ran, so this is not a clean bill of health."]
     bb = results.get("betterbench", {}).get("aggregate_tps")
     if bb:
         lines += ["", "BetterBench aggregate t/s: " +
@@ -584,6 +592,13 @@ def main() -> int:
 
     checks = compare(results, baseline, thresholds, args.mode)
     hard_fail = [c["name"] for c in checks if not c["ok"] and c["hard"]]
+    # `failures` carries the aborts that happen outside the check table -- the
+    # run raised before it finished measuring, or the release failed. It was
+    # built and then dropped: hard_fail was rebuilt from `checks` alone, and
+    # the checks a crashed run never reached simply do not exist, so the gate
+    # reported PASS with a green table. A run that did not complete is not a
+    # pass.
+    hard_fail += [f for f in failures if f not in hard_fail]
     release_ok = results.get("release", {}).get("health") == 200
     if not release_ok:
         hard_fail.append("production restore")
@@ -629,7 +644,7 @@ def main() -> int:
         baseline_path.write_text(json.dumps(new, indent=2) + "\n")
         log(f"baseline updated: {baseline_path}")
 
-    md = render_markdown(meta, checks, results)
+    md = render_markdown(meta, checks, results, hard_fail)
     (out_dir / "report.md").write_text(md + "\n")
     print("\n" + md + "\n")
 
