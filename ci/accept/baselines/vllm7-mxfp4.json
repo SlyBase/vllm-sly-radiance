@@ -10,8 +10,8 @@
   "modes": {
     "fast": {
       "aggregate_tps": {
-        "1": 108.62,
-        "8": 348.35
+        "1": 108.55,
+        "8": 340.04
       }
     },
     "full": {
@@ -29,5 +29,6 @@
     "at": "2026-09-17 21:51:32Z",
     "mode": "fast"
   },
-  "_note_fast_vs_full": "fast and full are NOT comparable: fast runs 24 requests at conc 1 and 8, full runs 48 at 1/2/4/8/16. conc 8 measures 348 t/s in fast against 388 in full - the same engine, just a shorter run. Judging a fast run against the full numbers would report a 10 % regression on every single build."
+  "_note_fast_vs_full": "fast und full sind NICHT vergleichbar: fast faehrt 24 Requests auf conc 1 und 8, full 48 auf 1/2/4/8/16. conc 8 misst in fast 331-348 t/s gegen 388 in full - dieselbe Engine, nur ein kuerzerer Lauf. Ein fast-Lauf gegen die full-Zahlen gemessen meldet auf jedem einzelnen Build 10 % Regression.",
+  "_note_fast_spread": "Die fast-Zahlen sind der MITTELWERT der beiden Kalibrierlaeufe gegen 0.2.3, nicht der beste: conc 1 = 108.47/108.62 (Streuung 0.1 %), conc 8 = 331.73/348.35 (Streuung 5.0 %). Vorher stand hier 348.35, also das Maximum - gegen ein Maximum gemessen landet bei dieser Streuung rund die Haelfte aller kuenftigen Laeufe darunter, und bei 0.95x Schwelle war der schlechtere der beiden Referenzlaeufe selbst nur 0.952x. conc 8 bleibt die wackligste Zahl des Gates; mehr Requests pro Lauf waeren das eigentliche Mittel. Gegenprobe 0.2.5: 335.88 = 0.988x des Mittelwerts."
 }

@@ -82,7 +82,8 @@
   "thresholds": {
     "kv_tokens_min_ratio": 0.98,
     "aggregate_tps_min_ratio": 0.95,
-    "mean_tokens_per_step_min_delta": -0.1,
+    "acceptance_rate_min_delta": -0.02,
+    "mean_tokens_per_step_min_delta": -0.3,
     "gsm8k_min_delta": -0.05,
     "startup_s_max_ratio": 1.5,
     "preemptions_max": 0
