@@ -126,7 +126,7 @@ if [ -n "$EXISTING" ]; then
 else
   if ! URLOUT=$(gh pr create --repo "$REPO" --head "$MIRROR" --base main --label upstream-sync --title "$TITLE" --body-file "$BODY" 2>&1); then
     echo "$URLOUT"
-    echo "::error::could not create the PR $MIRROR -> main. With the default GITHUB_TOKEN this needs the org/repo setting 'Allow GitHub Actions to create and approve pull requests'; otherwise set the SYNC_TOKEN secret (fine-grained PAT, contents + pull-requests write)."
+    echo "::error::could not create the PR $MIRROR -> main. With the default GITHUB_TOKEN this needs the org/repo setting 'Allow GitHub Actions to create and approve pull requests'; otherwise set up a GitHub App (Contents + Pull requests R/W) and add its ID/private key as the SYNC_APP_ID/SYNC_APP_PRIVATE_KEY secrets (see upstream-sync.yml's header)."
     exit 1
   fi
   echo "PR created: $URLOUT"
