@@ -15,13 +15,21 @@
 #
 # Semantic-overlap triage (does an upstream file already have a diverged sly/ or patch_*.py
 # counterpart?) runs OUTSIDE this workflow: a Hermes webhook route (homelab repo,
-# hermes-config.yaml.j2, route "upstream-sync-triage-slybase") fires on this repo's pull_request
-# events against the self-hosted, cost-free vLLM instead of a paid Anthropic API. It posts at most
-# one PR comment via GitHub REST with its own token, never pushes/merges, and never touches
-# README.md -- this fork's README is intentionally never taken from upstream (see
-# ci/upstream_sync.sh's README handling). There used to be a `triage` job here using
-# anthropics/claude-code-action@v1; removed once the Hermes route replaced it (it never activated
-# in Actions -- ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN were never set).
+# hermes-config.yaml.j2, route "upstream-sync-triage-slybase") against the self-hosted,
+# cost-free vLLM instead of a paid Anthropic API. It posts at most one PR comment via GitHub
+# REST with its own token, never pushes/merges, and never touches README.md -- this fork's
+# README is intentionally never taken from upstream (see ci/upstream_sync.sh's README
+# handling). There used to be a `triage` job here using anthropics/claude-code-action@v1;
+# removed once the Hermes route replaced it (it never activated in Actions --
+# ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN were never set).
+#
+# GitHub does NOT deliver repository webhooks for pull_request edits/creates made with a
+# GitHub App installation token (verified empirically 2026-09-18: an identical gh pr edit
+# fires a delivery under a user token but not under the SYNC_APP token this workflow normally
+# runs with) -- so the "mirror" step below ("ping the Hermes triage webhook" step) posts a
+# synthetic, HMAC-signed pull_request event to the Hermes route itself right after
+# ci/upstream_sync.sh runs, instead of relying on GitHub to relay one. Needs repo secret
+# HERMES_WEBHOOK_SECRET (same shared value as Hermes' platforms.webhook.extra.secret).
 name: upstream-sync
 
 on:
@@ -75,6 +83,7 @@ jobs:
           token: ${{ steps.app_token.outputs.token || github.token }}
 
       - name: mirror ${{ matrix.name }} and open/refresh the PR
+        id: mirror
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
@@ -88,3 +97,34 @@ jobs:
             echo "::warning::SYNC_APP_ID/SYNC_APP_PRIVATE_KEY not set -- using GITHUB_TOKEN; PRs it creates will not trigger ci.yml"
           fi
           ci/upstream_sync.sh "$NAME" "$URL"
+
+      - name: ping the Hermes triage webhook (App-token PR edits/creates never reach GitHub's own webhook delivery)
+        if: steps.mirror.outputs.pr_number != ''
+        env:
+          HERMES_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          PR_NUMBER: ${{ steps.mirror.outputs.pr_number }}
+          PR_ACTION: ${{ steps.mirror.outputs.pr_action }}
+          HEAD_REF: upstream/${{ matrix.name }}
+          REPO_FULL_NAME: ${{ github.repository }}
+        run: |
+          if [ -z "$HERMES_SECRET" ]; then
+            echo "::warning::HERMES_WEBHOOK_SECRET not set -- skipping the Hermes triage ping"
+            exit 0
+          fi
+          PAYLOAD=$(jq -n \
+            --arg action "$PR_ACTION" \
+            --arg repo "$REPO_FULL_NAME" \
+            --argjson number "$PR_NUMBER" \
+            --arg html_url "https://github.com/$REPO_FULL_NAME/pull/$PR_NUMBER" \
+            --arg head_ref "$HEAD_REF" \
+            '{action: $action, repository: {full_name: $repo},
+              pull_request: {number: $number, html_url: $html_url,
+                head: {ref: $head_ref}, base: {ref: "main"},
+                labels: [{name: "upstream-sync"}]}}')
+          SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$HERMES_SECRET" | sed 's/^.* //')
+          curl --fail --silent --show-error \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: pull_request" \
+            -H "X-Hub-Signature-256: sha256=$SIG" \
+            -d "$PAYLOAD" \
+            https://hooks.timonds.de/webhooks/upstream-sync-triage-slybase

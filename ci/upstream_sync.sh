@@ -123,6 +123,7 @@ EXISTING=$(gh pr list --repo "$REPO" --head "$MIRROR" --base main --state open -
 if [ -n "$EXISTING" ]; then
   gh pr edit "$EXISTING" --repo "$REPO" --title "$TITLE" --body-file "$BODY" >/dev/null
   echo "PR #$EXISTING refreshed: $(gh pr view "$EXISTING" --repo "$REPO" --json url --jq .url)"
+  PR_NUM=$EXISTING PR_ACTION=edited
 else
   if ! URLOUT=$(gh pr create --repo "$REPO" --head "$MIRROR" --base main --label upstream-sync --title "$TITLE" --body-file "$BODY" 2>&1); then
     echo "$URLOUT"
@@ -130,5 +131,16 @@ else
     exit 1
   fi
   echo "PR created: $URLOUT"
+  PR_NUM=${URLOUT##*/} PR_ACTION=opened
 fi
 rm -f "$BODY"
+
+# GitHub does not deliver repository webhooks for pull_request edits/creates made with a
+# GitHub App installation token (verified empirically 2026-09-18: the same gh pr edit fires a
+# webhook delivery under a user token but not under the App token this script normally runs
+# with) -- so upstream-sync.yml pings the Hermes triage webhook itself right after this script,
+# using PR_NUM/PR_ACTION below (unset/empty when step 2 exited early with nothing to sync).
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+  echo "pr_action=$PR_ACTION" >> "$GITHUB_OUTPUT"
+fi
