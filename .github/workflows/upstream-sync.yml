@@ -1,12 +1,22 @@
 # Daily mirror of the two Codeberg upstreams into origin/upstream/<name> (fast-forward only) and
 # a PR upstream/<name> -> main whenever the mirror has commits main does not. Nothing is merged
-# automatically; the PR body lists the new commits, the test-merge conflict status and the
-# changed files that are part of the image build (ci/upstream_sync.sh).
+# automatically; the PR body lists the new commits, the test-merge conflict status, the
+# ci/check_consistency.py result against that test merge, and the changed files that are part of
+# the image build (ci/upstream_sync.sh).
 #
 # Token: SYNC_TOKEN (fine-grained PAT, contents + pull-requests write) if set, else the default
 # GITHUB_TOKEN. With the default token (a) PR creation needs the org/repo setting "Allow GitHub
 # Actions to create and approve pull requests" and (b) the created PR does NOT trigger ci.yml
 # (GitHub suppresses workflow runs for events caused by GITHUB_TOKEN) -- so set SYNC_TOKEN.
+#
+# The `triage` job is a second, best-effort opinion on top of the deterministic checks above: it
+# asks Claude to look for *semantic* overlap the consistency check can't see (an upstream file
+# whose logic this fork already forked into sly/ or a patch_*.py) and propose ledger entries in
+# ci/unused_patches.txt's existing one-line style. It only runs when ANTHROPIC_API_KEY or
+# CLAUDE_CODE_OAUTH_TOKEN is set (neither is, as of writing -- add one to activate it), posts at
+# most one PR comment, and its job has no `contents` write permission -- it cannot push, edit
+# files or merge, regardless of what its own prompt asks for. Never touches README.md; this fork's
+# README is intentionally never taken from upstream (see ci/upstream_sync.sh's README handling).
 name: upstream-sync
 
 on:
@@ -54,3 +64,80 @@ jobs:
             echo "::warning::SYNC_TOKEN not set -- using GITHUB_TOKEN; PRs it creates will not trigger ci.yml"
           fi
           ci/upstream_sync.sh "$NAME" "$URL"
+
+  triage:
+    needs: sync
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stilldeadcode
+          - name: ggz14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: find the open sync PR for ${{ matrix.name }} and check for a Claude auth secret
+        id: find_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          NUM=$(gh pr list --repo "${{ github.repository }}" --head "upstream/${{ matrix.name }}" \
+                --base main --state open --json number --jq '.[0].number // empty')
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_KEY" = "true" ] || [ "$HAS_OAUTH" = "true" ]; then
+            echo "have_secret=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_secret=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: anthropics/claude-code-action@v1
+        if: ${{ steps.find_pr.outputs.number != '' && steps.find_pr.outputs.have_secret == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Read pull request #${{ steps.find_pr.outputs.number }} in this repository with
+            `gh pr view ${{ steps.find_pr.outputs.number }} --json title,body,files`. It is an
+            automated upstream-sync mirror PR; its body already lists the new commits, the
+            test-merge conflict status, the ci/check_consistency.py result against that test
+            merge, and which changed files are part of the image build -- read it as context,
+            do not repeat it.
+
+            Your job: for every file listed under "Changed files that are part of the image",
+            check with `git log`/`git show`/`git diff` (merge-base is in the PR body) whether this
+            repository already has its own diverged copy or patch touching the same
+            functionality -- for example a same-named file under sly/, or a patch_*.py that
+            targets the same upstream module/function. Flag any case where merging this PR as-is
+            would silently drop or override this fork's own optimization. If the PR body's
+            check_consistency.py section shows FAIL findings for untracked patch_*.py files,
+            propose the exact one-line ci/unused_patches.txt entry for each in the file's existing
+            style (path + one-line reason), inferring the reason from the new file's own
+            docstring/comments and this fork's config (e.g. TP=1, which sly/ module is the
+            "evolved copy" of what).
+
+            Never suggest changing README.md -- this repo's README is intentionally never taken
+            from upstream, regardless of what the PR's conflict section shows.
+
+            Post your findings as ONE comment via
+            `gh pr comment ${{ steps.find_pr.outputs.number }} --body-file <path to a file you wrote>`.
+            Do not push commits, do not edit any tracked file, do not merge or approve anything --
+            this is advisory triage for a human reviewer only, and your job token cannot write
+            repository contents even if asked.
+          claude_args: >-
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr diff:*),
+            Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git merge-base:*),
+            Bash(grep:*),Bash(find:*),Read,Grep,Glob"
+            --disallowedTools "Edit,Write,NotebookEdit,Bash(git push:*),Bash(git commit:*),Bash(gh pr merge:*),Bash(gh pr review:*)"
+            --max-turns 15
