@@ -104,11 +104,32 @@ last stdout line:
 | command | does | returns |
 | --- | --- | --- |
 | `status` | lock state, running unit, health, requests in flight | `{locked, owner, age_s, service, health, busy}` |
-| `acquire <owner> <ttl_s> [force]` | takes `/root/gpu-window.lock.d`; **refuses** while requests are running/waiting or `POST /v1/` appeared in the last minutes unless `force` | `{owner, ttl_s, previous_service}` |
-| `start <image> <service>` | stops the production unit, starts the candidate container from the live unit's arguments, double-starts on an invalidated compile cache, waits for `/health` | `{container, image, kv_tokens, startup_s, starts}` |
+| `acquire <owner> <ttl_s> [force]` | takes `/root/gpu-window.lock.d`, silences the vLLM alerts; **refuses** while requests are running/waiting or `POST /v1/` appeared in the last minutes unless `force` | `{owner, ttl_s, previous_service, silences}` |
+| `start <image> <service> [load_format]` | stops the production unit, starts the candidate container from the live unit's arguments, double-starts on an invalidated compile cache, waits for `/health` | `{container, image, kv_tokens, startup_s, starts, load_format}` |
 | `logs [n]` | candidate container log | raw text |
-| `release` | stops the candidate, starts the production unit, waits for `/health=200` | `{service, health, kv_tokens}` |
+| `release` | stops the candidate, starts the production unit, waits for `/health=200`, winds the silence down | `{service, health, kv_tokens}` |
 | `guard` | timer-driven: releases a window past its TTL | `{action, ...}` |
 
 The runner user never gets `docker` or `systemctl` rights of its own — only this script, through a
 sudoers whitelist and an SSH forced command.
+
+### Alerts during a window
+
+A window takes port 8000 down for 13–25 minutes and `VllmDown` has `for: 10m`, so every single
+acceptance run used to page. `acquire` therefore creates two Alertmanager silences — `job="vllm"`
+for `VllmDown`/`TargetDown`, and `alertname=~"Vllm.*"` for the two alerts built on `vllm:*`
+recording rules, which drop the `job` label — and `release` winds them down to `now + 300 s` so the
+firing alert can resolve quietly instead of notifying on the way out. If the production unit does
+**not** come back healthy, the silences are expired immediately: that is no longer planned
+downtime. All of it is best-effort; an unreachable Alertmanager never fails a run.
+
+### `load_format`
+
+The one engine argument the runner may set, and it is checked against a literal allowlist
+(`auto`, `safetensors`, `runai_streamer`, `fastsafetensors`) in both the forced command and the
+helper. It exists because ~109 s of every start is weight loading at ~197 MB/s against a measured
+~420 MB/s ceiling, and the multi-threaded loaders in the image are the cheapest thing to try
+against that. It changes only how weights get into memory, never what the engine computes.
+A gate run leaves it unset and thus tests exactly what production runs — pass it only for an
+experiment inside an already-open window, where the marginal cost of one more start is ~5 min
+against the window's ~15 min fixed block.
