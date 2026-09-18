@@ -45,12 +45,28 @@ fi
 BASE=$(git merge-base origin/main "$UP")
 echo "$MIRROR: $N commit(s) not in main (merge-base ${BASE:0:7})"
 
-# --- 3. test merge for the conflict list (throw-away worktree) ---
+# --- 3. test merge for the conflict list + consistency check (throw-away worktree) ---
 WT=$(mktemp -d)
 git worktree add --quiet --detach "$WT" origin/main
 CONFLICTS=""
+MERGED=1
 if ! git -C "$WT" merge --no-commit --no-ff --quiet "$UP" >/dev/null 2>&1; then
   CONFLICTS=$(git -C "$WT" diff --name-only --diff-filter=U || true)
+  # README is never taken from upstream -- the fork keeps its own. Resolve it here (only in
+  # this throwaway tree) so a lone README conflict doesn't block the consistency check below;
+  # the CONFLICTS list above still reports it to the human untouched.
+  if [ "$CONFLICTS" = "README.md" ] && git -C "$WT" checkout --ours -- README.md 2>/dev/null; then
+    git -C "$WT" add README.md
+  else
+    MERGED=0
+  fi
+fi
+CONSISTENCY=""
+if [ "$MERGED" = 1 ]; then
+  git -C "$WT" commit --quiet --no-verify -m "throwaway test merge" || MERGED=0
+fi
+if [ "$MERGED" = 1 ]; then
+  CONSISTENCY=$(cd "$WT" && python3 ci/check_consistency.py --base origin/main 2>&1 || true)
 fi
 git -C "$WT" merge --abort >/dev/null 2>&1 || true
 git worktree remove --force "$WT"
@@ -71,6 +87,17 @@ BODY=$(mktemp)
     echo "### Test merge into main: CONFLICTS"; echo '```'; echo "$CONFLICTS"; echo '```'
   else
     echo "### Test merge into main: clean (no textual conflicts -- still review the overlaps below)"
+  fi
+  echo
+  if [ "$MERGED" = 1 ]; then
+    if echo "$CONSISTENCY" | grep -q "^FAIL:"; then
+      echo "### ci/check_consistency.py against the test merge: FAIL"
+    else
+      echo "### ci/check_consistency.py against the test merge: OK"
+    fi
+    echo '```'; echo "$CONSISTENCY"; echo '```'
+  else
+    echo "### ci/check_consistency.py: skipped (unresolved conflicts beyond README.md)"
   fi
   echo
   if [ -n "$IMAGE_FILES" ]; then
