@@ -76,6 +76,14 @@ CHANGED=$(git diff --name-only "$BASE" "$UP")
 IMAGE_RE='^(Dockerfile|VERSION|_patchlib\.py|install_radiance_hooks\.py|patch_[^/]*\.py|radiance_[^/]*\.(py|pth|sh)|prune_rocm\.sh|sly/.*|fp8-configs/.*|moe-configs/.*|dflash2/.*|[^/]*\.jinja)$'
 IMAGE_FILES=$(echo "$CHANGED" | grep -E "$IMAGE_RE" || true)
 
+# This fork's own current image-layer files (same IMAGE_RE, against origin/main instead of
+# the diff), listed once here so the Hermes triage route (see upstream-sync.yml) can match a
+# changed upstream file against a differently-named fork equivalent (e.g. a sly/ module or a
+# patch_*.py) by name, instead of having to improvise its own directory-listing tool calls --
+# that improvisation is what made it read whole directory trees' worth of file contents and
+# never finish (observed 2026-09-18, PR #12: 3 context compactions, no comment after 57min).
+FORK_IMAGE_FILES=$(git ls-tree -r --name-only origin/main | grep -E "$IMAGE_RE" || true)
+
 # --- 5. PR body ---
 BODY=$(mktemp)
 {
@@ -102,6 +110,9 @@ BODY=$(mktemp)
   echo
   if [ -n "$IMAGE_FILES" ]; then
     echo "### Changed files that are part of the image (Dockerfile loop / COPY / sly)"; echo '```'; echo "$IMAGE_FILES"; echo '```'
+    echo
+    echo "### This fork's own current image-layer files (sly/, patch_*.py, radiance_*.*, ...) -- for the semantic-overlap check above"
+    echo '```'; echo "$FORK_IMAGE_FILES"; echo '```'
   else
     echo "### No changed file is part of the image build"
   fi
