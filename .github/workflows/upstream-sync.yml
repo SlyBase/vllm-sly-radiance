@@ -4,10 +4,14 @@
 # ci/check_consistency.py result against that test merge, and the changed files that are part of
 # the image build (ci/upstream_sync.sh).
 #
-# Token: SYNC_TOKEN (fine-grained PAT, contents + pull-requests write) if set, else the default
-# GITHUB_TOKEN. With the default token (a) PR creation needs the org/repo setting "Allow GitHub
-# Actions to create and approve pull requests" and (b) the created PR does NOT trigger ci.yml
-# (GitHub suppresses workflow runs for events caused by GITHUB_TOKEN) -- so set SYNC_TOKEN.
+# Token: a GitHub App installation token if secrets SYNC_APP_ID + SYNC_APP_PRIVATE_KEY are both
+# set, else the default GITHUB_TOKEN. With the default token (a) PR creation needs the org/repo
+# setting "Allow GitHub Actions to create and approve pull requests" and (b) the created PR does
+# NOT trigger ci.yml (GitHub suppresses workflow runs for events caused by GITHUB_TOKEN) -- so set
+# up the App. One-time, no PAT to ever rotate or expire early: GitHub -> Settings -> Developer
+# settings -> GitHub Apps -> New GitHub App; repository permissions Contents R/W + Pull requests
+# R/W; no webhook needed; install it on this repo; add its App ID as secret SYNC_APP_ID and the
+# generated private key's .pem contents as secret SYNC_APP_PRIVATE_KEY.
 #
 # The `triage` job is a second, best-effort opinion on top of the deterministic checks above: it
 # asks Claude to look for *semantic* overlap the consistency check can't see (an upstream file
@@ -45,23 +49,42 @@ jobs:
           - name: ggz14
             url: https://codeberg.org/ggz14/radiance-vllm-mxfp4.git
     steps:
+      - name: check for a GitHub App credential
+        id: app_check
+        env:
+          HAS_APP_ID: ${{ secrets.SYNC_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_APP_ID" = "true" ] && [ "$HAS_APP_KEY" = "true" ]; then
+            echo "have_app=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_app=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/create-github-app-token@v2
+        id: app_token
+        if: ${{ steps.app_check.outputs.have_app == 'true' }}
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          token: ${{ secrets.SYNC_TOKEN || github.token }}
+          token: ${{ steps.app_token.outputs.token || github.token }}
 
       - name: mirror ${{ matrix.name }} and open/refresh the PR
         env:
-          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
-          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+          HAVE_APP_TOKEN: ${{ steps.app_token.outputs.token != '' }}
           NAME: ${{ matrix.name }}
           URL: ${{ matrix.url }}
         run: |
           git config user.name "upstream-sync[bot]"
           git config user.email "upstream-sync@users.noreply.github.com"
-          if [ "$HAS_SYNC_TOKEN" != "true" ]; then
-            echo "::warning::SYNC_TOKEN not set -- using GITHUB_TOKEN; PRs it creates will not trigger ci.yml"
+          if [ "$HAVE_APP_TOKEN" != "true" ]; then
+            echo "::warning::SYNC_APP_ID/SYNC_APP_PRIVATE_KEY not set -- using GITHUB_TOKEN; PRs it creates will not trigger ci.yml"
           fi
           ci/upstream_sync.sh "$NAME" "$URL"
 
