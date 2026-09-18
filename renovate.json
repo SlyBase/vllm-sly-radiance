@@ -128,7 +128,7 @@
       "allowedVersions": "<7.0.0"
     },
     {
-      "description": "GitHub Actions in one PR",
+      "description": "GitHub Actions in one PR -- this also covers the pinned runner images in `runs-on:` (github-runners datasource), which is why they are pinned to `ubuntu-24.04` instead of riding `ubuntu-latest`: a runner image change is a toolchain change and belongs in a PR that CI can fail on, not in a label that flips on a date",
       "matchManagers": [
         "github-actions"
       ],

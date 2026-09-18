@@ -29,7 +29,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -56,7 +56,7 @@ jobs:
         run: docker buildx build --check .
 
   patch-dryrun:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -89,7 +89,7 @@ jobs:
           if-no-files-found: ignore
 
   consistency:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,7 +111,7 @@ jobs:
     # aggregate status for the branch protection: one required check instead of three
     needs: [lint, patch-dryrun, consistency]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: all jobs succeeded?
         env:
