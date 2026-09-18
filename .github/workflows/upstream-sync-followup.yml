@@ -1,0 +1,45 @@
+name: upstream-sync-followup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  followup:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'upstream-sync') && startsWith(github.event.pull_request.head.ref, 'upstream/')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check for a GitHub App credential
+        id: app_check
+        env:
+          HAS_APP_ID: ${{ secrets.SYNC_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_APP_ID" = "true" ] && [ "$HAS_APP_KEY" = "true" ]; then
+            echo "have_app=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_app=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/create-github-app-token@v2
+        id: app_token
+        if: ${{ steps.app_check.outputs.have_app == 'true' }}
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token || github.token }}
+      - name: apply the Hermes-suggested patch follow-up, if any
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          ci/apply_patch_followup.sh ${{ github.event.pull_request.number }}
