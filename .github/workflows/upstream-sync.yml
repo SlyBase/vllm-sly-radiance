@@ -1,8 +1,8 @@
 # Daily mirror of the two Codeberg upstreams into origin/upstream/<name> (fast-forward only) and
 # a PR upstream/<name> -> main whenever the mirror has commits main does not. Nothing is merged
 # automatically; the PR body lists the new commits, the test-merge conflict status, the
-# ci/check_consistency.py result against that test merge, and the changed files that are part of
-# the image build (ci/upstream_sync.sh).
+# ci/check_consistency.py result against that test merge, the changed files that are part of the
+# image build and their size-capped per-file diffs (ci/upstream_sync.sh).
 #
 # Token: a GitHub App installation token if secrets SYNC_APP_ID + SYNC_APP_PRIVATE_KEY are both
 # set, else the default GITHUB_TOKEN. With the default token (a) PR creation needs the org/repo
@@ -111,14 +111,17 @@ jobs:
             echo "::warning::HERMES_WEBHOOK_SECRET not set -- skipping the Hermes triage ping"
             exit 0
           fi
+          # nonce: unique per run and attempt, so the triage can append it to its GitHub API URLs
+          # (?nonce=...) and get a fresh response instead of a stale web_extract cache entry.
           PAYLOAD=$(jq -n \
             --arg action "$PR_ACTION" \
             --arg repo "$REPO_FULL_NAME" \
             --argjson number "$PR_NUMBER" \
             --arg html_url "https://github.com/$REPO_FULL_NAME/pull/$PR_NUMBER" \
             --arg head_ref "$HEAD_REF" \
+            --arg nonce "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             '{action: $action, repository: {full_name: $repo},
-              pull_request: {number: $number, html_url: $html_url,
+              pull_request: {number: $number, html_url: $html_url, nonce: $nonce,
                 head: {ref: $head_ref}, base: {ref: "main"},
                 labels: [{name: "upstream-sync"}]}}')
           SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$HERMES_SECRET" | sed 's/^.* //')

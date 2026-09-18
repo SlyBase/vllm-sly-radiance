@@ -13,6 +13,10 @@ NAME=$1 URL=$2
 MIRROR="upstream/$NAME"
 REPO=${GH_REPO:-SlyBase/vllm-sly-radiance}
 MAX_COMMITS=${MAX_COMMITS:-60}
+# Whole PR body, chars. The Hermes triage reads it through web_extract on `pulls/N`, whose JSON
+# is the body plus ~16.5k of API metadata and which the backend cuts at 50k chars.
+BODY_BUDGET=${BODY_BUDGET:-28000}
+PER_FILE_CAP=${PER_FILE_CAP:-6000}   # max bytes of one file's diff in the PR body
 
 git remote remove up 2>/dev/null || true
 git remote add up "$URL"
@@ -84,6 +88,50 @@ IMAGE_FILES=$(echo "$CHANGED" | grep -E "$IMAGE_RE" || true)
 # never finish (observed 2026-09-18, PR #12: 3 context compactions, no comment after 57min).
 FORK_IMAGE_FILES=$(git ls-tree -r --name-only origin/main | grep -E "$IMAGE_RE" || true)
 
+# Per-file diffs ($BASE..$UP, the same view as CHANGED) of IMAGE_FILES, printed as markdown.
+# The Hermes triage route has only web_search/web_extract, and `pulls/N/files` was cut at
+# web_extract's 50k chars inside its first entry (a huge Dockerfile.ggz14 diff; observed
+# 2026-09-18, PR #12), so no image-file diff ever reached the model. $1 = byte budget for all
+# diffs together, shared out smallest-first so small diffs stay whole; each diff is cut at a
+# line boundary and says how much was dropped.
+emit_image_diffs() {
+  local budget=$1 d n=0 left i j f size share cap kept used
+  d=$(mktemp -d)
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    n=$((n + 1))
+    printf '%s' "$f" > "$d/$n.name"
+    git diff --no-color --no-ext-diff "$BASE" "$UP" -- "$f" > "$d/$n.diff"
+    wc -c < "$d/$n.diff" | tr -d ' ' > "$d/$n.size"
+  done <<< "$IMAGE_FILES"
+  left=$n
+  for i in $(for j in $(seq 1 "$n"); do echo "$(cat "$d/$j.size") $j"; done | sort -n | cut -d' ' -f2); do
+    size=$(cat "$d/$i.size")
+    share=$((budget / left))
+    cap=$((share < PER_FILE_CAP ? share : PER_FILE_CAP))
+    used=$((size < cap ? size : cap))
+    echo "$cap" > "$d/$i.cap"
+    budget=$((budget - used))
+    left=$((left - 1))
+  done
+  for i in $(seq 1 "$n"); do
+    size=$(cat "$d/$i.size")
+    cap=$(cat "$d/$i.cap")
+    echo "#### \`$(cat "$d/$i.name")\`"
+    echo '````diff'
+    if [ "$size" -gt "$cap" ]; then
+      head -c "$cap" "$d/$i.diff" | sed '$d' > "$d/$i.cut"
+      kept=$(wc -c < "$d/$i.cut" | tr -d ' ')
+      cat "$d/$i.cut"
+      echo "... [truncated $((size - kept)) more bytes of this file's diff]"
+    else
+      cat "$d/$i.diff"
+    fi
+    echo '````'
+  done
+  rm -rf "$d"
+}
+
 # --- 5. PR body ---
 BODY=$(mktemp)
 {
@@ -119,10 +167,26 @@ BODY=$(mktemp)
   echo
   echo "### Commits (newest first, max $MAX_COMMITS)"
   git log --format='- `%h` %s (%ad)' --date=short -n "$MAX_COMMITS" "origin/main..$UP"
-  [ "$N" -gt "$MAX_COMMITS" ] && echo "- … $((N - MAX_COMMITS)) more"
+  if [ "$N" -gt "$MAX_COMMITS" ]; then echo "- … $((N - MAX_COMMITS)) more"; fi
+} > "$BODY"
+# Last, so that anything cutting the body from the end (web_extract) takes diff text, not the
+# sections above; sized from what is already in the body so it never exceeds BODY_BUDGET.
+BODY_SIZE=$(wc -c < "$BODY" | tr -d ' ')
+DIFF_BUDGET=$((BODY_BUDGET - BODY_SIZE - 2000))
+{
+  if [ -n "$IMAGE_FILES" ]; then
+    echo
+    echo "### Diffs of the changed image files (merge-base..upstream head, size-capped)"
+    if [ "$DIFF_BUDGET" -ge 1500 ]; then
+      echo "What upstream changed per file (\`-\` = merge-base, \`+\` = upstream head); a \`... [truncated N more bytes ...]\` line marks a diff cut to fit the PR body budget."
+      emit_image_diffs "$DIFF_BUDGET"
+    else
+      echo "(omitted: the rest of this PR body already uses the $BODY_BUDGET-char budget)"
+    fi
+  fi
   echo
   echo "<sub>upstream-sync.yml, $(date -u +%Y-%m-%dT%H:%MZ)</sub>"
-} > "$BODY"
+} >> "$BODY"
 
 # --- 6. open or refresh the PR ---
 if [ "$DRY_RUN" = 1 ]; then
