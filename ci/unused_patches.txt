@@ -32,3 +32,6 @@ patch_topk_composite.py   composite small-k top-k/top-p (radiance_topk.py not co
 patch_topk_triton_rows.py lower Triton top-k row threshold (in ggz14's loop); candidate for a follow-up A/B
 patch_tp3_pad.py          TP=3 via dummy heads (radiance_tp3pad.py); TP=1 here
 patch_verify_head.py      verify-head gate for radiance_verifyhead.py (not copied); tied to the paroquant drafter
+# --- carried from upstream/ggz14 (integrated 2026-09-19, VERSION 0.2.6): in the tree, NOT in our loop.
+patch_ar_qbits.py         all-reduce wire width (RADIANCE_AR_QBITS, default 6 = shipped kernel, 5/4 need libr4d rx8+); TP=1 here, no all-reduce
+patch_gdn_lazy.py         lazy GDN state snapshots (RADIANCE_GDN_LAZY, libr4d rx10); ggz14 itself defaults it off (corrupts multi-turn chat)
