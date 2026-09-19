@@ -11,7 +11,9 @@
 # (running/waiting requests or recent POST /v1/ lines) unless it is forced.
 #
 # Triggers
-#   - build.yml finished successfully on main or a tag  -> queued automatically, waits for approval
+#   - build.yml finished successfully on main           -> queued automatically, waits for approval
+#     (not for a v* tag: a tag only publishes to ghcr and points at a commit that main already
+#     gated; an old tag can even predate ci/accept/ and would fail at the checkout)
 #   - workflow_dispatch                                 -> choose image, profile, mode by hand
 #
 # Mode: `fast` (~25 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
@@ -61,7 +63,8 @@ jobs:
     # Cheap, unprotected: decide what to test. No GPU, no runner from the homelab.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.meta.outputs.image }}
