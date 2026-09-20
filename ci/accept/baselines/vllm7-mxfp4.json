@@ -1,8 +1,8 @@
 {
-  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144). Moved forward on 2026-09-18 with the 0.2.5 rollout: kv_tokens, startup_s, mean_tokens_per_step, acceptance_rate and modes.fast are the MEAN of the two 0.2.5 gate runs (35280786239 and 35316025820), both through the gate's own path. `full` and `gsm8k` are still the 0.2.2/0.2.3 numbers - `fast` does not measure them, and 0.2.5 changes only the load-time allocator scope. Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'.",
+  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144). Moved forward on 2026-09-18 with the 0.2.5 rollout: kv_tokens, startup_s, mean_tokens_per_step, acceptance_rate and modes.fast are the MEAN of the two 0.2.5 gate runs (35280786239 and 35316025820), both through the gate's own path. `full` and `gsm8k` are still the 0.2.2/0.2.3 numbers - `fast` does not measure them, and 0.2.5 changes only the load-time allocator scope. Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'. kv_tokens alone was corrected on 2026-09-20 from 385934 to 316790: the live unit changed on 2026-09-19 23:19 (--max-num-batched-tokens 2048 -> 8192, chat template dropped) and the larger activation budget costs KV pool. The gate reads the live unit, so it now measures 315602 for 0.2.7 (run 35509352149) against 316790 for 0.2.6 on the same unit (three production starts on 2026-09-20); the 385934 came from the old unit. Nothing else in this file was re-measured.",
   "image": "vllm-sly-radiance:0.2.5-rocm10.0",
   "measured": "2026-09-18",
-  "kv_tokens": 385934,
+  "kv_tokens": 316790,
   "startup_s": 344.2,
   "mean_tokens_per_step": 8.2228,
   "acceptance_rate": 0.4741,
