@@ -42,6 +42,32 @@ python3 ci/accept/accept.py \
 
 `--dry-run` prints the `gpu-window` calls without running anything.
 
+## After the gate: release
+
+A release is an annotated tag `v<VERSION>` on a commit main already carries; `build.yml` publishes every
+`v*` tag to ghcr.io. `ci/release_tag.sh` cuts it, and there are two ways in:
+
+| gate | what happens | who |
+| --- | --- | --- |
+| **green** | the `release` job of `accept.yml` tags the gated commit and the tag starts `build` | nobody, it just runs through |
+| **red** | nothing is released; the report is on the run page | you decide |
+| red, but the image is good anyway | Actions → **release** → *Run workflow* (`reason` is mandatory and goes into the tag message) | a human with write access |
+
+```bash
+gh workflow run release.yml -f reason="kv baseline stale: unit moved to --max-num-batched-tokens 8192, all else green"
+# optional: -f version=0.2.7 -f sha=<commit>   (default: VERSION and the tip of main)
+```
+
+Only the main build of `VERSION` (or a by-hand run of the production profile with the default image on
+main) releases automatically; calibration runs (`record_baseline`) and other profiles never do. The tag
+is pushed with the sync App's token, because a tag pushed with `GITHUB_TOKEN` would not start `build`. The
+script refuses a commit that is not on main, a VERSION that differs from the tag, and moving an existing
+tag; the same tag on the same commit is a no-op, so re-running is safe.
+
+The manual path is a dispatch and not an environment approval on the red gate on purpose: an environment
+that does not exist yet, or has lost its required reviewers, runs without asking, i.e. the release would
+fail open.
+
 ## Modes
 
 | | `fast` (~25 min) | `full` (~70 min) |
@@ -83,6 +109,7 @@ profiles/vllm5-int4.json    the INT4 fallback service (same LXC, disabled unit)
 baselines/*.json            the numbers of the image currently in production
 configs/{fast,full}.json    BetterBench configs (full == betterbench config/default.json)
 accept.py                   orchestrator: window, checks, verdict, report.json + report.md
+../release_tag.sh           cuts the v<VERSION> tag (used by accept.yml's release job and release.yml)
 ```
 
 Baselines carry mode-independent values (`kv_tokens`, `gsm8k`, `mean_tokens_per_step`) and
