@@ -1,0 +1,79 @@
+# Manual release: cut the v<VERSION> tag without a green acceptance gate.
+#
+# accept.yml tags a commit by itself when its gate is green. When the gate is red (or was never run for
+# that commit) and a human decides that the image is good anyway -- a stale baseline, a check that does
+# not apply to this change -- this is the way to release regardless: Actions -> release -> Run workflow.
+# The reason is mandatory and lands in the tag message, so the history says who released what and why.
+#
+# Deliberately a dispatch and not an environment approval on a red gate: an environment that does not
+# exist yet (or loses its protection rules) runs without asking, and a release that fails open is worse
+# than one that needs a click. Running this workflow needs write access to the repository.
+#
+# The tag is pushed with the sync App's token so that build.yml (push of a v* tag) starts and publishes
+# the image to ghcr.io; a push with the default token would not trigger it.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "why this is released without a green acceptance gate (goes into the tag message)"
+        type: string
+        required: true
+      version:
+        description: "VERSION to release (empty = VERSION at the commit below)"
+        type: string
+        default: ""
+      sha:
+        description: "commit to tag (empty = the tip of main)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    # Only from main: a branch must not be able to run its own copy of the script with the App token.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
+
+      - name: tag
+        env:
+          REASON: ${{ inputs.reason }}
+          VERSION_INPUT: ${{ inputs.version }}
+          SHA_INPUT: ${{ inputs.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          SHA=${SHA_INPUT:-$(git rev-parse HEAD)}
+          VER=${VERSION_INPUT:-$(git show "${SHA}:VERSION" | tr -d '[:space:]')}
+          ci/release_tag.sh "$VER" "$SHA" \
+            "released manually by ${ACTOR} without a green acceptance gate: ${REASON}" "$RUN_URL"
+          {
+            echo "### Released v${VER} without a green gate"
+            echo ""
+            echo "- commit: \`${SHA}\`"
+            echo "- by: ${ACTOR}"
+            echo "- reason: ${REASON}"
+            echo ""
+            echo "The tag starts **build**, which publishes the image to ghcr.io."
+          } >> "$GITHUB_STEP_SUMMARY"

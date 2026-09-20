@@ -19,6 +19,12 @@
 # Mode: `fast` (~25 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
 # for every build; `full` (~70 min: the whole conc sweep plus GSM8K) is selected automatically
 # when the major or minor part of VERSION changed, i.e. for a release, and can be forced by hand.
+#
+# After the gate
+#   green  -> the `release` job tags the gated commit v<VERSION> by itself (build.yml then publishes
+#             every v* tag to ghcr.io); nothing to click
+#   red    -> nothing is released. If a human decides the image is good anyway, release.yml
+#             (Actions -> release -> Run workflow, reason required) cuts the same tag by hand.
 name: accept
 
 on:
@@ -177,3 +183,49 @@ jobs:
       - name: baseline diff
         if: always() && inputs.record_baseline
         run: git --no-pager diff -- ci/accept/baselines/ || true
+
+  release:
+    # A green gate is the release: an annotated tag v<VERSION> on the commit that was gated. Only for
+    # what the gate is about -- the main build of VERSION, or a by-hand run of the production profile
+    # with the default image on main; never a calibration run (record_baseline) or another profile.
+    # `needs` makes this job skip when the gate is red, cancelled or was skipped.
+    needs: [plan, gate]
+    if: >-
+      github.event_name == 'workflow_run' ||
+      (github.ref == 'refs/heads/main' && inputs.image == '' && inputs.profile == 'vllm7-mxfp4' &&
+       !inputs.record_baseline)
+    runs-on: ubuntu-24.04
+    steps:
+      # The App token, not GITHUB_TOKEN: a tag pushed with the latter does not start build.yml.
+      - uses: actions/create-github-app-token@v2
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
+
+      - name: tag the gated commit
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ci/release_tag.sh "$VERSION" "$SHA" \
+            "acceptance gate passed: ${IMAGE}, profile ${PROFILE}, mode ${MODE}" "$RUN_URL"
+          {
+            echo "### Released v${VERSION}"
+            echo ""
+            echo "The gate was green, so \`v${VERSION}\` was tagged on \`${SHA}\`;"
+            echo "the tag starts **build**, which publishes the image to ghcr.io."
+          } >> "$GITHUB_STEP_SUMMARY"
