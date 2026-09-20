@@ -107,6 +107,12 @@ tuned launch takes the drafter's real call during the DFlash CUDA-graph capture.
 matters: the first version of the gate declined the drafter's call (it is `causal=False`) and everything else looked
 fine. `drafter attn tune fell back` (an exception in the tuned path) is a forbidden pattern.
 
+The prompt-lookup override of the DFlash draft (0.2.9, `sly/radiance_lookup_draft.py`) is guarded the same way:
+`[radiance] lookup draft: installed` is required on both profiles (it is logged at start by every process that
+hooks the V2 runner's DFlash2 speculator, so a vLLM that changed under it fails the gate instead of silently
+losing the feature), and `lookup draft: off after an error` / `not hooked` are forbidden. The `active` line is
+logged at the first real decode step and is not required: the gate's smoke requests are short.
+
 ## Files
 
 ```

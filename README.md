@@ -280,6 +280,66 @@ not better, outside it. `dflash_config.swa_window_size` 8192 (a config copy of t
 weights) lowers the accepted tokens/step against window 2048 by 25–43 % for generation and 24–28 % for
 summarising at 8k / 32k / 99k; copying is mixed (+6 % at 33k, −19 % at 99k). The window stays 2048.
 
+### Prompt lookup on top of the DFlash draft (0.2.9)
+
+What is left of the long-context TG decline after the two attention tunes is the drafter's acceptance: DFlash2
+attends to the last 2048 tokens only, so text that repeats something further back — an edit's `old_string`, a
+quoted file, a re-emitted block — is a copy the drafter cannot see. Single stream, greedy, tokens/step of the
+running image: verbatim copy of the first 30 lines of the context 7.3 at 1k of context, 3.6 / 4.4 / 3.2 at 8k /
+32k / 99k (the source has left the window), against 4.4–3.9 for free generation, which does not care.
+
+`sly/radiance_lookup_draft.py` (`RADIANCE_LOOKUP_DRAFT`, default on) lets a suffix n-gram lookup over the *whole*
+context replace the DFlash draft for a step, when it is very likely to win. It hooks the V2 model runner's DFlash2
+speculator (the repo's older n-gram / dynamic-draft hooks attach to the V1 MTP proposer and are inert with DFlash2):
+
+- **Scan.** One kernel per step looks in `req_states.all_token_ids` (vLLM keeps it in UVA host memory; 72 µs at 99k
+  of context for one request, bounded by the KV pool at ~0.25 ms for any batch) for the longest earlier occurrence
+  (up to 24 tokens, most recent on a tie) of the current suffix — only occurrences whose continuation starts more
+  than the drafter's window (2048, from its config) back. A source inside the window is one the drafter sees,
+  and it is better at it: without this rule lookup cost 5–8 % on edits at 1k of context.
+- **Policy** (`ENTER` 8, `STAY` 3, `HOT` 3). Enter lookup mode on a match of ≥ ENTER tokens; stay in it while the
+  last lookup step accepted ≥ HOT draft tokens and a match of ≥ STAY exists; otherwise the DFlash draft stays
+  exactly as the graph wrote it. "Any match ≥ 3" loses 1–17 % on free generation (short matches rarely
+  continue), simulated on recorded traces and the reason for the entry threshold.
+- **Lossless.** The step verifies 1 + 7 rows as before. In lookup mode the tokens are the continuation of the match
+  and the cached draft distribution `draft_logits` (the "probabilistic" draft method's q) is rewritten to a point
+  mass on them, i.e. a deterministic draft: accept with p(token), on rejection resample from p without it.
+  Any exception turns the override off for the process (`lookup draft: off after an error`).
+
+Results (R9700, production arguments, image 0.2.8 with the file bind-mounted, one server, the override switched
+by a file between runs of the same prompt — off, on, off — so the only difference is the override; 200 tokens):
+
+| context | far copy (30 lines) | edit (30 lines, `self`→`this`) | JSON list of names | generation | summary |
+|---|---|---|---|---|---|
+| 1k | 7.31 → 7.31 | 6.23 → 6.23 | 5.60 → 5.60 | 4.47 → 4.47 | 3.43 → 3.43 |
+| 8k | 3.64 → **6.98** (TG +89 %) | 3.67 → **5.83** (+57 %) | 4.98 → 4.98 | 4.44 → 4.44 | 3.62 → 3.62 |
+| 32k | 4.42 → **7.02** (+61 %) | 4.00 → **6.51** (+61 %) | 3.60 → 3.51 (−3 %) | 4.44 → 4.26 (−5 %) | 3.37 → 3.37 |
+| 99k | 3.24 → **7.12** (+116 %) | 3.25 → **6.75** (+105 %) | 4.92 → 4.72 (−3 %) | 3.91 → 3.91 | 2.80 → 2.80 |
+
+(accepted tokens/step, mean of two corpus slices; the step time is 38.4 / 39.1 / 40.5 / 44.1 ms with and without the
+override, unchanged within noise). A lookup step accepts 6.6–6.9 of 7 draft tokens. Where the override is not taken (generation, summary) the
+tokens are identical to the run without it; the copy and edit generations are bit-identical to it in every case.
+The few differences that exist (JSON list, one generation) sit at positions where the target's own distribution is
+flat (p(top1) 0.19–0.68, top-2 gap 0.13–0.94 nat) and appear between two runs *without* the override as well
+(verify-batch composition, the same ulp noise as across concurrency levels).
+
+Lossless checks: the V2 rejection sampler with the point-mass distribution against the target distribution
+(`sly/bench_lookup_draft.py --rejection`, 200k trials, drafts accepted 28 %, three token positions: max |z| 2.5, the
+same as vLLM's own deterministic-draft path; a control with the point mass on the wrong tokens is off by |z| > 700);
+temperature 1.0, top_p 1.0, 320 samples per mode over 8 concurrent requests at 8k of context asking for a far
+copy: common-prefix length with the greedy copy 42.6 → 41.6 tokens, per-token deviation rate 1.37 % → 1.44 %
+(z = +0.5, Mann-Whitney z = −0.07), accepted tokens/step 3.08 → 6.13. Eight concurrent requests on a 33k context
+(four copies, two edits, one generation, one summary), greedy: accepted tokens/step of the batch 3.84 → 5.33,
+6 of 8 generations identical to lookup-off (the same 6 of 8 between two runs without the override).
+BetterBench fast config (conc 1 / 8, sampling at temperature 0.7 / top_p 0.95 / top_k 20; contexts under 2k tokens, so
+the override is idle there), override off / on / off: conc 1 108.2 / 110.1 / 107.0 tok/s, conc 8 384.5 / 370.5 / 372.7,
+24/24 requests each, accepted tokens/step 4.281 / 4.281 / 4.226 — inside the run-to-run spread of the two off runs;
+GSM8K (200 items, greedy, chat) 0.830 off, 0.835 on (± 0.026).
+
+Not done: the drafter is unchanged, so the loss of free generation with context (4.6 → 3.9 tokens/step from 1k to
+99k) stays; this only helps where the text repeats. Knobs: see *Environment knobs*; `RADIANCE_LOOKUP_SWITCH=<file>`
+(override only while the file exists) is the A/B tool used above.
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -357,6 +417,10 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_ATTN_DECODE_3D` | `1` | – | Verify batches take the 3D split-KV kernel above 512 tokens when the plan's own launch is small enough (stock sends 7–8 sequences down the 2D kernel). `0` = aiter's 2D/3D choice. |
 | `RADIANCE_ATTN_DRAFTER_TUNE` | `1` | – | 0.2.8: split-KV launch for the DFlash2 drafter's sliding-window attention (fp8 KV, head 128, GQA 4, 2–16 queries per sequence; `sly/radiance_attn_drafter.py`, see *Drafter attention* above). `0` = vLLM's launch (A/B control; baked in at CUDA-graph capture, so it needs a restart). |
 | `RADIANCE_ATTN_DRAFTER_SEGMENTS` | `auto` | – | `auto` = 64 splits with one sequence, 32 with two or three, 16 beyond; `N` (a power of two) forces the split count. |
+| `RADIANCE_LOOKUP_DRAFT` | `1` | – | 0.2.9: prompt-lookup override of the DFlash2 draft (`sly/radiance_lookup_draft.py`, see *Prompt lookup* above): a suffix n-gram match over the whole context replaces the DFlash draft when it is very likely to win. `0` = the DFlash draft as the graph writes it (A/B control; the hook is not installed, so it needs a restart). |
+| `RADIANCE_LOOKUP_ENTER` / `_STAY` / `_HOT` | `8` / `3` / `3` | – | Enter lookup mode on a match of ≥ ENTER tokens; stay in it while the last lookup step accepted ≥ HOT draft tokens and a match of ≥ STAY exists. "Any match ≥ 3" (ENTER 3) loses 1–17 % on free generation. |
+| `RADIANCE_LOOKUP_MIN_DIST` | `auto` | – | Only sources whose continuation starts more than this many tokens back count; `auto` = the drafter's sliding window from its config (2048). `0` = any (costs 5–8 % on edits inside the drafter's window). |
+| `RADIANCE_LOOKUP_SWITCH` / `_STATS` | unset / `0` | – | Debug: the override runs only while the file `SWITCH` exists (A/B inside one process without a restart); `STATS=N` logs the lookup share and accepted tokens per lookup step every N draft steps. |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
 `RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
