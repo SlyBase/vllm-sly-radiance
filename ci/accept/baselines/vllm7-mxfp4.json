@@ -1,17 +1,17 @@
 {
-  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144, --max-num-batched-tokens 2048). Moved forward on 2026-09-20 with the 0.2.8 rollout: kv_tokens, startup_s, mean_tokens_per_step, acceptance_rate and modes.fast are the MEAN of the 0.2.7 (35517419492) and 0.2.8 (35529865683) gate runs, both through the gate's own path with the 2048 unit (the two differ by the drafter attention tune only). `full` and `gsm8k` are still the 0.2.2/0.2.3 numbers - `fast` does not measure them (GSM8K measured 0.830-0.850 on 0.2.7/0.2.8 A/B runs, inside the noise of 0.835). Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'.",
-  "image": "vllm-sly-radiance:0.2.8-rocm10.0",
+  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144, --max-num-batched-tokens 2048). Moved forward on 2026-09-20 with the 0.2.9 rollout: kv_tokens, startup_s, mean_tokens_per_step, acceptance_rate and modes.fast are the MEAN of the 0.2.8 (35529865683) and 0.2.9 (35538890085) gate runs, both through the gate's own path with the 2048 unit (the two differ by the prompt-lookup override, which is idle at BetterBench's context lengths). `full` and `gsm8k` are still the 0.2.2/0.2.3 numbers - `fast` does not measure them (GSM8K measured 0.830-0.850 on 0.2.7-0.2.9 A/B runs, inside the noise of 0.835). Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'.",
+  "image": "vllm-sly-radiance:0.2.9-rocm10.0",
   "measured": "2026-09-20",
   "kv_tokens": 384316,
-  "startup_s": 258.6,
-  "mean_tokens_per_step": 8.3291,
-  "acceptance_rate": 0.4748,
+  "startup_s": 266.2,
+  "mean_tokens_per_step": 8.3679,
+  "acceptance_rate": 0.483,
   "gsm8k": 0.835,
   "modes": {
     "fast": {
       "aggregate_tps": {
-        "1": 110.89,
-        "8": 354.58
+        "1": 111.31,
+        "8": 361.65
       }
     },
     "full": {
@@ -25,11 +25,11 @@
     }
   },
   "recorded": {
-    "image": "vllm-sly-radiance:0.2.8-rocm10.0",
-    "at": "2026-09-20 19:13:02Z",
+    "image": "vllm-sly-radiance:0.2.9-rocm10.0",
+    "at": "2026-09-20 22:08:40Z",
     "mode": "fast"
   },
   "_note_fast_vs_full": "fast und full sind NICHT vergleichbar: fast faehrt 24 Requests auf conc 1 und 8, full 48 auf 1/2/4/8/16. conc 8 misst in fast 331-352 t/s gegen 388 in full - dieselbe Engine, nur ein kuerzerer Lauf. Ein fast-Lauf gegen die full-Zahlen gemessen meldet auf jedem einzelnen Build 10 % Regression.",
-  "_note_fast_spread": "Alle fast-Zahlen sind MITTELWERTE zweier Laeufe, nie der beste. Streuung der beiden Laeufe (0.2.7 / 0.2.8): conc 1 = 110.45/111.33 (0.8 %), conc 8 = 346.69/362.46 (4.5 %), tokens/step = 8.2805/8.3777 (1.2 %), startup_s = 245.9/271.2 (10 %). conc 8 bleibt die wackligste Zahl des Gates; mehr Requests pro Lauf waeren das eigentliche Mittel, nicht eine weichere Schwelle.",
+  "_note_fast_spread": "Alle fast-Zahlen sind MITTELWERTE zweier Laeufe, nie der beste. Streuung der beiden Laeufe (0.2.8 / 0.2.9): conc 1 = 111.33/111.29 (0.04 %), conc 8 = 362.46/360.84 (0.4 %), tokens/step = 8.3777/8.3581 (0.2 %), startup_s = 271.2/261.1 (4 %). conc 8 streute in aelteren Laeufen bis 4.8 %: mehr Requests pro Lauf waeren das eigentliche Mittel, nicht eine weichere Schwelle.",
   "_note_startup": "startup_s streut mit 13 % am staerksten (321.4 / 366.9) und misst nicht die Engine, sondern die Umgebung: das Laden der 18.44 GiB schwankt am selben Tag zwischen 61 s und 158 s, ohne dass Platte, Page-Cache oder ZFS-Fragmentierung das erklaeren (am 2026-09-18 nachgemessen: dd 341-513 MB/s je nach Blockgroesse, mmap 458 MB/s, ARC 0.77 GiB - die Datei ist bei jedem Start kalt). Der Produktions-Rollout selbst brauchte 243 s bis health 200, beide Male. Die Pruefung ist deshalb bewusst weich (hard: false)."
 }
