@@ -434,6 +434,11 @@ def install_all():
     except Exception as e:
         sys.stderr.write(f"[radiance] install_attn_config_hook failed: {e!r}\n")
     try:
+        import radiance_attn_drafter
+        radiance_attn_drafter.install()          # RADIANCE_ATTN_DRAFTER_TUNE: split-KV for the DFlash drafter's attention
+    except Exception as e:
+        sys.stderr.write(f"[radiance] radiance_attn_drafter install failed: {e!r}\n")
+    try:
         import radiance_allreduce
         radiance_allreduce.install_custom_ar()   # RADIANCE_USE_R4D_AR (default on)
     except Exception as e:

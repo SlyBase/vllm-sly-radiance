@@ -82,7 +82,7 @@
         "vllm"
       ],
       "prBodyNotes": [
-        "Most patches anchor on vLLM source (see the Dockerfile loop). Expect anchor drift on minor bumps: fix the patches in the same PR, keep CI patch-dryrun green, then build.yml + A/B (func_check, BetterBench, GSM8K gate) before rollout."
+        "Most patches anchor on vLLM source (see the Dockerfile loop). Expect anchor drift on minor bumps: fix the patches in the same PR, keep CI patch-dryrun green, then build.yml + A/B (func_check, BetterBench, GSM8K gate) before rollout. sly/radiance_attn_drafter rebinds triton_attn.unified_attention and launches triton_unified_attention.kernel_unified_attention / reduce_segments by keyword: run sly/check_attn_drafter.py, check the start log for `drafter attn plan:` (the accept gate requires it) and re-run sly/bench_drafter_attn.py --check on the card."
       ]
     },
     {

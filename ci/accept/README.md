@@ -101,6 +101,12 @@ attention tune against aiter 0.1.21's config-table API, i.e. a dead feature file
 the list since 0.2.7 (`sly/radiance_attn_decode.py`), and the log line `[radiance] decode attn tune
 installed` is a *required* marker instead, so the tune silently not installing fails the gate.
 
+The drafter tune (0.2.8, `sly/radiance_attn_drafter.py`) is guarded the same way: `drafter attn tune installed` is
+required on both profiles, and on the production profile also `drafter attn plan:`, which is logged only when the
+tuned launch takes the drafter's real call during the DFlash CUDA-graph capture. That second marker is the one that
+matters: the first version of the gate declined the drafter's call (it is `causal=False`) and everything else looked
+fine. `drafter attn tune fell back` (an exception in the tuned path) is a forbidden pattern.
+
 ## Files
 
 ```

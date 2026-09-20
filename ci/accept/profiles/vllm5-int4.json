@@ -30,6 +30,10 @@
     [
       "decode attention tune",
       "\\[radiance\\] decode attn tune installed"
+    ],
+    [
+      "drafter attention tune",
+      "\\[radiance\\] drafter attn tune installed"
     ]
   ],
   "forbidden_log_patterns": [
@@ -44,6 +48,10 @@
     [
       "cuda graph capture failed",
       "Capturing CUDA graphs? failed|CUDAGraph capture failed"
+    ],
+    [
+      "drafter attention tune fell back",
+      "drafter attn tune fell back"
     ]
   ],
   "known_warnings": [

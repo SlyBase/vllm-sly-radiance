@@ -227,6 +227,59 @@ paired flips, against the recorded 0.835. The accepted-tokens/step differences a
 streams (±0.2); the numerics differ only through split-KV order and the fp8 rounding of P per tile
 (relative error against an fp32 reference 2.1–2.4 %, stock 2.1–2.7 %).
 
+### Drafter attention: split-KV over the window (0.2.8)
+
+Follow-up to the decode tune: what else grows (or costs) per step at long context? A single stream (k=7,
+greedy, prod arguments) goes from 38.3 ms per step at 1k of context to 44.6 ms at 99k; the target's
+attention is what 0.2.7 flattened, the rest is the DFlash2 drafter. Its five layers are all sliding-window
+2048 (32 q / 8 kv heads, head 128, fp8 KV) and call vLLM's `unified_attention` once per layer per step with 8
+queries per sequence. That launch is BLOCK_M 16 = BLOCK_Q 4 for GQA 4 with the 3D (split-KV) path closed for
+more than one query, i.e. 24 workgroups on 32 CUs, each walking the whole window: 133 µs per call for one
+sequence, 344 µs for eight, ~20–40 GB/s for 4 MB of K/V.
+
+`sly/radiance_attn_drafter.py` rebinds `unified_attention` in `vllm.v1.attention.backends.triton_attn` and, for
+that call only, (1) cuts the block table and `seq_len` down to the window in one tiny kernel (whole leading
+blocks are dropped; positions are only used relative to the sequence end and RoPE is already in the cached K)
+and (2) launches vLLM's own kernels in 3D mode over the slice: BLOCK_M 32 (= the 8 queries × 4 heads of a k=7
+verify), TILE 32, 4 warps, 64 / 32 / 16 splits by sequence count (1 / 2–3 / more), then vLLM's `reduce_segments`.
+The drafter's call is **non-causal** (`causal=False`: a key counts when it is `< seq_len` and within the window
+of its query on either side); the first version of the gate assumed causal, declined the real call, and only
+the "declined" log line gave that away — the launch now passes the flag through, and the accept gate requires
+the plan line (see `ci/accept/README.md`). Untouched: every other head size / GQA ratio / dtype, per-sequence
+causal, alibi / sinks / softcap / mm-prefix / chunked, prefill chunks (more than 16 queries per sequence), no
+window; an exception in the tuned path falls back to vLLM's own launch for the rest of the process.
+
+Micro, `sly/bench_drafter_attn.py` (µs per call and layer, window 2048, non-causal; CUDA graph captured at
+`max_seqlen_k = 262144`, replayed at 1k…96k; the value is flat from 2k on):
+
+| sequences | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| stock | 133 | 205 | 196 | 344 |
+| split-KV | 38 (3.5×) | 70 (2.9×) | 105 (1.9×) | 188 (1.8×) |
+
+Five layers per step: 0.5 ms (one sequence) to 0.8 ms (eight) shorter. Numerics are the stock kernel's
+(relative error against an fp32 reference 0.0020–0.0022 against 0.0022–0.0023, window 2048 and 8192).
+
+End to end (R9700, production arguments, same window, one stream, greedy, 200 tokens; mean of two corpus
+slices and three tasks; prod = 0.2.7 without the tune, candidate = the same image with the file bind-mounted):
+
+| context | 0.1k | 1k | 8k | 32k | 96k |
+|---|---|---|---|---|---|
+| step, prod | 37.3 ms | 38.3 | 39.5 | 41.7 | 44.6 |
+| step, tuned | 37.1 ms | 38.0 | 38.6 | 40.0 | 43.8 |
+
+The step is 0.2–1.6 ms (~1–4 %) shorter and the accepted tokens/step are unchanged within the ±0.2–0.6 a single
+greedy stream scatters; KV pool unchanged (384,316 tokens). That is all the drafter's *kernel* has to give: the
+decline of tokens/step over context (generation 4.6 → 3.7, summarising 3.4 → 2.8 from 1k to 99k; copying
+collapses from 7.3 to 3.3 once the source is out of the drafter's window) is the drafter's acceptance, not its
+attention time.
+
+Negative result, kept so it is not tried again: with this launch a wider drafter window is cheap (+0.3–0.4 ms
+per step at 8192, KV pool 384,316 → 356,996 tokens), but the checkpoint was trained with 2048 and gets worse,
+not better, outside it. `dflash_config.swa_window_size` 8192 (a config copy of the drafter with hardlinked
+weights) lowers the accepted tokens/step against window 2048 by 25–43 % for generation and 24–28 % for
+summarising at 8k / 32k / 99k; copying is mixed (+6 % at 33k, −19 % at 99k). The window stays 2048.
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -302,6 +355,8 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_ATTN_DECODE_WIDE` | `auto` | – | `auto` = 64-row `BLOCK_M` when the verify batch fills ≥ `MIN_FILL` of the 64 rows, 32 below; `0` = never widen; `1` = widen every batch that fits. |
 | `RADIANCE_ATTN_DECODE_MIN_FILL` | `0.5` | – | Fill fraction for `WIDE=auto`: width ≥ 6 at GQA 6 (measured crossover; the retired hook's 0.8 would not have widened DFlash k=7's 48 of 64 rows). |
 | `RADIANCE_ATTN_DECODE_3D` | `1` | – | Verify batches take the 3D split-KV kernel above 512 tokens when the plan's own launch is small enough (stock sends 7–8 sequences down the 2D kernel). `0` = aiter's 2D/3D choice. |
+| `RADIANCE_ATTN_DRAFTER_TUNE` | `1` | – | 0.2.8: split-KV launch for the DFlash2 drafter's sliding-window attention (fp8 KV, head 128, GQA 4, 2–16 queries per sequence; `sly/radiance_attn_drafter.py`, see *Drafter attention* above). `0` = vLLM's launch (A/B control; baked in at CUDA-graph capture, so it needs a restart). |
+| `RADIANCE_ATTN_DRAFTER_SEGMENTS` | `auto` | – | `auto` = 64 splits with one sequence, 32 with two or three, 16 beyond; `N` (a power of two) forces the split count. |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
 `RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
