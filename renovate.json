@@ -86,7 +86,7 @@
       ]
     },
     {
-      "description": "aiter: patch_unified_attention_lds / patch_radiance_dispatch / sly/patch_quark_mxfp4 anchor on it",
+      "description": "aiter: patch_unified_attention_lds / patch_radiance_dispatch / sly/patch_quark_mxfp4 anchor on it; sly/radiance_attn_decode wraps its unified-attention config API",
       "matchDepNames": [
         "ROCm/aiter"
       ],
@@ -94,7 +94,7 @@
         "aiter"
       ],
       "prBodyNotes": [
-        "aiter is compiled from source in the builder stage; anchors in patch_unified_attention_lds, patch_radiance_dispatch and sly/patch_quark_mxfp4 plus sly/mxfp4-configs need re-verification."
+        "aiter is compiled from source in the builder stage; anchors in patch_unified_attention_lds, patch_radiance_dispatch and sly/patch_quark_mxfp4 plus sly/mxfp4-configs need re-verification. sly/radiance_attn_decode wraps get_unified_attention_config / use_2d_kernel and reads the _UAParams fields: run sly/check_attn_decode.py, check the start log for `decode attn tune installed` (the accept gate requires it), and re-run sly/bench_decode_attn.py --table if the attention tables or kernels changed."
       ]
     },
     {

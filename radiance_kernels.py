@@ -199,7 +199,19 @@ def install_attn_config_hook():
        prefill 2D fp8  TILE=16 waves1  (large prefill only) + the per-head-size table above
        prefill 2D bf16 TILE=16 warps4 stages1 waves1
     Purely a tune: every LDS-fit (correctness) clamp lives in patch_unified_attention_lds.py
-    instead, so this cannot make a model fail to start."""
+    instead, so this cannot make a model fail to start.
+
+    That is the select_3d_config / select_2d_config API. aiter 0.1.21 replaced it with JSON config
+    tables, and the fp8 decode half of this tune for the new lookup lives in
+    sly/radiance_attn_decode.py, which is tried first; the rest of this function only runs on an aiter
+    that still has the old API (on the new one it fails loudly at UA.select_3d_config below, so a
+    tune that did not install can not pass for one that did)."""
+    try:
+        import radiance_attn_decode
+        if radiance_attn_decode.install():
+            return
+    except Exception as e:
+        sys.stderr.write(f"[radiance] radiance_attn_decode install failed: {e!r}\n")
     try:
         import aiter.ops.triton.attention.unified_attention as UA
     except Exception:

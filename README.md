@@ -155,6 +155,78 @@ its own A/B: libr4d extras (bf16 SSM state on R4D instead of FLA), `patch_kv_gro
   (attention block 1664 → 896 tokens), KV 101k → 133k tokens on the 32 GB card, concurrent-request
   ceiling ~6 → ~12. GSM8K unchanged (0.835), needle-in-haystack 3/3 at 12k and 24k tokens.
 
+### Decode attention: the verify batch on aiter's config tables (0.2.7)
+
+Single-stream decode at long context was attention-bound: one kernel, `kernel_unified_attention_3d`
+(head 256, 16 calls per step for the 16 full-attention layers), carried all of the growth. rocprofv3 on
+0.2.6 (one request, k=7): 21 µs per call at 0.1k, 1.63 ms at 32.8k, 3.48 ms at 65.6k, ~5.1 ms at 98k,
+i.e. step 42 → 82 → 110 → 147 ms — and a kernel at ~24 % of the DRAM bandwidth even after counting that
+every q-block re-streams the sequence's KV.
+
+The fix already existed: `radiance_kernels.install_attn_config_hook()` is the upstream tune for exactly
+this shape, but it wrapped `UA.select_3d_config`, which aiter 0.1.21.post2 no longer has, so every start
+logged `install_attn_config_hook failed: AttributeError(… 'select_3d_config')` and the tune never
+applied. The accept gate had that line on its `known_warnings` list since 0.2.3, so a dead feature read
+as noise (it is off the list now, and `[radiance] decode attn tune installed` is a *required* log marker
+instead). `sly/radiance_attn_decode.py` ports the tune to the new API — a wrapper around
+`get_unified_attention_config` and `use_2d_kernel`, no frame inspection or launch shim — and measures
+what the old numbers only claimed:
+
+- **`BLOCK_M`.** aiter derives it from the GQA ratio alone (16), so a width-8 verify (8 tokens × 6 heads)
+  is 5 q-blocks per sequence and each re-reads the whole KV. A 64-row block reads it once. Measured with
+  every block size on its own tuned cell and split count, the crossover is at **width 6 (56 % fill)**,
+  not the retired hook's 80 %: the 64-row block wins 1.05–1.22× from width 6 to 9 (DFlash k=7 is width
+  8, 75 %), the 32-row block wins or ties below, the 16-row block never wins.
+- **Kernel shape.** aiter's flat table (TILE 64, 2 warps, 2 stages) leaves the machine idle. TILE 32,
+  4 warps, 1 stage, **`waves_per_eu` 2** for the 64-row block — the retired hook's 6 is 5–15 % slower —
+  and reduce with 4 warps (1 warp is 5× slower at 128 splits, 2 is 25 % slower).
+- **Split-KV count.** FULL CUDA graphs are captured with `max_seqlen_k = max_model_len` (262144 here), so
+  the geometry is fixed at capture and replayed at every depth; a "shape-derived" count only ever sees
+  that. The bench therefore captures at 262144 and replays 4k…128k. Best fixed count: **32 with one
+  sequence, 16 from two up** (each split writes and re-reads tokens × 24 heads × 1 KB of partials;
+  stock's 16 workgroups per CU, i.e. 128 splits for the wide launch, costs 10–25 % at one sequence).
+- **7–8 sequences.** `num_2d_prgms` is computed at the stock BLOCK_Q, so from 7 verifying sequences stock
+  takes the 2D kernel (no KV split) at every depth; the wide 3D plan is 1.7–2.7× faster there.
+- **Untouched:** ALL_DECODE, other dtypes/head sizes, prefill chunks. The retired hook's fp8 prefill tune
+  (TILE 16, waves 1) measured 2–12 % *slower* than aiter's `Q_GEQ_256` entry at 0 / 32k / 98k of past KV,
+  so the 2D prefill config stays aiter's.
+
+Micro, `sly/bench_decode_attn.py` (µs per attention call incl. reduce, stock → tuned, width 8; the bench
+reproduces the trace: stock 1.75 / 3.37 / 4.94 ms at 32k / 64k / 96k against 1.63 / 3.48 / ~5.1):
+
+| sequences | 4k | 16k | 32k | 64k | 96k | 128k |
+|---|---|---|---|---|---|---|
+| 1 | 242 → 39 (6.2×) | 870 → 84 (10.3×) | 1752 → 146 (12.0×) | 3365 → 279 (12.1×) | 4941 → 410 (12.1×) | 6562 → 541 (12.1×) |
+| 4 | 880 → 100 (8.8×) | 3405 → 307 (11.1×) | 6658 → 591 (11.3×) | 13142 → 1164 (11.3×) | 19679 → 1708 (11.5×) | 26248 → 2238 (11.7×) |
+| 6 | 1391 → 152 (9.1×) | 5024 → 485 (10.4×) | 9881 → 923 (10.7×) | 19598 → 1809 (10.8×) | 29438 → 2633 (11.2×) | 39210 → 3492 (11.2×) |
+| 8 (stock = 2D kernel) | 336 → 201 (1.7×) | 1369 → 648 (2.1×) | 2748 → 1246 (2.2×) | 5546 → 2299 (2.4×) | 8360 → 3387 (2.5×) | 11164 → 4447 (2.5×) |
+
+Width 6 and 9 are 8.5–13.7× at 1–6 sequences (the same shape of table); the tuned kernel reaches ~490 GB/s
+at 96k (77 % of the read peak).
+
+End to end on the R9700 (2026-09-20, production arguments, same window, image 0.2.6 with the two files
+bind-mounted over the image's — the 0.2.7 image itself is built by CI —, `RADIANCE_ATTN_DECODE_TUNE=0`
+vs `1`; one stream, greedy, 256 tokens, `step` = decode seconds / spec-decode drafts, i.e. the engine's
+step gap without any profiler):
+
+| context | TG stock → tuned | step stock → tuned | accepted tokens/step |
+|---|---|---|---|
+| 0.1k | 113.0 → 113.5 tok/s | 37.6 → 37.5 ms | 4.30 → 4.27 |
+| 33k | 42.2 → **65.9** tok/s (+56 %) | 65.0 → 40.7 ms (−24) | 2.77 → 2.71 |
+| 65k | 32.9 → **72.9** tok/s (+122 %) | 93.3 → 42.7 ms (−51) | 3.13 → 3.12 |
+| 99k | 27.5 → **68.0** tok/s (+147 %) | 120.2 → 44.7 ms (−76) | 3.32 → 3.05 |
+
+The step grows by 7 ms over 99k of context instead of 83. In-situ kernel times (rocprofv3, tuned side; the
+64-token windows also hold a ~1.4k-token uncached prefill tail, so only the decode kernel rows count):
+`kernel_unified_attention_3d` (grid 128×4×32, i.e. one q-block and 32 splits) 5.8 / 129 / 245 / 363 µs per
+call at 0.1k / 32.8k / 65.6k / 98.4k against 21 / 1630 / 3480 / ~5100 µs stock — 0.09 / 2.1 / 3.9 / 5.8 ms
+per step (16 calls) against 0.34 / 26 / 56 / 82 — plus 0.06–0.14 ms of reduce. Concurrency and quality
+unchanged: BetterBench fast config (conc-only) 104.5 → 106.8 tok/s at conc 1 and 369.7 → 381.8 at conc
+8, all 24/24 requests OK; GSM8K (cot, zero-shot, greedy, 200 items) 0.865 → 0.850 ± 0.025 with 4 vs 1
+paired flips, against the recorded 0.835. The accepted-tokens/step differences above are single greedy
+streams (±0.2); the numerics differ only through split-KV order and the fp8 rounding of P per tile
+(relative error against an fp32 reference 2.1–2.4 %, stock 2.1–2.7 %).
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -226,6 +298,10 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_MXFP4_WPERM` / `RADIANCE_MXFP4_R4D_DECODE_MAX_M` | `0` / `0` | – | Experimental: fragment-order weights + libr4d's `gemm_mxfp4a8_nt_m64` decode kernel. |
 | `RADIANCE_MXFP4_MHIST` | `0` | – | Print every distinct `(N, K, M)` the plugin sees once (which M the decode path really issues). |
 | `RADIANCE_MXFP4_DEBUG`, `_CHECKX`, `_CHECKALL`, `_REFLINEAR`, `_SHADOW`, `_SYNC`, `_KERNEL_N`, `_KERNEL_NK` | off | – | Correctness/diagnostic switches, see the header of `sly/mxfp4/radiance_mxfp4.py`. |
+| `RADIANCE_ATTN_DECODE_TUNE` | `1` | – | 0.2.7: the fp8-q + fp8-KV, head-256 verify-batch tune of aiter's unified attention (`sly/radiance_attn_decode.py`, see *Decode attention* below). `0` = aiter's stock tables (A/B control; baked in at CUDA-graph capture, so it needs a restart). |
+| `RADIANCE_ATTN_DECODE_WIDE` | `auto` | – | `auto` = 64-row `BLOCK_M` when the verify batch fills ≥ `MIN_FILL` of the 64 rows, 32 below; `0` = never widen; `1` = widen every batch that fits. |
+| `RADIANCE_ATTN_DECODE_MIN_FILL` | `0.5` | – | Fill fraction for `WIDE=auto`: width ≥ 6 at GQA 6 (measured crossover; the retired hook's 0.8 would not have widened DFlash k=7's 48 of 64 rows). |
+| `RADIANCE_ATTN_DECODE_3D` | `1` | – | Verify batches take the 3D split-KV kernel above 512 tokens when the plan's own launch is small enough (stock sends 7–8 sequences down the 2D kernel). `0` = aiter's 2D/3D choice. |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
 `RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
