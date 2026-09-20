@@ -26,6 +26,10 @@
     [
       "dflash drafter",
       "Resolved architecture: DFlash2DraftModel"
+    ],
+    [
+      "decode attention tune",
+      "\\[radiance\\] decode attn tune installed"
     ]
   ],
   "forbidden_log_patterns": [
@@ -43,7 +47,6 @@
     ]
   ],
   "known_warnings": [
-    "install_attn_config_hook failed",
     "triton_bundler.py",
     "Cubin file saved by TritonBundler not found",
     "Failed to JIT torch c dlpack extension",

@@ -68,9 +68,12 @@ python3 ci/accept/accept.py \
 Startup time is a soft check (reported, never blocking): the first start after a compile-cache
 invalidation legitimately takes twice as long.
 
-`known_warnings` in the profile suppresses the noise that production has carried since 0.2.3
-(`install_attn_config_hook failed`, TritonBundler cubin, dlpack JIT) — it must stay an explicit
-list so a *new* warning still trips the forbidden patterns.
+`known_warnings` in the profile suppresses the noise that production carries (TritonBundler cubin,
+dlpack JIT) — it must stay an explicit list so a *new* warning still trips the forbidden patterns.
+`install_attn_config_hook failed` used to be on it (0.2.3–0.2.6): it was the AttributeError of the decode
+attention tune against aiter 0.1.21's config-table API, i.e. a dead feature filed as noise. It is off
+the list since 0.2.7 (`sly/radiance_attn_decode.py`), and the log line `[radiance] decode attn tune
+installed` is a *required* marker instead, so the tune silently not installing fails the gate.
 
 ## Files
 
