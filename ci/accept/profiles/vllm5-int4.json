@@ -34,6 +34,10 @@
     [
       "drafter attention tune",
       "\\[radiance\\] drafter attn tune installed"
+    ],
+    [
+      "lookup draft override",
+      "\\[radiance\\] lookup draft: installed"
     ]
   ],
   "forbidden_log_patterns": [
@@ -52,6 +56,10 @@
     [
       "drafter attention tune fell back",
       "drafter attn tune fell back"
+    ],
+    [
+      "lookup draft error",
+      "lookup draft: (off after an error|not hooked)"
     ]
   ],
   "known_warnings": [

@@ -439,6 +439,11 @@ def install_all():
     except Exception as e:
         sys.stderr.write(f"[radiance] radiance_attn_drafter install failed: {e!r}\n")
     try:
+        import radiance_lookup_draft
+        radiance_lookup_draft.install()          # RADIANCE_LOOKUP_DRAFT (default on): prompt-lookup override of the DFlash2 draft
+    except Exception as e:
+        sys.stderr.write(f"[radiance] radiance_lookup_draft install failed: {e!r}\n")
+    try:
         import radiance_allreduce
         radiance_allreduce.install_custom_ar()   # RADIANCE_USE_R4D_AR (default on)
     except Exception as e:
