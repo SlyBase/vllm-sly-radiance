@@ -354,6 +354,79 @@ Not done: the drafter is unchanged, so the loss of free generation with context 
 
 ## Results
 
+### Current image: 0.2.9 (2026-09-21)
+
+BetterBench 0.4.0, default config, all three phases (single-stream decode, prefill sweep, concurrency
+1/2/4/8/16 × 48 requests; sampling at temperature 0.7 / top_p 0.95 / top_k 20, 3 warmup + 20 measured
+passes per category), one run of 28 min against the production container: image 0.2.9, DFlash2 k=7
+(probabilistic), fp8 KV, `--max-model-len 262144`, `--max-num-seqs 8`, `--max-num-batched-tokens 2048`,
+KV pool 384,316 tokens, prompt lookup on. The server had no other traffic during the decode phase (at
+most 1 running request and an empty queue in every sample of a counter sidecar, 15 s interval). Compared with the last
+full vllm7 run (0.1.4, 2026-09-15, history below) and with the `full` baseline of the accept gate
+(`ci/accept/baselines`, measured on 0.2.2 / 0.2.3).
+
+**Concurrency** (48 requests per level, all ok):
+
+| Concurrency | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| **aggregate tok/s** | **105.6** | **199.6** | **294.7** | **393.7** | **382.3** |
+| Δ vs 0.1.4 (99.4 / 180.0 / 281.0 / 356.2 / 362.5) | +6.2 % | +10.9 % | +4.9 % | +10.5 % | +5.5 % |
+| Δ vs `full` baseline 0.2.2/0.2.3 (109.8 / 190.0 / 305.0 / 388.0 / 385.8) | −3.8 % | +5.1 % | −3.4 % | +1.5 % | −0.9 % |
+| per-request decode, median tok/s | 135 | 130 | 105 | 74 | 71 |
+| TTFT p50 / p95, ms | 107 / 153 | 153 / 200 | 178 / 292 | 264 / 395 | 3258 / 5957 |
+| tokens per client update (BetterBench) | 4.72 | 4.88 | 4.74 | 4.85 | 4.73 |
+| scaling vs conc 1 | 1.00× | 1.89× | 2.79× | 3.73× | 3.62× |
+
+`--max-num-seqs 8` caps the machine at conc 8; at conc 16 the surplus queues (TTFT p50 3.3 s, 7.0 s on
+0.1.4). Against the 0.2.2/0.2.3 baseline the deltas go both ways and stay inside the gate's −5 %
+threshold; the accept gate's own fast config (24 requests) measured conc 1 at 111.3 tok/s on this image.
+
+**Single-stream decode** (20 passes per category, prompts of 60–112 tokens, 600-token cap; tok/s ± 95 % CI):
+
+| Category | decode tok/s | Δ vs 0.1.4 | tokens/update | TTFT ms |
+|---|---|---|---|---|
+| chat | 82.1 ± 4.1 | +5.0 % | 3.09 | 111 |
+| code | 130.5 ± 8.3 | +10.5 % | 4.94 | 107 |
+| file_edit | 157.0 ± 6.8 | +10.8 % | 5.87 | 113 |
+| json | 153.5 ± 9.1 | +12.7 % | 5.71 | 108 |
+| math | 158.0 ± 8.2 | +9.0 % | 5.91 | 89 |
+| prose | 77.7 ± 3.9 | +7.5 % | 2.95 | 89 |
+| reasoning | 102.7 ± 13.7 | +15.3 % | 3.88 | 96 |
+| summarization | 122.8 ± 6.6 | +8.4 % | 4.59 | 112 |
+| **weighted** (BetterBench weights) | **122.4** (0.1.4: 110.0) | **+11.2 %** | 4.60 (4.57) | |
+
+The gain is step time, not acceptance: the median step gap fell 42.15 → 38.23 ms (−9.3 %, worth +10.2 %),
+tokens per update rose 4.57 → 4.60 (+0.8 %). What in the 0.2.x series is responsible cannot be separated
+from this run — the attention tunes of 0.2.7 / 0.2.8 move the step by a few tenths of a millisecond at these context lengths.
+Step gaps over all 15,581 decode updates: p50 38.2 ms, p90 38.5, p99 38.9, p99.9 40.4, max 41.8; none above
+60 ms (no stalls).
+
+**Prefill** (unique prompts, no prefix cache, 16 output tokens; there is no earlier vllm7 prefill sweep to
+compare with):
+
+| Prompt tokens | 1,514 | 5,918 | 11,793 | 23,543 | 47,055 |
+|---|---|---|---|---|---|
+| prefill tok/s | 2,073 | 2,053 | 2,020 | 1,913 | 1,713 |
+| TTFT | 0.73 s | 2.88 s | 5.84 s | 12.3 s | 27.5 s |
+
+**Draft acceptance** (server counters, before/after snapshot of the whole run, 42,069 draft steps): 4.20
+tokens/step, acceptance rate 0.457; a draft position was accepted in 0.81 / 0.64 / 0.50 / 0.40 / 0.33 / 0.28 /
+0.24 of the steps (positions 0…6). Independent of concurrency (sidecar, per level: 4.27 / 4.48 / 4.29 / 4.39 /
+4.14 tokens/step at 1/2/4/8/16). 0 preemptions, peak KV usage 43.3 %, 0 failed requests (decode and
+concurrency). BetterBench's "tokens/update" counts what the client sees per streamed update, so it is not the
+same number as the server's tokens/step.
+
+What this run does not show: BetterBench's prompts are tiny (longest 174 tokens, plus at most 600 generated),
+so the context stays under ~800 tokens and the prompt-lookup override (which needs more than 2048 tokens of
+context) cannot fire — its effect is measured in *Prompt lookup on top of the DFlash draft* above. It is a
+single run, without repetition; the conc-1 figure against the old baseline (−3.8 %) is the one to repeat
+before reading anything into it, and BetterBench itself flags 18 tail metrics as under-sampled (rule
+n·min(p, 100−p)/100 ≥ 5), so only means and medians are quoted here. The 0.1.4 comparison spans everything
+between 15 and 21 September. The INT4 reference row in the history table below was not re-measured. Raw
+JSON and the HTML report: `/root/betterbench/results/vllm7-029-full-20260921.*` on the build host.
+
+### History: 0.1.4 – 0.1.6 (2026-09-15/16)
+
 BetterBench 0.4.0 `--decode --concurrency` against the production container (2026-09-15, image
 0.1.4, all knobs from the *Options* section below). Reference: the same model family as INT4
 (`w4a16`) on stock vLLM on the same card.
