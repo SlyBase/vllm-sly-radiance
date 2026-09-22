@@ -14,6 +14,7 @@ patch_ar_maxbytes.py      all-reduce size knobs (in ggz14's loop); TP=1 here, no
 patch_async_dynwidth.py   dynamic verify width under async scheduling; depends on patch_dynwidth
 patch_autoround.py        registers ggz14's `auto-round` quant config (radiance_autoround.py/.hip not copied into this image)
 patch_dflash_calib.py     drafter activation-statistics collection for quantize_dflash_mxfp4.py (offline tooling)
+patch_dflash_selector_topk.py  A/B 2026-09-22 (BetterBench, prod args, 300 W): K 24/32 vs 16 = +0.8/+0.9 % weighted serial decode but -2.9/-2.5 % conc 1 (conc-1 noise 0.1 %), acceptance unchanged; K != 16 also needs its own torch.compile cache (the candidate_selector graph is cached at the checkpoint's 16 and replays with a shape assert)
 patch_dflash_mxfp4_kv.py  DFlash2 fused KV for an MXFP4-quantized drafter; our drafter is W4A16 (sly/patch_dflash_w4_packed.py)
 patch_draft_attn_blockm.py  rejected upstream (4-34% slower on gfx1201), not wired in there either
 patch_dynwidth.py         scheduler-side dynamic verify width; overlaps RADIANCE_DYNAMIC_DRAFT (radiance_draft.py); follow-up A/B

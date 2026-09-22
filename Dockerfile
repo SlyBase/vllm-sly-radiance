@@ -368,10 +368,6 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # on ROCm (stock gates it on is_cuda()): without it, packed W4A16 weights were carved out of the
 # freed 2.37 GiB bf16 embed/lm_head segments and pinned them (INT4 target k=7: 2.9 GiB stranded,
 # 313k -> 386k KV tokens; MXFP4 prod: 376k -> 386k).
-# patch_dflash_selector_topk.py (0.3.0, carried from ggz14) makes the DFlash2 selector's top_k
-# env-tunable (RADIANCE_DFLASH_SELECTOR_TOPK, unset = the checkpoint's 16). With the probabilistic
-# draft the draft distribution is non-zero on those K candidates only, so a sampled target token
-# outside them is a certain rejection -- the A/B asks whether a wider pool wins that back.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -383,7 +379,7 @@ RUN set -eu; cd /opt/patches; \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
-             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_dflash_selector_topk \
+             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
