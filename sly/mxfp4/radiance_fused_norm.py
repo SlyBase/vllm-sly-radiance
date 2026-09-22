@@ -47,6 +47,7 @@ _SILU_MAX_N = 18432
 _GDN_MAX_N = 10240
 
 _ext = None
+_rmx_tiled_wanted = _rmx_tiled_register = None
 _ROCM = False
 _GemmaRMSNorm = _RMSNormGated = _SiluAndMul = ()
 
@@ -67,6 +68,8 @@ if ENABLED:
                                "RADIANCE_MXFP4_SANITIZE=1 (the fused kernels quantize before any "
                                "nan_to_num could run).")
         _ext = _rmx._ext
+        if getattr(_rmx, "A_TILED_MIN_M", 0):
+            _rmx_tiled_wanted, _rmx_tiled_register = _rmx.a_tiled_wanted, _rmx.a_tiled_register
         from vllm.model_executor.layers.activation import SiluAndMul as _SiluAndMul
         from vllm.model_executor.layers.layernorm import GemmaRMSNorm as _GemmaRMSNorm
         from vllm.model_executor.layers.layernorm import RMSNormGated as _RMSNormGated
@@ -74,7 +77,8 @@ if ENABLED:
 
         _ROCM = bool(current_platform.is_rocm())
         sys.stderr.write(f"[radiance.fused_norm] armed: add_rms_quant={int(ADD_RMS)} "
-                         f"silu_mul_quant={int(SILU)} gdn_norm_quant={int(GDN)}\n")
+                         f"silu_mul_quant={int(SILU)} gdn_norm_quant={int(GDN)} "
+                         f"a_tiled_min_m={getattr(_rmx, 'A_TILED_MIN_M', 0)}\n")
 
 _seen: set = set()
 
@@ -93,6 +97,25 @@ def _check_bf16(name: str, *ts: torch.Tensor) -> None:
             raise RuntimeError(f"radiance::{name}: expected bfloat16, got {t.dtype}")
 
 
+# ---- fragment-tiled output (RADIANCE_MXFP4_A_TILED_MIN_M) ----------------------------------------
+# At prefill-class M the two producers whose every consumer is a folded W4A8 GEMM write q in the
+# WMMA-fragment-tiled layout radiance_mxfp4_fp8_gemm_atiled reads straight into registers (no A tile
+# in LDS; measured 12-16% faster than the folded kernel at M >= 2048, radiance_mxfp4_fp8.hip). The
+# decision is per call inside the opaque op body (eager ints, no traced guard); the consumer finds
+# it through radiance_mxfp4's data_ptr registry. The storage is padded to whole 16-row fragments and
+# q is the [M, K] view of it, so real and fake shapes agree. gdn_norm_quant has no tiled variant and
+# stays row-major (out_proj takes the folded kernel). Values are identical in both layouts.
+
+def _tiled(M: int, K: int) -> bool:
+    return (_rmx_tiled_wanted is not None and _rmx_tiled_wanted(M) and K % 128 == 0)
+
+
+def _q_alloc(M: int, K: int, device, tiled: bool) -> torch.Tensor:
+    if tiled:
+        return torch.empty(((M + 15) // 16 * 16, K), device=device, dtype=torch.float8_e4m3fn)[:M]
+    return torch.empty((M, K), device=device, dtype=torch.float8_e4m3fn)
+
+
 # ---- custom ops -------------------------------------------------------------------------------
 
 @torch.library.custom_op("radiance::add_rms_quant", mutates_args=())
@@ -102,7 +125,8 @@ def _add_rms_quant_op(y: torch.Tensor, residual: torch.Tensor, weight: torch.Ten
     Returns (q [M, K] e4m3, scale [M] f32, residual_out [M, K] bf16)."""
     _check_bf16("add_rms_quant", y, residual, weight)
     M, K = y.shape
-    q = torch.empty((M, K), device=y.device, dtype=torch.float8_e4m3fn)
+    tiled = _tiled(M, K)
+    q = _q_alloc(M, K, y.device, tiled)
     s = torch.empty((M,), device=y.device, dtype=torch.float32)
     r = torch.empty((M, K), device=y.device, dtype=torch.bfloat16)
     if M:
@@ -112,7 +136,9 @@ def _add_rms_quant_op(y: torch.Tensor, residual: torch.Tensor, weight: torch.Ten
         _once("add_rms_quant", f"M={M} K={K}")
         _ext.launch_add_rms_quant(y.data_ptr(), residual.data_ptr(), weight.data_ptr(),
                                   q.data_ptr(), s.data_ptr(), r.data_ptr(), M, K, float(eps),
-                                  torch.cuda.current_stream().cuda_stream)
+                                  torch.cuda.current_stream().cuda_stream, 1 if tiled else 0)
+        if tiled:
+            _rmx_tiled_register(q, M, K)
     return q, s, r
 
 
@@ -130,13 +156,17 @@ def _silu_mul_quant_op(gate_up: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     _check_bf16("silu_mul_quant", gate_up)
     M, N2 = gate_up.shape
     N = N2 // 2
-    q = torch.empty((M, N), device=gate_up.device, dtype=torch.float8_e4m3fn)
+    tiled = _tiled(M, N)
+    q = _q_alloc(M, N, gate_up.device, tiled)
     s = torch.empty((M,), device=gate_up.device, dtype=torch.float32)
     if M:
         gate_up = gate_up.contiguous()
         _once("silu_mul_quant", f"M={M} N={N}")
         _ext.launch_silu_mul_quant(gu=gate_up.data_ptr(), q=q.data_ptr(), scale=s.data_ptr(),
-                                   M=M, N=N, stream=torch.cuda.current_stream().cuda_stream)
+                                   M=M, N=N, stream=torch.cuda.current_stream().cuda_stream,
+                                   tiled=1 if tiled else 0)
+        if tiled:
+            _rmx_tiled_register(q, M, N)
     return q, s
 
 
