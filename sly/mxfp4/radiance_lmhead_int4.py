@@ -65,13 +65,21 @@ QMAX = 7  # symmetric int4: q in [-8, 7], scale = amax / 7 (compressed-tensors c
 ZP_BIAS = 8  # unsigned nibble = q + 8, the constant the kernel subtracts (HAS_ZP=False)
 
 
-def quant_method_for(layer: torch.nn.Module, prefix: str):
-    """QuarkConfig.get_quant_method hook: our method for an enabled ParallelLMHead, else None."""
+def quant_method_for(layer: torch.nn.Module, prefix: str, inner=None):
+    """get_quant_method hook: our method for an enabled ParallelLMHead, else None.
+
+    `inner` is the checkpoint's own method for a head that is stored quantized (compressed-tensors
+    only; the unsloth NVFP4 checkpoint ships lm_head as FP8 per-channel). It keeps the loading
+    (its parameters, its dequant at load) and the int4 pass runs on the bf16 weight it leaves.
+    """
     if not ENABLED or not isinstance(layer, ParallelLMHead):
         return None
     logger.info_once(
-        "[radiance] %s -> int4 W4A16 (group %d, clip=%s)", prefix, GROUP_SIZE, CLIP
+        "[radiance] %s -> int4 W4A16 (group %d, clip=%s%s)", prefix, GROUP_SIZE, CLIP,
+        ", from the checkpoint's quantized head" if inner is not None else "",
     )
+    if inner is not None:
+        return RadianceLMHeadInt4Over(inner)
     return RadianceLMHeadInt4()
 
 
@@ -155,3 +163,40 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
             x_2d, layer.weight, layer.weight_scale, None, bias, num_compute_units(), GROUP_SIZE
         )
         return out.reshape(x.shape[:-1] + (out.shape[-1],))
+
+
+class RadianceLMHeadInt4Over(RadianceLMHeadInt4):
+    """int4 head over a checkpoint that stores lm_head quantized (compressed-tensors).
+
+    Loading is the inner method's (the checkpoint's parameters, e.g. fp8 weight + per-channel
+    scale). Its process_weights_after_loading runs first; when that leaves a floating-point
+    weight (radiance_nvfp4's RadianceFp8ChannelToBf16 with RADIANCE_NVFP4_LMHEAD=bf16) the int4
+    pass follows. Anything else (the stock fp8 scheme, laid out for torch._scaled_mm) cannot be
+    re-quantized from here, so the head stays on the inner method and a warning says so.
+    """
+
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+        self.passthrough = False
+
+    def create_weights(self, layer, *args, **kwargs):
+        return self.inner.create_weights(layer, *args, **kwargs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.passthrough or layer.weight.dtype == torch.int8:
+            return  # a second pass over a shared head
+        self.inner.process_weights_after_loading(layer)
+        if layer.weight.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            self.passthrough = True
+            logger.warning(
+                "[radiance] lm_head: the checkpoint's head is %s after its own load step; int4 "
+                "needs a floating-point weight (NVFP4 checkpoints: RADIANCE_NVFP4_MXFP4=1 with "
+                "RADIANCE_NVFP4_LMHEAD=bf16) -- keeping the checkpoint's head", layer.weight.dtype)
+            return
+        super().process_weights_after_loading(layer)
+
+    def apply(self, layer, x, bias=None):
+        if self.passthrough:
+            return self.inner.apply(layer, x, bias)
+        return super().apply(layer, x, bias)

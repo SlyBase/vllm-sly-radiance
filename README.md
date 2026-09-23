@@ -418,6 +418,53 @@ after a few sentences; accuracy is unchanged. The extras' other kernels stay opt
 (8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
 but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
 
+### NVFP4 checkpoints via load-time MXFP4 requantization (0.3.6)
+
+ggz14's `radiance_nvfp4.py` + `patch_nvfp4_mxfp4.py` (merged with upstream/ggz14 in 0.2.0, left out of
+the loop until now) are in the image. With `RADIANCE_NVFP4_MXFP4=1` a compressed-tensors NVFP4
+checkpoint (`unsloth/Qwen3.8-27B-NVFP4`) is loaded as stored and every linear is requantized to
+MXFP4 (e2m1 + e8m0/32) at load: the NVFP4 MLPs, the FP8 per-channel attention / GDN / last-8-layer
+MLPs (`RADIANCE_NVFP4_FP8_LAYERS=mxfp4`) and the bf16 GDN a/b gates (`RADIANCE_NVFP4_BF16_LAYERS=in_proj_ba`).
+The result goes through `init_mxfp4_linear_kernel`, i.e. onto **this image's** `RadianceMxfp4W4A8LinearKernel`,
+exactly like a Quark layer. There is no NVFP4 kernel: NVFP4 is a storage format here.
+
+What that means for the tuning in this image: the Quark checkpoint excludes only `lm_head` (plus mtp /
+visual), so with the defaults above the NVFP4 model ends up with the **same set of MXFP4 linears at the
+same (N, K)** as the Quark one. Everything keyed on the kernel, the shape or the layer type applies
+unchanged: decode cell table / split-K, A-tiled prefill and WPERM (0.3.0/0.3.1), fused add-rms / silu /
+GDN-norm quant (every consumer is a radiance W4A8 layer, so every site fuses), decode / drafter
+attention tunes, prompt lookup, int8/int4 embed (bf16 in both checkpoints), KV group size, the load-time
+allocator scope. Expected speed is therefore the Quark number, give or take the lm_head below; ggz14's
++5 % decode for NVFP4 on TP=2 was measured against the ParoQuant unit and came from the GDN in_proj
+merge, which this image rejected (see `ci/unused_patches.txt`).
+
+Differences that do matter:
+
+- **lm_head.** The unsloth checkpoint stores it FP8 per-channel. `RADIANCE_NVFP4_LMHEAD=bf16` dequantizes
+  it at load; with `RADIANCE_LMHEAD_INT4=1` the int4 head is then built from that bf16 weight
+  (`sly/patch_lmhead_int4_ct.py`, now behind the scheme lookup; before 0.3.6 the int4 hook ran first and
+  would have loaded the e4m3 codes unscaled). `RADIANCE_LMHEAD_FP8` is a Quark-only hook and does nothing here.
+- **Accuracy.** Requantizing is a second rounding: 0.158 relRMS against bf16 vs 0.113 for NVFP4 itself
+  (ggz14's study; direct bf16 → MXFP4 is 0.112), and the FP8 layers lose their 8-bit precision. The
+  Quark checkpoint is AWQ-calibrated direct MXFP4. ggz14 measured GSM8K 500q 97.6 % on TP=2 — the gate
+  here is the usual GSM8K run against the Quark baseline.
+- **Load and memory.** ~10 s of requantization; the fp8 → bf16 → int4 head has a 2.4 GiB bf16 transient
+  at load. The KV pool has to be measured (not assumed to be 384k).
+- **KV scales.** The checkpoint carries static fp8 KV scales, which vLLM applies with `--kv-cache-dtype fp8`
+  (the Quark checkpoint has none, i.e. 1.0).
+
+Launch: the production command below with `-e RADIANCE_NVFP4_MXFP4=1`, `--model unsloth/Qwen3.8-27B-NVFP4`
+and `--quantization compressed-tensors` instead of `quark`; the other flags stay. The boot log prints one
+`[radiance.nvfp4]` line per converted layer with its requant error.
+
+**INT4 (compressed-tensors W4A16, `RedHatAI/Qwen3.8-27B-INT4`)** runs on vLLM's `rdna_hybrid_w4a16` kernels,
+not on the W4A8 kernel, so the MXFP4 GEMM work (cells, A-tiled, WPERM, fused norm quant) does not apply.
+What applies already: the target tile table (`sly/patch_w4a16_tiles.py --target`), int4 lm_head (CT hook),
+int8/int4 embed, the attention / drafter / lookup tunes, KV groups and the load-time allocator scope. A
+load-time INT4 → MXFP4 requant (the NVFP4 approach) would put it on the tuned kernel, but g128 uniform
+int4 → e2m1/e8m0 per 32 is a coarser double rounding than NVFP4's, and the same base model exists as
+direct Quark MXFP4 — not planned.
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -647,6 +694,11 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_LMHEAD_INT4` | `0` | `1` | int4 (W4A16, group-128 bf16 scales) lm_head on the drafter's Triton/HIP kernel path (see above); takes precedence over `RADIANCE_LMHEAD_FP8`. Same `head_dtype` limitation. |
 | `RADIANCE_LMHEAD_INT4_GS` | `128` | – | Group size of the int4 lm_head (64 measured: −8 % error for 2× scale bytes, not worth it). |
 | `RADIANCE_LMHEAD_INT4_CLIP` | `mse` | – | Per-group scale search over clip ratios 1.0…0.8 by least squared error; `rtn` = plain amax/7 (−14 % vs +0 % error, 1.6 s vs 0.3 s at load). |
+| `RADIANCE_NVFP4_MXFP4` | `0` | – | 0.3.6: serve a compressed-tensors NVFP4 checkpoint by requantizing every linear to MXFP4 at load onto the W4A8 kernel (see *NVFP4 checkpoints* above). Needs `RADIANCE_MXFP4=1 RADIANCE_MXFP4_W4A8=1`. Inert for Quark checkpoints. |
+| `RADIANCE_NVFP4_EXP` | `mse` | – | Block exponent rule of the requant: `mse` (no-clip vs one binade finer, per block by squared error), `ocp`, `noclip`. |
+| `RADIANCE_NVFP4_FP8_LAYERS` | `mxfp4` | – | The checkpoint's FP8 per-channel linears: `mxfp4` requantizes them too (never lm_head); `fp8` leaves them on hipBLASLt fp8 — diagnostic only, it wedged the GPU under 8-way concurrency on ggz14's TP=2 box. |
+| `RADIANCE_NVFP4_BF16_LAYERS` | `in_proj_ba` | – | Regex of unquantized linears to requantize as well. The GDN a/b gates must be on the radiance kernel for the fused add-rms quant in front of the GDN layers to fire. |
+| `RADIANCE_NVFP4_LMHEAD` | `bf16` | – | The checkpoint's FP8 lm_head: `bf16` dequantizes at load (and `RADIANCE_LMHEAD_INT4=1` turns that into the int4 head), `fp8` keeps vLLM's fp8 path. All `RADIANCE_NVFP4_*` are part of the torch.compile cache key. |
 | `RADIANCE_FUSED_NORM_QUANT` | `0` | `1` | Fused add+rms_norm / silu·mul / GDN gated norm + per-token fp8 quant in front of the W4A8 GEMMs (see above). Needs `RADIANCE_MXFP4_W4A8=1`, `RADIANCE_MXFP4_W4A8_MIN_M=0`, `RADIANCE_MXFP4_SANITIZE=0`; part of the torch.compile cache key. |
 | `RADIANCE_FUSED_NORM_QUANT_ADD_RMS` / `_SILU` / `_GDN` | `1` | – | Per-fusion switches (only read when `RADIANCE_FUSED_NORM_QUANT=1`). |
 | `GPU_MAX_HW_QUEUES` | ROCm default | `2` | ROCm HW queue count; 2 measured best for this single-process setup. |
@@ -826,7 +878,7 @@ docker run --rm --device=/dev/kfd --device=/dev/dri -e HIP_VISIBLE_DEVICES=0 \
 
 ```
 Dockerfile                    build pipeline (upstream + sly/ patch loop + HIP kernel compile)
-VERSION                       image version (0.1.4)
+VERSION                       image version
 _patchlib.py                  anchor-based, idempotent patch helper (upstream)
 patch_*.py, radiance_*.py     upstream vllm-radiance RDNA4 patches and runtime modules
 sly/
