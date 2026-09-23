@@ -663,7 +663,9 @@ docker run --rm --name vllm7-mxfp4 \
   --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 \
+  --chat-template /opt/qwen-fixed.jinja \
   --default-chat-template-kwargs '{"reasoning_effort": "medium"}' \
+  --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}' \
   --port 8000
 ```
 
@@ -672,6 +674,8 @@ Why these values:
 | Argument | Note |
 |---|---|
 | `--quantization quark` | The checkpoint's quant method (fp4 + e8m0 scales); set explicitly rather than trusting auto-detect. |
+| `--chat-template /opt/qwen-fixed.jinja` | froggeric's fixed Qwen template (v22.5), shipped in the image since 0.3.4: `medium` reasoning by default instead of the official 3.8 template's `xhigh`, no blank `<think></think>` injected into chat history (keeps the prefix cache), JSON-string tool arguments and `enable_thinking=false` do not crash, client effort aliases (`high`/`max` → `xhigh`, `none`/`off` → thinking off). |
+| `--override-generation-config` | Server default sampling, the Qwen 3.8 thinking-mode recommendation: temperature 1.0, top_p 0.95, top_k 20, min_p 0, presence_penalty 0 (a non-zero penalty inside the chain of thought causes language mixing). Clients that switch thinking off (`enable_thinking: false` / `reasoning_effort: "none"`) should send the non-thinking values themselves: 0.7 / 0.8 / 20 / 0 / 1.5. The benchmarks in this README ran at 0.7 / 0.95 / 20. |
 | `--kv-cache-dtype fp8` | 133k tokens of KV on 32 GB; `auto` (bf16) halves that. |
 | `--mamba-ssm-cache-dtype bfloat16` | Halves the GDN state pages (see above). The model config defaults to float32. Changing this invalidates the compile cache. |
 | `--speculative-config.*` | DFlash2 with the W4A16 drafter. `num_speculative_tokens 7` is the drafter's maximum (block size 8). `TRITON_ATTN` for the drafter; the target uses `ROCM_AITER_UNIFIED_ATTN`. |
