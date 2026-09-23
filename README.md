@@ -340,6 +340,35 @@ Not done: the drafter is unchanged, so the loss of free generation with context 
 99k) stays; this only helps where the text repeats. Knobs: see *Environment knobs*; `RADIANCE_LOOKUP_SWITCH=<file>`
 (override only while the file exists) is the A/B tool used above.
 
+### Prefill GEMM on fragment-tiled activations, fragment-order weights (0.3.0, 0.3.1)
+
+Two switches that were in the image all along, neither of which did anything in production:
+
+- **`RADIANCE_MXFP4_A_TILED_MIN_M=513`** (0.3.0). `radiance_mxfp4_fp8_gemm_atiled` reads the
+  activation straight into the WMMA registers instead of staging a 256-row A tile through LDS (the
+  largest single cost of the folded kernel, ablated at 24–32 %). It needs the activation in
+  fragment-tiled layout, which only upstream's `radiance_arnq.py` producers emitted — this image's
+  fused norm/quant ops (`sly/mxfp4/radiance_fused_norm.py`) never asked for it, so the knob was
+  inert. 0.3.0 makes `add_rms_quant` and `silu_mul_quant` write the tiled layout at M ≥ the
+  threshold and register it for the consumer. The registry no longer pops on first use: the
+  gated-delta-net input norm feeds two GEMMs (`in_proj_qkvz`, `in_proj_ba`), and a popped entry would
+  have made the second one read the tiled buffer as row-major.
+- **`RADIANCE_MXFP4_WPERM=1`** (0.3.1). Weights in WMMA fragment order, so a wave's weight read is
+  128 contiguous bytes instead of sixteen rows K/2 apart. It cost 405 KV tokens (383,911 instead of
+  384,316): the permute made a new parameter per layer while the checkpoint copy was still alive and
+  left holes between the weights. 0.3.1 permutes back into the weight's own storage.
+
+A/B on the production arguments (BetterBench decode + prefill + concurrency 1/4/8, 8 passes, 210 W,
+same window, ABAB for the tiled path): prefill +11 … +13 % at 2k–64k from the tiled GEMM
+(2,041 → 2,315 tok/s at 2k, 1,674 → 1,857 at 64k, repeat within 0.3 %), decode unchanged; WPERM on
+top: step gap 38.5 → 37.2 ms, weighted decode +3.7 %, conc 1 +3.7 %, prefill +1 %. KV pool 384,316
+in every warm start, greedy output (four prompts up to 7k tokens) byte-identical in every arm. Rejected in
+the same windows: `RADIANCE_MXFP4_DECODE_NT=1` on top of WPERM (step 37.6 ms), libr4d's decode kernel
+(`RADIANCE_MXFP4_R4D_DECODE_MAX_M=64`: not bit-identical, 810 KV tokens), `RADIANCE_MXFP4_TN4_MIN_M=4096`
+(neutral), `patch_dflash_selector_topk` with K 24/32 (see `ci/unused_patches.txt`), `--no-async-scheduling`
+(neutral), and a 36-cell sweep of aiter's 2D prefill attention config (stock cell within 1–5 % of the
+best, see `sly/radiance_attn_decode.py`).
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -354,7 +383,70 @@ Not done: the drafter is unchanged, so the loss of free generation with context 
 
 ## Results
 
-### Current image: 0.2.9 (2026-09-21)
+### Current image: 0.3.1 (2026-09-23)
+
+BetterBench 0.4.0, default config, all three phases (single-stream decode 3 warmup + 20 passes per
+category, prefill sweep, concurrency 1/2/4/8/16 × 48 requests; temperature 0.7 / top_p 0.95 / top_k 20),
+against the production container: image 0.3.1 with `RADIANCE_MXFP4_A_TILED_MIN_M=513` and
+`RADIANCE_MXFP4_WPERM=1`, otherwise the same arguments as the 0.2.9 run below (KV pool 384,316 tokens,
+`--max-model-len 262144`). Two runs back to back, no other traffic: **300 W with the firmware fan curve**
+(no acoustic limit) and the production setting **210 W / fan curve capped at 2,800 rpm**.
+
+**Single-stream decode** (tok/s ± 95 % CI):
+
+| Category | 300 W | 210 W | 0.2.9, 210 W |
+|---|---|---|---|
+| chat | 90.8 ± 5.7 | 85.5 ± 4.2 | 82.1 |
+| code | 145.7 ± 9.1 | 136.1 ± 9.2 | 130.5 |
+| file_edit | 175.2 ± 6.8 | 164.6 ± 6.8 | 157.0 |
+| json | 166.7 ± 11.2 | 153.8 ± 10.0 | 153.5 |
+| math | 170.4 ± 7.3 | 157.2 ± 6.8 | 158.0 |
+| prose | 82.9 ± 3.3 | 77.7 ± 2.9 | 77.7 |
+| reasoning | 105.1 ± 13.6 | 105.6 ± 13.5 | 102.7 |
+| summarization | 128.7 ± 9.1 | 121.5 ± 6.4 | 122.8 |
+| **weighted** | **132.6** | **125.3** | 122.4 |
+| step gap p50 | 35.40 ms | 37.52 ms | 38.23 ms |
+| tokens/update | 4.61 | 4.63 | 4.60 |
+
+**Prefill** (unique prompts, no prefix cache, 16 output tokens):
+
+| Prompt tokens | 1,514 | 5,918 | 11,794 | 23,543 | 47,056 |
+|---|---|---|---|---|---|
+| **300 W**, tok/s | **3,040** | **3,029** | **2,974** | **2,786** | **2,424** |
+| **210 W**, tok/s | 2,431 | 2,409 | 2,360 | 2,225 | 1,961 |
+| 0.2.9, 210 W | 2,073 | 2,053 | 2,020 | 1,913 | 1,713 |
+| Δ 210 W vs 0.2.9 | +17.3 % | +17.3 % | +16.8 % | +16.3 % | +14.5 % |
+| TTFT 300 W / 210 W | 0.50 / 0.62 s | 1.95 / 2.46 s | 3.97 / 5.00 s | 8.45 / 10.58 s | 19.4 / 24.0 s |
+
+**Concurrency** (48 requests per level, all ok, 0 preemptions):
+
+| Concurrency | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| **300 W**, aggregate tok/s | **116.8** | **213.8** | **329.4** | **400.9** | **398.5** |
+| **210 W**, aggregate tok/s | 110.0 | 196.5 | 311.2 | 359.8 | 369.8 |
+| 0.2.9, 210 W | 105.6 | 199.6 | 294.7 | 393.7 | 382.3 |
+| TTFT p50 300 W / 210 W, ms | 108 / 111 | 135 / 149 | 157 / 173 | 184 / 228 | 183 / 204 |
+
+**Card** (5 s samples over the whole run):
+
+| | 300 W | 210 W |
+|---|---|---|
+| board power avg / max | 298 / 417 W | 209 / 295 W |
+| junction avg / max | 99 / 102 °C | 94 / 98 °C |
+| memory avg / max | 87 / 90 °C | 90 / 94 °C |
+| fan avg / max | 3,756 / 4,058 rpm | 2,334 / 2,445 rpm |
+| sclk avg | 3,005 MHz | 2,344 MHz |
+
+Draft acceptance (server counters over each run): 4.23 / 4.25 tokens per step, acceptance rate 0.462 / 0.464
+— unchanged against 0.2.9 (4.20 / 0.457), the gains are step time. What 300 W buys over 210 W: +5.8 %
+weighted decode (step 37.5 → 35.4 ms), +24 … +26 % prefill, +6 … +11 % concurrency, for 42 % more power and
+about 1,400 rpm more fan. Against 0.2.9 at the same 210 W the new image gains +2.4 % decode and +14.5 …
++17.3 % prefill (the tiled GEMM plus WPERM); conc 8/16 came out 8.6 / 3.3 % below the 0.2.9 run, which is
+larger than the ±4 % conc-8 spread seen between identical arms in the A/B above but was not repeated, so
+it is recorded here and not explained. Raw JSON: `/opt/accept/betterbench/out/full/full{300,210}.json` on
+the CI LXC, fan/power samples in `/root/gpu_full{300,210}.csv` on the Proxmox host.
+
+### History: 0.2.9 (2026-09-21)
 
 BetterBench 0.4.0, default config, all three phases (single-stream decode, prefill sweep, concurrency
 1/2/4/8/16 × 48 requests; sampling at temperature 0.7 / top_p 0.95 / top_k 20, 3 warmup + 20 measured
@@ -480,8 +572,9 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_MXFP4_DECODE_BK` | auto | – | `128` pins BK=128, `64` forces the BK=64 instantiation where one exists (split 1 and 4) — sweep knobs, never a production setting. |
 | `RADIANCE_MXFP4_DECODE_NT` | `0` | – | Non-temporal weight loads in the decode kernel. |
 | `RADIANCE_MXFP4_TN4_MIN_M` | `2048` | – | M from which the folded kernel uses the wide TN=4 tile. |
-| `RADIANCE_MXFP4_A_TILED_MIN_M` | `0` | – | Tiled-A layout for very large M (must exceed 512 and `DECODE_MAX_M`). |
-| `RADIANCE_MXFP4_WPERM` / `RADIANCE_MXFP4_R4D_DECODE_MAX_M` | `0` / `0` | – | Experimental: fragment-order weights + libr4d's `gemm_mxfp4a8_nt_m64` decode kernel. |
+| `RADIANCE_MXFP4_A_TILED_MIN_M` | `0` | `513` | 0.3.0: from this M on, the fused norm/quant producers write the fragment-tiled activation and the prefill GEMM takes `radiance_mxfp4_fp8_gemm_atiled` (+11 … +13 % prefill, bit-identical). Must exceed 512 and `DECODE_MAX_M`. |
+| `RADIANCE_MXFP4_WPERM` | `0` | `1` | Fragment-order weights, permuted in place at load (0.3.1): step gap −1.3 ms, weighted decode +3.7 %, KV pool unchanged, bit-identical. |
+| `RADIANCE_MXFP4_R4D_DECODE_MAX_M` | `0` | – | libr4d's `gemm_mxfp4a8_nt_m64` decode kernel (needs WPERM). Measured 2026-09-23: not bit-identical, no step gain, 810 KV tokens — off. |
 | `RADIANCE_MXFP4_MHIST` | `0` | – | Print every distinct `(N, K, M)` the plugin sees once (which M the decode path really issues). |
 | `RADIANCE_MXFP4_DEBUG`, `_CHECKX`, `_CHECKALL`, `_REFLINEAR`, `_SHADOW`, `_SYNC`, `_KERNEL_N`, `_KERNEL_NK` | off | – | Correctness/diagnostic switches, see the header of `sly/mxfp4/radiance_mxfp4.py`. |
 | `RADIANCE_ATTN_DECODE_TUNE` | `1` | – | 0.2.7: the fp8-q + fp8-KV, head-256 verify-batch tune of aiter's unified attention (`sly/radiance_attn_decode.py`, see *Decode attention* below). `0` = aiter's stock tables (A/B control; baked in at CUDA-graph capture, so it needs a restart). |
@@ -519,6 +612,11 @@ docker run --rm --name vllm7-mxfp4 \
   -e RADIANCE_LMHEAD_FP8=1 \
   -e RADIANCE_LMHEAD_INT4=1 \
   -e RADIANCE_FUSED_NORM_QUANT=1 \
+  -e RADIANCE_KV_GROUP_SIZE=8 \
+  -e RADIANCE_EMBED_INT8=1 \
+  -e RADIANCE_EMBED_BITS=4 \
+  -e RADIANCE_MXFP4_A_TILED_MIN_M=513 \
+  -e RADIANCE_MXFP4_WPERM=1 \
   -p 8000:8000 \
   -v /root/hf-cache:/root/.cache/huggingface \
   -v /root/vllm7-cache/triton:/root/.triton \

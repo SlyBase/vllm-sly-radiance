@@ -19,7 +19,7 @@ time / R, median of --reps; "us" covers the attention kernel and the reduce, "at
   python3 bench_decode_attn.py --sweep kernel --nseqs 1,4,8 --depths 32768,98304 --warm 6 --csv /out/kernel.csv
   python3 bench_decode_attn.py --sweep splits --base wide32 --csv /out/splits.csv
   python3 bench_decode_attn.py --check           # tuned vs stock vs an fp32 torch reference
-  python3 bench_decode_attn.py --prefill         # 2D prefill config candidates
+  python3 bench_decode_attn.py --prefill --csv /out/prefill.csv   # 2D prefill config sweep (--pf-grid, --pasts)
   python3 bench_decode_attn.py --rank /out/kernel.csv --top 15   # best cell over all swept shapes
 
 `radiance_attn_decode` must be importable (PYTHONPATH=<repo>/sly, or the site-packages copy) and must not
@@ -401,37 +401,83 @@ def cmd_check(a):
     print(f"check ok (worst tuned rel err {worst:.4f})")
 
 
+PF_STOCK = dict(BLOCK_M=64, TILE_SIZE=32, num_warps=4, num_stages=1, waves_per_eu=6)   # aiter gfx1201 Q_GEQ_256
+
+
+def pf_cells(spec):
+    """--pf-grid 'bm=64,128;t=16,32;w=4,8;s=1;e=1,2' -> {name: attn_2d override}. Unset fields keep stock."""
+    keys = {"bm": "BLOCK_M", "t": "TILE_SIZE", "w": "num_warps", "s": "num_stages", "e": "waves_per_eu"}
+    axes = {k: [PF_STOCK[v]] for k, v in keys.items()}
+    for part in filter(None, spec.split(";")):
+        k, _, vals = part.partition("=")
+        axes[k.strip()] = [int(x) for x in vals.split(",")]
+    cells = {}
+    for combo in itertools.product(*(axes[k] for k in keys)):
+        cell = {keys[k]: v for k, v in zip(keys, combo)}
+        cells["bm{BLOCK_M}_t{TILE_SIZE}_w{num_warps}_s{num_stages}_e{waves_per_eu}".format(**cell)] = cell
+    return cells
+
+
 def cmd_prefill(a):
-    """2D prefill/extend at 2048 query tokens: aiter's Q_GEQ_256 entry vs the fp8 large-prefill tune the
-    retired hook carried (TILE 16 waves 1) and neighbours. Eager, as the piecewise steps run it."""
+    """2D prefill/extend: one --qlen query chunk (the engine's max-num-batched-tokens) over `past` tokens of
+    KV, eager as the piecewise steps run it. Every cell is checked against stock's output on the same random
+    fp8 data (and at past 4096 both against an fp32 reference); timing = median of 5 after 2 warm calls."""
     b = Bench(a)
     torch = b.torch
-    cands = {"stock": None,
-             "t16_e1": dict(TILE_SIZE=16, waves_per_eu=1),
-             "t32_e1": dict(TILE_SIZE=32, waves_per_eu=1),
-             "t16_e6": dict(TILE_SIZE=16),
-             "t16_w2_e1": dict(TILE_SIZE=16, waves_per_eu=1, num_warps=2)}
+    cands = {"stock": None}
+    for name, cell in pf_cells(a.pf_grid).items():
+        if cell != PF_STOCK:
+            cands[name] = cell
     qlen = a.qlen
-    q = torch.randn(qlen, NQ, HS, device=b.dev).to(b.fp8)
+    g = torch.Generator(device=b.dev).manual_seed(3)
+    q = (torch.randn(qlen, NQ, HS, device=b.dev, generator=g) * 0.5).to(b.fp8)
     out = torch.empty(qlen, NQ, HS, dtype=torch.bfloat16, device=b.dev)
     one = torch.tensor([1.0], device=b.dev)
-    for past in (0, 32768, 98304):
+    done = set()
+    fh = writer = None
+    if a.csv:
+        new = not os.path.exists(a.csv)
+        if not new:
+            with open(a.csv) as f:
+                done = {(r[0], int(r[1])) for r in csv.reader(f) if r and r[0] != "cell"}
+        fh = open(a.csv, "a", newline="")
+        writer = csv.writer(fh)
+        if new:
+            writer.writerow(["cell", "past", "qlen", "ms", "tflops", "err_vs_stock", "err_vs_ref"])
+    for past in [int(x) for x in a.pasts.split(",")]:
         depth = past + qlen
         nb = -(-depth // BLOCK)
         buf = torch.empty(nb, NKV, BLOCK, 2 * HS, dtype=b.fp8, device=b.dev)
-        for i in range(0, nb, 16):
-            n = min(16, nb - i)
-            buf[i:i + n].copy_(b.tile_data[:n])
+        for i in range(nb):
+            buf[i].copy_(torch.randn(NKV, BLOCK, 2 * HS, device=b.dev, generator=g).to(b.fp8))
         k, v = buf.transpose(1, 2).split(HS, dim=-1)
         bt = torch.arange(nb, device=b.dev, dtype=torch.int32).view(1, nb)
         cu = torch.tensor([0, qlen], device=b.dev, dtype=torch.int32)
         seq = torch.tensor([depth], device=b.dev, dtype=torch.int32)
-        base = None
+        # causal FLOPs of the chunk: QK^T + PV over (past + i + 1) keys for query i
+        flops = 4.0 * NQ * HS * (qlen * past + qlen * (qlen + 1) / 2)
+        ref = None
+        if past == 4096:
+            K = k[:nb].reshape(nb * BLOCK, NKV, HS)[:depth].float()
+            V = v[:nb].reshape(nb * BLOCK, NKV, HS)[:depth].float()
+            qf = q.float()
+            ref = torch.empty(qlen, NQ, HS, device=b.dev)
+            pos = torch.arange(depth, device=b.dev)[None, :]
+            lim = (past + torch.arange(qlen, device=b.dev))[:, None]
+            for h in range(NQ):
+                kvh = h // (NQ // NKV)
+                sc = (qf[:, h] @ K[:, kvh].T) * HS ** -0.5
+                ref[:, h] = torch.softmax(sc.masked_fill(pos > lim, float("-inf")), -1) @ V[:, kvh]
+            del K, V
+        base = base_out = None
         for name, over in cands.items():
-            b.RAD.ENABLED, b.RAD.FORCE, b.RAD.FORCE_2D = True, None, over
+            if (name, past) in done and name != "stock":
+                continue
+            b.RAD.ENABLED, b.RAD.FORCE, b.RAD.FORCE_2D = True, None, (dict(over) if over else None)
             times = []
+            t0 = time.time()
             try:
-                for _ in range(6):
+                for _ in range(7):
                     e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                     e0.record()
                     b.UA.unified_attention(q=q, k=k, v=v, out=out, cu_seqlens_q=cu, max_seqlen_q=qlen, seqused_k=seq,
@@ -442,12 +488,25 @@ def cmd_prefill(a):
                     torch.cuda.synchronize()
                     times.append(e0.elapsed_time(e1))
             except Exception as e:
-                print(f"past={past} {name}: FAIL {type(e).__name__}: {str(e)[:100]}")
+                print(f"past={past} {name}: FAIL {type(e).__name__}: {str(e)[:120]}", flush=True)
                 continue
             ms = statistics.median(times[2:])
-            base = base or ms
-            print(f"past={past:6d} qlen={qlen} {name:10s} {ms:8.3f} ms  ({base / ms:4.2f}x vs stock)", flush=True)
-        del buf
+            o = out.float()
+            if base_out is None:
+                base, base_out = ms, o.clone()
+            err = ((o - base_out).norm() / base_out.norm()).item()
+            eref = ((o - ref).norm() / ref.norm()).item() if ref is not None else float("nan")
+            bad = err > 0.05 or not torch.isfinite(o).all().item()
+            print(f"past={past:6d} {name:26s} {ms:8.3f} ms {flops / ms / 1e9:6.1f} TF  {base / ms:4.2f}x  "
+                  f"err {err:.4f} ref {eref:.4f}{'  BAD' if bad else ''}  ({time.time() - t0:.0f}s)", flush=True)
+            if writer and (name, past) not in done:
+                writer.writerow([name, past, qlen, f"{ms:.3f}", f"{flops / ms / 1e9:.1f}", f"{err:.4f}",
+                                 f"{eref:.4f}" + ("_BAD" if bad else "")])
+                fh.flush()
+        del buf, k, v
+        torch.cuda.empty_cache()
+    if fh:
+        fh.close()
 
 
 def main():
@@ -470,6 +529,9 @@ def main():
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--prefill", action="store_true")
     ap.add_argument("--qlen", type=int, default=2048)
+    ap.add_argument("--pasts", default="0,4096,16384,32768,65536,98304", help="--prefill: KV tokens before the chunk")
+    ap.add_argument("--pf-grid", default="bm=64,128,256;t=16,32,64;w=4,8;e=1,2",
+                    help="--prefill: attn_2d cells, axes bm/t/w/s/e, unset axes keep aiter's stock value")
     ap.add_argument("--print", dest="print_csv", help="print the table of an existing csv and exit")
     ap.add_argument("--rank", help="rank the configs of an existing sweep csv and exit")
     a = ap.parse_args()

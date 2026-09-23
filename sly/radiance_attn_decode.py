@@ -61,7 +61,12 @@ Untouched, deliberately:
     does not fit one 64-row block (max_seqlen_q x 6 > 64: prefill chunks): plan() returns None.
   * the 2D prefill config. The retired hook's fp8 prefill tune (TILE 16, waves 1) measured 2-12% slower
     than aiter's Q_GEQ_256 entry on this card (2048-token chunks at 0 / 32k / 98k of past KV), so it is
-    not ported.
+    not ported. A full sweep on 2026-09-22 (bench_decode_attn.py --prefill, 36 cells: BLOCK_M 64/128/256 x
+    TILE 16/32/64 x warps 4/8 x waves 1/2, 2048-token chunk over 0-98k past, 300 W) confirmed it: the best
+    cell (BLOCK_M 64 / TILE 32 / 4 warps / waves 2) is 1.12x at 4k, 1.05x at 32k, 1.03x at 64k and 0.99x at
+    98k of past KV; BLOCK_M 128/256 lose everywhere. Stock reaches ~95 TFLOPS; in a 64k prefill that is
+    < 2% end to end, so the table stays aiter's. What would move long-context prefill is a different
+    kernel, not a different cell.
 
 Knobs (read at import):
   RADIANCE_ATTN_DECODE_TUNE      1 (default) | 0 = aiter's stock tables (A/B control)

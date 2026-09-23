@@ -45,16 +45,34 @@ def a_tiled_wanted(M: int) -> bool:
     return A_TILED_MIN_M > 0 and M >= A_TILED_MIN_M
 
 
+# One producer can feed SEVERAL consumers (the GDN input norm feeds in_proj_qkvz AND in_proj_ba),
+# so an entry is NOT popped on consume -- the second consumer would read the tiled buffer as
+# row-major. It lives until the address is registered again or it ages out of the last
+# _A_TILED_KEEP registrations (a producer's consumers run right after it, before the next few
+# producers). A stale entry can only be matched by a later ROW-MAJOR tensor at the same address with
+# the same (M, K); at prefill-class M every fp8 activation of K = hidden / intermediate that reaches
+# mxfp4_linear_pq comes from a tiled producer, which re-registers, and a shape mismatch is treated
+# as row-major and dropped (not raised: gdn_norm_quant's row-major K = value_dim output may reuse
+# the address of a tiled hidden-size one).
+_A_TILED_KEEP = 64
+
+
 def a_tiled_register(q, M: int, K: int) -> None:
-    _A_TILED[q.data_ptr()] = (M, K)
+    ptr = q.data_ptr()
+    _A_TILED.pop(ptr, None)
+    _A_TILED[ptr] = (M, K)
+    while len(_A_TILED) > _A_TILED_KEEP:
+        _A_TILED.pop(next(iter(_A_TILED)))
 
 
 def a_tiled_take(q, M: int, K: int) -> bool:
-    ent = _A_TILED.pop(q.data_ptr(), None)
+    ptr = q.data_ptr()
+    ent = _A_TILED.get(ptr)
     if ent is None:
         return False
     if ent != (M, K):
-        raise RuntimeError(f"radiance.mxfp4: tiled activation shape mismatch {ent} vs {(M, K)}")
+        del _A_TILED[ptr]
+        return False
     return True
 # Store the weight in WMMA fragment order rather than the checkpoint's [N, K/2]. A B fragment maps
 # lane l onto N row l&15, so in checkpoint order a half-wave reads sixteen rows K/2 bytes apart --
@@ -787,8 +805,12 @@ def _make_kernel_class():
                     raise RuntimeError(
                         f"[radiance.mxfp4] RADIANCE_MXFP4_WPERM needs N and K divisible by 16, "
                         f"got N={N_} K={K}")
-                layer.weight = torch.nn.Parameter(
-                    permute_w(layer.weight.data, N_, K), requires_grad=False)
+                # Back into the SAME storage, not a new Parameter: a fresh [N, K/2] per layer
+                # while the checkpoint copy is still alive left the loaded weights interleaved
+                # with freed holes, and the KV pool came out 405 tokens smaller (383,911 vs
+                # 384,316, prod unit, 2026-09-23). The permuted copy is a transient of one
+                # layer's size, freed before the next layer.
+                layer.weight.data.copy_(permute_w(layer.weight.data, N_, K))
             layer.radiance_w4a8_ok = bool(ok)   # record only; never read in the forward
 
         def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
