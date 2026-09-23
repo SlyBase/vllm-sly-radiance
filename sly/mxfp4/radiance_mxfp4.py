@@ -805,8 +805,12 @@ def _make_kernel_class():
                     raise RuntimeError(
                         f"[radiance.mxfp4] RADIANCE_MXFP4_WPERM needs N and K divisible by 16, "
                         f"got N={N_} K={K}")
-                layer.weight = torch.nn.Parameter(
-                    permute_w(layer.weight.data, N_, K), requires_grad=False)
+                # Back into the SAME storage, not a new Parameter: a fresh [N, K/2] per layer
+                # while the checkpoint copy is still alive left the loaded weights interleaved
+                # with freed holes, and the KV pool came out 405 tokens smaller (383,911 vs
+                # 384,316, prod unit, 2026-09-23). The permuted copy is a transient of one
+                # layer's size, freed before the next layer.
+                layer.weight.data.copy_(permute_w(layer.weight.data, N_, K))
             layer.radiance_w4a8_ok = bool(ok)   # record only; never read in the forward
 
         def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
