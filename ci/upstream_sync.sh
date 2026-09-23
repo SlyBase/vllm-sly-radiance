@@ -81,7 +81,7 @@ git worktree remove --force "$WT"
 
 # --- 4. files that matter for the image (Dockerfile loop, COPY'd modules, sly/ layer) ---
 CHANGED=$(git diff --name-only "$BASE" "$UP")
-IMAGE_RE='^(Dockerfile|VERSION|_patchlib\.py|install_radiance_hooks\.py|patch_[^/]*\.py|radiance_[^/]*\.(py|pth|sh)|prune_rocm\.sh|sly/.*|fp8-configs/.*|moe-configs/.*|dflash2/.*|[^/]*\.jinja)$'
+IMAGE_RE='^(Dockerfile|VERSION|_patchlib\.py|install_radiance_hooks\.py|patch_[^/]*\.py|radiance_[^/]*\.(py|pth|sh)|prune_rocm\.sh|split_venv\.py|constraints\.txt|sly/.*|fp8-configs/.*|moe-configs/.*|dflash2/.*|[^/]*\.jinja)$'
 IMAGE_FILES=$(echo "$CHANGED" | grep -E "$IMAGE_RE" || true)
 
 # This fork's own current image-layer files (same IMAGE_RE, against origin/main instead of

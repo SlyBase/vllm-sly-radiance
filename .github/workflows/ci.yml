@@ -88,6 +88,64 @@ jobs:
           path: .dryrun/pass*.log
           if-no-files-found: ignore
 
+  constraints:
+    # constraints.txt must be exactly what pip resolves for the pinned vLLM (no missing, stale or
+    # out-of-range pin): the guard that makes a Renovate bump of it mergeable without an image build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          # the image's interpreter: pip evaluates environment markers for the running one
+          python-version: "3.12"
+
+      - name: replay the image's pip resolution against constraints.txt
+        id: check
+        # a Renovate PR gets repaired below instead of just failing
+        continue-on-error: ${{ startsWith(github.head_ref, 'renovate/') }}
+        run: python3 ci/check_constraints.py
+
+      # Renovate looks packages up one by one, so its PR can hold versions that do not fit
+      # together (see --repair in ci/check_constraints.py). Re-resolve the changed pins as ranges,
+      # push the consistent set to the Renovate branch with the App token (a GITHUB_TOKEN push
+      # would not start CI again) and fail this run; the push's own run is the one that counts.
+      # Renovate sees the branch as edited from then on and leaves it alone until it is merged.
+      - name: app token (repair)
+        id: app_token
+        if: steps.check.outcome == 'failure' && startsWith(github.head_ref, 'renovate/')
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: repair the Renovate PR
+        if: steps.check.outcome == 'failure' && startsWith(github.head_ref, 'renovate/')
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF" "$HEAD_REF"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+          python3 ci/check_constraints.py --repair --base "origin/$BASE_REF" | tee repair.log
+          python3 ci/check_constraints.py
+          git config user.name "constraints-repair[bot]"
+          git config user.email "constraints-repair@users.noreply.github.com"
+          git add constraints.txt renovate.json
+          git commit -m "constraints: repair the resolution of this update" \
+            -m "$(grep -E '^  |^repair:' repair.log)"
+          git push "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$HEAD_REF"
+          {
+            echo "### constraints.txt repaired and pushed"
+            echo '```'; cat repair.log; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::constraints.txt did not resolve as proposed; the repaired set was pushed, its CI run decides"
+          exit 1
+
   consistency:
     runs-on: ubuntu-24.04
     steps:
@@ -100,16 +158,17 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          if [ -n "$BASE_REF" ] && [[ "$HEAD_REF" != upstream/* ]]; then
-            # upstream/* sync PRs are exempt: they never carry a VERSION bump until the merge is curated
+          if [ -n "$BASE_REF" ] && [[ "$HEAD_REF" != upstream/* ]] && [[ "$HEAD_REF" != renovate/* ]]; then
+            # upstream/* sync PRs are exempt: they never carry a VERSION bump until the merge is curated;
+            # renovate/* likewise: dependency bumps collect on main and ship with the next VERSION bump
             python3 ci/check_consistency.py --base "origin/$BASE_REF"
           else
             python3 ci/check_consistency.py
           fi
 
   ci:
-    # aggregate status for the branch protection: one required check instead of three
-    needs: [lint, patch-dryrun, consistency]
+    # aggregate status for the branch protection: one required check instead of four
+    needs: [lint, patch-dryrun, constraints, consistency]
     if: always()
     runs-on: ubuntu-24.04
     steps:

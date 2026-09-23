@@ -14,3 +14,5 @@ vllm-cache/
 # mistaken for what the image ships.
 *.so
 rocm-bandwidth-test
+# macOS AppleDouble files (a tar/copy from a Mac carries them next to every file)
+._*

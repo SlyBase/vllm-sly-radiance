@@ -1,8 +1,9 @@
 # vllm-radiance: vLLM/torch/triton/aiter stack for RDNA4 (gfx1201 / R9700), plus the radiance
-# patches and kernels. Single multistage build on the official AMD ROCm image, in four stages:
+# patches and kernels. Single multistage build on the official AMD ROCm image, in five stages:
 #   1. builder    compile torch/triton/torchvision/aiter/vLLM from source into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
 #   3. assemble   install the wheels, apply the patches, build the R4D kernel library
+#   3b. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
 # No prebuilt component wheels and no checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
@@ -251,13 +252,18 @@ ENV SP=/opt/vllm/lib/python3.12/site-packages
 # platform detection. The transformers pin goes in the SAME pip invocation as the vLLM wheel so the
 # resolver sees it as a constraint -- installing it afterwards would first pull the newest release
 # and then downgrade it, leaving both in the layer.
+# Everything that comes from PyPI is pinned by constraints.txt (see its header; Renovate keeps it
+# current, ci/check_constraints.py keeps it complete): without it a rebuild that misses the cache
+# resolves vLLM's open ranges to whatever is newest that day.
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir -U pip wheel setuptools \
+COPY constraints.txt /tmp/constraints.txt
+RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
  && pip install --no-cache-dir --no-deps \
       /wheels/torch-*.whl /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
- && pip install --no-cache-dir /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
- && pip install --no-cache-dir /opt/rocm/share/amd_smi pillow pybind11 \
- && rm -rf /wheels /root/.cache
+ && pip install --no-cache-dir -c /tmp/constraints.txt \
+      /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
+ && pip install --no-cache-dir -c /tmp/constraints.txt /opt/rocm/share/amd_smi pillow pybind11 \
+ && rm -rf /wheels /root/.cache /tmp/constraints.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
 # asic_info reports it empty on this card). It used to be called VLLM_ROCM_GCN_ARCH, which vLLM
@@ -267,6 +273,26 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
     HIP_ARCHITECTURES=${GFX_ARCH} AMDGPU_TARGETS=${GFX_ARCH} GPU_ARCHS=${GFX_ARCH} \
     SAFETENSORS_FAST_GPU=1 TOKENIZERS_PARALLELISM=false TRITON_CACHE_AUTOTUNING=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# --- trim, strip and freeze the installed stack (the release image's cold venv layer) ---
+# Everything below this point is radiance's own work on top of the stack; this step closes the
+# part that changes only with a stack bump, and snapshots it for split_venv.py (see the venvsplit
+# stage), which later ships the unchanged part as its own layer.
+#   * triton's NVIDIA backend binaries (ptxas, cupti, ~360 MB): this triton only ever targets HIP.
+#     The backend's Python modules stay -- triton imports every backend at load time.
+#   * aiter's prebuilt assembly kernels for other archs (hsa/gfx942, gfx950, gfx1250, ~115 MB):
+#     aiter looks them up under hsa/<device arch>, and there is none for gfx1201.
+#   * debug symbols of the installed extensions (worth ~1 GB): release builds, but they still carry
+#     .debug_* sections that nothing reads at runtime. The radiance kernels built further down
+#     (R4D, the MXFP4 GEMM) are not stripped: tiny, and both carry device fatbins.
+COPY split_venv.py /opt/split_venv.py
+RUN set -eu; \
+    rm -rf ${SP}/triton/backends/nvidia/bin ${SP}/triton/backends/nvidia/lib; \
+    find ${SP}/aiter_meta/hsa -mindepth 1 -maxdepth 1 -type d -name 'gfx*' ! -name "${GFX_ARCH}" \
+      -exec rm -rf {} +; \
+    find /opt/vllm -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} +; \
+    /usr/bin/python3 /opt/split_venv.py snapshot /opt/vllm /opt/vllm.stable.json
 
 # --- runtime modules and configs ---
 # radiance_amdsmi.py and .pth: amdsmi init-order fix. amdsmi must init before HIP at site-init in
@@ -448,13 +474,22 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
  && python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
 
-# --- strip debug symbols from the installed extensions (worth ~1 GB) ---
-# These are release builds, but they still carry .debug_* sections that nothing reads at runtime.
-# R4D and the MXFP4 kernel above are both excluded: tiny, and both carry device fatbins.
-RUN find /opt/vllm -type f -name '*.so*' ! -name 'r4d.so' ! -name 'radiance_mxfp4_fp8.so' \
-      -exec strip --strip-unneeded {} + 2>/dev/null || true; \
-    find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true; \
-    echo "extensions stripped"
+# The installed extensions were stripped before the snapshot above; only bytecode is left to drop.
+RUN find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+
+# =====================================================================================
+# STAGE 3b venvsplit: the venv as two layers, so a release update pulls only its own part
+# =====================================================================================
+# /split/cold is the stack as installed above, minus whatever the patch chain rewrote: ~2.2 GB that
+# is byte-identical from release to release until the stack is bumped. /split/hot is the rest:
+# the patched vLLM and aiter trees, the few files patched elsewhere (e.g. torch/_dynamo/utils.py),
+# the radiance modules and the HIP kernels. split_venv.py resets every mtime, so the cold layer's
+# digest depends on file contents only: it repeats whenever the installed stack is the same, also
+# when the steps after the wheel install rerun. A registry push then reports the layer as existing,
+# and a `docker pull` of the next release skips it.
+# The venv is only read here (copied, not moved: see split_venv.py's docstring).
+FROM assemble AS venvsplit
+RUN /usr/bin/python3 /opt/split_venv.py split /opt/vllm /opt/vllm.stable.json /split
 
 # =====================================================================================
 # STAGE 4 final: the release image -- a clean Ubuntu with only what is needed to serve
@@ -488,7 +523,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # it a cached layer users do not re-download for every version bump.
 COPY --from=rocmprune /opt/rocm /opt/rocm
 COPY --from=rocmprune /etc/alternatives /etc/alternatives
-COPY --from=assemble /opt/vllm /opt/vllm
+# Cold before hot: the hot layer fills in the paths the cold one leaves out (see venvsplit).
+COPY --from=venvsplit /split/cold/ /opt/vllm/
+COPY --from=venvsplit /split/hot/ /opt/vllm/
 COPY --from=builder /artifacts/rocm-bandwidth-test /usr/local/bin/rocm-bandwidth-test
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
@@ -552,7 +589,7 @@ RUN printf '%s\n' \
  && rm -f /tmp/_jit_probe.hip /tmp/_jit_probe.so \
  && echo "runtime JIT toolchain OK (hipcc + libstdc++ headers + Python.h + pybind11)"
 
-ARG RADIANCE_VERSION=0.6.2
+ARG RADIANCE_VERSION=dev
 ENV RADIANCE_VERSION=${RADIANCE_VERSION}
 # The banner reads this file first: one source of truth for the version, so it reports what was
 # built even when the image is built without --build-arg.
@@ -561,3 +598,36 @@ COPY radiance_preamble.py /opt/radiance_preamble.py
 COPY radiance_entrypoint.sh /opt/radiance_entrypoint.sh
 RUN chmod +x /opt/radiance_entrypoint.sh
 ENTRYPOINT ["/opt/radiance_entrypoint.sh"]
+
+# --- image metadata: what this image is and where it came from ---
+# `docker inspect --format '{{json .Config.Labels}}' <image>` shows them; build.yml sets the
+# description and source on the registry manifest too, where ghcr.io reads them. Kept last:
+# VCS_REF and BUILD_DATE change with every build, and a changed ARG invalidates every RUN below it.
+# build.yml passes RADIANCE_VERSION (= VERSION), VCS_REF and BUILD_DATE; a local build says dev/unknown.
+# ref.name only overrides the base image's own value ("ubuntu"), which would otherwise show through.
+ARG ROCM_BASE
+ARG RELEASE_BASE
+ARG TORCH_VERSION
+ARG TRITON_VERSION
+ARG R4D_VERSION
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="vllm-sly-radiance" \
+      org.opencontainers.image.description="vLLM ${VLLM_VERSION} for the AMD Radeon AI PRO R9700 (${GFX_ARCH}, RDNA4): MXFP4 (Quark) checkpoints with the W4A8 HIP GEMM, DFlash2 speculative decoding, libr4d kernels" \
+      org.opencontainers.image.version="${RADIANCE_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/SlyBase/vllm-sly-radiance" \
+      org.opencontainers.image.url="https://github.com/SlyBase/vllm-sly-radiance" \
+      org.opencontainers.image.documentation="https://github.com/SlyBase/vllm-sly-radiance#readme" \
+      org.opencontainers.image.vendor="SlyBase" \
+      org.opencontainers.image.base.name="${RELEASE_BASE}" \
+      org.opencontainers.image.ref.name="${RADIANCE_VERSION}" \
+      io.slybase.radiance.gfx-arch="${GFX_ARCH}" \
+      io.slybase.radiance.rocm-base="${ROCM_BASE}" \
+      io.slybase.radiance.vllm="${VLLM_VERSION}" \
+      io.slybase.radiance.torch="${TORCH_VERSION}" \
+      io.slybase.radiance.triton="${TRITON_VERSION}" \
+      io.slybase.radiance.aiter="${AITER_VERSION}" \
+      io.slybase.radiance.transformers="${TRANSFORMERS_VERSION}" \
+      io.slybase.radiance.r4d="${R4D_VERSION}"
