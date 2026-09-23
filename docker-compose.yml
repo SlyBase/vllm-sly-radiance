@@ -95,7 +95,7 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser=qwen3_coder
       - --reasoning-parser=qwen3
-      - --chat-template=/work/qwen-fixed-v22.3.jinja
+      - --chat-template=/opt/qwen-fixed.jinja               # shipped in the image (froggeric v22.5)
       - --language-model-only
       - --trust-remote-code
       - --host=0.0.0.0

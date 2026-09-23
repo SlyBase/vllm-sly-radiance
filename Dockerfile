@@ -602,6 +602,16 @@ ENV RADIANCE_VERSION=${RADIANCE_VERSION}
 # The banner reads this file first: one source of truth for the version, so it reports what was
 # built even when the image is built without --build-arg.
 COPY VERSION /opt/radiance_version
+# The chat template for Qwen 3.5 / 3.6 / 3.8: froggeric's fixed template (huggingface.co/froggeric/
+# Qwen-Fixed-Chat-Templates, Apache-2.0, repo revision 855bffc). It fixes the official 3.8 template's
+# xhigh-by-default reasoning, the blank <think></think> blocks it injects into chat history (a
+# prefix-cache miss on every turn), crashes on JSON-string tool arguments and enable_thinking=false,
+# and maps client effort aliases (high/max -> xhigh, none/off -> thinking off). Serve with
+# `--chat-template /opt/qwen-fixed.jinja`; the path stays the same across template versions, the
+# version is in the label io.slybase.radiance.chat-template and in the file's first line.
+COPY qwen-fixed-v22.5.jinja /opt/qwen-fixed.jinja
+COPY ci/check_chat_template.py /tmp/check_chat_template.py
+RUN python /tmp/check_chat_template.py && rm -f /tmp/check_chat_template.py
 COPY radiance_preamble.py /opt/radiance_preamble.py
 COPY radiance_entrypoint.sh /opt/radiance_entrypoint.sh
 RUN chmod +x /opt/radiance_entrypoint.sh
@@ -638,4 +648,5 @@ LABEL org.opencontainers.image.title="vllm-sly-radiance" \
       io.slybase.radiance.triton="${TRITON_VERSION}" \
       io.slybase.radiance.aiter="${AITER_VERSION}" \
       io.slybase.radiance.transformers="${TRANSFORMERS_VERSION}" \
-      io.slybase.radiance.r4d="${R4D_VERSION}"
+      io.slybase.radiance.r4d="${R4D_VERSION}" \
+      io.slybase.radiance.chat-template="qwen3.8-froggeric-v22.5 (/opt/qwen-fixed.jinja)"
