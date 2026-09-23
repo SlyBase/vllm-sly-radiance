@@ -347,7 +347,7 @@ Two switches that were in the image all along, neither of which did anything in 
 - **`RADIANCE_MXFP4_A_TILED_MIN_M=513`** (0.3.0). `radiance_mxfp4_fp8_gemm_atiled` reads the
   activation straight into the WMMA registers instead of staging a 256-row A tile through LDS (the
   largest single cost of the folded kernel, ablated at 24–32 %). It needs the activation in
-  fragment-tiled layout, which only upstream's `radiance_arnq.py` producers emitted — this image's
+  fragment-tiled layout, which only ggz14's `radiance_arnq.py` producers emitted — this image's
   fused norm/quant ops (`sly/mxfp4/radiance_fused_norm.py`) never asked for it, so the knob was
   inert. 0.3.0 makes `add_rms_quant` and `silu_mul_quant` write the tiled layout at M ≥ the
   threshold and register it for the consumer. The registry no longer pops on first use: the
@@ -765,5 +765,8 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
   HIP kernel.
 - [vLLM](https://github.com/vllm-project/vllm), [AITER](https://github.com/ROCm/aiter),
   [DFlash](https://github.com/vllm-project/vllm/pull/52816).
+- [turboderp/exllamav3](https://github.com/turboderp-org/exllamav3) (MIT) — `escha/` (carried from
+  ggz14, not used by the image build) contains code derived from ExLlamaV3; its license is in
+  `escha/EXLLAMAV3-LICENSE.txt`.
 
 License: same as upstream vllm-radiance (see `LICENSE`).
