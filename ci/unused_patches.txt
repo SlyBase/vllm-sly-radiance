@@ -11,16 +11,16 @@ patch_radiance_fusion.py  AiterRMSNormQuantFusionPass.is_rdna_aiter_enabled() re
 patch_ar_3rank.py         TP=3 three-rank all-reduce; needs the 3-rank r4d kernel from r4d_radiance_extras.patch (TP=1 here)
 patch_ar_geometry.py      all-reduce launch geometry knobs; TP=1 here, no all-reduce
 patch_ar_maxbytes.py      all-reduce size knobs (in ggz14's loop); TP=1 here, no all-reduce
-patch_async_dynwidth.py   dynamic verify width under async scheduling; depends on patch_dynwidth
+patch_async_dynwidth.py   dynamic verify width under async scheduling; depends on patch_dynwidth. A/B 2026-09-23 (0.3.1, prod args, 300 W, ABAB, conc 2/4/8/16 x 48): RADIANCE_DYNAMIC_WIDTH=1 costs 3 % at conc 4-16 (C8 401/406 -> 389/397), conc 2 unchanged -- rejected
 patch_autoround.py        registers ggz14's `auto-round` quant config (radiance_autoround.py/.hip not copied into this image)
 patch_dflash_calib.py     drafter activation-statistics collection for quantize_dflash_mxfp4.py (offline tooling)
 patch_dflash_selector_topk.py  A/B 2026-09-22 (BetterBench, prod args, 300 W): K 24/32 vs 16 = +0.8/+0.9 % weighted serial decode but -2.9/-2.5 % conc 1 (conc-1 noise 0.1 %), acceptance unchanged; K != 16 also needs its own torch.compile cache (the candidate_selector graph is cached at the checkpoint's 16 and replays with a shape assert)
 patch_dflash_mxfp4_kv.py  DFlash2 fused KV for an MXFP4-quantized drafter; our drafter is W4A16 (sly/patch_dflash_w4_packed.py)
 patch_draft_attn_blockm.py  rejected upstream (4-34% slower on gfx1201), not wired in there either
-patch_dynwidth.py         scheduler-side dynamic verify width; overlaps RADIANCE_DYNAMIC_DRAFT (radiance_draft.py); follow-up A/B
+patch_dynwidth.py         scheduler-side dynamic verify width; A/B 2026-09-23 rejected, see patch_async_dynwidth.py
 patch_escha.py            registers ggz14's `escha` quant config (radiance_escha.py/.hip not copied into this image)
 patch_gdn_glue.py         strided GDN gates + empty core_attn_out; only meaningful on the R4D GDN path, which bf16 SSM state declines here
-patch_gdn_merge_inproj.py GDN in_proj single-GEMM merge (radiance_gdnmerge.py not copied); candidate for a follow-up step
+patch_gdn_merge_inproj.py GDN in_proj single-GEMM merge (radiance_gdnmerge.py not copied). Upstream's merged forward replaces forward_hip with the AITER GDN core; this image serves forward_cuda (FLA). A forward_cuda-sliced variant was A/B'd 2026-09-23 (0.3.1, prod args, 300 W): step gap 35.31 -> 35.15 ms, prefill -1.5..-2.2 %, conc 4 -2.5 %, KV pool 384,316 -> 375,820 (the torch.cat copies fragment the weight arena) -- rejected. A K != default merge also needs RADIANCE_GDN_MERGE_INPROJ in envs.compile_factors (stale AOT graph otherwise)
 patch_gdn_shared_build.py shared GDN metadata build across KV-cache groups; candidate for a follow-up A/B
 patch_kv_group_size.py    hybrid KV-cache group sizing by capacity; candidate for a follow-up A/B (KV token count)
 patch_nvfp4_mxfp4.py      NVFP4 checkpoints via the MXFP4 kernel; this image serves a Quark MXFP4 checkpoint
