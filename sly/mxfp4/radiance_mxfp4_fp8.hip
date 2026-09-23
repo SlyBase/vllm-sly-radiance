@@ -1,5 +1,8 @@
 // RADIANCE gfx1201 MXFP4 x FP8 GEMM: C[M,N] bf16 = A_fp8[M,K] . dequant(W_mxfp4)[N,K]^T
 //
+// Origin: ggz14/radiance-vllm-mxfp4 (Codeberg, radiance_mxfp4_fp8.hip), modified by SlyBase
+// (vllm-sly-radiance): decode band, tile tables, fused norm/quant producers, A-tiled wiring.
+//
 // Why a hand-written kernel: Triton lowers tl.dot_scaled by upconverting e2m1 to bf16 and using the
 // 16-bit WMMA. Measured on this card, register-resident: fp8 WMMA 325.2 TFLOP/s vs f16 WMMA 160.2
 // (2.03x), while Triton's own tl.dot manages 102.8 bf16 and only 43.3 on fp8 operands -- i.e. Triton
