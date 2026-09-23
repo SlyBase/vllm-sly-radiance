@@ -369,6 +369,25 @@ the same windows: `RADIANCE_MXFP4_DECODE_NT=1` on top of WPERM (step 37.6 ms), l
 (neutral), and a 36-cell sweep of aiter's 2D prefill attention config (stock cell within 1–5 % of the
 best, see `sly/radiance_attn_decode.py`).
 
+### Fused GDN decode on ROCm (HIP port of vLLM's kernel, default off)
+
+vLLM 0.29 has a fused kernel for the post-conv half of the gated-delta-net decode of a speculative
+verify batch (q/k l2norm, gating, delta-rule state update with the per-position write-back, gated
+RMSNorm in one launch per request and value head), but builds it for NVIDIA archs only; on ROCm the
+layer logs `Falling back to the Triton GDN decode path` and runs the FLA update kernel plus its glue
+— about six extra launches per GDN layer, 48 layers per target forward. `sly/gdn/radiance_gdn_decode.hip`
+is a HIP port of that kernel (cp.async → register prefetch, `__shfl_*_sync` → wave32 `__shfl_*`,
+`__nv_bfloat16` → `__hip_bfloat16`; the math is unchanged), registered as
+`torch.ops._C.fused_gdn_decode_post_conv_mtp` so vLLM's own switch picks it up.
+
+Status: in the image, **off by default** (`RADIANCE_GDN_FUSED_DECODE=1` plus
+`VLLM_GDN_DECODE_KERNEL=cuda` enables it). vLLM's reference test for the kernel passes on gfx1201
+(22 cases: head ratios 1/2/3/4/8, bf16 and fp32 state, ragged batches, silu and sigmoid gate) plus
+four production shapes in both gate modes — 30 of 30. One serving arm so far (300 W, prod args): step gap 35.32 → 34.59 ms
+(−2.1 %), weighted decode 129.8 → 132.0 tok/s, prefill −0.5 %, concurrency within noise; the warm-start
+KV check and a repeat arm are still open before it goes into the production unit. The fused path hands
+`out_proj` a bf16 activation, so the fp8 `gdn_norm_quant` fusion is bypassed there.
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -587,6 +606,7 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_LOOKUP_ENTER` / `_STAY` / `_HOT` | `8` / `3` / `3` | – | Enter lookup mode on a match of ≥ ENTER tokens; stay in it while the last lookup step accepted ≥ HOT draft tokens and a match of ≥ STAY exists. "Any match ≥ 3" (ENTER 3) loses 1–17 % on free generation. |
 | `RADIANCE_LOOKUP_MIN_DIST` | `auto` | – | Only sources whose continuation starts more than this many tokens back count; `auto` = the drafter's sliding window from its config (2048). `0` = any (costs 5–8 % on edits inside the drafter's window). |
 | `RADIANCE_LOOKUP_SWITCH` / `_STATS` | unset / `0` | – | Debug: the override runs only while the file `SWITCH` exists (A/B inside one process without a restart); `STATS=N` logs the lookup share and accepted tokens per lookup step every N draft steps. |
+| `RADIANCE_GDN_FUSED_DECODE` | `0` | – | Registers the HIP port of vLLM's fused GDN MTP decode kernel as `torch.ops._C.fused_gdn_decode_post_conv_mtp` (see *Fused GDN decode on ROCm*); use together with `VLLM_GDN_DECODE_KERNEL=cuda` (`=triton` = A/B control). |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
 `RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
@@ -804,6 +824,9 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
   HIP kernel.
 - [vLLM](https://github.com/vllm-project/vllm), [AITER](https://github.com/ROCm/aiter),
   [DFlash](https://github.com/vllm-project/vllm/pull/52816).
+- [vLLM](https://github.com/vllm-project/vllm) — `sly/gdn/radiance_gdn_decode.hip` is a HIP port of vLLM's
+  fused GDN MTP decode kernel (`csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu`, v0.29.0,
+  Apache-2.0), modified for gfx1201.
 - [turboderp/exllamav3](https://github.com/turboderp-org/exllamav3) (MIT) — `escha/` (carried from
   ggz14, not used by the image build) contains code derived from ExLlamaV3; its license is in
   `escha/EXLLAMAV3-LICENSE.txt`.

@@ -284,7 +284,7 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
 #     aiter looks them up under hsa/<device arch>, and there is none for gfx1201.
 #   * debug symbols of the installed extensions (worth ~1 GB): release builds, but they still carry
 #     .debug_* sections that nothing reads at runtime. The radiance kernels built further down
-#     (R4D, the MXFP4 GEMM) are not stripped: tiny, and both carry device fatbins.
+#     (R4D, the MXFP4 GEMM, the GDN decode kernel) are not stripped: tiny, and they carry device fatbins.
 COPY split_venv.py /opt/split_venv.py
 RUN set -eu; \
     rm -rf ${SP}/triton/backends/nvidia/bin ${SP}/triton/backends/nvidia/lib; \
@@ -303,7 +303,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
-     sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py ${SP}/
+     sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -410,7 +410,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire \
-             sly/patch_rocm_load_max_split; do \
+             sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
@@ -473,6 +473,14 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       $(python -m pybind11 --includes) \
       /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
  && python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
+
+# sly/gdn/radiance_gdn_decode.hip: HIP port of vLLM's fused GDN MTP decode kernel (0.3.3, see the file
+# header). Same single-file pybind11 build as above; registered as torch.ops._C.fused_gdn_decode_post_conv_mtp
+# by radiance_gdn_decode.py only under RADIANCE_GDN_FUSED_DECODE=1.
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/patches/sly/gdn/radiance_gdn_decode.hip -o ${SP}/radiance_gdn_decode_ext.so \
+ && python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
 
 # The installed extensions were stripped before the snapshot above; only bytecode is left to drop.
 RUN find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true
