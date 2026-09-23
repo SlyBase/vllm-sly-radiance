@@ -1,0 +1,54 @@
+# Self-hosted Renovate, same setup as SlyBase/helm-charts: renovate.json has tracked every pin of
+# this repo (Dockerfile ARGs, base images, libr4d, CI tools, actions, constraints.txt) since the
+# start, but nothing ever ran it. The token is the upstream-sync GitHub App's (SYNC_APP_*), which
+# needs contents, pull requests, issues (dependency dashboard) and workflows (action bumps) write.
+#
+# Renovate PRs run ci.yml like any PR; the `constraints` job there is what makes a
+# constraints.txt bump safe to merge. They never build the image (build.yml needs a VERSION bump
+# on main) and never deploy.
+name: renovate
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+    paths: [renovate.json, .github/workflows/renovate.yml]
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: Renovate LOG_LEVEL
+        type: choice
+        options: [info, debug]
+        default: info
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: renovatebot/github-action@693b9ef15eec82123529a37c782242f091365961 # v46.1.14
+        with:
+          token: ${{ steps.app_token.outputs.token }}
+        env:
+          RENOVATE_REPOSITORIES: '["${{ github.repository }}"]'
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: required
+          LOG_LEVEL: ${{ inputs.log_level || 'info' }}
+          # The installation token is scoped to this repository; lookups of other repositories'
+          # releases/tags (pytorch, triton, vllm, aiter, actions) need a separate read-only token
+          # or they run into the anonymous rate limit. Same secret name as in helm-charts.
+          RENOVATE_GITHUB_COM_TOKEN: ${{ secrets.RENOVATE_GITHUB_COM_TOKEN }}

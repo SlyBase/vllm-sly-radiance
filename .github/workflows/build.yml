@@ -64,12 +64,19 @@ jobs:
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
+          VER: ${{ steps.meta.outputs.version }}
         run: |
           set -o pipefail
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            --build-arg "RADIANCE_VERSION=${VER}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -t "$TAG" . 2>&1 | tee build.log
           docker image inspect "$TAG" --format 'size {{.Size}} id {{.Id}}'
+          # the venv split (Dockerfile stage venvsplit): the cold layer should repeat across releases
+          grep -E '\[split_venv\] (cold|hot|  )' build.log || true
+          docker history --format '{{.Size}}\t{{.CreatedBy}}' "$TAG" | grep -E 'COPY /(opt|split)' || true
 
       - name: smoke test (CPU only, no --device)
         env:
@@ -83,6 +90,8 @@ jobs:
           assert v == '$VER', f'/opt/radiance_version {v} != VERSION $VER'
           print('vllm', vllm.__version__, 'image', v, 'QuarkConfig', QuarkConfig.__name__)
           " 2>&1 | tail -5
+          LV=$(docker image inspect "$TAG" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
+          [ "$LV" = "$VER" ] || { echo "::error::label org.opencontainers.image.version is '$LV', not $VER"; exit 1; }
 
       - name: login to ghcr.io
         if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
@@ -100,6 +109,16 @@ jobs:
         run: |
           docker tag "$TAG" "$REMOTE"
           docker push "$REMOTE"
+          # Registry-side OCI annotations (ghcr.io shows the index's description and links the
+          # package to its repo by source). `docker build --annotation` is dropped by the docker
+          # image-store exporter, so they are added here: imagetools re-creates the index around
+          # the same manifests with the annotations, no layer is uploaded again.
+          label() { docker image inspect "$TAG" --format "{{index .Config.Labels \"$1\"}}"; }
+          ANN=()
+          for k in title description version revision created source url documentation vendor; do
+            ANN+=(--annotation "index:org.opencontainers.image.$k=$(label "org.opencontainers.image.$k")")
+          done
+          docker buildx imagetools create "${ANN[@]}" -t "$REMOTE" "$REMOTE"
           echo "pushed $REMOTE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: summary
