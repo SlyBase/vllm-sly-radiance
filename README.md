@@ -577,6 +577,38 @@ larger than the ±4 % conc-8 spread seen between identical arms in the A/B above
 it is recorded here and not explained. Raw JSON: `/opt/accept/betterbench/out/full/full{300,210}.json` on
 the CI LXC, fan/power samples in `/root/gpu_full{300,210}.csv` on the Proxmox host.
 
+### Other checkpoints on one R9700 (0.3.6, 2026-09-24)
+
+The same image and the same production arguments (DFlash2 W4A16 drafter, k = 7, fp8 KV, bf16 SSM
+cache, `--max-model-len 262144`), only `--model` / `--quantization` and the format switch changed;
+300 W, fan on auto, BetterBench `ab.json` (weighted serial decode, concurrency 1/4/8, prefill at
+2k/64k context), GSM8K 200 questions (cot zero-shot, greedy, ±0.027).
+
+| Checkpoint | Switch | Decode tok/s | Step gap | Conc 1 / 4 / 8 tok/s | Prefill 2k / 64k tok/s | KV (262k requests) | GSM8K |
+|---|---|---|---|---|---|---|---|
+| [amd/Qwen3.8-27B-Quark-AWQ-MXFP4](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (production) | – | 130.4 | 34.8 ms | 118 / 344 / 412 | 3300–3385 / 2510–2555 | 1.46× (384,316) | 0.845 |
+| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `RADIANCE_NVFP4_MXFP4=1`, `--quantization compressed-tensors` | **136.6** | 34.8 ms | 126 / 353 / 402 | ~3160 / 2504 | 1.43× (374,202) | 0.825 |
+| [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) (W4A16) | `--quantization compressed-tensors` | 107.8 | 42.9 ms | 100 / 282 / 290 | 1628 / 1439 | 1.47× | 0.820 |
+| [z-lab/Qwen3.8-27B-PARO](https://huggingface.co/z-lab/Qwen3.8-27B-PARO) | `RADIANCE_PAROQUANT=1`, no `--quantization` | 67.7 | 70.6 ms | 60 / 194 / 239 | 2313 / 2004 | 1.20× | 0.840 |
+| [amd/Qwen3.8-27B-Quark-AWQ-INT4-W4A16](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-INT4-W4A16) | – | does not load | | | | | |
+
+- **MXFP4 (Quark)** is the best all-round choice: fastest prefill, the full KV pool at maximum
+  context, best accuracy. Every kernel in this image was tuned on it.
+- **NVFP4** is requantized to MXFP4 at load and runs on the same kernels (same step gap); decode is
+  5 % higher because the drafter lands more tokens per step on this checkpoint (4.69 vs 4.48), at
+  ~10k fewer KV tokens (its fp8 → bf16 → int4 lm_head transient) and a GSM8K within noise.
+- **INT4 W4A16** runs on vLLM's `rdna_hybrid_w4a16` kernels, not on the W4A8 MXFP4 GEMM: half the
+  prefill, −17 % decode. Its HF repo's `refs/main` pointed at an incomplete snapshot in our cache;
+  pin `--revision` if the load reports missing weight files.
+- **ParoQuant** works but is not tuned for a single card (see *ParoQuant, AutoRound and escha*);
+  ggz14's numbers are from 2 × R9700.
+- **Quark INT4-W4A16** has no Quark scheme in vLLM 0.29 (int4 weight-only), and its AWQ
+  `algo_config` also trips `QuarkConfig.apply_vllm_mapper`; use the compressed-tensors INT4 above.
+
+Prefill numbers carry about ±3 % between measurement sessions (the MXFP4 range above is two
+sessions); within one window the same image repeats within 0.3 %. Quark and INT4 were measured in
+one session, NVFP4 and ParoQuant in another, each against an MXFP4 arm of its own session.
+
 ### History: 0.2.9 (2026-09-21)
 
 BetterBench 0.4.0, default config, all three phases (single-stream decode, prefill sweep, concurrency
