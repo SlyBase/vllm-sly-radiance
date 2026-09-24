@@ -211,6 +211,7 @@ jobs:
 
       - name: tag the gated commit
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           VERSION: ${{ needs.plan.outputs.version }}
           SHA: ${{ needs.plan.outputs.sha }}
           IMAGE: ${{ needs.plan.outputs.image }}

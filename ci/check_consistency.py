@@ -99,11 +99,22 @@ def check_version_bump(base):
         print(f"version bump: {old} -> {new} ({len(image_files)} image-relevant files)")
 
 
+def check_changelog():
+    ver = (ROOT / "VERSION").read_text().strip()
+    rc = subprocess.run([sys.executable, str(ROOT / "ci" / "changelog_section.py"), "--check", ver],
+                        capture_output=True, text=True).returncode
+    if rc != 0:
+        fail(f"CHANGELOG.md has no section '## [{ver}]' for the current VERSION -- add one (it becomes the release notes)")
+    else:
+        print(f"changelog: section for {ver} present")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", help="git ref of the PR base; enables the VERSION-bump check")
     args = ap.parse_args()
     check_patches()
+    check_changelog()
     if args.base:
         check_version_bump(args.base)
     if failures:

@@ -55,6 +55,7 @@ jobs:
 
       - name: tag
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           REASON: ${{ inputs.reason }}
           VERSION_INPUT: ${{ inputs.version }}
           SHA_INPUT: ${{ inputs.sha }}
