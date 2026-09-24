@@ -414,8 +414,9 @@ within 0.03 ms):
 
 Not bit-identical to the FLA path (different rounding of the bf16 state), so greedy text drifts
 after a few sentences; accuracy is unchanged. The extras' other kernels stay opt-in:
-`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain), `RADIANCE_GDN_LAZY=1`
-(lazy snapshots), `R4D_ATTN_FP8` (8-bit legs of the R4D prefill attention, R4D backend only).
+`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain) and `R4D_ATTN_FP8`
+(8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
+but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
 
 ### Build
 
@@ -614,7 +615,7 @@ design reasons. Revisit an entry when its reason changes.
 | Lazy GDN snapshots (`RADIANCE_GDN_LAZY`) | Corrupts multi-turn chat (ggz14 turned it off themselves). |
 | `RADIANCE_PRESHUFFLE`, `RADIANCE_VERIFY_HEAD`, `RADIANCE_DRAFT_RERANK` | Apply to FP8 block-scale checkpoints resp. the ParoQuant drafter, not to this model. |
 | Top-k/top-p sampler kernels (`patch_topk_*`) | Measured the sampler's share: top-k 20 / top-p 0.95 cost 0.3 % of a step. |
-| All-reduce / TP=3 patches (`patch_ar_*`, `patch_tp3_pad`) | Single-GPU image (TP = 1). |
+| 3-rank all-reduce and 5/4-bit wire (`patch_ar_3rank`, `patch_ar_qbits`) | Written for the older two-rank `radiance_allreduce.py`; this image ships StillDeadcode's N-rank module (TP=3 rides RCCL), and the 5/4-bit kernels are not in the rebased libr4d extras. The rest of ggz14's multi-GPU work is in (0.3.5, *Several GPUs*). |
 
 **Other images and forks:**
 
@@ -673,7 +674,7 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_TP_PAD` | unset | – | 0.3.5: `3` pads the target to TP=3-divisible head counts with zero-weight dummies at load (`radiance_tp3pad.py`; see *Several GPUs*). `RADIANCE_TP_PAD_DRAFTER=0` leaves the drafter unpadded, `RADIANCE_TP_PAD_STRICT=0` demotes a coverage mismatch to a warning. |
 | `RADIANCE_AR_MAX_KB` / `RADIANCE_AR_QUANT_MIN_KB` | `49152` / `128` | – | 0.3.5, TP=2 only: largest message on the P2P all-reduce kernel and smallest on its 6-bit wire (`sly/patch_ar_knobs.py`). |
 | `RADIANCE_AR_QNT` / `RADIANCE_AR_QNB` | `1024` / `48` | – | 0.3.5, TP=2 only: threads per block / block cap of the 6-bit all-reduce. |
-| `RADIANCE_GDN_FUSED_UPDATE` / `RADIANCE_GDN_LAZY` | `0` | – | 0.3.5 (libr4d extras): fused GDN decode step / lazy GDN state snapshots. Fused update measured at TP=1: no gain. |
+| `RADIANCE_GDN_FUSED_UPDATE` | `0` | – | 0.3.5 (libr4d extras): fused GDN decode step. Measured at TP=1: no gain. |
 | `R4D_ATTN_FP8` | `0` | – | 0.3.5 (libr4d extras): 8-bit QK (`1`), PV (`2`) or both (`3`) legs of the R4D prefill attention; only with `--attention-backend R4D` and an fp8 KV cache. |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
@@ -919,7 +920,8 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
 - [StillDeadcode](https://codeberg.org/StillDeadcode) — vllm-radiance and libr4d, the RDNA4
   foundation this image is built on.
 - [ggz14](https://codeberg.org/ggz14) — radiance-vllm-mxfp4: the MXFP4 loader work and the W4A8
-  HIP kernel.
+  HIP kernel; the libr4d extras (narrow-state GDN kernels, `sly/r4d/`) and the TP=3 padding
+  (`radiance_tp3pad.py`).
 - [vLLM](https://github.com/vllm-project/vllm), [AITER](https://github.com/ROCm/aiter),
   [DFlash](https://github.com/vllm-project/vllm/pull/52816).
 - [vLLM](https://github.com/vllm-project/vllm) — `sly/gdn/radiance_gdn_decode.hip` is a HIP port of vLLM's
