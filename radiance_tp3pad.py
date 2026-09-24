@@ -320,23 +320,25 @@ def _spec_of(model_config):
     return None, None
 
 
-def _expected_counts(spec, cfg, mtp_layers):
+def _expected_counts(spec, cfg, mtp_layers, mtp_scaled=True):
     """label -> expected padded-tensor count, from the config's layer table."""
     if spec == "drafter":
         n = int(getattr(cfg, "num_hidden_layers", 0))
         return {"q_proj": 2 * n, "k_proj": 2 * n, "v_proj": 2 * n, "o_proj": 2 * n,
                 "gate_proj": 2 * n, "up_proj": 2 * n, "down_proj": 2 * n}
     lt = list(getattr(cfg, "layer_types", []) or [])
-    n_full = lt.count("full_attention") + mtp_layers
     n_lin = lt.count("linear_attention")
-    n_all = len(lt) + mtp_layers
     # MXFP4 layers carry (weight, weight_scale) and both are padded. The fp8 MTP layer carries the
     # same two names, but its weight_scale is per output channel (1-D), which a K-pad leaves alone:
     # o_proj / down_proj pad one tensor per MTP layer, the rest two.
+    # A bf16 MTP layer (amd/Qwen3.8-27B-Quark-AWQ-MXFP4 leaves mtp.* unquantized) has no
+    # weight_scale at all: one padded tensor per projection (sly: mtp_scaled from the stream).
     n_full_mx, n_all_mx = lt.count("full_attention"), len(lt)
-    exp = {"q_proj": 2 * n_full, "k_proj": 2 * n_full, "v_proj": 2 * n_full,
+    m2 = (2 if mtp_scaled else 1) * mtp_layers
+    exp = {"q_proj": 2 * n_full_mx + m2, "k_proj": 2 * n_full_mx + m2, "v_proj": 2 * n_full_mx + m2,
            "o_proj": 2 * n_full_mx + mtp_layers,
-           "gate_proj": 2 * n_all, "up_proj": 2 * n_all, "down_proj": 2 * n_all_mx + mtp_layers,
+           "gate_proj": 2 * n_all_mx + m2, "up_proj": 2 * n_all_mx + m2,
+           "down_proj": 2 * n_all_mx + mtp_layers,
            "in_proj_qkv": 2 * n_lin, "in_proj_z": 2 * n_lin, "in_proj_b": 2 * n_lin,
            "in_proj_a": 2 * n_lin, "out_proj": 2 * n_lin,
            "conv1d": n_lin, "A_log": n_lin, "dt_bias": n_lin}
@@ -383,11 +385,13 @@ def pad_weights(weights, model_config):
         tally = OrderedDict()
         seen = 0
         mtp = set()
+        mtp_scaled = False
         for name, t in weights:
             seen += 1
             m = re.match(r"^mtp\.layers\.(\d+)\.", name)
             if m:
                 mtp.add(m.group(1))
+                mtp_scaled = mtp_scaled or name.endswith("weight_scale")
             plan = plan_shape(name, t.shape, spec, inter)
             if plan is None:
                 yield name, t
@@ -401,7 +405,7 @@ def pad_weights(weights, model_config):
         for (lab, old, new), n in tally.items():
             _log(f"padded {lab} {n}x {list(old)}->{list(new)}")
             counts[lab] = counts.get(lab, 0) + n
-        exp = _expected_counts(spec, cfg, len(mtp))
+        exp = _expected_counts(spec, cfg, len(mtp), mtp_scaled)
         bad = {k: (counts.get(k, 0), v) for k, v in exp.items() if counts.get(k, 0) != v}
         extra = sorted(set(counts) - set(exp))
         total = sum(counts.values())

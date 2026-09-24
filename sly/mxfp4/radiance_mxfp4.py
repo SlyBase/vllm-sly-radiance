@@ -804,7 +804,9 @@ def _make_kernel_class():
                 if N_ % 16 or K % 16:
                     raise RuntimeError(
                         f"[radiance.mxfp4] RADIANCE_MXFP4_WPERM needs N and K divisible by 16, "
-                        f"got N={N_} K={K}")
+                        f"got N={N_} K={K}; serve with RADIANCE_MXFP4_WPERM=0 (the layout is global "
+                        f"to every kernel, so one layer cannot opt out -- e.g. RADIANCE_TP_PAD=3 "
+                        f"pads the GDN in_proj_ba to N=108)")
                 # Back into the SAME storage, not a new Parameter: a fresh [N, K/2] per layer
                 # while the checkpoint copy is still alive left the loaded weights interleaved
                 # with freed holes, and the KV pool came out 405 tokens smaller (383,911 vs
