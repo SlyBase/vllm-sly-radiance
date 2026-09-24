@@ -388,6 +388,36 @@ four production shapes in both gate modes — 30 of 30. One serving arm so far (
 KV check and a repeat arm are still open before it goes into the production unit. The fused path hands
 `out_proj` a bf16 activation, so the fp8 `gdn_norm_quant` fusion is bypassed there.
 
+### libr4d extras: GDN kernels for the bf16 state cache (0.3.5)
+
+`--mamba-ssm-cache-dtype bfloat16` halves the gated-delta-net state traffic, but the pinned libr4d
+only carried fp32-state GDN kernels, so `radiance_gdn` declined every GDN layer to the FLA Triton
+path (`falling back to FLA ... state dtype torch.bfloat16` in the log). ggz14's libr4d extras carry
+the narrow-state kernels (bf16 / fp16 state, fp32 accumulate, round-to-nearest-even stores). They
+were written against libr4d b9e42ab; `sly/r4d/r4d_extras_rx10.patch` is the same patch rebased onto
+our pin 5dc6302 (kernel sources unchanged, the four registry files merged by hand), applied before
+`build.sh`. Nothing to switch on: the kernels bind as soon as the cache is 16-bit, and the log
+prints `all-R4D decode path live` / `all-R4D prefill path live`.
+
+Measured 2026-09-24 (300 W, production args, 0.3.4 → 0.3.5, BetterBench ab.json + long-context probe; a
+repeat of the 0.3.4 arm at the end of the window reproduced its prefill within 0.1 % and its step gap
+within 0.03 ms):
+
+| | 0.3.4 | 0.3.5 | Δ |
+|---|---|---|---|
+| prefill 2k / 8k / 16k / 32k / 64k (tok/s) | 3144 / 3127 / 3037 / 2817 / 2431 | 3297 / 3299 / 3221 / 2980 / 2555 | +4.9 / +5.5 / +6.0 / +5.8 / +5.1 % |
+| weighted decode (tok/s) | 129.4 | 130.6 | +1.0 % |
+| step gap, 37-token / 28k-token prompt (ms) | 35.57 / 37.49 | 34.85 / 36.83 | −0.7 ms |
+| conc 4 / 8 (tok/s) | 334.7 / 390.9 (repeat 342.3 / 399.8) | 340.2 / 392.1 | within noise |
+| KV pool (tokens) | 384,316 | 384,316 | – |
+| GSM8K (200, cot zero-shot) | 0.835 (baseline) | 0.845 | – |
+
+Not bit-identical to the FLA path (different rounding of the bf16 state), so greedy text drifts
+after a few sentences; accuracy is unchanged. The extras' other kernels stay opt-in:
+`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain) and `R4D_ATTN_FP8`
+(8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
+but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
+
 ### Build
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
@@ -585,7 +615,7 @@ design reasons. Revisit an entry when its reason changes.
 | Lazy GDN snapshots (`RADIANCE_GDN_LAZY`) | Corrupts multi-turn chat (ggz14 turned it off themselves). |
 | `RADIANCE_PRESHUFFLE`, `RADIANCE_VERIFY_HEAD`, `RADIANCE_DRAFT_RERANK` | Apply to FP8 block-scale checkpoints resp. the ParoQuant drafter, not to this model. |
 | Top-k/top-p sampler kernels (`patch_topk_*`) | Measured the sampler's share: top-k 20 / top-p 0.95 cost 0.3 % of a step. |
-| All-reduce / TP=3 patches (`patch_ar_*`, `patch_tp3_pad`) | Single-GPU image (TP = 1). |
+| 3-rank all-reduce and 5/4-bit wire (`patch_ar_3rank`, `patch_ar_qbits`) | Written for the older two-rank `radiance_allreduce.py`; this image ships StillDeadcode's N-rank module (TP=3 rides RCCL), and the 5/4-bit kernels are not in the rebased libr4d extras. The rest of ggz14's multi-GPU work is in (0.3.5, *Several GPUs*). |
 
 **Other images and forks:**
 
@@ -641,6 +671,11 @@ Production values first; everything else is tuning/diagnostic and off by default
 | `RADIANCE_LOOKUP_MIN_DIST` | `auto` | – | Only sources whose continuation starts more than this many tokens back count; `auto` = the drafter's sliding window from its config (2048). `0` = any (costs 5–8 % on edits inside the drafter's window). |
 | `RADIANCE_LOOKUP_SWITCH` / `_STATS` | unset / `0` | – | Debug: the override runs only while the file `SWITCH` exists (A/B inside one process without a restart); `STATS=N` logs the lookup share and accepted tokens per lookup step every N draft steps. |
 | `RADIANCE_GDN_FUSED_DECODE` | `0` | – | Registers the HIP port of vLLM's fused GDN MTP decode kernel as `torch.ops._C.fused_gdn_decode_post_conv_mtp` (see *Fused GDN decode on ROCm*); use together with `VLLM_GDN_DECODE_KERNEL=cuda` (`=triton` = A/B control). |
+| `RADIANCE_TP_PAD` | unset | – | 0.3.5: `3` pads the target to TP=3-divisible head counts with zero-weight dummies at load (`radiance_tp3pad.py`; see *Several GPUs*). `RADIANCE_TP_PAD_DRAFTER=0` leaves the drafter unpadded, `RADIANCE_TP_PAD_STRICT=0` demotes a coverage mismatch to a warning. |
+| `RADIANCE_AR_MAX_KB` / `RADIANCE_AR_QUANT_MIN_KB` | `49152` / `128` | – | 0.3.5, TP=2 only: largest message on the P2P all-reduce kernel and smallest on its 6-bit wire (`sly/patch_ar_knobs.py`). |
+| `RADIANCE_AR_QNT` / `RADIANCE_AR_QNB` | `1024` / `48` | – | 0.3.5, TP=2 only: threads per block / block cap of the 6-bit all-reduce. |
+| `RADIANCE_GDN_FUSED_UPDATE` | `0` | – | 0.3.5 (libr4d extras): fused GDN decode step. Measured at TP=1: no gain. |
+| `R4D_ATTN_FP8` | `0` | – | 0.3.5 (libr4d extras): 8-bit QK (`1`), PV (`2`) or both (`3`) legs of the R4D prefill attention; only with `--attention-backend R4D` and an fp8 KV cache. |
 
 Inherited from upstream vllm-radiance (see its `DOCKERHUB.md`): `RADIANCE_GFX_ARCH`,
 `RADIANCE_NUMA_BIND`, `RADIANCE_RUN_BWTEST`, `RADIANCE_BANNER_PLAIN`, `RADIANCE_RMS_QUANT_FUSION`
@@ -722,6 +757,32 @@ Why these values:
 **Compile cache:** the first start after an image or config change compiles fresh and the memory
 profiler sees ~2 GiB more peak → ~2 GiB less KV cache. Restart once with a warm cache. Startup is
 4–6 minutes with a warm cache.
+
+### Several GPUs (tensor parallel) — not tested on this box
+
+This box has one R9700, so none of the multi-GPU paths below were run here. They are in the image
+because ggz14 and StillDeadcode serve them on 2–3 cards; what was checked here is that they stay
+out of the way at TP=1 (KV pool, throughput and GSM8K unchanged, see the 0.3.5 table above).
+
+| TP | All-reduce | What to set |
+|---|---|---|
+| 2 | libr4d one-shot P2P kernel, exact bf16 up to `RADIANCE_AR_MAX_KB` (default 49152 KiB), 6-bit rotated wire above `RADIANCE_AR_QUANT_MIN_KB` (`RADIANCE_USE_R4D_AR_QUANT=1`, default) | `--tensor-parallel-size 2`. Raise `RADIANCE_AR_MAX_KB` to at least `max-num-batched-tokens × 5120 × 2 / 1024` (e.g. 98304 at 8192) or every prefill all-reduce silently falls back to RCCL. `RADIANCE_AR_QNT` / `_QNB` tune the 6-bit path (ggz14 ships 96 blocks). |
+| 3 | RCCL (no 3-rank kernel in this image) | `--tensor-parallel-size 3 -e RADIANCE_TP_PAD=3 -e RADIANCE_MXFP4_WPERM=0`: `radiance_tp3pad` widens the heads (24/4/16/48 → 36/6/18/54), the MLP (17408 → 17472) and the vocab with zero-weight dummies at load, so every dimension divides by 3. Checked here on one card (`RADIANCE_TP_PAD=3` at TP=1, see below). The DFlash2 **W4A16** drafter is not padded (its packed int4 tensors are not in the padding tables), so at TP=3 either drop `--speculative-config` or use an fp8 DFlash2 drafter (ggz14's setup). |
+| 4 / 8 | libr4d N-rank kernels (one-shot to 6 tokens, two-shot above, tiered-int8 wire at TP=4 with `RADIANCE_USE_R4D_AR_QUANT=1`) | `--tensor-parallel-size 4` / `8`. No padding needed (all head counts divide). |
+
+`RADIANCE_USE_R4D_AR=0` keeps RCCL everywhere. Add `--device` access for every card and drop
+`HIP_VISIBLE_DEVICES=0` (or list the cards). `--gpu-memory-utilization`, `--max-num-seqs` and the
+CUDA-graph sizes in the production command were tuned for one 32 GB card and are only a starting
+point.
+
+TP=3 padding on one card (2026-09-24, `RADIANCE_TP_PAD=3`, TP=1, no speculative decoding):
+the target is padded at load (1143 of 1695 tensors, coverage check OK), serves coherent text and
+scores GSM8K 0.83 (100 questions, ±0.04; unpadded 0.835–0.845). The padded heads cost KV: 1.13×
+instead of 1.46× of 262k on one card. Two things this run found and fixed: the coverage check
+assumed a quantized MTP layer (the AMD checkpoint's `mtp.*` is bf16), and `RADIANCE_MXFP4_WPERM=1`
+cannot serve the padded GDN `in_proj_ba` (N = 108 is not a multiple of 16; the fragment layout is
+global to every kernel) -- **serve `RADIANCE_TP_PAD=3` with `RADIANCE_MXFP4_WPERM=0`**, which costs
+the 3.7 % decode WPERM brings at TP=1.
 
 ## Build
 
@@ -859,7 +920,8 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
 - [StillDeadcode](https://codeberg.org/StillDeadcode) — vllm-radiance and libr4d, the RDNA4
   foundation this image is built on.
 - [ggz14](https://codeberg.org/ggz14) — radiance-vllm-mxfp4: the MXFP4 loader work and the W4A8
-  HIP kernel.
+  HIP kernel; the libr4d extras (narrow-state GDN kernels, `sly/r4d/`) and the TP=3 padding
+  (`radiance_tp3pad.py`).
 - [vLLM](https://github.com/vllm-project/vllm), [AITER](https://github.com/ROCm/aiter),
   [DFlash](https://github.com/vllm-project/vllm/pull/52816).
 - [vLLM](https://github.com/vllm-project/vllm) — `sly/gdn/radiance_gdn_decode.hip` is a HIP port of vLLM's

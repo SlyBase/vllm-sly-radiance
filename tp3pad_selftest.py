@@ -57,13 +57,16 @@ def headers(path):
 TARGET_EXPECT = {
     # label: {(dtype, old_shape): new_shape}
     "q_proj": {("U8", (12288, 2560)): (18432, 2560), ("U8", (12288, 160)): (18432, 160),
-               ("F8_E4M3", (12288, 5120)): (18432, 5120), ("F32", (12288,)): (18432,)},
+               ("F8_E4M3", (12288, 5120)): (18432, 5120), ("F32", (12288,)): (18432,),
+               ("BF16", (12288, 5120)): (18432, 5120)},
     "k_proj": {("U8", (1024, 2560)): (1536, 2560), ("U8", (1024, 160)): (1536, 160),
-               ("F8_E4M3", (1024, 5120)): (1536, 5120), ("F32", (1024,)): (1536,)},
+               ("F8_E4M3", (1024, 5120)): (1536, 5120), ("F32", (1024,)): (1536,),
+               ("BF16", (1024, 5120)): (1536, 5120)},
     "v_proj": {("U8", (1024, 2560)): (1536, 2560), ("U8", (1024, 160)): (1536, 160),
-               ("F8_E4M3", (1024, 5120)): (1536, 5120), ("F32", (1024,)): (1536,)},
+               ("F8_E4M3", (1024, 5120)): (1536, 5120), ("F32", (1024,)): (1536,),
+               ("BF16", (1024, 5120)): (1536, 5120)},
     "o_proj": {("U8", (5120, 3072)): (5120, 4608), ("U8", (5120, 192)): (5120, 288),
-               ("F8_E4M3", (5120, 6144)): (5120, 9216)},
+               ("F8_E4M3", (5120, 6144)): (5120, 9216), ("BF16", (5120, 6144)): (5120, 9216)},
     "in_proj_qkv": {("U8", (10240, 2560)): (11520, 2560), ("U8", (10240, 160)): (11520, 160)},
     "in_proj_z": {("U8", (6144, 2560)): (6912, 2560), ("U8", (6144, 160)): (6912, 160)},
     "in_proj_b": {("U8", (48, 2560)): (54, 2560), ("U8", (48, 160)): (54, 160)},
@@ -78,11 +81,13 @@ TARGET_EXPECT = {
 def target_mlp_expect(inter):
     return {
         "gate_proj": {("U8", (17408, 2560)): (inter, 2560), ("U8", (17408, 160)): (inter, 160),
-                      ("F8_E4M3", (17408, 5120)): (inter, 5120), ("F32", (17408,)): (inter,)},
+                      ("F8_E4M3", (17408, 5120)): (inter, 5120), ("F32", (17408,)): (inter,),
+                      ("BF16", (17408, 5120)): (inter, 5120)},
         "up_proj": {("U8", (17408, 2560)): (inter, 2560), ("U8", (17408, 160)): (inter, 160),
-                    ("F8_E4M3", (17408, 5120)): (inter, 5120), ("F32", (17408,)): (inter,)},
+                    ("F8_E4M3", (17408, 5120)): (inter, 5120), ("F32", (17408,)): (inter,),
+                      ("BF16", (17408, 5120)): (inter, 5120)},
         "down_proj": {("U8", (5120, 8704)): (5120, inter // 2), ("U8", (5120, 544)): (5120, inter // 32),
-                      ("F8_E4M3", (5120, 17408)): (5120, inter)},
+                      ("F8_E4M3", (5120, 17408)): (5120, inter), ("BF16", (5120, 17408)): (5120, inter)},
     }
 
 
@@ -115,10 +120,12 @@ def run_spec(label, path, spec, expect, stock, padded, intermediate=None, tps=(1
     tally = OrderedDict()
     counts = {}
     mtp = set()
+    mtp_scaled = False
     for name, (dt, shape) in hdr.items():
         m = re.match(r"^mtp\.layers\.(\d+)\.", name)
         if m:
             mtp.add(m.group(1))
+            mtp_scaled = mtp_scaled or name.endswith("weight_scale")
         plan = tp.plan_shape(name, shape, spec, intermediate)
         if plan is None:
             continue
@@ -145,7 +152,7 @@ def run_spec(label, path, spec, expect, stock, padded, intermediate=None, tps=(1
         num_hidden_layers = text.get("num_hidden_layers", 0)
         intermediate_size = padded["intermediate_size"]
 
-    exp_counts = tp._expected_counts(spec, _Cfg, len(mtp))
+    exp_counts = tp._expected_counts(spec, _Cfg, len(mtp), mtp_scaled)
     for lab, n in exp_counts.items():
         check(counts.get(lab, 0) == n, f"{label} {lab}: {counts.get(lab, 0)} tensors padded, expected {n}")
     check(set(counts) <= set(exp_counts), f"{label} unexpected labels {sorted(set(counts) - set(exp_counts))}")

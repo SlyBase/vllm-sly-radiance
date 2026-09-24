@@ -303,7 +303,8 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
-     sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py ${SP}/
+     sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
+     radiance_tp3pad.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -394,6 +395,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # on ROCm (stock gates it on is_cuda()): without it, packed W4A16 weights were carved out of the
 # freed 2.37 GiB bf16 embed/lm_head segments and pinned them (INT4 target k=7: 2.9 GiB stranded,
 # 313k -> 386k KV tokens; MXFP4 prod: 376k -> 386k).
+# patch_tp3_pad (ggz14) installs the three radiance_tp3pad.py hooks for TP=3 via zero-weight dummy
+# heads; every hook returns immediately unless RADIANCE_TP_PAD=3, so TP 1/2 serves are unchanged.
+# sly/patch_ar_knobs.py makes the TP=2 all-reduce size gate (RADIANCE_AR_MAX_KB) and the 6-bit
+# wire geometry env-tunable; defaults are the shipped values.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -410,13 +415,25 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire \
-             sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode; do \
+             sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode \
+             patch_tp3_pad sly/patch_ar_knobs; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
     python -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('${SP}/radiance_*.py')]; print('radiance modules parse OK')"
 
 # --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
+# sly/r4d/r4d_extras_rx10.patch is ggz14's r4d_radiance_extras_rx10.patch (written against libr4d
+# b9e42ab) rebased onto this pin: the kernel sources applied as-is, the four registry files
+# (build.sh, r4d.h, r4d_module.hip, r4d_registry.hip) were merged by hand -- every conflict was
+# additive, the pin's N-rank all-reduce family next to the extras. It adds the narrow-state (bf16 /
+# fp16 SSM cache) gated-delta-net decode kernels that radiance_gdn.py binds when
+# --mamba-ssm-cache-dtype is 16-bit, the lazy-snapshot GDN kernels (RADIANCE_GDN_LAZY), the fused
+# GDN decode step (RADIANCE_GDN_FUSED_UPDATE), the 8-bit legs of the R4D prefill attention
+# (R4D_ATTN_FP8, R4D backend only) and the TP=2 all-reduce with a fused decoder epilogue. ggz14's
+# three-rank all-reduce is left out: it was written for the older two-rank radiance_allreduce.py,
+# and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
+# ride RCCL.
 # One shared object holding every hand-written kernel this image runs: paged attention (prefill and
 # decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
 # its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
@@ -445,6 +462,7 @@ RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && GOT=$(git rev-parse HEAD) \
  && [ "$GOT" = "${R4D_VERSION}" ] \
     || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
+ && git apply /opt/patches/sly/r4d/r4d_extras_rx10.patch \
  && GFX_ARCH=${GFX_ARCH} OUT=${SP}/r4d.so ./build.sh \
  && python -c "import sys, torch, r4d; \
 print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
