@@ -505,7 +505,7 @@ from the checkpoint).
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
-- PyTorch 2.14.0, Triton 3.8.0, aiter 0.1.21.post2, transformers 5.17.0, vLLM 0.29.0; libr4d pinned
+- PyTorch 2.14.0, torchvision 0.29.0, Triton 3.8.0, aiter 0.1.22.post1, transformers 5.17.0, vLLM 0.30.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.

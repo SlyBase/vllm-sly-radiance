@@ -36,7 +36,7 @@ Gated on RADIANCE_AUTOROUND so a build that is not serving an AutoRound checkpoi
 import pathlib
 import sysconfig
 
-from _patchlib import apply
+from _patchlib import apply_any
 
 SP = pathlib.Path(sysconfig.get_paths()["purelib"])
 QI = SP / "vllm/model_executor/layers/quantization/__init__.py"
@@ -74,8 +74,12 @@ if _radiance_os.environ.get("RADIANCE_AUTOROUND", "0") == "1":
 SENTINEL = "radiance: register the gfx1201 AutoRound int4 W4A8 config"
 
 
+# vLLM 0.30.0 adds "resolve_quant_method" to __all__; same insertion point after the list.
+ANCHOR_030 = ANCHOR.replace('    "QuantizationConfig",\n', '    "QuantizationConfig",\n    "resolve_quant_method",\n')
+NEW_030 = ANCHOR_030 + NEW[len(ANCHOR):]
+
 def main():
-    apply(QI, ANCHOR, NEW, SENTINEL, "autoround: register the quantization config")
+    apply_any(QI, [(ANCHOR, NEW), (ANCHOR_030, NEW_030)], SENTINEL, "autoround: register the quantization config")
 
 
 if __name__ == "__main__":
