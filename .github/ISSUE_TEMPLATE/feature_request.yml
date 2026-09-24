@@ -1,0 +1,75 @@
+name: 🚀 Feature request
+description: A new model, format, kernel, option or improvement for the image.
+title: "[feature] "
+type: Feature
+assignees:
+  - slydlake
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Please check [what was already tried and rejected](https://github.com/SlyBase/vllm-sly-radiance/blob/main/docs/NOT-ADOPTED.md) first.
+
+  - type: textarea
+    id: request
+    attributes:
+      label: What should the image do?
+      description: The feature, model, kernel or option you want, and what it should do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why? Use case
+      description: What it enables or speeds up, for whom, and in which setup.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - new model / checkpoint format
+        - speed (decode / prefill / concurrency)
+        - memory / context length / KV cache
+        - speculative decoding / drafter
+        - multi-GPU / tensor parallel
+        - API / tool calling / chat template
+        - build, image size, CI, docs
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: image
+    attributes:
+      label: Image version you use
+      placeholder: ghcr.io/slybase/vllm-sly-radiance:0.4.0-rocm10.0
+    validations:
+      required: false
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and drafter (if relevant)
+      placeholder: amd/Qwen3.8-27B-Quark-AWQ-MXFP4 + syvai/Qwen3.8-27B-DFlash2-W4A16
+    validations:
+      required: false
+
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU(s) and tensor parallel size (if relevant)
+      placeholder: 2x Radeon AI PRO R9700, TP=2
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links to other repos, papers, checkpoints, benchmark numbers — and what you already tried.
+    validations:
+      required: false

@@ -1,0 +1,139 @@
+name: 🐞 Bug report
+description: Something does not work, crashes, is slower than documented or returns wrong output.
+title: "[bug] "
+type: Bug
+assignees:
+  - slydlake
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The fields below describe *your* deployment so the problem can be reproduced.
+        The README's [Quickstart](https://github.com/SlyBase/vllm-sly-radiance#quickstart) is the reference setup.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker run … (see "Launch command" below)
+        2. curl localhost:8000/v1/chat/completions …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: image
+    attributes:
+      label: Image version
+      description: The exact tag (`docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' <image>`).
+      placeholder: ghcr.io/slybase/vllm-sly-radiance:0.4.0-rocm10.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - docker run (README quickstart)
+        - docker compose
+        - Kubernetes / Helm
+        - systemd unit around docker/podman
+        - built the image myself
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model (--model)
+      placeholder: amd/Qwen3.8-27B-Quark-AWQ-MXFP4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: Checkpoint format
+      options:
+        - Quark MXFP4 (--quantization quark)
+        - NVFP4 (RADIANCE_NVFP4_MXFP4=1)
+        - compressed-tensors INT4 / W4A16
+        - ParoQuant (RADIANCE_PAROQUANT=1)
+        - AutoRound (RADIANCE_AUTOROUND=1)
+        - escha (RADIANCE_ESCHA=1)
+        - FP8 / BF16
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: drafter
+    attributes:
+      label: Speculative decoding / drafter
+      description: Method, drafter model and num_speculative_tokens — or "none".
+      placeholder: dflash, syvai/Qwen3.8-27B-DFlash2-W4A16, k=7
+    validations:
+      required: true
+
+  - type: input
+    id: context
+    attributes:
+      label: Context and batching
+      description: --max-model-len, --max-num-seqs, --max-num-batched-tokens, KV cache dtype.
+      placeholder: 262144 / 8 / 2048 / fp8
+    validations:
+      required: false
+
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU(s) and tensor parallel size
+      placeholder: 1x Radeon AI PRO R9700 (gfx1201), TP=1, power cap 300 W
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, kernel, amdgpu driver / ROCm on the host, container runtime, LXC/VM if any.
+      placeholder: Ubuntu 24.04, kernel 6.14, amdgpu 6.x, Docker 29, inside a Proxmox LXC
+    validations:
+      required: false
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Launch command
+      description: The full `docker run` / compose service / manifest, including every `-e RADIANCE_*` variable.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The server log from start to the error (the `[radiance]` lines at startup matter). Trim tokens/secrets.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Performance numbers (for "slower than expected")
+      description: Tool and settings (e.g. BetterBench config), power cap, what you measured vs. what the README says.
+    validations:
+      required: false
