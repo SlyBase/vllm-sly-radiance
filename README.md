@@ -456,9 +456,9 @@ Differences that do matter:
 Measured 2026-09-24 (300 W, production args, 0.3.6, second start, against Quark MXFP4 on the
 same stack): load 461 s cold incl. ~21 s requantization (304 layers, relRMS 0.113–0.116 against
 the NVFP4 weights), KV pool **374,202** tokens (Quark 384,316: −2.6 %, the bf16 → int4 head's
-transient), GSM8K 0.825 (Quark 0.835–0.845, ±0.027 at 200), weighted decode **136.6** tok/s
-(Quark 130.6) at the same 34.8 ms step gap — the drafter lands more tokens per step on this
-checkpoint (4.69 vs 4.48) — prefill 3160 / 2504 tok/s at 2k / 64k (Quark 3297 / 2555), conc 4 / 8
+transient), GSM8K 0.825 (Quark 0.835–0.845, ±0.027 at 200), weighted decode 133.4 tok/s
+against Quark's 132.7 at the same 34.8 ms step gap (128 fresh BetterBench runs each; a first
+64-run sample had read 136.6 vs 130.6, which was trajectory noise, see *Other checkpoints*) — prefill 3160 / 2504 tok/s at 2k / 64k (Quark 3297 / 2555), conc 4 / 8
 352.6 / 402.2 (Quark 340.2 / 392.1). A fix was needed on the way: `radiance_nvfp4.py` built its
 e2m1 grid as a module-level tensor, which vLLM's meta-device model construction turned into a meta
 tensor ("Cannot copy out of meta tensor" at the first requant).
@@ -587,16 +587,18 @@ cache, `--max-model-len 262144`), only `--model` / `--quantization` and the form
 | Checkpoint | Switch | Decode tok/s | Step gap | Conc 1 / 4 / 8 tok/s | Prefill 2k / 64k tok/s | KV (262k requests) | GSM8K |
 |---|---|---|---|---|---|---|---|
 | [amd/Qwen3.8-27B-Quark-AWQ-MXFP4](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (production) | – | 130.4 | 34.8 ms | 118 / 344 / 412 | 3300–3385 / 2510–2555 | 1.46× (384,316) | 0.845 |
-| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `RADIANCE_NVFP4_MXFP4=1`, `--quantization compressed-tensors` | **136.6** | 34.8 ms | 126 / 353 / 402 | ~3160 / 2504 | 1.43× (374,202) | 0.825 |
+| [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | `RADIANCE_NVFP4_MXFP4=1`, `--quantization compressed-tensors` | 133.4 ¹ | 34.8 ms | 126 / 353 / 402 | ~3160 / 2504 | 1.43× (374,202) | 0.825 |
 | [RedHatAI/Qwen3.8-27B-INT4](https://huggingface.co/RedHatAI/Qwen3.8-27B-INT4) (W4A16) | `--quantization compressed-tensors` | 107.8 | 42.9 ms | 100 / 282 / 290 | 1628 / 1439 | 1.47× | 0.820 |
 | [z-lab/Qwen3.8-27B-PARO](https://huggingface.co/z-lab/Qwen3.8-27B-PARO) | `RADIANCE_PAROQUANT=1`, no `--quantization` | 67.7 | 70.6 ms | 60 / 194 / 239 | 2313 / 2004 | 1.20× | 0.840 |
 | [amd/Qwen3.8-27B-Quark-AWQ-INT4-W4A16](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-INT4-W4A16) | – | does not load | | | | | |
 
 - **MXFP4 (Quark)** is the best all-round choice: fastest prefill, the full KV pool at maximum
   context, best accuracy. Every kernel in this image was tuned on it.
-- **NVFP4** is requantized to MXFP4 at load and runs on the same kernels (same step gap); decode is
-  5 % higher because the drafter lands more tokens per step on this checkpoint (4.69 vs 4.48), at
-  ~10k fewer KV tokens (its fp8 → bf16 → int4 lm_head transient) and a GSM8K within noise.
+- **NVFP4** is requantized to MXFP4 at load and runs on the same kernels (same step gap), so decode
+  is the same as Quark's: 133.4 vs 132.7 tok/s (+0.5 %) over 128 fresh runs each, tokens per update
+  4.64 vs 4.55 with overlapping 95 % intervals. ¹ The first 64-run sample had read 136.6 vs 130.4
+  (+4.7 %); that was trajectory noise, not the drafter (see below). NVFP4 costs ~10k KV tokens (its
+  fp8 → bf16 → int4 lm_head transient) and its GSM8K is within noise.
 - **INT4 W4A16** runs on vLLM's `rdna_hybrid_w4a16` kernels, not on the W4A8 MXFP4 GEMM: half the
   prefill, −17 % decode. Its HF repo's `refs/main` pointed at an incomplete snapshot in our cache;
   pin `--revision` if the load reports missing weight files.
@@ -604,6 +606,17 @@ cache, `--max-model-len 262144`), only `--model` / `--quantization` and the form
   ggz14's numbers are from 2 × R9700.
 - **Quark INT4-W4A16** has no Quark scheme in vLLM 0.29 (int4 weight-only), and its AWQ
   `algo_config` also trips `QuarkConfig.apply_vllm_mapper`; use the compressed-tensors INT4 above.
+
+**Why a single BetterBench run cannot rank checkpoints by decode.** Every run is one deterministic
+sampling trajectory (engine seed 0, a fresh nonce per run), and tokens per update of the same prompt
+swing between 2.8 and 6 from one trajectory to the next; with 8 runs per category the weighted
+decode carries about ±5 %. Checked on 2026-09-24 for the NVFP4 "+5 %": with the prompt lookup off and
+fixed prompts the DFlash drafter accepts the same per draft position on all four checkpoints (4.04–4.13
+tokens per step, greedy and T = 0.7); the prompt lookup never fires in BetterBench's short prompts
+(0 of 14,416 steps: it only takes sources more than 2048 tokens back); fidelity on reference text
+(NLL per token on code and prose) ranks ParoQuant 0.30 < Quark 0.349 < INT4 0.355 < NVFP4 0.393, i.e. no
+link to acceptance. A fresh 128-run sample per checkpoint then put NVFP4 at +0.5 %. Rank decode on
+≥ 128 runs per arm, or on the step gap, which is deterministic.
 
 Prefill numbers carry about ±3 % between measurement sessions (the MXFP4 range above is two
 sessions); within one window the same image repeats within 0.3 %. Quark and INT4 were measured in
