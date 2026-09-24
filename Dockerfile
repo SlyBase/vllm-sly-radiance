@@ -304,7 +304,9 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
-     radiance_tp3pad.py ${SP}/
+     radiance_tp3pad.py radiance_nvfp4.py radiance_autoround.py radiance_escha.py \
+     paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
+     sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -399,6 +401,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # heads; every hook returns immediately unless RADIANCE_TP_PAD=3, so TP 1/2 serves are unchanged.
 # sly/patch_ar_knobs.py makes the TP=2 all-reduce size gate (RADIANCE_AR_MAX_KB) and the 6-bit
 # wire geometry env-tunable; defaults are the shipped values.
+# patch_nvfp4_mxfp4.py (ggz14, 2026-09-15) serves compressed-tensors NVFP4 checkpoints
+# (unsloth/Qwen3.8-27B-NVFP4) by requantizing every linear to MXFP4 at load (radiance_nvfp4.py) and
+# handing it to the same W4A8 kernel plugin the Quark checkpoint runs on. Inert unless
+# RADIANCE_NVFP4_MXFP4=1; it only touches compressed-tensors scheme selection, never QuarkConfig.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -413,10 +419,11 @@ RUN set -eu; cd /opt/patches; \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
              sly/patch_quark_mxfp4 sly/patch_short_prefill \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_mamba_align_retire \
+             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct patch_nvfp4_mxfp4 \
+             sly/patch_fused_norm_quant \
+             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_mamba_align_retire \
              sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode \
-             patch_tp3_pad sly/patch_ar_knobs; do \
+             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
@@ -499,6 +506,22 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       $(python -m pybind11 --includes) \
       /opt/patches/sly/gdn/radiance_gdn_decode.hip -o ${SP}/radiance_gdn_decode_ext.so \
  && python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
+
+# ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
+# above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
+# paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
+# asked: RADIANCE_AUTOROUND=1 (patch_autoround), RADIANCE_ESCHA=1 (patch_escha),
+# RADIANCE_PAROQUANT=1 (radiance_quant_plugins.pth). Dispatch is by the checkpoint's quant_method.
+COPY radiance_autoround.hip radiance_autoround_kernels.h radiance_escha.hip /opt/quant/
+COPY escha/escha_kernels.h escha/escha_act.h /opt/quant/escha/
+COPY paroquant/radiance_paroquant.hip paroquant/par_kernels.h /opt/quant/
+RUN cd /opt/quant \
+ && for k in autoround escha paroquant; do \
+      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=${GFX_ARCH} $(python -m pybind11 --includes) \
+        radiance_$k.hip -o ${SP}/radiance_${k}_kernel.so || exit 1; \
+    done \
+ && python -c "import torch, radiance_autoround_kernel, radiance_escha_kernel, radiance_paroquant_kernel; print('quant plugin kernels built')" \
+ && cd / && rm -rf /opt/quant
 
 # The installed extensions were stripped before the snapshot above; only bytecode is left to drop.
 RUN find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true

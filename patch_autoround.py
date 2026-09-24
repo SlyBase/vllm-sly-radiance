@@ -34,10 +34,11 @@ symmetric, which is what the kernel actually supports.
 Gated on RADIANCE_AUTOROUND so a build that is not serving an AutoRound checkpoint imports nothing.
 """
 import pathlib
+import sysconfig
 
 from _patchlib import apply
 
-SP = pathlib.Path("/opt/vllm/lib/python3.12/site-packages")
+SP = pathlib.Path(sysconfig.get_paths()["purelib"])
 QI = SP / "vllm/model_executor/layers/quantization/__init__.py"
 
 ANCHOR = '''__all__ = [

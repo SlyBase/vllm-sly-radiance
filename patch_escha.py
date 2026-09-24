@@ -13,10 +13,11 @@ entirely, so without this the engine simply reports an unsupported quantization 
 Gated on RADIANCE_ESCHA so a build not serving an escha checkpoint imports nothing.
 """
 import pathlib
+import sysconfig
 
 from _patchlib import apply
 
-SP = pathlib.Path("/opt/vllm/lib/python3.12/site-packages")
+SP = pathlib.Path(sysconfig.get_paths()["purelib"])
 QI = SP / "vllm/model_executor/layers/quantization/__init__.py"
 
 ANCHOR = '''__all__ = [
