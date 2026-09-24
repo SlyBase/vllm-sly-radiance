@@ -1018,7 +1018,9 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
   fused GDN MTP decode kernel (`csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu`, v0.29.0,
   Apache-2.0), modified for gfx1201.
 - [turboderp/exllamav3](https://github.com/turboderp-org/exllamav3) (MIT) — `escha/` (carried from
-  ggz14, not used by the image build) contains code derived from ExLlamaV3; its license is in
-  `escha/EXLLAMAV3-LICENSE.txt`.
+  ggz14; since 0.3.6 its kernel headers are built into `radiance_escha_kernel`) contains code derived
+  from ExLlamaV3; its license is in `escha/EXLLAMAV3-LICENSE.txt`.
+- [z-lab ParoQuant](https://huggingface.co/z-lab/Qwen3.8-27B-PARO) — the format; ggz14 wrote the W4A8
+  gfx1201 reimplementation in `paroquant/`, the AutoRound kernel and the NVFP4 → MXFP4 requant (0.3.6).
 
 License: same as upstream vllm-radiance (see `LICENSE`).
