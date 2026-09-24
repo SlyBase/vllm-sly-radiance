@@ -51,7 +51,10 @@ LMHEAD = os.environ.get("RADIANCE_NVFP4_LMHEAD", "bf16")
 LOG_EVERY = os.environ.get("RADIANCE_NVFP4_LOG", "1") == "1"
 ROW_CHUNK = 4096            # rows per requant pass: bounds the fp32 transient at ~1.3 GiB for K=17408
 
-_E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+# A Python list, not a module-level tensor: this module is imported while vLLM builds the model
+# under a meta-device context, and a tensor created then is a meta tensor with no data
+# ("Cannot copy out of meta tensor" at the first requant).
+_E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def _log(msg):
@@ -68,7 +71,7 @@ def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
     lo = packed & 0x0F
     hi = packed >> 4
     codes = torch.stack((lo, hi), dim=-1).reshape(n, -1)
-    grid = _E2M1.to(packed.device)
+    grid = torch.tensor(_E2M1, device=packed.device)
     mag = grid[(codes & 0x7).long()]
     return torch.where((codes & 0x8) != 0, -mag, mag)
 
@@ -119,7 +122,7 @@ def _encode_blocks(wb: torch.Tensor, e: torch.Tensor):
     scale = torch.exp2(e).unsqueeze(-1)
     v = wb / scale
     idx = e2m1_index(v.abs())
-    grid = _E2M1.to(wb.device)
+    grid = torch.tensor(_E2M1, device=wb.device)
     q = grid[idx.long()] * torch.sign(v) * scale
     err = ((q - wb) ** 2).sum(-1)
     return idx, err
