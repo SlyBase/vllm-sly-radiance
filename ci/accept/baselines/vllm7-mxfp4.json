@@ -1,12 +1,12 @@
 {
-  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700, MXFP4 + DFlash2 k=7, max-model-len 262144, --max-num-batched-tokens 2048). Moved forward on 2026-09-20 with the 0.2.9 rollout: kv_tokens, startup_s, mean_tokens_per_step, acceptance_rate and modes.fast are the MEAN of the 0.2.8 (35529865683) and 0.2.9 (35538890085) gate runs, both through the gate's own path with the 2048 unit (the two differ by the prompt-lookup override, which is idle at BetterBench's context lengths). `full` and `gsm8k` are still the 0.2.2/0.2.3 numbers - `fast` does not measure them (GSM8K measured 0.830-0.850 on 0.2.7-0.2.9 A/B runs, inside the noise of 0.835). Null/absent entries are skipped, not failed. Move this file forward after every rollout: it is 'what production does today', not 'the best we ever measured'.",
-  "image": "vllm-sly-radiance:0.2.9-rocm10.0",
-  "measured": "2026-09-20",
+  "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700 at the production 210 W, MXFP4 + DFlash2 k=7, max-model-len 262144, --max-num-batched-tokens 2048). Recalibrated 2026-09-25 on 0.4.0 with a full-mode record_baseline gate run (36119585981): the conc 8/16 values had been the 0.2.2/0.2.3 numbers (388/386 t/s); every 0.3.x-0.4.0 full run at 210 W measured 360-370 t/s there (BetterBench reference 2026-09-25: 362/369), so the old values failed a neutral release.",
+  "image": "vllm-sly-radiance:0.4.0-rocm10.0",
+  "measured": "2026-09-25",
   "kv_tokens": 384316,
-  "startup_s": 266.2,
-  "mean_tokens_per_step": 8.3679,
-  "acceptance_rate": 0.483,
-  "gsm8k": 0.835,
+  "startup_s": 256.2,
+  "mean_tokens_per_step": 11.3692,
+  "acceptance_rate": 0.4778,
+  "gsm8k": 0.845,
   "modes": {
     "fast": {
       "aggregate_tps": {
@@ -16,18 +16,18 @@
     },
     "full": {
       "aggregate_tps": {
-        "1": 109.8,
-        "2": 190.0,
-        "4": 305.0,
-        "8": 388.0,
-        "16": 385.8
+        "1": 114.53,
+        "2": 205.02,
+        "4": 318.24,
+        "8": 363.47,
+        "16": 365.0
       }
     }
   },
   "recorded": {
-    "image": "vllm-sly-radiance:0.2.9-rocm10.0",
-    "at": "2026-09-20 22:08:40Z",
-    "mode": "fast"
+    "image": "vllm-sly-radiance:0.4.0-rocm10.0",
+    "at": "2026-09-25 09:39:09Z",
+    "mode": "full"
   },
   "_note_fast_vs_full": "fast und full sind NICHT vergleichbar: fast faehrt 24 Requests auf conc 1 und 8, full 48 auf 1/2/4/8/16. conc 8 misst in fast 331-352 t/s gegen 388 in full - dieselbe Engine, nur ein kuerzerer Lauf. Ein fast-Lauf gegen die full-Zahlen gemessen meldet auf jedem einzelnen Build 10 % Regression.",
   "_note_fast_spread": "Alle fast-Zahlen sind MITTELWERTE zweier Laeufe, nie der beste. Streuung der beiden Laeufe (0.2.8 / 0.2.9): conc 1 = 111.33/111.29 (0.04 %), conc 8 = 362.46/360.84 (0.4 %), tokens/step = 8.3777/8.3581 (0.2 %), startup_s = 271.2/261.1 (4 %). conc 8 streute in aelteren Laeufen bis 4.8 %: mehr Requests pro Lauf waeren das eigentliche Mittel, nicht eine weichere Schwelle.",
