@@ -15,7 +15,7 @@ Gated on RADIANCE_ESCHA so a build not serving an escha checkpoint imports nothi
 import pathlib
 import sysconfig
 
-from _patchlib import apply
+from _patchlib import apply_any
 
 SP = pathlib.Path(sysconfig.get_paths()["purelib"])
 QI = SP / "vllm/model_executor/layers/quantization/__init__.py"
@@ -54,8 +54,12 @@ if _radiance_escha_os.environ.get("RADIANCE_ESCHA", "0") == "1":
 SENTINEL = "radiance: register the gfx1201 escha (EXL3 trellis) W2 config"
 
 
+# vLLM 0.30.0 adds "resolve_quant_method" to __all__; same insertion point after the list.
+ANCHOR_030 = ANCHOR.replace('    "QuantizationConfig",\n', '    "QuantizationConfig",\n    "resolve_quant_method",\n')
+NEW_030 = ANCHOR_030 + NEW[len(ANCHOR):]
+
 def main():
-    apply(QI, ANCHOR, NEW, SENTINEL, "escha: register the quantization config")
+    apply_any(QI, [(ANCHOR, NEW), (ANCHOR_030, NEW_030)], SENTINEL, "escha: register the quantization config")
 
 
 if __name__ == "__main__":

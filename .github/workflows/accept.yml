@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # The App token, not GITHUB_TOKEN: a tag pushed with the latter does not start build.yml.
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app_token
         with:
           app-id: ${{ secrets.SYNC_APP_ID }}
@@ -211,6 +211,7 @@ jobs:
 
       - name: tag the gated commit
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           VERSION: ${{ needs.plan.outputs.version }}
           SHA: ${{ needs.plan.outputs.sha }}
           IMAGE: ${{ needs.plan.outputs.image }}

@@ -62,7 +62,7 @@ Gated by RADIANCE_MXFP4=1 (default off), matching the upstream flag.
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 KL = SP / "vllm/model_executor/kernels/linear/__init__.py"
@@ -101,6 +101,21 @@ REGISTER_NEW = (
     "    except Exception as _radiance_exc:  # never block model load on our own kernel\n"
     '        logger.warning_once("[radiance] MXFP4 W4A8 kernel unavailable: %r", _radiance_exc)\n'
 )
+
+# vLLM 0.30.0 spells the same call over several lines with quantization="mxfp4"; same insertion
+# point, the radiance block is appended unchanged (REGISTER_NEW minus the 0.29 anchor it repeats).
+REGISTER_ANCHOR_030 = (
+    "    platform = current_platform._enum\n"
+    "    possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))\n"
+    "\n"
+    '    # Apply --linear-backend filtering when set.\n'
+    "    possible = _resolve_backend_kernels(\n"
+    "        possible,\n"
+    '        "MXFP4",\n'
+    '        quantization="mxfp4",\n'
+    "    )\n"
+)
+REGISTER_NEW_030 = REGISTER_ANCHOR_030 + REGISTER_NEW[len(REGISTER_ANCHOR):]
 
 # --- 2. relax aiter's CDNA4 gate so the Triton fp4 GEMM is reachable on gfx1201 -------------
 # Verbatim vs. ggz14/0.27.1 -- this exact two-line block is unchanged at 0.29.0.
@@ -194,9 +209,9 @@ FINAL_GATE_NEW = (
 
 
 def main():
-    apply(KL, REGISTER_ANCHOR, REGISTER_NEW,
-          "[radiance] MXFP4 W4A8 kernel unavailable",
-          "mxfp4: register the radiance W4A8 kernel")
+    apply_any(KL, [(REGISTER_ANCHOR, REGISTER_NEW), (REGISTER_ANCHOR_030, REGISTER_NEW_030)],
+              "[radiance] MXFP4 W4A8 kernel unavailable",
+              "mxfp4: register the radiance W4A8 kernel")
     apply(KA, SUPPORTS_ANCHOR, SUPPORTS_NEW,
           "[radiance] native MXFP4 enabled on gfx12x",
           "mxfp4: relax aiter's CDNA4 gate")

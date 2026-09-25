@@ -42,7 +42,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app_token
         with:
           app-id: ${{ secrets.SYNC_APP_ID }}
@@ -55,6 +55,7 @@ jobs:
 
       - name: tag
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           REASON: ${{ inputs.reason }}
           VERSION_INPUT: ${{ inputs.version }}
           SHA_INPUT: ${{ inputs.sha }}

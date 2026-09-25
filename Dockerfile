@@ -18,7 +18,7 @@ ARG GFX_ARCH=gfx1201
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's
 # interpreter (python 3.12.3) matches.
 # renovate: datasource=docker depName=ubuntu versioning=ubuntu
-ARG RELEASE_BASE=ubuntu:24.04@sha256:a08e551cb33850e4740772b38217fc1796a66da2506d312abe51acda354ff061
+ARG RELEASE_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 # Component pins, in one place. Each is both the git tag that gets compiled and the version the
 # resulting wheel reports, so `pip show`, `importlib.metadata`, and the startup banner all agree
@@ -42,11 +42,11 @@ ARG TORCH_VERSION=2.14.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.8.0
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.24.1
+ARG TORCHVISION_VERSION=0.29.0
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.21.post2
+ARG AITER_VERSION=0.1.22.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.29.0
+ARG VLLM_VERSION=0.30.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and

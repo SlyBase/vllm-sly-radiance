@@ -24,7 +24,7 @@ jobs:
           else
             echo "have_app=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app_token
         if: ${{ steps.app_check.outputs.have_app == 'true' }}
         with:

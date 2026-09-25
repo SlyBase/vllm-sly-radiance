@@ -21,7 +21,7 @@ concurrency:
 
 env:
   # renovate: datasource=pypi depName=ruff
-  RUFF_VERSION: 0.16.7
+  RUFF_VERSION: 0.16.8
   # renovate: datasource=docker depName=hadolint/hadolint
   HADOLINT_VERSION: v2.15.1
   # renovate: datasource=docker depName=rhysd/actionlint
@@ -116,7 +116,7 @@ jobs:
       - name: app token (repair)
         id: app_token
         if: steps.check.outcome == 'failure' && startsWith(github.head_ref, 'renovate/')
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.SYNC_APP_ID }}
           private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
