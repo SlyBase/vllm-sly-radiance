@@ -29,7 +29,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -56,7 +56,7 @@ jobs:
         run: docker buildx build --check .
 
   patch-dryrun:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -91,7 +91,7 @@ jobs:
   constraints:
     # constraints.txt must be exactly what pip resolves for the pinned vLLM (no missing, stale or
     # out-of-range pin): the guard that makes a Renovate bump of it mergeable without an image build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -147,7 +147,7 @@ jobs:
           exit 1
 
   consistency:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -170,7 +170,7 @@ jobs:
     # aggregate status for the branch protection: one required check instead of four
     needs: [lint, patch-dryrun, constraints, consistency]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: all jobs succeeded?
         env:
