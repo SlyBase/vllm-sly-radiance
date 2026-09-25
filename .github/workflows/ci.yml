@@ -96,6 +96,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # the persisted GITHUB_TOKEN (contents: read) is sent to github.com in front of the App
+          # token in the repair push's URL and gets it a 403 as github-actions[bot]; the repo is
+          # public, so the fetches below need no credentials
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
