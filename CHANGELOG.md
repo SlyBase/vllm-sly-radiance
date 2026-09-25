@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [0.4.0] - 2026-09-24
+## [0.4.0] - 2026-09-25
 
 ### Changed
 - **vLLM 0.29.0 → 0.30.0**, aiter 0.1.21.post2 → 0.1.22.post1, torchvision 0.24.1 → 0.29.0, ubuntu:24.04
@@ -27,7 +27,11 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `docs/`; this changelog; GitHub releases carry the changelog section.
 
 ### Measured
-- See the release A/B in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#040) (production arguments, 300 W).
+- Performance-neutral against 0.3.6 (prefill ±0.3 %, step gap unchanged, KV pool 384,316), GSM8K 0.855.
+  Reference run: 133.2 tok/s decode, 3,166 tok/s prefill at 1.5k, 410 tok/s at conc 8 (300 W);
+  124.5 / 2,527 / 362 at 210 W ([details](docs/BENCHMARKS.md#040)).
+- New recommendation for shorter contexts: `--max-model-len 131072 --max-num-batched-tokens 4096`,
+  +3.5 … +4.8 % prefill on 8k–64k prompts.
 
 ## [0.3.6] - 2026-09-24
 

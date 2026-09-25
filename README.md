@@ -2,7 +2,7 @@
 
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
 with hand-written MXFP4 kernels, DFlash2 speculative decoding and the full 262k context on a single
-32 GB card: **~{{DECODE300}} tok/s single-stream decode, ~{{PP2K300}} tok/s prefill, {{C8_300}} tok/s at 8
+32 GB card: **~133 tok/s single-stream decode, ~3,200 tok/s prefill, 410 tok/s at 8
 concurrent requests**, with every number measured and reproducible.
 
 ```bash
@@ -25,7 +25,7 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:0.4.0-rocm10.0
 
 ## Performance
 
-Reference run of image **0.4.0** on {{REFDATE}}, production arguments from the [quickstart](#quickstart)
+Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
 (`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
 BetterBench 0.4.0 default config: single-stream decode
 3 warmup + 20 passes per category, prefill sweep with unique prompts, concurrency 1–16 × 48 requests,
@@ -34,15 +34,15 @@ sampling temperature 0.7 / top_p 0.95 / top_k 20. Two power settings, no other t
 
 | | 300 W | 210 W |
 |---|---|---|
-| **Decode, single stream** (weighted over 8 task categories) | **{{DECODE300}} tok/s** | {{DECODE210}} tok/s |
-| step gap (one target forward + draft) | {{GAP300}} ms | {{GAP210}} ms |
-| **Prefill** 1.5k / 6k / 24k / 47k prompt tokens | **{{PP300}}** tok/s | {{PP210}} tok/s |
-| time to first token, 1.5k / 47k tokens | {{TTFT300}} | {{TTFT210}} |
-| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **{{CONC300}}** tok/s | {{CONC210}} tok/s |
-| GSM8K (200, cot zero-shot, greedy) | {{GSM}} | |
-| board power / junction / fan (avg) | {{CARD300}} | {{CARD210}} |
+| **Decode, single stream** (weighted over 8 task categories) | **133.2 tok/s** | 124.5 tok/s |
+| step gap (one target forward + draft) | 34.8 ms | 37.0 ms |
+| **Prefill** 1.5k / 6k / 24k / 47k prompt tokens | **3,166 / 3,161 / 2,903 / 2,512** tok/s | 2,527 / 2,498 / 2,311 / 2,027 tok/s |
+| time to first token, 1.5k / 47k tokens | 0.48 s / 18.7 s | 0.60 s / 23.2 s |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **121 / 214 / 332 / 410 / 406** tok/s | 111 / 197 / 312 / 362 / 369 tok/s |
+| GSM8K (200, cot zero-shot, greedy) | 0.855 ± 0.025 | |
+| board power / junction / fan (avg) | 296 W / 98 °C / 3,710 rpm | 210 W / 93 °C / 2,321 rpm |
 
-What that means: code, JSON and edits decode at 150–180 tok/s (the drafter lands 5–6 tokens per step),
+What that means: code, JSON, math and edits decode at 140–175 tok/s (the drafter lands 5–6 tokens per step),
 free prose at ~85; long contexts stay fast (99k tokens of context cost ~7 ms per step instead of 83).
 Per-category tables, the measurement method and every earlier release are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Decode differences below ~5 % between single runs are noise;
@@ -98,8 +98,9 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 - **First start** compiles kernels and CUDA graphs (~10 min) and reports a ~2 GiB smaller KV pool;
   **restart once** — the warm start takes 4–6 min and gets the full 384k-token KV pool. Keep the cache
   volumes.
-- **Power:** decode barely depends on the power cap (210 W costs ~6 % decode and ~25 % prefill against
-  300 W, see the table above).
+- **Power:** 210 W costs ~6.5 % decode and ~20 % prefill against 300 W (table above). The card allows
+  up to 330 W: +4 … +8 % prefill and ~+1 % step time over 300 W, but the junction runs at 102 °C average
+  (106 °C peak) and the fan at ~4,200 rpm — not worth it for 24/7 use.
 - **iGPU:** `HIP_VISIBLE_DEVICES=0` keeps ROCm off an integrated GPU next to the R9700.
 - Other checkpoints: [NVFP4, INT4, ParoQuant](docs/BENCHMARKS.md#other-checkpoints-on-one-r9700-036-2026-09-24);
   several GPUs: [docs/MULTI-GPU.md](docs/MULTI-GPU.md).
@@ -160,7 +161,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | Argument | Recommended | Trade-off |
 |---|---|---|
 | `--max-model-len` | `262144` | the model maximum; the KV pool (384k tokens) then holds one full-length request plus change. Lower it only together with the options below — it does not make a single request faster |
-| `--max-num-batched-tokens` | `2048` | prefill chunk size. {{CHUNKNOTE}} |
+| `--max-num-batched-tokens` | `2048` | prefill chunk size. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k |
 | `--max-num-seqs` | `8` | 8 × (7 + 1) = 64 verify tokens per step, inside `DECODE_MAX_M`; above 8 requests queue (conc 16 = conc 8 throughput) |
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
@@ -168,7 +169,19 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes) |
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |
 
-**Less context, more prefill:** {{LESSCTX}}
+**Less context, more prefill:** if your requests stay well below 262k tokens, set
+`--max-model-len 131072 --max-num-batched-tokens 4096`: +3.5 … +4.8 % prefill on 8k–64k prompts, and the
+KV pool (~326k tokens) still holds two full 131k requests. Measured 2026-09-25 (300 W, prefill sweep):
+
+| `--max-model-len` / `--max-num-batched-tokens` | Prefill 2k / 8k / 16k / 32k / 64k tok/s | KV pool |
+|---|---|---|
+| 262144 / 2048 (default) | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 |
+| 131072 / 2048 | 3,379 / 3,344 / 3,212 / 2,936 / 2,520 | ~350k |
+| 131072 / **4096** | 3,375 / **3,444 / 3,351 / 3,057 / 2,613** | ~326k |
+| 131072 / 8192 | 3,367 / 3,486 / 3,290 / 3,022 / 2,579 | ~282k |
+
+Decode and concurrency are unchanged within noise. (These are prefill-only sweeps, which read ~5 % higher
+than the prefill phase of the full run in the table above; compare within one table.)
 
 ### Other checkpoints and GPUs
 

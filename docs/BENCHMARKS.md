@@ -2,6 +2,81 @@
 
 Current reference numbers are in the [README](../README.md#performance). This file keeps the full tables of earlier releases, the checkpoint comparison and why single runs mislead.
 
+## 0.4.0
+
+### Reference run (2026-09-25)
+
+Image 0.4.0 (vLLM 0.30.0) with the production arguments of the README quickstart, run as the acceptance
+candidate in a GPU window (second start, KV pool 384,316 tokens), BetterBench 0.4.0 default config: single-
+stream decode 3 warmup + 20 passes per category, prefill sweep (unique prompts, no prefix cache, 16 output
+tokens), concurrency 1/2/4/8/16 × 48 requests; sampling temperature 0.7 / top_p 0.95 / top_k 20. 300 W with
+the firmware fan curve, then 210 W with the fan capped at 2,800 rpm. Card sampled every 5 s.
+
+**Single-stream decode** (tok/s ± 95 % CI; tokens per client update):
+
+| Category | 300 W | 210 W | tokens/update (300 W) |
+|---|---|---|---|
+| chat | 91.6 ± 4.0 | 89.5 ± 7.3 | 3.13 |
+| code | 143.2 ± 9.2 | 130.9 ± 8.1 | 4.94 |
+| file_edit | 173.8 ± 7.1 | 167.2 ± 5.8 | 5.93 |
+| json | 166.3 ± 10.3 | 155.2 ± 10.5 | 5.66 |
+| math | 171.1 ± 10.3 | 160.8 ± 8.4 | 5.83 |
+| prose | 86.2 ± 3.6 | 79.3 ± 3.3 | 2.99 |
+| reasoning | 108.2 ± 13.9 | 103.7 ± 14.0 | 3.73 |
+| summarization | 133.6 ± 7.3 | 125.9 ± 8.6 | 4.55 |
+| **weighted** | **133.2** | **124.5** | 4.57 |
+| step gap p50 | 34.84 ms | 36.99 ms | |
+
+**Prefill:**
+
+| Prompt tokens | 1,514 | 5,918 | 11,794 | 23,543 | 47,056 |
+|---|---|---|---|---|---|
+| 300 W, tok/s | 3,166 | 3,161 | 3,108 | 2,903 | 2,512 |
+| 210 W, tok/s | 2,527 | 2,498 | 2,461 | 2,311 | 2,027 |
+| TTFT 300 W / 210 W | 0.48 / 0.60 s | 1.87 / 2.37 s | 3.79 / 4.79 s | 8.11 / 10.19 s | 18.7 / 23.2 s |
+
+**Concurrency** (48 requests per level, all OK, 0 preemptions):
+
+| Concurrency | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 300 W, aggregate tok/s | 121.0 | 214.1 | 331.9 | 410.0 | 405.7 |
+| 210 W, aggregate tok/s | 110.9 | 197.2 | 312.2 | 362.4 | 369.0 |
+| TTFT p50 300 W / 210 W, ms | 90 / 99 | 135 / 148 | 155 / 172 | 198 / 223 | 192 / 204 |
+
+**Card** (5 s samples): 300 W — 296 W avg / 400 W peak, junction 98 / 102 °C, memory 87 / 90 °C, fan
+3,710 / 4,035 rpm, sclk 2,941 MHz; 210 W — 210 / 271 W, junction 93 / 97 °C, memory 90 / 94 °C, fan
+2,321 / 2,428 rpm, sclk 2,298 MHz. Draft acceptance (server counters): 4.23 / 4.21 tokens per step,
+acceptance rate 0.461 / 0.459. GSM8K (200, cot zero-shot, greedy): 0.855 ± 0.025.
+
+**330 W** (the card's maximum cap; `ab.json`, 8 passes, same night, against the 300 W arm of the A/B below):
+prefill +8.3 / +7.9 / +6.8 / +5.5 / +4.3 % at 2k / 8k / 16k / 32k / 64k, step gap 34.81 → 34.61 ms,
+326 W avg / 422 W peak, junction 102 / 106 °C, fan 4,198 / 4,508 rpm.
+
+### A/B against 0.3.6 (2026-09-25, 300 W, production arguments, ab.json)
+
+| | 0.3.6 | 0.4.0 | 0.3.6 repeat |
+|---|---|---|---|
+| prefill 2k / 64k tok/s | 3,180 / 2,516 | 3,169 / 2,514 | 3,176 / 2,514 |
+| weighted decode tok/s | 130.7 | 130.5 | 130.6 |
+| step gap, 37 / 28k-token prompt | 35.04 / 36.95 ms | 35.08 / 36.93 ms | |
+| KV pool (warm) | 384,316 | 384,316 | |
+| GSM8K 200 | 0.845 (0.3.5) | 0.855 | |
+
+vLLM 0.30 is performance-neutral on this stack (prefill within ±0.3 %, the same image repeats within 0.3 %).
+NVFP4 loads and serves on 0.4.0 as well.
+
+### Prefill chunk size and context length (2026-09-25, 300 W, prefill-only sweeps)
+
+| `--max-model-len` / `--max-num-batched-tokens` | Prefill 2k / 8k / 16k / 32k / 64k tok/s | KV pool | conc 1 / 4 / 8 |
+|---|---|---|---|
+| 262144 / 2048 | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 | – |
+| 131072 / 2048 | 3,379 / 3,344 / 3,212 / 2,936 / 2,520 | ~350k | 116 / 350 / 413 |
+| 131072 / 4096 | 3,375 / 3,444 / 3,351 / 3,057 / 2,613 | ~326k | 122 / 340 / 396 |
+| 131072 / 8192 | 3,367 / 3,486 / 3,290 / 3,022 / 2,579 | ~282k | 118 / 345 / 406 |
+
+A prefill-only sweep reads ~5 % higher than the prefill phase of a full BetterBench run (the card is cooler
+when it starts); compare within one table only.
+
 ## 0.3.1 (2026-09-23)
 
 BetterBench 0.4.0, default config, all three phases (single-stream decode 3 warmup + 20 passes per
