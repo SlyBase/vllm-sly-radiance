@@ -54,8 +54,9 @@ sly/
   patch_dflash_w4_packed.py   W4A16 (compressed-tensors) DFlash drafter
   patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path
   patch_lmhead_fp8.py         hook radiance_lmhead_fp8 into QuarkConfig
-  patch_w4a16_tiles.py        gfx1201 tile table for the drafter GEMMs
-  bench_w4a16_tiles.py        tile sweep that produced the table
+  patch_w4a16_tiles.py        gfx1201 tile table + split-K for the W4A16 GEMMs (drafter, INT4 target)
+  bench_w4a16_tiles.py        tile / split-K sweep that produced the tables
+  check_w4a16_splitk.py       split-K numerics vs fp32 reference (CPU interpreter or GPU)
   mxfp4/radiance_mxfp4.py     RadianceMxfp4W4A8LinearKernel plugin (dispatch, scratch, knobs)
   mxfp4/radiance_mxfp4_fp8.hip  fp8-WMMA W4A8 GEMM: folded prefill + split-K decode kernels
   mxfp4/radiance_lmhead_fp8.py  fp8 lm_head

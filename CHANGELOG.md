@@ -10,6 +10,21 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.1] - 2026-09-27
+
+### Added
+- Split-K for the W4A16 Triton GEMM (`sly/patch_w4a16_tiles.py`, knob `RADIANCE_W4A16_SPLITK`, default on):
+  the stock kernel runs the whole K loop in one workgroup, so the N = 5120 projections at decode M get
+  160–320 workgroups for 64 CUs and stay latency-bound (INT4 target `down_proj`: 139 µs against 82 µs
+  for the MXFP4 split-K kernel on the same shape). Per-shape entries in `_GFX12X_SPLITK`; a shape
+  without an entry runs exactly as in 0.4.0. Affects compressed-tensors INT4 targets and the DFlash2
+  W4A16 drafter.
+- `sly/check_w4a16_splitk.py` (numerics against an fp32 reference, CPU via the Triton interpreter or
+  GPU) and `bench_w4a16_tiles.py --splitk`.
+
+### Measured
+- Pending (GPU windows A/B of the INT4 decode plan).
+
 ## [0.4.0] - 2026-09-25
 
 ### Changed

@@ -5,6 +5,11 @@ auf den DFlash2-Draft-Shapes (gs=128, symmetrisch). Misst DRAM-kalt (Gewichts-Ro
 gfx12x-Heuristik. Laeuft im Wegwerf-Container aus dem Runtime-Image (GPU exklusiv).
 
   python3 bench_w4a16_tiles.py [--quick] [--out /root/w4a16_tiles.json]
+
+--splitk (0.4.1): Sweep des Split-K-Pfads aus sly/patch_w4a16_tiles.py (Patch vorher im Container
+anwenden) ueber alle Target- und Draft-Shapes gegen den heutigen Stand (Tile-Tabelle bzw. Heuristik);
+gemessen wird der ganze Aufruf inkl. Memset/Reduce. Gibt am Ende die _GFX12X_SPLITK-Zeilen fuer
+Eintraege aus, die >= 5 % schneller sind.
 """
 import argparse, itertools, json, sys, time
 import torch, triton
@@ -17,6 +22,8 @@ ap.add_argument("--iters", type=int, default=40)
 ap.add_argument("--fc", action="store_true", help="only the DFlash2 fc layer (K = 5 x 5120 aux -> N 5120, ReplicatedLinear)")
 ap.add_argument("--lmhead", action="store_true", help="only the int4 lm_head (N 248320, K 5120; sly/mxfp4/radiance_lmhead_int4.py)")
 ap.add_argument("--target", action="store_true", help="only the INT4 target shapes the drafter does not share (RedHatAI/Qwen3.8-27B-INT4)")
+ap.add_argument("--splitk", action="store_true", help="split-K sweep over target + drafter shapes (needs the patched module)")
+ap.add_argument("--shapes", default="", help="comma list of shape names to keep (with --splitk)")
 args = ap.parse_args()
 
 GS = 128
@@ -32,7 +39,13 @@ if args.target:
     # GDN out_proj und Attention o_proj haben beide N 5120 x K 6144. Reihenfolge nach Bytes x Calls je Step
     # (qkvz 48x43 MB, out_o 64x16 MB, attn_qkv 16x38 MB), damit ein abgebrochener Sweep die wichtigsten hat.
     SHAPES = [("qkvz", 16384, 5120), ("out_o", 5120, 6144), ("attn_qkv", 14336, 5120)]
-MS = [8, 16, 32, 40, 64] if not args.quick else [8, 40]
+if args.splitk:
+    # nach erwartetem Gewinn geordnet: N=5120 mit langem K zuerst (160-320 Workgroups ohne Split-K)
+    SHAPES = [("down", 5120, 17408), ("out_o", 5120, 6144), ("fc", 5120, 25600), ("o", 5120, 4096),
+              ("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("qkv", 6144, 5120), ("gate_up", 34816, 5120)]
+    if args.shapes:
+        SHAPES = [x for x in SHAPES if x[0] in args.shapes.split(",")]
+MS = [8, 16, 32, 40, 64] if not args.quick else ([8, 16] if args.splitk else [8, 40])
 dev = torch.device("cuda")
 torch.manual_seed(0)
 
@@ -88,6 +101,68 @@ def cfgs_for(M):
         if nw == 1 and bm * bn > 1024: continue   # 1 Warp nur fuer kleine Tiles
         if nw == 8 and bm * bn < 512: continue
         yield (bm, bn, bk, nw, ns)
+
+def run_sk(a, w, s, cfg):
+    return H.triton_w4a16_splitk_gemm(a, w, s, GS, cfg)
+
+
+def bench_sk(a, ws, ss, cfg, iters):
+    n = len(ws)
+    for i in range(3): run_sk(a, ws[i % n], ss[i % n], cfg)
+    torch.cuda.synchronize()
+    ev = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(iters)]
+    for i in range(iters):
+        ev[i][0].record(); run_sk(a, ws[i % n], ss[i % n], cfg); ev[i][1].record()
+    torch.cuda.synchronize()
+    t = sorted(s.elapsed_time(e) * 1000 for s, e in ev)
+    return t[len(t) // 2]
+
+
+def splitk_cfgs(M):
+    bms = [16] if M <= 16 else ([32] if M <= 32 else [32, 64])
+    for bm, bn, nw, sk, at in itertools.product(bms, [16, 32, 64], [2, 4], [2, 3, 4, 6, 8], [0, 1]):
+        yield (bm, bn, 128, nw, None, sk, at)
+
+
+if args.splitk:
+    results, table = {}, []
+    for name, N, K in SHAPES:
+        wbytes = N * K // 2 + N * (K // GS) * 2
+        copies = max(2, (160 << 20) // wbytes)
+        ws, ss = make(N, K, copies)
+        for M in MS:
+            a = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
+            cur = H._gfx12x_draft_override(GS, K, N, M) or heuristic(M, N, K)
+            cur7 = tuple(cur) + (1, 0)
+            ref = run_sk(a, ws[0], ss[0], cur7).float()
+            t_c = bench_sk(a, ws, ss, cur7, args.iters)
+            best = (t_c, cur7); rows = []
+            t0 = time.time()
+            for cfg in splitk_cfgs(M):
+                try:
+                    out = run_sk(a, ws[0], ss[0], cfg).float()
+                    err = (out - ref).abs().max().item() / (ref.abs().max().item() + 1e-6)
+                    if err > 2e-2: rows.append((cfg, None, err)); continue
+                    t = bench_sk(a, ws, ss, cfg, args.iters)
+                except Exception as e:
+                    rows.append((cfg, None, str(e)[:60])); continue
+                rows.append((cfg, t, err))
+                if t < best[0]: best = (t, cfg)
+            def gb(t): return wbytes / (t * 1e-6) / 1e9
+            print(f"{name:8s} N={N:5d} K={K:5d} M={M:2d}: today {cur7} {t_c:7.1f} us ({gb(t_c):4.0f} GB/s)"
+                  f" -> best {best[1]} {best[0]:7.1f} us ({gb(best[0]):4.0f} GB/s) {t_c / best[0]:.2f}x"
+                  f"  [{time.time() - t0:.0f}s]", flush=True)
+            top = sorted([r for r in rows if r[1] is not None], key=lambda r: r[1])[:5]
+            results[f"{name}:{M}"] = {"N": N, "K": K, "M": M, "today": [cur7, t_c], "best": [best[1], best[0]],
+                                      "top5": top}
+            if best[1][5] > 1 and best[0] <= 0.95 * t_c:
+                table.append(f"    ({GS}, {K}, {N}, {M}): {best[1]},  # {name}: {t_c:.0f} -> {best[0]:.0f} us")
+        del ws, ss; torch.cuda.empty_cache()
+    json.dump(results, open(args.out, "w"), indent=1)
+    print("written", args.out)
+    print("\n_GFX12X_SPLITK entries (>= 5 % faster than today):")
+    print("\n".join(table) if table else "    (none)")
+    sys.exit(0)
 
 results = {}
 for name, N, K in SHAPES:
