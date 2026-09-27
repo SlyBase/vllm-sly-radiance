@@ -52,6 +52,8 @@ into step time and tokens per update:
 | prefill @ 47k | 3,455 | 2,512 (2,613 at 131k/4096) | native long-prefill attention (16-key tiles), GDN chunk scan in one GPU round (~30 % faster GDN core), 4096 chunk |
 
 So most of the decode gap is acceptance (i.e. drafter + benchmark), not kernels; the prefill gap is kernels.
+The measurement plan (BetterBench 0.6.0, thinking off first, then drafter/greedy arms) is the
+[like-for-like recipe](BENCHMARKS.md#recipe-like-for-like-against-paiton-queued-not-yet-run).
 
 **Transferable = runtime flags only. Queued for an A/B** (production args, 300 W, same window, control
 first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 384,316):
