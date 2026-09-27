@@ -1,0 +1,161 @@
+name: Benchmark result
+description: Report throughput, latency or accuracy numbers measured with this image.
+title: "[bench] <image tag> — <model> — <what you measured>"
+labels: ["benchmark"]
+type: Task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing numbers. Results are only comparable when the setup is complete, so please
+        fill in every required field. See [PERFORMANCE.md](https://github.com/SlyBase/vllm-sly-radiance/blob/main/PERFORMANCE.md) for how the
+        project's own numbers are measured and gated.
+
+        Tips:
+        - Compare prefill **on the same card only** — two R9700 under the same power cap can differ ~12%.
+        - For an A/B, change one variable and run both legs with the same harness, interleaved if possible.
+        - Report accuracy (e.g. GSM8K) next to speed when you changed kernels or env flags.
+
+  - type: input
+    id: image
+    attributes:
+      label: Image tag / commit
+      description: Image tag (`vllm-sly-radiance:<version>-rocm10.0`) or the git commit you built from.
+      placeholder: vllm-sly-radiance:0.3.1-rocm10.0
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Target checkpoint
+      placeholder: amd/Qwen3.8-27B-Quark-AWQ-MXFP4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: quant
+    attributes:
+      label: Quant format
+      options:
+        - MXFP4 (quark_mxfp4 / amd_mxfp4)
+        - paroquant_mxfp4
+        - ParoQuant int4 (W4A8)
+        - ParoQuant int5 (W5A8)
+        - NVFP4
+        - FP8
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: drafter
+    attributes:
+      label: Speculative decoding
+      description: Method, drafter checkpoint and number of speculative tokens — or "none".
+      placeholder: dflash, syvai/Qwen3.8-27B-DFlash2-W4A16, SPEC=7
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: GPU model and count, VRAM, power cap, which card(s) the run used, CPU, PCIe topology if TP>1.
+      placeholder: |
+        1x Radeon AI PRO R9700 (32 GB), card 0, power cap 210 W
+        Ryzen 9 7950X, PCIe 5.0 x16
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host software
+      description: OS, kernel, amdgpu driver / ROCm version on the host.
+      placeholder: Proxmox VE 9 (kernel 6.14), amdgpu-dkms 7.0, ROCm 10.0
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Server configuration
+      description: |
+        Launcher and every setting you changed from its defaults (TP, MAXLEN, MAXSEQS, GPU_UTIL, KV_MEM,
+        ASYNC, `RADIANCE_*` / `VLLM_*` overrides). Pasting the full launch command is best.
+      render: shell
+      placeholder: |
+        TP=1 MAXLEN=65536 MAXSEQS=8 SPEC=7 ./serve.sh
+        # overrides: RADIANCE_GDN_NORM_QUANT=1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What was measured
+      multiple: true
+      options:
+        - Single-stream decode (t/s or ms/step)
+        - Concurrency / aggregate throughput
+        - Prefill (PP t/s, TTFT)
+        - KV cache capacity
+        - Accuracy (GSM8K, perplexity, …)
+        - Kernel microbenchmark
+        - A/B comparison of two configs
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: harness
+    attributes:
+      label: Benchmark tool and invocation
+      description: e.g. BetterBench (`--quick`?), `paroquant/bench_decode_ctx.py`, a `sly/bench_*.py` script, `vllm bench serve`, lm-eval.
+      placeholder: BetterBench --quick, single pass
+    validations:
+      required: true
+
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: |
+        The numbers, ideally as a table. Include context length, concurrency level, number of runs or
+        pairs, and spread / CI where you have it. For an A/B, show both legs.
+      placeholder: |
+        | metric | value |
+        |---|---|
+        | combined decode | 138.7 t/s |
+        | decode step @ 0 / 8k / 32k | 35.7 / 37.2 / 38.9 ms |
+        | prefill (same card) | 3150 / 3085 / 3070 PP t/s |
+        | concurrency agg 1/2/4/8 | 116 / 202 / 312 / 308 t/s |
+    validations:
+      required: true
+
+  - type: textarea
+    id: accuracy
+    attributes:
+      label: Accuracy / correctness gate
+      description: Any quality check run on the same build (GSM8K n/q and score, byte-identical greedy output, multi-turn chat check, …). Leave empty if none.
+      placeholder: "GSM8K 250q greedy conc-8: 98.40% (246/250, 0 errors)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Raw output / logs
+      description: Benchmark JSON, server startup log (KV pool size, selected kernels), or a link to them.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything unusual — thermals, other load on the host, warm-up, errors, comparison against another image.
+    validations:
+      required: false
