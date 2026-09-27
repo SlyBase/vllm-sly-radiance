@@ -1,7 +1,5 @@
 # Considered and not adopted
 
-What other R9700 stacks do that this image deliberately does not, with the reason.
-
 What other R9700 stacks do that this image deliberately does not, with the reason. Every "measured" entry
 is an A/B on the production arguments (BetterBench, see the sections above for the numbers); the rest are
 design reasons. Revisit an entry when its reason changes.
@@ -33,3 +31,49 @@ design reasons. Revisit an entry when its reason changes.
 | `tcclaviger/vllm`, `Dyluhn/R9V` | Separate forks with their own model mix (MoE, expert offload, TP ≥ 2); nothing single-GPU-MXFP4-specific to take over was found. |
 | DFlash2-FP8 drafter (`tcclaviger/Qwen3.8-27B-DFlash2-FP8`) | Heavier than the W4A16 drafter, and stacks running it report fewer tokens per update than this image (code 4.71 vs 5.09). |
 | Qwen3.8-27B-PARO-MXFP6 | Two GPUs only. |
+
+## Paiton (Eliovp-BV/paiton-vllm-plugin, `models/Qwen3.8-MXFP4-DFlash2`)
+
+Reviewed 2026-09-27 against their 26 September 65K image. Paiton is a vLLM plugin whose speed comes
+from **native HIP kernels built by a private compiler** (GEMM, attention, GDN prefill/replay, fused GDN
+spec-verify, target/draft heads, fused SiLU/RMS + fp8). The repo ships only the Python adapter
+(Apache-2.0) and downloads the `.so` files as a closed bundle (`licenses="NOASSERTION"`, "compiler and
+implementation source stay private"). Nothing of that can be taken over as code.
+
+**Their numbers vs ours are not one A/B.** Their table (MXFP4 arm): weighted decode 156.1, C8 428.0,
+prefill 3,691 @ 1.5k / 3,455 @ 47k; ours (0.4.0 reference): 133.2 / 410.0 / 3,166 / 2,512. Different
+BetterBench (0.6.0 quick vs 0.4.0 default), thinking off, 65,536 context, different drafter. Decoded
+into step time and tokens per update:
+
+| | Paiton (MXFP4) | 0.4.0 | Where the gap comes from |
+|---|---|---|---|
+| decode update p50 | 33.3 ms (fwd 28.0 ms) | 34.84 ms | ~4 %: their native GEMM/GDN-verify kernels |
+| tokens / update, weighted | ≈ 5.2 | 4.57 | ~14 %: benchmark version, thinking off, FP8 drafter + greedy draft sampling |
+| prefill @ 47k | 3,455 | 2,512 (2,613 at 131k/4096) | native long-prefill attention (16-key tiles), GDN chunk scan in one GPU round (~30 % faster GDN core), 4096 chunk |
+
+So most of the decode gap is acceptance (i.e. drafter + benchmark), not kernels; the prefill gap is kernels.
+The measurement plan (BetterBench 0.6.0, thinking off first, then drafter/greedy arms) is the
+[like-for-like recipe](BENCHMARKS.md#recipe-like-for-like-against-paiton-queued-not-yet-run).
+
+**Transferable = runtime flags only. Queued for an A/B** (production args, 300 W, same window, control
+first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 384,316):
+
+| Arm | Paiton setting | Ours today | Why it might help |
+|---|---|---|---|
+| A1 | `GPU_MAX_HW_QUEUES=1` | `2` | Paiton: "removes a slower decode mode some fresh processes start in"; ours picked 2 against the random default, 1 was not in that sweep |
+| A2 | `draft_sample_method: greedy` | `probabilistic` | lossless either way; greedy drafts skip the draft-side sampling, and the lookup draft already writes point masses |
+| A3 | `tcclaviger/Qwen3.8-27B-DFlash2-FP8` drafter | `syvai/...-W4A16` | Paiton's tokens/update (json ≈ 7.2, code ≈ 6.0) are well above ours (5.66 / 4.94); the old "fewer tokens per update" row above came from other stacks, re-check on this image. Costs KV (heavier drafter) |
+| A4 | `--mamba-ssm-cache-dtype float16` | `bfloat16` | fp16 state: more mantissa, same bytes; the libr4d extras have fp16 kernels (also on the radlight list) |
+| A5 | `--attention-backend R4D` | `ROCM_AITER_UNIFIED_ATTN` (quickstart) | Paiton and `serve-mxfp4.sh` both use R4D for the target |
+| A6 | `cudagraph_capture_sizes` incl. `1, 2, 4` | `[8 … 64]` | only matters if a step ever runs below 8 tokens (non-spec paths) — expect neutral |
+
+`--max-num-batched-tokens 4096` at shorter context is already the README's "less context, more prefill"
+recommendation. Paiton's opt-in n-gram co-drafting (`PAITON_NGRAM_CODRAFT`) is the same idea as this image's
+`RADIANCE_LOOKUP_DRAFT` (default on since 0.2.9); nothing to add. Their 3-bit W3A4 weights
+(`EliovpAI/Qwen3.8-27B-W3Rot-INT3-Paiton-RDNA4`, +19.9 % decode, MMLU-Pro −2.9 pts) need their closed
+kernels — Transformers, stock vLLM and this image cannot load them.
+
+**Kernel leads worth reimplementing ourselves** (ideas from their release notes, no code available):
+16-key tiles for long-prefill attention (+6.6 % attention), GDN gate read in place instead of copied, a GDN
+chunk-scan launch that fills the card in one round, and a fused GDN kernel for the speculative verify
+step (+1.5 % weighted decode, bit-exact to the old path).
