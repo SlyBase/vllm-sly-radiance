@@ -34,6 +34,14 @@ default run (20 per category = 160 decode runs, the ≥ 128 rule). Read tokens p
 step gap, and put them next to Paiton's (chat ≈ 4.0, code ≈ 6.0, json ≈ 7.3, file_edit ≈ 6.0, math ≈ 6.1,
 prose ≈ 2.6, reasoning ≈ 3.9, summarization ≈ 4.6 at 33.3 ms per update).
 
+Prefill from the same runs (the full run, not a prefill-only sweep, which reads ~5 % higher): the depths are
+already like-for-like (median prompts 1,516 / 5,895 / 11,802 / 23,550 / 47,017 tokens there, 1,514 / 5,918 /
+11,794 / 23,543 / 47,056 in our 0.4.0 run, < 0.5 % apart), so compare tok/s per depth directly against
+Paiton's MXFP4 arm: 3,691 / 3,831 / 3,871 / 3,750 / 3,455. Our 0.4.0 numbers (3,166 … 2,512) had 2048
+chunks at 262k; the 4096 chunk of this setup is worth +3.5 … +4.8 % on its own, and prefix caching is off
+on both sides but irrelevant here (unique prompts). What remains, growing with depth (≈ +12 % at 2k,
+≈ +27 % at 64k before this run), is their attention/GDN prefill kernels.
+
 - Gap mostly gone → it was the benchmark setup (thinking). Nothing to change in the image; note it here.
 - Gap left in tokens per update → step 2. Gap left in step time → kernels (their closed ones), not this recipe.
 
