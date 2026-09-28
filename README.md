@@ -153,8 +153,9 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 ### Defaults that are already on
 
 `RADIANCE_ATTN_DECODE_TUNE`, `RADIANCE_ATTN_DRAFTER_TUNE`, `RADIANCE_LOOKUP_DRAFT` (prompt lookup),
-`RADIANCE_USE_R4D` (libr4d kernels), `RADIANCE_W4A16_TILES`, `RADIANCE_W4A16_SPLITK` (split-K for the
-W4A16 GEMMs of INT4 targets and the drafter, per-shape table), `RADIANCE_MXFP4_DECODE_TUNE16`. Set any to
+`RADIANCE_USE_R4D` (libr4d kernels), `RADIANCE_W4A16_TILES`, `RADIANCE_W4A16_SPLITK` (split-K / fast dequant for the
+W4A16 GEMMs of INT4 targets and the drafter, per-shape table; `RADIANCE_W4A16_A8=0` drops its lossy W4A8
+rows, `RADIANCE_W4A16_SPLITK_TABLE=<json>` replaces the table), `RADIANCE_MXFP4_DECODE_TUNE16`. Set any to
 `0` only for an A/B.
 
 ### vLLM arguments and trade-offs

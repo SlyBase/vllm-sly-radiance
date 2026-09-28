@@ -25,6 +25,11 @@ ap.add_argument("--target", action="store_true", help="only the INT4 target shap
 ap.add_argument("--splitk", action="store_true", help="split-K sweep over target + drafter shapes (needs the patched module)")
 ap.add_argument("--shapes", default="", help="comma list of shape names to keep (with --splitk)")
 ap.add_argument("--atomic", action="store_true", help="also sweep the atomic split-K variant (with --splitk)")
+ap.add_argument("--ms", default="", help="comma list of M buckets (default 8,16,32,40,64)")
+ap.add_argument("--max-partial-mib", type=float, default=1.0,
+                help="skip split-K configs whose fp32 partials exceed this (KV pool, see patch_w4a16_tiles.py)")
+ap.add_argument("--a8-min-m", type=int, default=32, help="sweep DEQ 3 (W4A8 int8, lossy) from this M bucket on")
+ap.add_argument("--table-out", default="", help="write the resulting _GFX12X_SPLITK as JSON (RADIANCE_W4A16_SPLITK_TABLE)")
 args = ap.parse_args()
 
 GS = 128
@@ -47,6 +52,8 @@ if args.splitk:
     if args.shapes:
         SHAPES = [x for x in SHAPES if x[0] in args.shapes.split(",")]
 MS = [8, 16, 32, 40, 64] if not args.quick else ([8, 16] if args.splitk else [8, 40])
+if args.ms:
+    MS = [int(x) for x in args.ms.split(",")]
 dev = torch.device("cuda")
 torch.manual_seed(0)
 
@@ -124,7 +131,7 @@ def splitk_cfgs(M):
     # unpack 1 interleave-free 8-dot. Atomic never won in window A (2026-09-28), --atomic brings it back.
     bms = [16] if M <= 16 else ([32] if M <= 32 else [32, 64])
     sks = [1, 2, 4, 6, 8, 12, 16] if not args.quick else [1, 4, 8]
-    dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)]
+    dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)] + ([(3, 0)] if M >= args.a8_min_m else [])
     ats = [0, 1] if args.atomic else [0]
     for bm, bn, nw, sk, (dq, up), at in itertools.product(bms, [32, 64, 128], [2, 4, 8], sks, dus, ats):
         if (sk, dq, up) == (1, 0, 0) or (nw == 8 and bn < 64) or (sk == 1 and at):
@@ -132,8 +139,13 @@ def splitk_cfgs(M):
         yield (bm, bn, 128, nw, None, sk, at, dq, up)
 
 
+def partial_bytes(cfg, M, N):
+    return 0 if cfg[5] <= 1 else (M * N * 4 if cfg[6] else cfg[5] * M * N * 4)
+
+
 if args.splitk:
     results, table = {}, []
+    new_table = {k: v for k, v in H._GFX12X_SPLITK.items() if k[3] not in MS}  # buckets not swept keep theirs
     for name, N, K in SHAPES:
         wbytes = N * K // 2 + N * (K // GS) * 2
         copies = max(2, (160 << 20) // wbytes)
@@ -149,10 +161,13 @@ if args.splitk:
             best = (t_c, cur7); rows = []
             t0 = time.time()
             for cfg in splitk_cfgs(M):
+                if partial_bytes(cfg, M, N) > args.max_partial_mib * (1 << 20):
+                    continue
+                tol = 3e-2 if cfg[7] == 3 else 2e-2  # W4A8 carries the activation rounding
                 try:
                     out = run_sk(a, ws[0], ss[0], cfg).float()
                     err = (out - ref).abs().max().item() / (ref.abs().max().item() + 1e-6)
-                    if err > 2e-2: rows.append((cfg, None, err)); continue
+                    if err > tol: rows.append((cfg, None, err)); continue
                     t = bench_sk(a, ws, ss, cfg, args.iters)
                 except Exception as e:
                     rows.append((cfg, None, str(e)[:60])); continue
@@ -167,11 +182,16 @@ if args.splitk:
                                       "best": [best[1], best[0]], "top5": top}
             if best[1] != cur7 and best[0] <= 0.95 * t_c:
                 table.append(f"    ({GS}, {K}, {N}, {M}): {best[1]},  # {name}: {t_c:.0f} -> {best[0]:.0f} us")
+                new_table[(GS, K, N, M)] = tuple(best[1])
         del ws, ss; torch.cuda.empty_cache()
     json.dump(results, open(args.out, "w"), indent=1)
     print("written", args.out)
     print("\n_GFX12X_SPLITK entries (>= 5 % faster than today):")
     print("\n".join(table) if table else "    (none)")
+    if args.table_out:
+        json.dump({",".join(map(str, k)): list(v) for k, v in sorted(new_table.items())}, open(args.table_out, "w"),
+                  indent=1)
+        print("table written", args.table_out, len(new_table), "entries")
     sys.exit(0)
 
 results = {}

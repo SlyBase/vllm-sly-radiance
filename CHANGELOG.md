@@ -20,7 +20,11 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   without an entry runs exactly as in 0.4.0. Affects compressed-tensors INT4 targets and the DFlash2
   W4A16 drafter. The same kernel carries two cheaper dequant schemes (scale applied to the fp32 tile
   result; bf16 magic-number nibble conversion with the zero point folded into the tile result) and an
-  interleave-free unpack, selectable per table entry.
+  interleave-free unpack, selectable per table entry, and a W4A8 scheme for M >= 32 (activations quantized
+  to int8 per row and 128-wide K tile inside the kernel, int8 matrix cores at twice the bf16 rate;
+  lossy, `RADIANCE_W4A16_A8=0` opts out). Split-K partials stay <= 1 MiB so the CUDA-graph memory
+  estimate does not take KV-cache tokens; `RADIANCE_W4A16_SPLITK_TABLE=<json>` loads a swept table
+  without a rebuild.
 - `sly/check_w4a16_splitk.py` (numerics against an fp32 reference, CPU via the Triton interpreter or
   GPU) and `bench_w4a16_tiles.py --splitk`.
 

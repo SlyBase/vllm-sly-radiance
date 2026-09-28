@@ -11,7 +11,9 @@ and against the stock _triton_w4a16_skinny_fmt_kernel with the same tile:
   * uneven splits (K tiles not divisible by split_k), M not a multiple of BLOCK_M, asymmetric zp,
   * the dispatch: a _GFX12X_SPLITK entry is taken by triton_w4a16_skinny_fmt_gemm and
     RADIANCE_W4A16_SPLITK=0 falls back to the tile table,
-  * the shared split-K workspace (one per device, table-max sized, reused).
+  * W4A8 (deq 3) against the same reference with a 4x wider floor (activation rounding),
+  * the table file (RADIANCE_W4A16_SPLITK_TABLE), the RADIANCE_W4A16_A8=0 opt-out and the 1 MiB
+    partial cap of the built-in table.
 
 CPU (Triton interpreter, no GPU; reduced N, real K), in a plain `docker run` without device flags:
   BENCH_DEVICE=cpu TRITON_INTERPRET=1 python3 check_w4a16_splitk.py
@@ -48,7 +50,7 @@ MS = [1, 5, 8, 13, 16, 32] if args.full else [1, 8, 13]
 # (deq, unpack, split_k, atomic): the stock dequant through every split mode, then each fast-dequant
 # scheme alone (split_k 1 = DIRECT store) and split (buffer and atomic)
 VARIANTS = [(0, 0, sk, at) for sk in (1, 2, 3, 4, 8) for at in ((0,) if sk == 1 else (0, 1))]
-VARIANTS += [(d, u, sk, at) for d, u in ((1, 0), (2, 0), (0, 1), (1, 1), (2, 1))
+VARIANTS += [(d, u, sk, at) for d, u in ((1, 0), (2, 0), (0, 1), (1, 1), (2, 1), (3, 0))
              for sk, at in ((1, 0), (3, 0), (8, 0), (3, 1))]
 
 SHIFTS = torch.tensor([(j // 2) * 4 + (j % 2) * 16 for j in range(8)], dtype=torch.int32)
@@ -89,7 +91,9 @@ for name, N, K in SHAPES:
                 cfg = (bm, 32, 128, 2, None, sk, atomic, deq, unpack)
                 out = H.triton_w4a16_splitk_gemm(a, b_q, scales, GS, cfg, zp=z).cpu()
                 err = (out.float() - ref).abs().max().item()
-                ok = err <= floor and out.shape == (M, N)
+                # W4A8 (deq 3) rounds the activations to int8 per (row, K tile): ~0.4 % of the output
+                # max on these inputs, so it gets 2^-5 instead of the bf16 floor
+                ok = err <= (floor * 4 if deq == 3 else floor) and out.shape == (M, N)
                 if (deq, unpack, sk) == (0, 0, 1):
                     base = out
                 tag = (f"{name:7s} N={N:5d} K={K:5d} M={M:2d} zp={int(use_zp)} deq={deq} unpack={unpack} "
@@ -141,14 +145,30 @@ dispatch_ok = taken and (d1.cpu().float() - ref).abs().max().item() <= fl \
 print(f"dispatch: split-K entry taken once and knob=0 falls back: {dispatch_ok}")
 fails += not dispatch_ok
 
-# shared workspace: sized to the table maximum on first use, never shrunk, reused (same storage) after
-H._RADIANCE_SK_WS.clear()
-w1 = H._radiance_sk_workspace(dev, 1000)
-w2 = H._radiance_sk_workspace(dev, 500)
-ws_ok = (w1.data_ptr() == w2.data_ptr() and len(H._RADIANCE_SK_WS) == 1
-         and H._RADIANCE_SK_WS[dev].numel() >= max(1000, H._radiance_sk_ws_table_max()))
-print(f"split-K workspace shared and sized to the table max ({H._radiance_sk_ws_table_max()} floats): {ws_ok}")
-fails += not ws_ok
+# table file (RADIANCE_W4A16_SPLITK_TABLE) replaces the built-in table; RADIANCE_W4A16_A8=0 drops deq-3 rows
+import json, tempfile  # noqa: E402
+
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+    json.dump({"128,1152,64,8": [16, 32, 128, 2, None, 2, 0, 3, 0], "128,1152,64,16": [16, 32, 128, 2, None, 1, 0, 2, 0]}, tf)
+os.environ["RADIANCE_W4A16_SPLITK_TABLE"] = tf.name
+os.environ["RADIANCE_W4A16_SPLITK"] = "1"
+H._RADIANCE_SK_TABLE = None
+e8 = H._gfx12x_splitk_override(GS, 1152, 64, 8)
+os.environ["RADIANCE_W4A16_A8"] = "0"
+e8_off = H._gfx12x_splitk_override(GS, 1152, 64, 8)
+e16_off = H._gfx12x_splitk_override(GS, 1152, 64, 16)
+del os.environ["RADIANCE_W4A16_A8"], os.environ["RADIANCE_W4A16_SPLITK_TABLE"]
+H._RADIANCE_SK_TABLE = None
+tbl_ok = (e8 == (16, 32, 128, 2, None, 2, 0, 3, 0) and e8_off is None and e16_off is not None
+          and H._gfx12x_splitk_override(GS, 1152, 64, 8) is None)
+print(f"table file replaces the built-in table, RADIANCE_W4A16_A8=0 drops only deq-3 rows: {tbl_ok}")
+fails += not tbl_ok
+
+# built-in table: every split-K partial within the KV cap
+cap_ok = all(v[5] <= 1 or (b * n * 4 if v[6] else v[5] * b * n * 4) <= H._RADIANCE_SK_MAX_PARTIAL
+             for (_g, _k, n, b), v in H._GFX12X_SPLITK.items())
+print(f"built-in table partials <= {H._RADIANCE_SK_MAX_PARTIAL >> 20} MiB: {cap_ok}")
+fails += not cap_ok
 
 print(f"{checked} split-K cases, {fails} failures")
 sys.exit(1 if fails else 0)

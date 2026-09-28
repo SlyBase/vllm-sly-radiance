@@ -170,6 +170,9 @@ def _radiance_w4a16_splitk_kernel(
     #   DEQ 1  w = q - zp (exact), the scale multiplies the fp32 tile result instead of every weight
     #   DEQ 2  w = bits(MAGIC | q) = MAGIC_F + q exactly (no int->float convert, no subtract), zero point
     #          and scale folded into the tile result: (dot - rowsum(a) * (MAGIC_F + zp)) * scale
+    #   DEQ 3  W4A8: A quantized in-kernel per (row, K tile) to int8, W = q - zp in int8, int32 dot, both
+    #          scales on the tile result -- lossy (activation rounding), for M >= 32 where bf16 WMMA is the
+    #          bottleneck (UNPACK 0 only)
     #   UNPACK 0  3x tl.interleave + per-column shifts back to natural K order (stock)
     #   UNPACK 1  no interleave: nibble j of every packed word is K index 8i+j, so 8 dots over K/8 against
     #             the matching stride-8 columns of A (needs BLOCK_K // 8 >= 16)
@@ -220,14 +223,24 @@ def _radiance_w4a16_splitk_kernel(
             b = tl.interleave(b, b)
             b = tl.interleave(b, b)
             b = (b >> shifts_full) & 0xF
-            if DEQ == 0:
-                w = (b - zp_col).to(scales.dtype) * scales[:, None]
-            elif DEQ == 1:
-                w = (b - zp_col).to(scales.dtype)
+            if DEQ == 3:
+                # W4A8: A quantized per (row, K tile) to int8 (absmax / 127, round half away from zero),
+                # W = q - zp exact in int8, int8 x int8 -> int32 (twice the bf16 WMMA rate on gfx12)
+                a_f = a.to(tl.float32)
+                s_a = tl.maximum(tl.max(tl.abs(a_f), axis=1), 1e-30) / 127.0
+                t_a = a_f / s_a[:, None]
+                a_q = tl.where(t_a >= 0, t_a + 0.5, t_a - 0.5).to(tl.int32).to(tl.int8)
+                w_q = (b - zp_col).to(tl.int8)
+                tile += tl.dot(a_q, tl.trans(w_q), out_dtype=tl.int32).to(tl.float32) * s_a[:, None]
             else:
-                w = (b | MAGIC).to(tl.int16).to(scales.dtype, bitcast=True)
-                rowsum += tl.sum(a.to(tl.float32), axis=1)
-            tile += tl.dot(a, tl.trans(w), out_dtype=tl.float32)
+                if DEQ == 0:
+                    w = (b - zp_col).to(scales.dtype) * scales[:, None]
+                elif DEQ == 1:
+                    w = (b - zp_col).to(scales.dtype)
+                else:
+                    w = (b | MAGIC).to(tl.int16).to(scales.dtype, bitcast=True)
+                    rowsum += tl.sum(a.to(tl.float32), axis=1)
+                tile += tl.dot(a, tl.trans(w), out_dtype=tl.float32)
         else:
             for j in tl.static_range(8):
                 offs_kj = k_start * BLOCK_K + tl.arange(0, BLOCK_K // 8) * 8 + j
@@ -245,7 +258,7 @@ def _radiance_w4a16_splitk_kernel(
 
         if DEQ == 0:
             accumulator += tile
-        elif DEQ == 1:
+        elif DEQ == 1 or DEQ == 3:
             accumulator += tile * scales.to(tl.float32)[None, :]
         else:
             if HAS_ZP:
@@ -283,6 +296,27 @@ _GFX12X_SPLITK: dict[tuple[int, int, int, int], tuple] = {
 @@SPLITK_TABLE@@}
 
 
+_RADIANCE_SK_TABLE = None
+
+
+def _gfx12x_splitk_table():
+    # RADIANCE_W4A16_SPLITK_TABLE=<json> replaces the built-in table ({"gs,K,N,bucket": [cfg...]}, as
+    # written by bench_w4a16_tiles.py --splitk --table-out); read once per process.
+    global _RADIANCE_SK_TABLE
+    if _RADIANCE_SK_TABLE is None:
+        import json
+        import os
+
+        path = os.environ.get("RADIANCE_W4A16_SPLITK_TABLE")
+        if path:
+            with open(path) as f:
+                _RADIANCE_SK_TABLE = {tuple(int(x) for x in k.split(",")): tuple(v)
+                                      for k, v in json.load(f).items()}
+        else:
+            _RADIANCE_SK_TABLE = _GFX12X_SPLITK
+    return _RADIANCE_SK_TABLE
+
+
 def _gfx12x_splitk_override(group_size, K, N, M):
     import os
 
@@ -290,36 +324,19 @@ def _gfx12x_splitk_override(group_size, K, N, M):
         return None
     for b in _GFX12X_DRAFT_BUCKETS:
         if M <= b:
-            return _GFX12X_SPLITK.get((group_size, K, N, b))
+            e = _gfx12x_splitk_table().get((group_size, K, N, b))
+            if e is not None and len(e) > 7 and e[7] == 3 and os.environ.get("RADIANCE_W4A16_A8", "1") != "1":
+                return None  # W4A8 entry opted out: the tile table decides
+            return e
     return None
 
 
-# One fp32 split-K workspace per device, shared by every call: GEMM and reduce are stream-ordered, so a
-# call's partials are consumed before the next call writes. Sized on first use to the largest table need,
-# so production never reallocates; per-call buffers inside CUDA-graph capture had cost ~13 MB of graph pool
-# (KV pool 384,316 -> 383,911 tokens, window B 2026-09-28).
-_RADIANCE_SK_WS: dict = {}
-
-
-def _radiance_sk_ws_table_max():
-    need = 0
-    for (_gs, _k, n, bucket), e in _GFX12X_SPLITK.items():
-        if e[5] > 1 and not e[6]:
-            need = max(need, e[5] * bucket * n)
-    return need
-
-
-def _radiance_sk_workspace(device, numel):
-    ws = _RADIANCE_SK_WS.get(device)
-    if ws is not None and ws.numel() >= numel:
-        return ws[:numel]
-    if ws is not None and device.type == "cuda" and torch.cuda.is_current_stream_capturing():
-        # an off-table shape bigger than the shared buffer: a captured graph may already point at the
-        # shared one, so never replace it during capture -- this call gets its own (graph-pool) buffer
-        return torch.empty(numel, dtype=torch.float32, device=device)
-    ws = torch.empty(max(numel, _radiance_sk_ws_table_max()), dtype=torch.float32, device=device)
-    _RADIANCE_SK_WS[device] = ws
-    return ws[:numel]
+# Split-K partials are allocated per call (graph-pool friendly). Table entries keep them <= 1 MiB: the
+# caching allocator serves 1-10 MiB requests from 20 MiB segments, and vLLM charges every byte that the
+# trial CUDA-graph capture takes (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS, measured as a drop in free
+# device memory, FULL graphs extrapolated) to the KV pool. A shared 9.4 MiB workspace (window C,
+# 2026-09-28) cost 1,214 KV tokens against 405 for the per-call buffers.
+_RADIANCE_SK_MAX_PARTIAL = 1 << 20
 
 
 def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None, c=None):
@@ -334,6 +351,7 @@ def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None
     BLOCK_K = min(BLOCK_K, group_size)
     if unpack:
         assert BLOCK_K // 8 >= 16, "UNPACK 1 needs BLOCK_K >= 128 (tl.dot K >= 16)"
+        assert deq != 3, "DEQ 3 (W4A8) is implemented for UNPACK 0 only"
     has_zp = zp is not None
     if c is None:
         c = torch.empty((M, N), dtype=a.dtype, device=a.device)
@@ -353,7 +371,7 @@ def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None
     elif atomic:
         p = torch.zeros((M, N), dtype=torch.float32, device=a.device)
     else:
-        p = _radiance_sk_workspace(a.device, split_k * M * N)
+        p = torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)
     _radiance_w4a16_splitk_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)](
         a, b_q, scales, zp if has_zp else scales, p, M, N, K, K8, num_groups, tiles_per_split,
         group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp, ATOMIC=bool(atomic and not direct), DIRECT=direct,
@@ -369,45 +387,41 @@ def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None
     return c
 '''
 
-# window A2 sweep, 2026-09-28 (R9700, 300 W, DRAM-cold; entries >= 5 % faster than the tile table).
+# window A2 sweep, 2026-09-28 (R9700, 300 W, DRAM-cold; entries >= 5 % faster than the tile table),
+# restricted to split-K partials <= 1 MiB (_RADIANCE_SK_MAX_PARTIAL, KV pool) -- entries over the cap
+# replaced by the fastest capped config of the same sweep or dropped (tile table decides there).
 # Fields 8/9 = deq/unpack; deq 2 (magic-number bf16, folded zero point + scale) wins at M <= 32 almost
 # everywhere, split-K on the K-heavy N=5120 shapes, deq 1 at M = 40/64.
 _SPLITK_TABLE = [
-    # down  N=5120  K=17408: M=8 150->95 / M=16 130->99 / M=32 151->124 / M=40 203->184 us
+    # down  N=5120  K=17408
     ((128, 17408, 5120, 8), (16, 32, 128, 2, None, 2, 0, 2, 0)),
-    ((128, 17408, 5120, 16), (16, 128, 128, 4, None, 6, 0, 2, 0)),
-    ((128, 17408, 5120, 32), (32, 128, 128, 4, None, 8, 0, 2, 0)),
-    ((128, 17408, 5120, 40), (64, 64, 128, 4, None, 12, 0, 1, 0)),
-    # out_o  N=5120  K=6144: M=8 61->48 / M=16 61->51 us
-    ((128, 6144, 5120, 8), (16, 128, 128, 8, None, 8, 0, 2, 1)),
+    # out_o  N=5120  K=6144
+    ((128, 6144, 5120, 8), (16, 64, 128, 4, None, 6, 0, 2, 0)),
     ((128, 6144, 5120, 16), (16, 32, 128, 2, None, 2, 0, 2, 0)),
-    # fc  N=5120  K=25600: M=8 197->131 / M=16 201->134 / M=32 208->169 / M=40 294->269 us
+    # fc  N=5120  K=25600
     ((128, 25600, 5120, 8), (16, 128, 128, 4, None, 2, 0, 2, 0)),
     ((128, 25600, 5120, 16), (16, 64, 128, 4, None, 2, 0, 2, 0)),
-    ((128, 25600, 5120, 32), (32, 128, 128, 4, None, 8, 0, 2, 0)),
-    ((128, 25600, 5120, 40), (64, 64, 128, 4, None, 6, 0, 1, 0)),
-    # o  N=5120  K=4096: M=8 45->38 / M=16 42->39 / M=40 59->54 / M=64 60->55 us
+    # o  N=5120  K=4096
     ((128, 4096, 5120, 8), (16, 64, 128, 4, None, 6, 0, 2, 0)),
-    ((128, 4096, 5120, 16), (16, 128, 128, 8, None, 4, 0, 2, 1)),
     ((128, 4096, 5120, 40), (64, 32, 128, 4, None, 1, 0, 1, 0)),
     ((128, 4096, 5120, 64), (64, 32, 128, 4, None, 1, 0, 1, 0)),
-    # qkvz  N=16384  K=5120: M=8 106->82 / M=16 110->81 / M=32 128->101 / M=40 174->158 us
+    # qkvz  N=16384  K=5120
     ((128, 5120, 16384, 8), (16, 128, 128, 2, None, 1, 0, 2, 0)),
     ((128, 5120, 16384, 16), (16, 128, 128, 2, None, 1, 0, 2, 0)),
     ((128, 5120, 16384, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 16384, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # attn_qkv  N=14336  K=5120: M=8 89->76 / M=16 111->76 / M=32 117->99 / M=40 157->144 / M=64 164->145 us
+    # attn_qkv  N=14336  K=5120
     ((128, 5120, 14336, 8), (16, 64, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 14336, 16), (16, 64, 128, 4, None, 1, 0, 2, 0)),
-    ((128, 5120, 14336, 32), (32, 128, 128, 4, None, 2, 0, 2, 0)),
+    ((128, 5120, 14336, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 14336, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 14336, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # qkv  N=6144  K=5120: M=8 53->39 / M=16 46->40 / M=40 74->67 / M=64 75->70 us
+    # qkv  N=6144  K=5120
     ((128, 5120, 6144, 8), (16, 64, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 6144, 16), (16, 64, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 6144, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 6144, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # gate_up  N=34816  K=5120: M=8 200->178 / M=16 203->181 / M=32 258->226 us
+    # gate_up  N=34816  K=5120
     ((128, 5120, 34816, 8), (16, 128, 128, 8, None, 1, 0, 2, 0)),
     ((128, 5120, 34816, 16), (16, 128, 128, 8, None, 1, 0, 2, 0)),
     ((128, 5120, 34816, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
