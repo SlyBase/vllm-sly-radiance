@@ -25,7 +25,17 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   GPU) and `bench_w4a16_tiles.py --splitk`.
 
 ### Measured
-- Pending (GPU windows A/B of the INT4 decode plan).
+- One R9700, 300 W, production arguments, one GPU window (2026-09-28), step gap from streamed greedy
+  requests (median chunk interval, deterministic): **RedHatAI/Qwen3.8-27B-INT4 42.70 → 37.43 ms
+  (−12.4 %)**, 36.69 ms (−14.1 %) together with `RADIANCE_SKINNY_GEMM=all`; the control arm repeated
+  at 42.76 ms. **Quark MXFP4 (production) 34.47 → 34.15 ms (−0.9 %, drafter GEMMs).** At unchanged
+  acceptance (4.29 / 4.21 tokens per step) INT4 decode is ~125 instead of 107.8 tok/s; the gap to
+  MXFP4 shrinks from −19 % to −7 % step time. At 8 concurrent requests INT4 stays far behind
+  (297 vs 426 tok/s: M = 40–64, where the W4A16 kernels reach only ~250 GB/s).
+- GSM8K 200 (cot zero-shot, greedy): INT4 0.825 (0.820 before), MXFP4 0.850 (baseline 0.835–0.845).
+- Kernel level (M = 8, DRAM-cold, `bench_w4a16_tiles.py --splitk`): down_proj 150 → 95 µs,
+  out/o 61 → 48, gate_up 200 → 178, GDN qkvz 106 → 82, attention qkv 89 → 76, drafter qkv 53 → 39,
+  drafter fc 197 → 131.
 
 ## [0.4.0] - 2026-09-25
 

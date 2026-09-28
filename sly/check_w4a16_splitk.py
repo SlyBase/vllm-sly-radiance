@@ -10,7 +10,8 @@ and against the stock _triton_w4a16_skinny_fmt_kernel with the same tile:
     interleave-free 8-dot) alone and split, same floor,
   * uneven splits (K tiles not divisible by split_k), M not a multiple of BLOCK_M, asymmetric zp,
   * the dispatch: a _GFX12X_SPLITK entry is taken by triton_w4a16_skinny_fmt_gemm and
-    RADIANCE_W4A16_SPLITK=0 falls back to the tile table.
+    RADIANCE_W4A16_SPLITK=0 falls back to the tile table,
+  * the shared split-K workspace (one per device, table-max sized, reused).
 
 CPU (Triton interpreter, no GPU; reduced N, real K), in a plain `docker run` without device flags:
   BENCH_DEVICE=cpu TRITON_INTERPRET=1 python3 check_w4a16_splitk.py
@@ -139,6 +140,15 @@ dispatch_ok = taken and (d1.cpu().float() - ref).abs().max().item() <= fl \
     and (d0.cpu().float() - ref).abs().max().item() <= fl
 print(f"dispatch: split-K entry taken once and knob=0 falls back: {dispatch_ok}")
 fails += not dispatch_ok
+
+# shared workspace: sized to the table maximum on first use, never shrunk, reused (same storage) after
+H._RADIANCE_SK_WS.clear()
+w1 = H._radiance_sk_workspace(dev, 1000)
+w2 = H._radiance_sk_workspace(dev, 500)
+ws_ok = (w1.data_ptr() == w2.data_ptr() and len(H._RADIANCE_SK_WS) == 1
+         and H._RADIANCE_SK_WS[dev].numel() >= max(1000, H._radiance_sk_ws_table_max()))
+print(f"split-K workspace shared and sized to the table max ({H._radiance_sk_ws_table_max()} floats): {ws_ok}")
+fails += not ws_ok
 
 print(f"{checked} split-K cases, {fails} failures")
 sys.exit(1 if fails else 0)

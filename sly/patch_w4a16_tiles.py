@@ -294,6 +294,34 @@ def _gfx12x_splitk_override(group_size, K, N, M):
     return None
 
 
+# One fp32 split-K workspace per device, shared by every call: GEMM and reduce are stream-ordered, so a
+# call's partials are consumed before the next call writes. Sized on first use to the largest table need,
+# so production never reallocates; per-call buffers inside CUDA-graph capture had cost ~13 MB of graph pool
+# (KV pool 384,316 -> 383,911 tokens, window B 2026-09-28).
+_RADIANCE_SK_WS: dict = {}
+
+
+def _radiance_sk_ws_table_max():
+    need = 0
+    for (_gs, _k, n, bucket), e in _GFX12X_SPLITK.items():
+        if e[5] > 1 and not e[6]:
+            need = max(need, e[5] * bucket * n)
+    return need
+
+
+def _radiance_sk_workspace(device, numel):
+    ws = _RADIANCE_SK_WS.get(device)
+    if ws is not None and ws.numel() >= numel:
+        return ws[:numel]
+    if ws is not None and device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        # an off-table shape bigger than the shared buffer: a captured graph may already point at the
+        # shared one, so never replace it during capture -- this call gets its own (graph-pool) buffer
+        return torch.empty(numel, dtype=torch.float32, device=device)
+    ws = torch.empty(max(numel, _radiance_sk_ws_table_max()), dtype=torch.float32, device=device)
+    _RADIANCE_SK_WS[device] = ws
+    return ws[:numel]
+
+
 def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None, c=None):
     """triton_w4a16_skinny_fmt_gemm with an explicit (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages,
     split_k, atomic[, deq, unpack]) config; split_k 1 with deq 0 / unpack 0 runs the stock kernel."""
@@ -325,7 +353,7 @@ def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None
     elif atomic:
         p = torch.zeros((M, N), dtype=torch.float32, device=a.device)
     else:
-        p = torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)
+        p = _radiance_sk_workspace(a.device, split_k * M * N)
     _radiance_w4a16_splitk_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)](
         a, b_q, scales, zp if has_zp else scales, p, M, N, K, K8, num_groups, tiles_per_split,
         group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp, ATOMIC=bool(atomic and not direct), DIRECT=direct,
