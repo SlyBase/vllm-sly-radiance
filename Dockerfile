@@ -44,7 +44,7 @@ ARG TRITON_VERSION=3.6.0
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCHVISION_VERSION=0.24.1
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.22.post1
+ARG AITER_VERSION=0.1.24
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG VLLM_VERSION=0.30.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
