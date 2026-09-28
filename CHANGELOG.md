@@ -18,7 +18,9 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   160–320 workgroups for 64 CUs and stay latency-bound (INT4 target `down_proj`: 139 µs against 82 µs
   for the MXFP4 split-K kernel on the same shape). Per-shape entries in `_GFX12X_SPLITK`; a shape
   without an entry runs exactly as in 0.4.0. Affects compressed-tensors INT4 targets and the DFlash2
-  W4A16 drafter.
+  W4A16 drafter. The same kernel carries two cheaper dequant schemes (scale applied to the fp32 tile
+  result; bf16 magic-number nibble conversion with the zero point folded into the tile result) and an
+  interleave-free unpack, selectable per table entry.
 - `sly/check_w4a16_splitk.py` (numerics against an fp32 reference, CPU via the Triton interpreter or
   GPU) and `bench_w4a16_tiles.py --splitk`.
 

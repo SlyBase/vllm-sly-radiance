@@ -24,6 +24,7 @@ ap.add_argument("--lmhead", action="store_true", help="only the int4 lm_head (N 
 ap.add_argument("--target", action="store_true", help="only the INT4 target shapes the drafter does not share (RedHatAI/Qwen3.8-27B-INT4)")
 ap.add_argument("--splitk", action="store_true", help="split-K sweep over target + drafter shapes (needs the patched module)")
 ap.add_argument("--shapes", default="", help="comma list of shape names to keep (with --splitk)")
+ap.add_argument("--atomic", action="store_true", help="also sweep the atomic split-K variant (with --splitk)")
 args = ap.parse_args()
 
 GS = 128
@@ -119,9 +120,16 @@ def bench_sk(a, ws, ss, cfg, iters):
 
 
 def splitk_cfgs(M):
+    # (deq, unpack): 0/0 stock dequant, 1 scale after the dot, 2 magic-number + folded zero point,
+    # unpack 1 interleave-free 8-dot. Atomic never won in window A (2026-09-28), --atomic brings it back.
     bms = [16] if M <= 16 else ([32] if M <= 32 else [32, 64])
-    for bm, bn, nw, sk, at in itertools.product(bms, [16, 32, 64], [2, 4], [2, 3, 4, 6, 8], [0, 1]):
-        yield (bm, bn, 128, nw, None, sk, at)
+    sks = [1, 2, 4, 6, 8, 12, 16] if not args.quick else [1, 4, 8]
+    dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)]
+    ats = [0, 1] if args.atomic else [0]
+    for bm, bn, nw, sk, (dq, up), at in itertools.product(bms, [32, 64, 128], [2, 4, 8], sks, dus, ats):
+        if (sk, dq, up) == (1, 0, 0) or (nw == 8 and bn < 64) or (sk == 1 and at):
+            continue
+        yield (bm, bn, 128, nw, None, sk, at, dq, up)
 
 
 if args.splitk:
@@ -136,6 +144,8 @@ if args.splitk:
             cur7 = tuple(cur) + (1, 0)
             ref = run_sk(a, ws[0], ss[0], cur7).float()
             t_c = bench_sk(a, ws, ss, cur7, args.iters)
+            sk_now = H._GFX12X_SPLITK.get((GS, K, N, M))  # the shipped split-K entry, if any
+            t_now = bench_sk(a, ws, ss, sk_now, args.iters) if sk_now else t_c
             best = (t_c, cur7); rows = []
             t0 = time.time()
             for cfg in splitk_cfgs(M):
@@ -149,13 +159,13 @@ if args.splitk:
                 rows.append((cfg, t, err))
                 if t < best[0]: best = (t, cfg)
             def gb(t): return wbytes / (t * 1e-6) / 1e9
-            print(f"{name:8s} N={N:5d} K={K:5d} M={M:2d}: today {cur7} {t_c:7.1f} us ({gb(t_c):4.0f} GB/s)"
-                  f" -> best {best[1]} {best[0]:7.1f} us ({gb(best[0]):4.0f} GB/s) {t_c / best[0]:.2f}x"
-                  f"  [{time.time() - t0:.0f}s]", flush=True)
+            print(f"{name:8s} N={N:5d} K={K:5d} M={M:2d}: tiles {t_c:7.1f} us ({gb(t_c):4.0f} GB/s), split-K entry"
+                  f" {t_now:7.1f} us -> best {best[1]} {best[0]:7.1f} us ({gb(best[0]):4.0f} GB/s)"
+                  f" {t_c / best[0]:.2f}x  [{time.time() - t0:.0f}s]", flush=True)
             top = sorted([r for r in rows if r[1] is not None], key=lambda r: r[1])[:5]
-            results[f"{name}:{M}"] = {"N": N, "K": K, "M": M, "today": [cur7, t_c], "best": [best[1], best[0]],
-                                      "top5": top}
-            if best[1][5] > 1 and best[0] <= 0.95 * t_c:
+            results[f"{name}:{M}"] = {"N": N, "K": K, "M": M, "today": [cur7, t_c], "splitk_entry": [sk_now, t_now],
+                                      "best": [best[1], best[0]], "top5": top}
+            if best[1] != cur7 and best[0] <= 0.95 * t_c:
                 table.append(f"    ({GS}, {K}, {N}, {M}): {best[1]},  # {name}: {t_c:.0f} -> {best[0]:.0f} us")
         del ws, ss; torch.cuda.empty_cache()
     json.dump(results, open(args.out, "w"), indent=1)

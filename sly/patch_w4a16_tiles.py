@@ -25,9 +25,12 @@ shape at M <= 16 gets 160-320 workgroups of 2 waves for 64 CUs -- latency-bound 
 (INT4 target down_proj K=17408: 139 us against 82 us for the split-K MXFP4 decode kernel on the same
 shape). _radiance_w4a16_splitk_kernel adds grid axis 2 over group-aligned K ranges; the fp32 partials
 go either to a [SPLIT_K, M, N] buffer summed and cast by _radiance_w4a16_splitk_reduce (deterministic,
-2 launches) or via tl.atomic_add into a zeroed fp32 [M, N] (3 launches, order not fixed). Entries of
-_GFX12X_SPLITK take precedence over the tile table; split_k 1 always runs the stock kernel, so a table
-row with split_k 1 is bit-identical to the tile table. RADIANCE_W4A16_SPLITK=0 disables it.
+2 launches) or via tl.atomic_add into a zeroed fp32 [M, N] (3 launches, order not fixed). The same kernel
+carries two cheaper dequant schemes (DEQ 1: scale applied to the fp32 tile result; DEQ 2: bf16 magic-number
+nibble conversion with zero point and scale folded into the tile result) and an interleave-free unpack
+(UNPACK 1: 8 dots against stride-8 activation columns), selectable per table entry. Entries of
+_GFX12X_SPLITK take precedence over the tile table; split_k 1 with the stock dequant runs the stock kernel,
+so such a row is bit-identical to the tile table. RADIANCE_W4A16_SPLITK=0 disables the table.
 """
 
 import sysconfig
@@ -139,151 +142,238 @@ apply(F,
       '_radiance_override = _gfx12x_draft_override(',
       'rdna_hybrid_w4a16: gfx12x branch consults the drafter tile table')
 
-# --- 3. split-K kernel, reduce and table, placed after the drafter tile table ---
+# --- 3. split-K / fast-dequant kernel, reduce and table, placed after the drafter tile table ---
+# Plain source (not a chain of string literals) so it reads like the kernel it becomes.
+_SPLITK_SRC = r'''
+
+# --- radiance (sly/patch_w4a16_tiles.py): split-K + fast dequant for skinny M on gfx1201 ---
+@triton.jit
+def _radiance_w4a16_splitk_kernel(
+    a_ptr, b_ptr, scales_ptr, zp_ptr, p_ptr,
+    M, N, K, K8, num_groups, tiles_per_split,
+    group_size,
+    ZP_BIAS: tl.constexpr,
+    HAS_ZP: tl.constexpr,
+    ATOMIC: tl.constexpr,
+    DIRECT: tl.constexpr,
+    DEQ: tl.constexpr,
+    UNPACK: tl.constexpr,
+    MAGIC: tl.constexpr,
+    MAGIC_F: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # _triton_w4a16_skinny_fmt_kernel over the K tiles [k_lo, k_hi) of split pid_k. BLOCK_K <= group_size,
+    # so one scale (and zero point) per row covers a whole K tile, which DEQ 1/2 exploit:
+    #   DEQ 0  as stock: w = (q - zp) * scale in the activation dtype, one dot per tile
+    #   DEQ 1  w = q - zp (exact), the scale multiplies the fp32 tile result instead of every weight
+    #   DEQ 2  w = bits(MAGIC | q) = MAGIC_F + q exactly (no int->float convert, no subtract), zero point
+    #          and scale folded into the tile result: (dot - rowsum(a) * (MAGIC_F + zp)) * scale
+    #   UNPACK 0  3x tl.interleave + per-column shifts back to natural K order (stock)
+    #   UNPACK 1  no interleave: nibble j of every packed word is K index 8i+j, so 8 dots over K/8 against
+    #             the matching stride-8 columns of A (needs BLOCK_K // 8 >= 16)
+    # Output: DIRECT -> cast into p_ptr (= c, split_k 1); ATOMIC -> fp32 atomic_add into [M, N];
+    # else the fp32 partial into slice pid_k of [SPLIT_K, M, N].
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    pid_k = tl.program_id(2)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
+    exllama_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16
+    shifts_1d = tl.reshape(
+        tl.broadcast_to(exllama_shifts_row[None, :], (BLOCK_K // 8, 8)),
+        (BLOCK_K,),
+    )
+    shifts_full = tl.broadcast_to(shifts_1d[None, :], (BLOCK_N, BLOCK_K))
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    k_lo = pid_k * tiles_per_split
+    k_hi = tl.minimum(k_lo + tiles_per_split, tl.cdiv(K, BLOCK_K))
+    for k_start in range(k_lo, k_hi):
+        offs_k8 = k_start * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
+        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]
+        mask_b = mask_n[:, None] & (offs_k8[None, :] < K8)
+        b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
+
+        group_idx = (k_start * BLOCK_K) // group_size
+        scales = tl.load(scales_ptr + offs_n * num_groups + group_idx, mask=mask_n, other=1.0)
+        if HAS_ZP:
+            zp_word = tl.load(zp_ptr + (offs_n // 8) * num_groups + group_idx, mask=mask_n, other=0)
+            zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
+            zp_col = zp_raw[:, None]
+        else:
+            zp_col = ZP_BIAS
+
+        tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        rowsum = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        if UNPACK == 0:
+            offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
+            a = tl.load(a_ptr + offs_m[:, None] * K + offs_k[None, :],
+                        mask=mask_m[:, None] & (offs_k[None, :] < K), other=0.0)
+            b = tl.interleave(b_packed, b_packed)
+            b = tl.interleave(b, b)
+            b = tl.interleave(b, b)
+            b = (b >> shifts_full) & 0xF
+            if DEQ == 0:
+                w = (b - zp_col).to(scales.dtype) * scales[:, None]
+            elif DEQ == 1:
+                w = (b - zp_col).to(scales.dtype)
+            else:
+                w = (b | MAGIC).to(tl.int16).to(scales.dtype, bitcast=True)
+                rowsum += tl.sum(a.to(tl.float32), axis=1)
+            tile += tl.dot(a, tl.trans(w), out_dtype=tl.float32)
+        else:
+            for j in tl.static_range(8):
+                offs_kj = k_start * BLOCK_K + tl.arange(0, BLOCK_K // 8) * 8 + j
+                a_j = tl.load(a_ptr + offs_m[:, None] * K + offs_kj[None, :],
+                              mask=mask_m[:, None] & (offs_kj[None, :] < K), other=0.0)
+                b_j = (b_packed >> ((j // 2) * 4 + (j % 2) * 16)) & 0xF
+                if DEQ == 0:
+                    w_j = (b_j - zp_col).to(scales.dtype) * scales[:, None]
+                elif DEQ == 1:
+                    w_j = (b_j - zp_col).to(scales.dtype)
+                else:
+                    w_j = (b_j | MAGIC).to(tl.int16).to(scales.dtype, bitcast=True)
+                    rowsum += tl.sum(a_j.to(tl.float32), axis=1)
+                tile += tl.dot(a_j, tl.trans(w_j), out_dtype=tl.float32)
+
+        if DEQ == 0:
+            accumulator += tile
+        elif DEQ == 1:
+            accumulator += tile * scales.to(tl.float32)[None, :]
+        else:
+            if HAS_ZP:
+                zf = MAGIC_F + zp_raw.to(tl.float32)
+                tile = tile - rowsum[:, None] * zf[None, :]
+            else:
+                tile = tile - rowsum[:, None] * (MAGIC_F + ZP_BIAS)
+            accumulator += tile * scales.to(tl.float32)[None, :]
+
+    mask_c = mask_m[:, None] & mask_n[None, :]
+    if DIRECT:
+        tl.store(p_ptr + offs_m[:, None] * N + offs_n[None, :],
+                 accumulator.to(p_ptr.dtype.element_ty), mask=mask_c)
+    elif ATOMIC:
+        tl.atomic_add(p_ptr + offs_m[:, None] * N + offs_n[None, :], accumulator, mask=mask_c)
+    else:
+        tl.store(p_ptr + pid_k * M * N + offs_m[:, None] * N + offs_n[None, :], accumulator, mask=mask_c)
+
+
+@triton.jit
+def _radiance_w4a16_splitk_reduce(p_ptr, c_ptr, MN, SPLIT_K: tl.constexpr, BLOCK: tl.constexpr):
+    # c = sum over the SPLIT_K fp32 partials, cast to the output dtype (split order fixed).
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < MN
+    acc = tl.load(p_ptr + offs, mask=mask, other=0.0)
+    for s in tl.static_range(1, SPLIT_K):
+        acc += tl.load(p_ptr + s * MN + offs, mask=mask, other=0.0)
+    tl.store(c_ptr + offs, acc.to(c_ptr.dtype.element_ty), mask=mask)
+
+
+# (group_size, K, N, M bucket) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, split_k, atomic
+# [, deq, unpack]) -- deq/unpack default 0 (stock dequant). Consulted before the tile table; from
+# sly/bench_w4a16_tiles.py --splitk (R9700, DRAM-cold, "today" = the tile table above).
+_GFX12X_SPLITK: dict[tuple[int, int, int, int], tuple] = {
+@@SPLITK_TABLE@@}
+
+
+def _gfx12x_splitk_override(group_size, K, N, M):
+    import os
+
+    if os.environ.get("RADIANCE_W4A16_SPLITK", "1") != "1":
+        return None
+    for b in _GFX12X_DRAFT_BUCKETS:
+        if M <= b:
+            return _GFX12X_SPLITK.get((group_size, K, N, b))
+    return None
+
+
+def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None, c=None):
+    """triton_w4a16_skinny_fmt_gemm with an explicit (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages,
+    split_k, atomic[, deq, unpack]) config; split_k 1 with deq 0 / unpack 0 runs the stock kernel."""
+    BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, split_k, atomic = cfg[:7]
+    deq, unpack = (tuple(cfg[7:9]) + (0, 0))[:2]
+    M, K = a.shape
+    N = b_q.shape[0]
+    K8 = K // 8
+    num_groups = K // group_size
+    BLOCK_K = min(BLOCK_K, group_size)
+    if unpack:
+        assert BLOCK_K // 8 >= 16, "UNPACK 1 needs BLOCK_K >= 128 (tl.dot K >= 16)"
+    has_zp = zp is not None
+    if c is None:
+        c = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    extra_kwargs = {} if num_stages is None else {"num_stages": num_stages}
+    k_tiles = triton.cdiv(K, BLOCK_K)
+    tiles_per_split = triton.cdiv(k_tiles, max(1, split_k))
+    split_k = triton.cdiv(k_tiles, tiles_per_split)  # no empty splits
+    if split_k <= 1 and not deq and not unpack:
+        _triton_w4a16_skinny_fmt_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))](
+            a, b_q, scales, zp if has_zp else scales, c, M, N, K, K8, num_groups,
+            group_size=group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=num_warps, **extra_kwargs)
+        return c
+    direct = split_k <= 1
+    if direct:
+        p = c
+    elif atomic:
+        p = torch.zeros((M, N), dtype=torch.float32, device=a.device)
+    else:
+        p = torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)
+    _radiance_w4a16_splitk_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)](
+        a, b_q, scales, zp if has_zp else scales, p, M, N, K, K8, num_groups, tiles_per_split,
+        group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp, ATOMIC=bool(atomic and not direct), DIRECT=direct,
+        DEQ=deq, UNPACK=unpack,
+        # MAGIC | q is MAGIC_F + q exactly: fp16 1024.0 (10 mantissa bits), bf16 128.0 (7)
+        MAGIC=0x6400 if a.dtype == torch.float16 else 0x4300,
+        MAGIC_F=1024.0 if a.dtype == torch.float16 else 128.0,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=num_warps, **extra_kwargs)
+    if not direct:
+        MN = M * N
+        _radiance_w4a16_splitk_reduce[(triton.cdiv(MN, 1024),)](
+            p, c, MN, SPLIT_K=1 if atomic else split_k, BLOCK=1024, num_warps=4)
+    return c
+'''
+
+# window A sweep, 2026-09-28 (stock dequant; only entries >= 5 % faster than the tile table)
+_SPLITK_TABLE = [
+    # down  N=5120  K=17408: 149/141/149/202/208 us -> 112/115/141/190/192
+    ((128, 17408, 5120, 8), (16, 64, 128, 4, None, 6, 0)),
+    ((128, 17408, 5120, 16), (16, 64, 128, 4, None, 4, 0)),
+    ((128, 17408, 5120, 32), (32, 32, 128, 4, None, 3, 0)),
+    ((128, 17408, 5120, 40), (64, 64, 128, 4, None, 6, 0)),
+    ((128, 17408, 5120, 64), (64, 64, 128, 4, None, 8, 0)),
+    # INT4 target out_o  N=5120  K=6144: 63/61 us -> 50/52
+    ((128, 6144, 5120, 8), (16, 64, 128, 4, None, 6, 0)),
+    ((128, 6144, 5120, 16), (16, 64, 128, 4, None, 6, 0)),
+    # drafter fc  N=5120  K=25600: 190/208/211/287/288 us -> 154/159/190/256/259
+    ((128, 25600, 5120, 8), (16, 64, 128, 4, None, 6, 0)),
+    ((128, 25600, 5120, 16), (16, 64, 128, 4, None, 6, 0)),
+    ((128, 25600, 5120, 32), (32, 64, 128, 4, None, 2, 0)),
+    ((128, 25600, 5120, 40), (64, 64, 128, 4, None, 8, 0)),
+    ((128, 25600, 5120, 64), (64, 64, 128, 4, None, 8, 0)),
+    # drafter o_proj  N=5120  K=4096: 43/42 us -> 37/38
+    ((128, 4096, 5120, 8), (16, 64, 128, 4, None, 4, 0)),
+    ((128, 4096, 5120, 16), (16, 64, 128, 4, None, 4, 0)),
+    # INT4 target qkvz  N=16384  K=5120, M=16: 109 -> 98 us
+    ((128, 5120, 16384, 16), (16, 64, 128, 4, None, 2, 0)),
+    # INT4 target attn_qkv  N=14336  K=5120, M=16/40: 115/158 -> 88/147 us
+    ((128, 5120, 14336, 16), (16, 64, 128, 4, None, 2, 0)),
+    ((128, 5120, 14336, 40), (64, 64, 128, 4, None, 2, 0)),
+]
+
 apply(F,
       '_GFX12X_DRAFT_BUCKETS = (8, 16, 32, 40, 64)\n',
-      '_GFX12X_DRAFT_BUCKETS = (8, 16, 32, 40, 64)\n'
-      '\n'
-      '\n'
-      '# --- radiance (sly/patch_w4a16_tiles.py): split-K for skinny M on gfx1201 ---\n'
-      '@triton.jit\n'
-      'def _radiance_w4a16_splitk_kernel(\n'
-      '    a_ptr, b_ptr, scales_ptr, zp_ptr, p_ptr,\n'
-      '    M, N, K, K8, num_groups, tiles_per_split,\n'
-      '    group_size,\n'
-      '    ZP_BIAS: tl.constexpr,\n'
-      '    HAS_ZP: tl.constexpr,\n'
-      '    ATOMIC: tl.constexpr,\n'
-      '    BLOCK_M: tl.constexpr,\n'
-      '    BLOCK_N: tl.constexpr,\n'
-      '    BLOCK_K: tl.constexpr,\n'
-      '):\n'
-      '    # Body of _triton_w4a16_skinny_fmt_kernel over K tiles [k_lo, k_hi) of this split; the fp32\n'
-      '    # partial goes to p_ptr ([SPLIT_K, M, N] slice pid_k, or atomically into [M, N]).\n'
-      '    pid_m = tl.program_id(0)\n'
-      '    pid_n = tl.program_id(1)\n'
-      '    pid_k = tl.program_id(2)\n'
-      '\n'
-      '    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n'
-      '    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n'
-      '\n'
-      '    exllama_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16\n'
-      '    shifts_1d = tl.reshape(\n'
-      '        tl.broadcast_to(exllama_shifts_row[None, :], (BLOCK_K // 8, 8)),\n'
-      '        (BLOCK_K,),\n'
-      '    )\n'
-      '    shifts_full = tl.broadcast_to(shifts_1d[None, :], (BLOCK_N, BLOCK_K))\n'
-      '\n'
-      '    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n'
-      '\n'
-      '    k_lo = pid_k * tiles_per_split\n'
-      '    k_hi = tl.minimum(k_lo + tiles_per_split, tl.cdiv(K, BLOCK_K))\n'
-      '    for k_start in range(k_lo, k_hi):\n'
-      '        offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)\n'
-      '        mask_k = offs_k < K\n'
-      '\n'
-      '        a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]\n'
-      '        mask_a = (offs_m[:, None] < M) & mask_k[None, :]\n'
-      '        a = tl.load(a_ptrs, mask=mask_a, other=0.0)\n'
-      '\n'
-      '        offs_k8 = k_start * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)\n'
-      '        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
-      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n'
-      '        b_packed = tl.load(b_ptrs, mask=mask_b, other=0)\n'
-      '\n'
-      '        b = tl.interleave(b_packed, b_packed)\n'
-      '        b = tl.interleave(b, b)\n'
-      '        b = tl.interleave(b, b)\n'
-      '        b = (b >> shifts_full) & 0xF\n'
-      '\n'
-      '        group_idx = (k_start * BLOCK_K) // group_size\n'
-      '        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx\n'
-      '        scale_mask = offs_n < N\n'
-      '        scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)\n'
-      '\n'
-      '        if HAS_ZP:\n'
-      '            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + group_idx\n'
-      '            zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)\n'
-      '            zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF\n'
-      '            b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]\n'
-      '        else:\n'
-      '            b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]\n'
-      '\n'
-      '        b_fp_t = tl.trans(b_fp)\n'
-      '        accumulator += tl.dot(a, b_fp_t, out_dtype=tl.float32)\n'
-      '\n'
-      '    mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n'
-      '    if ATOMIC:\n'
-      '        tl.atomic_add(p_ptr + offs_m[:, None] * N + offs_n[None, :], accumulator, mask=mask_c)\n'
-      '    else:\n'
-      '        p_ptrs = p_ptr + pid_k * M * N + offs_m[:, None] * N + offs_n[None, :]\n'
-      '        tl.store(p_ptrs, accumulator, mask=mask_c)\n'
-      '\n'
-      '\n'
-      '@triton.jit\n'
-      'def _radiance_w4a16_splitk_reduce(p_ptr, c_ptr, MN, SPLIT_K: tl.constexpr, BLOCK: tl.constexpr):\n'
-      '    # c = sum over the SPLIT_K fp32 partials, cast to the output dtype (split order fixed).\n'
-      '    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)\n'
-      '    mask = offs < MN\n'
-      '    acc = tl.load(p_ptr + offs, mask=mask, other=0.0)\n'
-      '    for s in tl.static_range(1, SPLIT_K):\n'
-      '        acc += tl.load(p_ptr + s * MN + offs, mask=mask, other=0.0)\n'
-      '    tl.store(c_ptr + offs, acc.to(c_ptr.dtype.element_ty), mask=mask)\n'
-      '\n'
-      '\n'
-      '# (group_size, K, N, M bucket) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, split_k, atomic).\n'
-      '# Consulted before the tile table; filled from sly/bench_w4a16_tiles.py --splitk.\n'
-      '_GFX12X_SPLITK: dict[tuple[int, int, int, int], tuple[int, int, int, int, int | None, int, int]] = {\n'
-      '}\n'
-      '\n'
-      '\n'
-      'def _gfx12x_splitk_override(group_size, K, N, M):\n'
-      '    import os\n'
-      '\n'
-      '    if os.environ.get("RADIANCE_W4A16_SPLITK", "1") != "1":\n'
-      '        return None\n'
-      '    for b in _GFX12X_DRAFT_BUCKETS:\n'
-      '        if M <= b:\n'
-      '            return _GFX12X_SPLITK.get((group_size, K, N, b))\n'
-      '    return None\n'
-      '\n'
-      '\n'
-      'def triton_w4a16_splitk_gemm(a, b_q, scales, group_size, cfg, zp_bias=8, zp=None, c=None):\n'
-      '    """triton_w4a16_skinny_fmt_gemm with an explicit (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,\n'
-      '    num_stages, split_k, atomic) config; split_k 1 runs the stock kernel unchanged."""\n'
-      '    BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, split_k, atomic = cfg\n'
-      '    M, K = a.shape\n'
-      '    N = b_q.shape[0]\n'
-      '    K8 = K // 8\n'
-      '    num_groups = K // group_size\n'
-      '    BLOCK_K = min(BLOCK_K, group_size)\n'
-      '    has_zp = zp is not None\n'
-      '    if c is None:\n'
-      '        c = torch.empty((M, N), dtype=a.dtype, device=a.device)\n'
-      '    extra_kwargs = {} if num_stages is None else {"num_stages": num_stages}\n'
-      '    k_tiles = triton.cdiv(K, BLOCK_K)\n'
-      '    tiles_per_split = triton.cdiv(k_tiles, max(1, split_k))\n'
-      '    split_k = triton.cdiv(k_tiles, tiles_per_split)  # no empty splits\n'
-      '    if split_k <= 1:\n'
-      '        _triton_w4a16_skinny_fmt_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))](\n'
-      '            a, b_q, scales, zp if has_zp else scales, c, M, N, K, K8, num_groups,\n'
-      '            group_size=group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp,\n'
-      '            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=num_warps, **extra_kwargs)\n'
-      '        return c\n'
-      '    if atomic:\n'
-      '        p = torch.zeros((M, N), dtype=torch.float32, device=a.device)\n'
-      '    else:\n'
-      '        p = torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)\n'
-      '    _radiance_w4a16_splitk_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)](\n'
-      '        a, b_q, scales, zp if has_zp else scales, p, M, N, K, K8, num_groups, tiles_per_split,\n'
-      '        group_size, ZP_BIAS=zp_bias, HAS_ZP=has_zp, ATOMIC=bool(atomic),\n'
-      '        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=num_warps, **extra_kwargs)\n'
-      '    MN = M * N\n'
-      '    _radiance_w4a16_splitk_reduce[(triton.cdiv(MN, 1024),)](\n'
-      '        p, c, MN, SPLIT_K=1 if atomic else split_k, BLOCK=1024, num_warps=4)\n'
-      '    return c\n',
+      '_GFX12X_DRAFT_BUCKETS = (8, 16, 32, 40, 64)\n' + _SPLITK_SRC.replace(
+          '@@SPLITK_TABLE@@', ''.join(f'    {k}: {v},\n' for k, v in _SPLITK_TABLE)),
       '_radiance_w4a16_splitk_kernel',
-      'rdna_hybrid_w4a16: split-K kernel + table')
+      'rdna_hybrid_w4a16: split-K / fast-dequant kernel + table')
 
 # --- 4. the dispatch takes a split-K entry before the stock launch ---
 apply(F,
