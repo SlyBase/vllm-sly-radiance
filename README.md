@@ -153,12 +153,13 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 ### Defaults that are already on
 
 `RADIANCE_ATTN_DECODE_TUNE`, `RADIANCE_ATTN_DRAFTER_TUNE`, `RADIANCE_LOOKUP_DRAFT` (prompt lookup),
-`RADIANCE_USE_R4D` (libr4d kernels), `RADIANCE_W4A16_TILES`, `RADIANCE_W4A16_SPLITK` (split-K / fast dequant for the
-W4A16 GEMMs of INT4 targets and the drafter, per-shape table; `RADIANCE_W4A16_SPLITK_TABLE=<json>` replaces the table),
-`RADIANCE_W4A16_TILED` (W4A16 weights in 1 KB 16-row blocks), `RADIANCE_W4A16_SILU` (gate_up + silu in one GEMM),
-`RADIANCE_GDN_BA_W4` (GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM), `RADIANCE_DFLASH_KV_W4` (drafter
-context-KV on its int4 rows instead of a 105 MB bf16 copy), `RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4), `RADIANCE_MXFP4_DECODE_TUNE16`. Set any to
-`0` only for an A/B.
+`RADIANCE_USE_R4D` (libr4d kernels), `RADIANCE_MXFP4_DECODE_TUNE16`, and for the W4A16 GEMMs (INT4 targets and
+the drafter): `RADIANCE_W4A16_TILES` (tile table), `RADIANCE_W4A16_SPLITK` (split-K / fast dequant, per-shape
+table; `RADIANCE_W4A16_SPLITK_TABLE=<json>` replaces it), `RADIANCE_W4A16_TILED` (weights in 1 KB 16-row
+blocks), `RADIANCE_LMHEAD_INT4_TILED` (the int4 lm_head too), `RADIANCE_W4A16_SILU` (gate_up + silu in one
+GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a 105 MB bf16 copy),
+`RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4). Set any to `0` only for an A/B.
+`RADIANCE_GDN_BA_W4=1` (GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM) stays off: measured slower.
 
 ### vLLM arguments and trade-offs
 

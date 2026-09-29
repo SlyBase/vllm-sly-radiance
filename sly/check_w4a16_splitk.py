@@ -119,7 +119,10 @@ for name, N, K in SHAPES:
                 err = (out.float() - ref).abs().max().item()
                 report(err <= floor and out.shape == (M, N), tag, f"max err {err:.3e} > floor {floor:.3e}")
                 out_t = H.triton_w4a16_splitk_gemm(a, b_t, scales, GS, cfg, zp=z).cpu()
-                report(torch.equal(out, out_t), tag, "tiled layout differs from row layout")
+                # atomic (mode 1) has no fixed summation order on a GPU: tolerance there, identity elsewhere
+                t_err = (out_t.float() - ref).abs().max().item()
+                report(torch.equal(out, out_t) or (md == 1 and t_err <= floor), tag,
+                       "tiled layout differs from row layout")
                 outs[(deq, unpack, sk, md, ks)] = out
             # serial reduce == buffer reduce, KSTEP 2 == KSTEP 1 (same summation order)
             for (deq, unpack, sk, md, ks), out in outs.items():
@@ -152,6 +155,7 @@ for name, N, K in SHAPES:
         err = (sil.float() - ref_silu).abs().max().item()
         report(sil.shape == (M, N // 2) and err <= fl2, f"{name} EPI 2 {cfg}", f"err {err:.3e} > {fl2:.3e}")
 
+fails_before_epi = fails  # (the epilogue checks run per shape above; this counts the fused entry only)
 # fused-op entry: table config (EPI kernel) and the torch fallback (no table entry, e.g. prefill M)
 name, N, K = SHAPES[0]
 b_q = torch.randint(-2**31, 2**31 - 1, (N, K // 8), dtype=torch.int32, device=dev)
@@ -174,7 +178,7 @@ for M in (8, 70):
                f"fused entry M={M} gfx12x={on_gfx}", f"silu err {err:.3e}, split err {e1:.3e}")
 H._on_gfx12x = on_gfx12x
 H._RADIANCE_SK_TABLE = None
-print(f"epilogues and fused entry: {fails == 0}")
+print(f"epilogues and fused entry: {fails == fails_before_epi}")
 
 # int4 re-quantization (post-load: GDN ba rows, drafter kernel_projection): relative RMS error of the
 # dequantized weight, same recipe as the int4 lm_head (~10 % expected for a symmetric g128 int4)

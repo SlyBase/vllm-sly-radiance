@@ -55,7 +55,8 @@ if args.splitk:
     # rows), DFlash2 grouped-conv kernel_projection (2 x taps 2 x 320 groups)
     SHAPES = [("down", 5120, 17408), ("out_o", 5120, 6144), ("fc", 5120, 25600), ("o", 5120, 4096),
               ("qkvz_ba", 16480, 5120), ("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("qkv", 6144, 5120),
-              ("gate_up", 34816, 5120), ("ctx_kv", 10240, 5120), ("conv", 1280, 5120)]
+              ("gate_up", 34816, 5120), ("ctx_kv", 10240, 5120), ("conv", 1280, 5120),
+              ("lm_head", 248320, 5120)]  # int4 head, 2 calls per step (verify + DFlash2 candidates)
     if args.shapes:
         SHAPES = [x for x in SHAPES if x[0] in args.shapes.split(",")]
 MS = [8, 16, 32, 40, 64] if not args.quick else ([8, 16] if args.splitk else [8, 40])
@@ -137,7 +138,9 @@ def splitk_cfgs(M):
     # (deq, unpack): 0/0 stock dequant, 1 scale after the dot, 2 magic-number + folded zero point,
     # unpack 1 interleave-free 8-dot. Split-K as the serial reduce (mode 2): it never costs more than the
     # buffer reduce (same partials, one launch less); atomic never won (window A).
-    bms = [16] if M <= 16 else ([32] if M <= 32 else [32, 64])
+    # BLOCK_M 16 at every M: M = 40 in 64-row tiles computes 37 % padding; 16-row tiles re-read the
+    # weights per M tile, but from L2 (the sweep decides)
+    bms = [16] if M <= 16 else ([16, 32] if M <= 32 else [16, 32, 64])
     sks = [1, 2, 4, 6, 8, 12, 16] if not args.quick else [1, 4, 8]
     dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)]
     mds = [2, 0] if args.modes0 else [2]

@@ -16,13 +16,14 @@ rdna_hybrid_w4a16.py (patch_w4a16_tiles); this only wires them in:
   4. qwen3_dflash.py _project_context_kv: the context-KV projection on the drafter's own int4 rows
      (radiance_dflash_kv_project) instead of the 105 MB bf16 fused weight, which is then never built.
 
-  5. envs.py compile_factors: RADIANCE_W4A16_*, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_* -- the transforms
+  5. envs.py compile_factors: RADIANCE_W4A16_*, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_*,
+     RADIANCE_LMHEAD_INT4_TILED -- the transforms
      change the traced graph (fused ops instead of gate_up + act, one merged GEMM, a replaced module),
      so a knob flip must not replay an AOT graph compiled with the other setting.
 
 Every site keeps the stock path when its layer was not transformed (MXFP4 target, bf16, other
 quantizations). Knobs: RADIANCE_W4A16_SILU, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_CONV_W4,
-RADIANCE_DFLASH_KV_W4 (all default 1). Runs after sly/patch_fused_norm_quant (its anchors include the
+RADIANCE_DFLASH_KV_W4 (default 1; RADIANCE_GDN_BA_W4 default 0 since window E). Runs after sly/patch_fused_norm_quant (its anchors include the
 fused-norm lines) and sly/patch_nvfp4_compile_key (the compile_factors line).
 """
 import sysconfig
@@ -190,6 +191,7 @@ apply(SP / "vllm/envs.py",
       '        if _radiance_k.startswith(("RADIANCE_FUSED_NORM_QUANT", "RADIANCE_EMBED_", "RADIANCE_NVFP4_")):\n',
       '        # sly/patch_w4a16_fuse.py: the W4A16 post-load transforms change the traced graph\n'
       '        if _radiance_k.startswith(("RADIANCE_FUSED_NORM_QUANT", "RADIANCE_EMBED_", "RADIANCE_NVFP4_",\n'
-      '                                   "RADIANCE_W4A16_", "RADIANCE_GDN_BA_W4", "RADIANCE_DFLASH_")):\n',
-      '"RADIANCE_W4A16_", "RADIANCE_GDN_BA_W4", "RADIANCE_DFLASH_"',
+      '                                   "RADIANCE_W4A16_", "RADIANCE_GDN_BA_W4", "RADIANCE_DFLASH_",\n'
+      '                                   "RADIANCE_LMHEAD_INT4_TILED")):\n',
+      '"RADIANCE_W4A16_", "RADIANCE_GDN_BA_W4", "RADIANCE_DFLASH_",',
       'envs: W4A16 transform knobs in compile_factors')

@@ -63,6 +63,9 @@ CLIP_RATIOS = (1.0, 0.95, 0.9, 0.85, 0.8)
 CHUNK_ROWS = 8192
 QMAX = 7  # symmetric int4: q in [-8, 7], scale = amax / 7 (compressed-tensors convention)
 ZP_BIAS = 8  # unsigned nibble = q + 8, the constant the kernel subtracts (HAS_ZP=False)
+# RADIANCE_LMHEAD_INT4_TILED (default 1, needs RADIANCE_W4A16_TILED): store the packed head in the tiled
+# W4A16 layout; 0 keeps the row layout (A/B of the head alone)
+TILED = os.environ.get("RADIANCE_LMHEAD_INT4_TILED", "1") == "1"
 
 
 def quant_method_for(layer: torch.nn.Module, prefix: str, inner=None):
@@ -141,7 +144,16 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
             del packed, s
         # int8 view of the [N, K//8] int32 packing = [N, K//2]; the kernel path re-views it as
         # int32 (that is how RDNAHybridW4A16LinearKernel stores the drafter's weights too).
-        layer.weight = Parameter(w_q.view(torch.int8).contiguous(), requires_grad=False)
+        w_i8 = w_q.view(torch.int8).contiguous()
+        if TILED:
+            # sly/patch_w4a16_tiles.py LAYOUT 1 (1 KB blocks of 16 rows x 128 K), like every other
+            # W4A16 weight of this image; the apply op reads both layouts (and skips the HIP skinny
+            # path, which only knows the row layout)
+            from vllm.model_executor.kernels.linear.mixed_precision import rdna_hybrid_w4a16 as _h
+
+            if getattr(_h, "_radiance_tiled_enabled", None) and _h._on_gfx12x() and _h._radiance_tiled_enabled(n, k):
+                w_i8 = _h.radiance_w4a16_tile(w_i8)
+        layer.weight = Parameter(w_i8, requires_grad=False)
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
         logger.info(
             "[radiance] lm_head quantised to int4 g%d: [%d, %d], %.2f GiB freed",

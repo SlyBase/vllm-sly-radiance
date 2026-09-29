@@ -588,15 +588,18 @@ def _radiance_set_w4(layer, kern, w_q, w_s):
 
 
 def _radiance_quant_rows(w, group_size=128):
-    """bf16 [rows, K] -> (int8 [rows, K/2] ExLlama-shuffled, bf16 scales [rows, K/G]); symmetric int4,
+    """bf16/fp16 [rows, K] -> (int8 [rows, K/2] ExLlama-shuffled, scales [rows, K/G] in w's dtype); symmetric int4,
     per-group MSE clip search (the int4 lm_head recipe, sly/mxfp4/radiance_lmhead_int4.py)."""
     rows, k = w.shape
     ng = k // group_size
+    # scales in the activation dtype of the layer (bf16 in production, fp16 models too), rounded to it
+    # before q is chosen, so q is optimal for the scale the kernel multiplies with
+    sdt = w.dtype if w.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
     blk = w.float().view(rows, ng, group_size)
     amax = blk.abs().amax(dim=-1, keepdim=True)
     best_err = best_q = best_s = None
     for r in (1.0, 0.95, 0.9, 0.85, 0.8):
-        s = (amax * (r / 7)).clamp_(min=1e-8).to(torch.bfloat16).float()
+        s = (amax * (r / 7)).clamp_(min=1e-8).to(sdt).float()
         q = torch.round(blk / s).clamp_(-8, 7)
         err = (q * s - blk).square_().sum(dim=-1, keepdim=True)
         if best_err is None:
@@ -607,7 +610,7 @@ def _radiance_quant_rows(w, group_size=128):
             best_q = torch.where(better, q, best_q)
             best_s = torch.where(better, s, best_s)
     nib = (best_q.view(rows, k) + 8).to(torch.uint8)
-    return pack_int4_exllama_shuffle(nib).view(torch.int8), best_s.view(rows, ng).to(torch.bfloat16)
+    return pack_int4_exllama_shuffle(nib).view(torch.int8), best_s.view(rows, ng).to(sdt)
 
 
 class RadianceW4Linear(torch.nn.Module):
@@ -693,7 +696,9 @@ def radiance_w4a16_postload(model, drafter=None):
 
     counts = {"silu": 0, "gdn_ba": 0, "conv_w4": 0}
     silu_on = os.environ.get("RADIANCE_W4A16_SILU", "1") == "1"
-    ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "1") == "1"
+    # GDN qkvz + ba merge: off by default -- the 96 extra rows add a 129th tile (a nearly empty third wave on
+    # 64 CUs): 93.9 us merged vs 79.2 + 3.6 us separate at M = 8 (window E sweep, 2026-09-29)
+    ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "0") == "1"
     conv_on = os.environ.get("RADIANCE_DFLASH_CONV_W4", "1") == "1"
     for root in (model, drafter):
         if root is None:
@@ -793,44 +798,59 @@ direct_register_custom_op(
 )
 '''
 
-# window A2 sweep, 2026-09-28 (R9700, 300 W, DRAM-cold; entries >= 5 % faster than the tile table),
-# restricted to split-K partials <= 1 MiB (_RADIANCE_SK_MAX_PARTIAL, KV pool) -- entries over the cap
-# replaced by the fastest capped config of the same sweep or dropped (tile table decides there).
-# Fields 8/9 = deq/unpack; deq 2 (magic-number bf16, folded zero point + scale) wins at M <= 32 almost
-# everywhere, split-K on the K-heavy N=5120 shapes, deq 1 at M = 40/64.
+# window E sweep, 2026-09-29 (R9700, 300 W, DRAM-cold, TILED weights, serial split-K, partials <= 1 MiB):
+# entries >= 5 % faster than min(tile table, _radiance_default_cfg). us per call, 0.4.0 -> entry.
 _SPLITK_TABLE = [
-    # down  N=5120  K=17408
-    ((128, 17408, 5120, 8), (16, 32, 128, 2, None, 2, 0, 2, 0)),
-    # out_o  N=5120  K=6144
-    ((128, 6144, 5120, 8), (16, 64, 128, 4, None, 6, 0, 2, 0)),
-    ((128, 6144, 5120, 16), (16, 32, 128, 2, None, 2, 0, 2, 0)),
-    # fc  N=5120  K=25600
-    ((128, 25600, 5120, 8), (16, 128, 128, 4, None, 2, 0, 2, 0)),
-    ((128, 25600, 5120, 16), (16, 64, 128, 4, None, 2, 0, 2, 0)),
-    # o  N=5120  K=4096
-    ((128, 4096, 5120, 8), (16, 64, 128, 4, None, 6, 0, 2, 0)),
+    # down  N=5120  K=17408: M8 151->88 / M16 149->101
+    ((128, 17408, 5120, 8), (16, 128, 128, 4, None, 6, 2, 2, 0)),
+    ((128, 17408, 5120, 16), (16, 32, 128, 2, None, 2, 2, 2, 0)),
+    # out_o  N=5120  K=6144: M8 70->40 / M16 69->44
+    ((128, 6144, 5120, 8), (16, 64, 128, 4, None, 6, 2, 2, 0)),
+    ((128, 6144, 5120, 16), (16, 32, 128, 2, None, 2, 2, 2, 0)),
+    # fc  N=5120  K=25600: M8 207->126 / M16 206->127 / M32 209->200 / M40 293->283 / M64 303->289
+    ((128, 25600, 5120, 8), (16, 64, 128, 4, None, 6, 2, 2, 0)),
+    ((128, 25600, 5120, 16), (16, 64, 128, 4, None, 2, 2, 2, 0, 2)),
+    ((128, 25600, 5120, 32), (32, 64, 128, 4, None, 1, 0, 1, 0)),
+    ((128, 25600, 5120, 40), (64, 32, 128, 4, None, 1, 0, 1, 0)),
+    ((128, 25600, 5120, 64), (64, 32, 128, 4, None, 1, 0, 1, 0)),
+    # o  N=5120  K=4096: M8 48->32 / M32 45->40 / M40 63->51 / M64 64->51
+    ((128, 4096, 5120, 8), (16, 64, 128, 4, None, 6, 2, 2, 0)),
+    ((128, 4096, 5120, 32), (32, 32, 128, 4, None, 1, 0, 1, 0, 2)),
     ((128, 4096, 5120, 40), (64, 32, 128, 4, None, 1, 0, 1, 0)),
     ((128, 4096, 5120, 64), (64, 32, 128, 4, None, 1, 0, 1, 0)),
-    # qkvz  N=16384  K=5120
-    ((128, 5120, 16384, 8), (16, 128, 128, 2, None, 1, 0, 2, 0)),
-    ((128, 5120, 16384, 16), (16, 128, 128, 2, None, 1, 0, 2, 0)),
+    # qkvz  N=16384  K=5120: M32 131->95 / M40 176->157
     ((128, 5120, 16384, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 16384, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # attn_qkv  N=14336  K=5120
-    ((128, 5120, 14336, 8), (16, 64, 128, 4, None, 1, 0, 2, 0)),
-    ((128, 5120, 14336, 16), (16, 64, 128, 4, None, 1, 0, 2, 0)),
+    # qkvz_ba  N=16480  K=5120: M32 361->122 / M40 199->177 / M64 202->179
+    ((128, 5120, 16480, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
+    ((128, 5120, 16480, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
+    ((128, 5120, 16480, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
+    # attn_qkv  N=14336  K=5120: M32 121->94 / M40 159->140 / M64 168->144
     ((128, 5120, 14336, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
     ((128, 5120, 14336, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 14336, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # qkv  N=6144  K=5120
-    ((128, 5120, 6144, 8), (16, 64, 128, 4, None, 1, 0, 2, 0)),
-    ((128, 5120, 6144, 16), (16, 64, 128, 4, None, 1, 0, 2, 0)),
+    # qkv  N=6144  K=5120: M8 47->37 / M16 52->37 / M32 58->51 / M40 75->68 / M64 76->69
+    ((128, 5120, 6144, 8), (16, 128, 128, 8, None, 2, 2, 2, 0)),
+    ((128, 5120, 6144, 16), (16, 128, 128, 8, None, 2, 2, 2, 0)),
+    ((128, 5120, 6144, 32), (32, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 6144, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 6144, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
-    # gate_up  N=34816  K=5120
-    ((128, 5120, 34816, 8), (16, 128, 128, 8, None, 1, 0, 2, 0)),
-    ((128, 5120, 34816, 16), (16, 128, 128, 8, None, 1, 0, 2, 0)),
+    # gate_up  N=34816  K=5120: M8 206->176 / M32 259->211 / M40 362->341 / M64 376->343
+    ((128, 5120, 34816, 8), (16, 64, 128, 4, None, 1, 0, 1, 0)),
     ((128, 5120, 34816, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
+    ((128, 5120, 34816, 40), (64, 64, 128, 4, None, 1, 0, 1, 0)),
+    ((128, 5120, 34816, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
+    # ctx_kv  N=10240  K=5120: M8 126->54 / M16 123->56 / M32 228->75 / M64 122->114
+    ((128, 5120, 10240, 8), (16, 64, 128, 4, None, 1, 0, 2, 0)),
+    ((128, 5120, 10240, 16), (16, 64, 128, 4, None, 1, 0, 2, 0, 2)),
+    ((128, 5120, 10240, 32), (32, 128, 128, 4, None, 1, 0, 2, 0)),
+    ((128, 5120, 10240, 64), (64, 64, 128, 4, None, 1, 0, 1, 0)),
+    # conv  N=1280  K=5120: M8 27->23 / M16 30->23 / M32 40->24 / M40 40->28 / M64 40->29
+    ((128, 5120, 1280, 8), (16, 32, 128, 4, None, 8, 2, 2, 0)),
+    ((128, 5120, 1280, 16), (16, 32, 128, 4, None, 8, 2, 1, 0)),
+    ((128, 5120, 1280, 32), (32, 64, 128, 8, None, 4, 2, 0, 0)),
+    ((128, 5120, 1280, 40), (64, 32, 128, 4, None, 4, 2, 0, 0)),
+    ((128, 5120, 1280, 64), (32, 64, 128, 4, None, 2, 2, 1, 0)),
 ]
 
 apply(F,
