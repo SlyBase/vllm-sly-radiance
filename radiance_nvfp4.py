@@ -37,10 +37,12 @@ from torch.nn import Parameter
 EXP_MODE = os.environ.get("RADIANCE_NVFP4_EXP", "mse")
 FP8_LAYERS = os.environ.get("RADIANCE_NVFP4_FP8_LAYERS", "mxfp4")   # mxfp4 | fp8
 # Regex (re.search on the vLLM module prefix) of UNQUANTIZED bf16 linears to requantize to MXFP4 as
-# well. Default "in_proj_ba": the checkpoint leaves the GDN a/b gate projections in bf16, and the GDN
-# in_proj merge (radiance_gdnmerge) only fuses a layer whose qkvz AND ba sides are both on the
-# radiance kernel. With it all 48 GDN layers merge (96 launches/forward gone), the fp8 stream covers
-# the whole model, decode 23.9 -> 22.2 ms/step, GSM8K 97.60 (2026-09-15). Empty = leave them bf16.
+# well. Default "in_proj_ba": the checkpoint leaves the GDN a/b gate projections in bf16. ggz14 did this
+# for the GDN in_proj merge (radiance_gdnmerge), which this image rejected (ci/unused_patches.txt); it
+# still pays off without it: every consumer of the GDN input norm stays a radiance W4A8 layer, so the
+# fused norm-quant producer covers the site. Measured 2026-09-29 (ThinkingCap NVFP4A16, 0.4.1-rc3,
+# 300 W): empty = bf16 gates costs +0.6 ms/step (34.53 -> 35.14 ms) and KV pool, for dNLL +0.000
+# (+-0.005) against the MXFP4 gates. Empty = leave them bf16.
 BF16_LAYERS = os.environ.get("RADIANCE_NVFP4_BF16_LAYERS", "in_proj_ba").strip()
 # lm_head: "bf16" (default) dequantizes the checkpoint's FP8 per-channel lm_head to bf16 at load so it
 # runs on the plain bf16 GEMM like every other unit here (and the int2 draft/verify heads take their
@@ -49,6 +51,9 @@ BF16_LAYERS = os.environ.get("RADIANCE_NVFP4_BF16_LAYERS", "in_proj_ba").strip()
 # serve still wedged the GPU at 8-way concurrency with it in place (2026-09-15, reset #4).
 LMHEAD = os.environ.get("RADIANCE_NVFP4_LMHEAD", "bf16")
 LOG_EVERY = os.environ.get("RADIANCE_NVFP4_LOG", "1") == "1"
+# RADIANCE_NVFP4_DIAG=native|requant|fold: measurement-only schemes from radiance_nvfp4_diag.py (bf16
+# dequant per forward, --enforce-eager). Unset = the serving path below.
+DIAG = os.environ.get("RADIANCE_NVFP4_DIAG", "").strip()
 ROW_CHUNK = 4096            # rows per requant pass: bounds the fp32 transient at ~1.3 GiB for K=17408
 
 # A Python list, not a module-level tensor: this module is imported while vLLM builds the model
@@ -390,6 +395,9 @@ def _make_classes():
 
 def scheme_class():
     """The NVFP4 scheme class, or None if it cannot be built (never blocks model load)."""
+    if DIAG:
+        import radiance_nvfp4_diag
+        return radiance_nvfp4_diag.scheme_class()
     if "nv" not in _CLS:
         try:
             _CLS["nv"], _CLS["fp8"], _CLS["bf16"], _CLS["head"] = _make_classes()
@@ -403,6 +411,9 @@ def bf16_scheme_class(layer_name):
     """The bf16 -> MXFP4 scheme for an unquantized linear whose prefix matches
     RADIANCE_NVFP4_BF16_LAYERS, else None."""
     import re
+    if DIAG:
+        import radiance_nvfp4_diag
+        return radiance_nvfp4_diag.bf16_scheme_class(layer_name)
     if not BF16_LAYERS or not layer_name or not re.search(BF16_LAYERS, layer_name):
         return None
     scheme_class()

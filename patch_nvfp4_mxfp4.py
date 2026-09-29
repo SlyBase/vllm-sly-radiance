@@ -1,10 +1,15 @@
 """NVFP4 checkpoints on gfx1201: route compressed-tensors NVFP4 (and optionally FP8 per-channel)
 linears to radiance_nvfp4's load-time MXFP4 requantization, which lands on the radiance W4A8 kernel.
 
-Two hunks in compressed_tensors.py's _get_scheme_from_parts, both gated on RADIANCE_NVFP4_MXFP4=1
+Hunks in compressed_tensors.py's _get_scheme_from_parts, all gated on RADIANCE_NVFP4_MXFP4=1
 at call time so the stock scheme selection is untouched otherwise:
   1. the NVFP4 branch returns RadianceNvfp4ToMxfp4 instead of CompressedTensorsW4A4Fp4 (whose
      kernel list on ROCm ends in an emulation that would materialise bf16 weights per forward);
+  1b. the same for weight-only NVFP4 (NVFP4A16, input_activations null -- e.g.
+     bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4): stock returns CompressedTensorsW4A4Fp4(use_a16=True),
+     whose kernel selection FORCES Marlin on anything but SM100/103 and aborts the load on ROCm
+     ("Forced NVFP4 kernel MarlinNvFp4LinearKernel is not supported"). The radiance scheme declares
+     input_global_scale only as a loader home, so a checkpoint without it loads unchanged;
   2. the FP8 W8A8 branch returns RadianceFp8ChannelToMxfp4 when RADIANCE_NVFP4_FP8_LAYERS=mxfp4
      (never for lm_head), else the stock CompressedTensorsW8A8Fp8.
 Also a one-shot conversion summary after weight loading, hooked next to the existing radiance
@@ -35,6 +40,22 @@ NV_NEW = (
     "            return CompressedTensorsW4A4Fp4()\n"
     "\n"
     "        if self._is_mxfp4(weight_quant):\n"
+)
+A16_ANCHOR = (
+    "            if input_quant is None:\n"
+    "                return CompressedTensorsW4A4Fp4(use_a16=True)\n"
+)
+A16_NEW = (
+    "            if input_quant is None:\n"
+    "                # --- radiance (patch_nvfp4_mxfp4.py): NVFP4A16 -> MXFP4 at load on gfx12x ---\n"
+    "                import os as _radiance_os\n"
+    "                if _radiance_os.environ.get(\"RADIANCE_NVFP4_MXFP4\", \"0\") == \"1\":\n"
+    "                    import radiance_nvfp4 as _radiance_nvfp4\n"
+    "\n"
+    "                    _radiance_cls = _radiance_nvfp4.scheme_class()\n"
+    "                    if _radiance_cls is not None:\n"
+    "                        return _radiance_cls()\n"
+    "                return CompressedTensorsW4A4Fp4(use_a16=True)\n"
 )
 
 FP8_ANCHOR = (
@@ -77,6 +98,8 @@ BF16_NEW = (
 def main():
     apply(CT, NV_ANCHOR, NV_NEW, "NVFP4 -> MXFP4 at load on gfx12x",
           "nvfp4: NVFP4 branch -> radiance requant scheme")
+    apply(CT, A16_ANCHOR, A16_NEW, "NVFP4A16 -> MXFP4 at load on gfx12x",
+          "nvfp4: NVFP4A16 (weight-only) branch -> radiance requant scheme")
     apply(CT, BF16_ANCHOR, BF16_NEW, "optional bf16 -> MXFP4 for unmatched linears",
           "nvfp4: unmatched bf16 linears -> optional radiance requant scheme")
     apply(CT, FP8_ANCHOR, FP8_NEW, "optional FP8 -> MXFP4 at load",
