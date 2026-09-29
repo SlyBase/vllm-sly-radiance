@@ -2,6 +2,60 @@
 
 Current reference numbers are in the [README](../README.md#performance). This file keeps the full tables of earlier releases, the checkpoint comparison and why single runs mislead.
 
+## Recipe: like-for-like against Paiton (queued, not yet run)
+
+Why: Paiton's MXFP4 table (156.1 weighted decode, see [NOT-ADOPTED](NOT-ADOPTED.md#paiton-eliovp-bvpaiton-vllm-plugin-modelsqwen38-mxfp4-dflash2))
+beats our 133.2 mostly on tokens per update, but per category the gap is uneven (chat/code/json far ahead,
+file_edit/math/summarization level, prose *behind*). That pattern points at the benchmark setup first, the
+drafter second. BetterBench sends no `enable_thinking`, so thinking follows the server default — ours is on
+(`reasoning_effort: medium`), theirs off; with thinking on, every category decodes reasoning prose first.
+Settle the setup before blaming the drafter.
+
+**BetterBench 0.6.0** (same corpus and weights as 0.4.0/0.5.0; the prefill filler is reshuffled every pass,
+which only matters for content-keyed KV caches — vLLM's prefix cache hashes a chain from the prompt start, so
+our prefill numbers stay comparable; the default sweep stops at conc 8, our `ci/accept/configs` set their own
+levels). The gate host can move to it without a new baseline.
+
+```bash
+git clone --branch v0.6.0 https://github.com/GGZ14/BetterBench && pip install -e ./BetterBench
+```
+
+**Step 1 — Paiton's conditions on our image.** Production image and arguments, 300 W, second start, with
+exactly these changes:
+
+```bash
+--max-model-len 65536 --max-num-batched-tokens 4096 --no-enable-prefix-caching \
+--default-chat-template-kwargs '{"enable_thinking": false}'
+# drop --override-generation-config; BetterBench sends 0.7 / 0.95 / 20 itself
+```
+
+Run `betterbench run --quick` twice (their protocol: 5 scored per category, mean of two runs) **and** one
+default run (20 per category = 160 decode runs, the ≥ 128 rule). Read tokens per update per category and the
+step gap, and put them next to Paiton's (chat ≈ 4.0, code ≈ 6.0, json ≈ 7.3, file_edit ≈ 6.0, math ≈ 6.1,
+prose ≈ 2.6, reasoning ≈ 3.9, summarization ≈ 4.6 at 33.3 ms per update).
+
+Prefill from the same runs (the full run, not a prefill-only sweep, which reads ~5 % higher): the depths are
+already like-for-like (median prompts 1,516 / 5,895 / 11,802 / 23,550 / 47,017 tokens there, 1,514 / 5,918 /
+11,794 / 23,543 / 47,056 in our 0.4.0 run, < 0.5 % apart), so compare tok/s per depth directly against
+Paiton's MXFP4 arm: 3,691 / 3,831 / 3,871 / 3,750 / 3,455. Our 0.4.0 numbers (3,166 … 2,512) had 2048
+chunks at 262k; the 4096 chunk of this setup is worth +3.5 … +4.8 % on its own, and prefix caching is off
+on both sides but irrelevant here (unique prompts). What remains, growing with depth (≈ +12 % at 2k,
+≈ +27 % at 64k before this run), is their attention/GDN prefill kernels.
+
+- Gap mostly gone → it was the benchmark setup (thinking). Nothing to change in the image; note it here.
+- Gap left in tokens per update → step 2. Gap left in step time → kernels (their closed ones), not this recipe.
+
+**Step 2 — drafter and draft sampling, same window, on the step-1 setup.** Arms in the order
+C, G, F, FG, C (C = control: W4A16 drafter, `probabilistic`; G = `draft_sample_method greedy`;
+F = `tcclaviger/Qwen3.8-27B-DFlash2-FP8` pinned to `ee0cb26a8279b7910cc28d82a8a3e15e4728d56f`;
+FG = both), one default BetterBench run per arm, second start each. Record per arm: weighted decode,
+tokens per update, step gap, conc 1/8, the KV pool from the log.
+
+**Step 3 — only for a winner: production conditions.** Repeat control vs winner on the production arguments
+(262k, thinking on, prefix caching on). It must hold the KV pool at 384,316 tokens (the FP8 drafter is heavier
+and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
+(recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
+
 ## 0.4.0
 
 ### Reference run (2026-09-25)
