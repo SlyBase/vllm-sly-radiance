@@ -24,7 +24,7 @@ body:
       label: Why? Use case
       description: What it enables or speeds up, for whom, and in which setup.
     validations:
-      required: true
+      required: false
 
   - type: dropdown
     id: area
@@ -40,7 +40,7 @@ body:
         - build, image size, CI, docs
         - other
     validations:
-      required: true
+      required: false
 
   - type: input
     id: image
