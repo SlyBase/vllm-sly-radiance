@@ -6,10 +6,13 @@ gfx12x-Heuristik. Laeuft im Wegwerf-Container aus dem Runtime-Image (GPU exklusi
 
   python3 bench_w4a16_tiles.py [--quick] [--out /root/w4a16_tiles.json]
 
---splitk (0.4.1): Sweep des Split-K-Pfads aus sly/patch_w4a16_tiles.py (Patch vorher im Container
-anwenden) ueber alle Target- und Draft-Shapes gegen den heutigen Stand (Tile-Tabelle bzw. Heuristik);
-gemessen wird der ganze Aufruf inkl. Memset/Reduce. Gibt am Ende die _GFX12X_SPLITK-Zeilen fuer
-Eintraege aus, die >= 5 % schneller sind.
+--splitk (0.4.1): Sweep des Split-K-/Dequant-Pfads aus sly/patch_w4a16_tiles.py (Patch vorher im
+Container anwenden) ueber alle Target-, Draft- und Fusions-Shapes, auf dem gekachelten Gewichtslayout
+(RADIANCE_W4A16_TILED, `--rows` = Zeilenlayout). Split-K laeuft im Serial-Modus (mode 2, kein zweiter
+Launch; `--modes0` misst den Puffer-Reduce zusaetzlich), KSTEP 2 als zweite Stufe auf den Top-5. Gemessen
+wird der ganze Aufruf. Ausgabe je Fall: 0.4.0-Stand (Tile-Tabelle, Zeilenlayout), Tile-Tabelle gekachelt,
+Default-Config der Fusionspfade, Bestwert gekachelt und derselbe Bestwert im Zeilenlayout (#3-Effekt);
+am Ende die _GFX12X_SPLITK-Zeilen fuer Eintraege >= 5 % schneller als min(Tiles, Default).
 """
 import argparse, itertools, json, sys, time
 import torch, triton
@@ -28,7 +31,8 @@ ap.add_argument("--atomic", action="store_true", help="also sweep the atomic spl
 ap.add_argument("--ms", default="", help="comma list of M buckets (default 8,16,32,40,64)")
 ap.add_argument("--max-partial-mib", type=float, default=1.0,
                 help="skip split-K configs whose fp32 partials exceed this (KV pool, see patch_w4a16_tiles.py)")
-ap.add_argument("--a8-min-m", type=int, default=32, help="sweep DEQ 3 (W4A8 int8, lossy) from this M bucket on")
+ap.add_argument("--rows", action="store_true", help="sweep on the row layout instead of the tiled one")
+ap.add_argument("--modes0", action="store_true", help="also sweep the partial-buffer reduce (mode 0)")
 ap.add_argument("--table-out", default="", help="write the resulting _GFX12X_SPLITK as JSON (RADIANCE_W4A16_SPLITK_TABLE)")
 args = ap.parse_args()
 
@@ -47,8 +51,11 @@ if args.target:
     SHAPES = [("qkvz", 16384, 5120), ("out_o", 5120, 6144), ("attn_qkv", 14336, 5120)]
 if args.splitk:
     # nach erwartetem Gewinn geordnet: N=5120 mit langem K zuerst (160-320 Workgroups ohne Split-K)
+    # + the fused call sites: GDN qkvz + ba merged (16384 + 96 rows), DFlash context-KV (5 layers x K/V
+    # rows), DFlash2 grouped-conv kernel_projection (2 x taps 2 x 320 groups)
     SHAPES = [("down", 5120, 17408), ("out_o", 5120, 6144), ("fc", 5120, 25600), ("o", 5120, 4096),
-              ("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("qkv", 6144, 5120), ("gate_up", 34816, 5120)]
+              ("qkvz_ba", 16480, 5120), ("qkvz", 16384, 5120), ("attn_qkv", 14336, 5120), ("qkv", 6144, 5120),
+              ("gate_up", 34816, 5120), ("ctx_kv", 10240, 5120), ("conv", 1280, 5120)]
     if args.shapes:
         SHAPES = [x for x in SHAPES if x[0] in args.shapes.split(",")]
 MS = [8, 16, 32, 40, 64] if not args.quick else ([8, 16] if args.splitk else [8, 40])
@@ -128,19 +135,20 @@ def bench_sk(a, ws, ss, cfg, iters):
 
 def splitk_cfgs(M):
     # (deq, unpack): 0/0 stock dequant, 1 scale after the dot, 2 magic-number + folded zero point,
-    # unpack 1 interleave-free 8-dot. Atomic never won in window A (2026-09-28), --atomic brings it back.
+    # unpack 1 interleave-free 8-dot. Split-K as the serial reduce (mode 2): it never costs more than the
+    # buffer reduce (same partials, one launch less); atomic never won (window A).
     bms = [16] if M <= 16 else ([32] if M <= 32 else [32, 64])
     sks = [1, 2, 4, 6, 8, 12, 16] if not args.quick else [1, 4, 8]
-    dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)] + ([(3, 0)] if M >= args.a8_min_m else [])
-    ats = [0, 1] if args.atomic else [0]
-    for bm, bn, nw, sk, (dq, up), at in itertools.product(bms, [32, 64, 128], [2, 4, 8], sks, dus, ats):
-        if (sk, dq, up) == (1, 0, 0) or (nw == 8 and bn < 64) or (sk == 1 and at):
+    dus = [(0, 0), (1, 0), (2, 0), (1, 1), (2, 1)]
+    mds = [2, 0] if args.modes0 else [2]
+    for bm, bn, nw, sk, (dq, up), md in itertools.product(bms, [32, 64, 128], [2, 4, 8], sks, dus, mds):
+        if (sk, dq, up) == (1, 0, 0) or (nw == 8 and bn < 64) or (sk == 1 and md != 2):
             continue
-        yield (bm, bn, 128, nw, None, sk, at, dq, up)
+        yield (bm, bn, 128, nw, None, sk, md if sk > 1 else 0, dq, up)
 
 
 def partial_bytes(cfg, M, N):
-    return 0 if cfg[5] <= 1 else (M * N * 4 if cfg[6] else cfg[5] * M * N * 4)
+    return 0 if cfg[5] <= 1 else (M * N * 4 if cfg[6] == 1 else cfg[5] * M * N * 4)
 
 
 if args.splitk:
@@ -149,44 +157,59 @@ if args.splitk:
     for name, N, K in SHAPES:
         wbytes = N * K // 2 + N * (K // GS) * 2
         copies = max(2, (160 << 20) // wbytes)
-        ws, ss = make(N, K, copies)
+        wr, ss = make(N, K, copies)
+        wt = [H.radiance_w4a16_tile(w).view(torch.int32) for w in wr]
+        ws = wr if args.rows else wt
         for M in MS:
             a = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
             cur = H._gfx12x_draft_override(GS, K, N, M) or heuristic(M, N, K)
             cur7 = tuple(cur) + (1, 0)
-            ref = run_sk(a, ws[0], ss[0], cur7).float()
-            t_c = bench_sk(a, ws, ss, cur7, args.iters)
-            sk_now = H._GFX12X_SPLITK.get((GS, K, N, M))  # the shipped split-K entry, if any
-            t_now = bench_sk(a, ws, ss, sk_now, args.iters) if sk_now else t_c
+            ref = run_sk(a, wr[0], ss[0], cur7).float()
+            t_040 = bench_sk(a, wr, ss, cur7, args.iters)          # 0.4.0: tile table, row layout
+            t_c = bench_sk(a, ws, ss, cur7, args.iters)            # tile table on the swept layout
+            dflt = H._radiance_default_cfg(M)
+            t_d = bench_sk(a, ws, ss, dflt, args.iters) if dflt else float("inf")
+            base = min(t_c, t_d)
             best = (t_c, cur7); rows = []
             t0 = time.time()
             for cfg in splitk_cfgs(M):
                 if partial_bytes(cfg, M, N) > args.max_partial_mib * (1 << 20):
                     continue
-                tol = 3e-2 if cfg[7] == 3 else 2e-2  # W4A8 carries the activation rounding
                 try:
                     out = run_sk(a, ws[0], ss[0], cfg).float()
                     err = (out - ref).abs().max().item() / (ref.abs().max().item() + 1e-6)
-                    if err > tol: rows.append((cfg, None, err)); continue
+                    if err > 2e-2: rows.append((cfg, None, err)); continue
                     t = bench_sk(a, ws, ss, cfg, args.iters)
                 except Exception as e:
                     rows.append((cfg, None, str(e)[:60])); continue
                 rows.append((cfg, t, err))
                 if t < best[0]: best = (t, cfg)
-            def gb(t): return wbytes / (t * 1e-6) / 1e9
-            print(f"{name:8s} N={N:5d} K={K:5d} M={M:2d}: tiles {t_c:7.1f} us ({gb(t_c):4.0f} GB/s), split-K entry"
-                  f" {t_now:7.1f} us -> best {best[1]} {best[0]:7.1f} us ({gb(best[0]):4.0f} GB/s)"
-                  f" {t_c / best[0]:.2f}x  [{time.time() - t0:.0f}s]", flush=True)
+            # stage 2: KSTEP 2 on the five fastest
             top = sorted([r for r in rows if r[1] is not None], key=lambda r: r[1])[:5]
-            results[f"{name}:{M}"] = {"N": N, "K": K, "M": M, "today": [cur7, t_c], "splitk_entry": [sk_now, t_now],
-                                      "best": [best[1], best[0]], "top5": top}
-            if best[1] != cur7 and best[0] <= 0.95 * t_c:
-                table.append(f"    ({GS}, {K}, {N}, {M}): {best[1]},  # {name}: {t_c:.0f} -> {best[0]:.0f} us")
+            for cfg, _t, _e in top:
+                c2 = tuple(cfg[:7]) + (cfg[7] if len(cfg) > 7 else 0, cfg[8] if len(cfg) > 8 else 0, 2)
+                try:
+                    t = bench_sk(a, ws, ss, c2, args.iters)
+                except Exception as e:
+                    rows.append((c2, None, str(e)[:60])); continue
+                rows.append((c2, t, None))
+                if t < best[0]: best = (t, c2)
+            t_rows = bench_sk(a, wr, ss, best[1], args.iters)  # the same winner on the row layout (#3)
+            def gb(t): return wbytes / (t * 1e-6) / 1e9
+            print(f"{name:8s} N={N:5d} K={K:5d} M={M:2d}: 0.4.0 {t_040:6.1f} | tiles {t_c:6.1f} | default "
+                  f"{t_d:6.1f} -> best {best[1]} {best[0]:6.1f} us ({gb(best[0]):4.0f} GB/s), rows {t_rows:6.1f}"
+                  f"  {t_040 / best[0]:.2f}x vs 0.4.0  [{time.time() - t0:.0f}s]", flush=True)
+            top = sorted([r for r in rows if r[1] is not None], key=lambda r: r[1])[:5]
+            results[f"{name}:{M}"] = {"N": N, "K": K, "M": M, "v040": [cur7, t_040], "today": [cur7, t_c],
+                                      "default": [dflt, t_d], "best": [best[1], best[0]], "best_rows": t_rows,
+                                      "top5": top}
+            if best[1] != cur7 and best[0] <= 0.95 * base:
+                table.append(f"    ({GS}, {K}, {N}, {M}): {best[1]},  # {name}: {base:.0f} -> {best[0]:.0f} us")
                 new_table[(GS, K, N, M)] = tuple(best[1])
-        del ws, ss; torch.cuda.empty_cache()
+        del wr, wt, ws, ss; torch.cuda.empty_cache()
     json.dump(results, open(args.out, "w"), indent=1)
     print("written", args.out)
-    print("\n_GFX12X_SPLITK entries (>= 5 % faster than today):")
+    print("\n_GFX12X_SPLITK entries (>= 5 % faster than min(tile table, default)):")
     print("\n".join(table) if table else "    (none)")
     if args.table_out:
         json.dump({",".join(map(str, k)): list(v) for k, v in sorted(new_table.items())}, open(args.table_out, "w"),
