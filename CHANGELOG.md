@@ -10,6 +10,16 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.2] - 2026-09-30
+
+### Changed
+- Pin the PyTorch stack to the pre-ROCm-10.1 "sanctioned trio": **torch 2.11.0** + triton 3.6.0
+  + torchvision 0.24.1, down from torch 2.14.0 / triton 3.8.0 / torchvision 0.29.0. Per
+  [ROCm/ROCm#6406](https://github.com/ROCm/ROCm/issues/6406), torch >= 2.12 causes abnormally
+  high CPU usage after the first GPU operation; downgrading to torch 2.11 resolves it (the
+  bug is expected to be fixed in the ROCm 10.1 release, after which the stack can be bumped
+  again). `torchaudio` is not part of this image's stack, so no pin is added for it.
+
 ## [0.4.1] - 2026-09-27
 
 ### Added

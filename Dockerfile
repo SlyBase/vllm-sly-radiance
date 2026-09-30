@@ -8,7 +8,7 @@
 # No prebuilt component wheels and no checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
+# stack: torch 2.11.0, triton 3.6.0, torchvision 0.24.1, aiter v0.1.22.post1, vLLM v0.30.0,
 # all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
@@ -38,11 +38,11 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
 # renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCH_VERSION=2.14.0
+ARG TORCH_VERSION=2.11.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TRITON_VERSION=3.8.0
+ARG TRITON_VERSION=3.6.0
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.29.0
+ARG TORCHVISION_VERSION=0.24.1
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
 ARG AITER_VERSION=0.1.22.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
