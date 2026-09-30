@@ -59,6 +59,15 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   step gap **34.52 -> 33.72 ms (-2.3 %)**, KV pool **384,316** (the split-K loss of 405 tokens is
   offset now that the drafter's context-KV no longer needs a bf16 copy). The INT4 target arms of that
   window were not run (stopped early).
+- Window D (2026-09-29, split-K table of window B): INT4 step gap 42.68 -> 36.53 ms, BetterBench decode
+  (128 runs) **INT4 127.5 tok/s against MXFP4 128.1** in the same window; GSM8K INT4 0.83.
+- Window F2 (2026-09-30, image 0.4.1-rc5 with the window-E table, second starts): **INT4 all knobs off ->
+  on (with `RADIANCE_SKINNY_GEMM=all`) 42.73 -> 34.61 ms (-19.0 %)**, within 3 % of MXFP4 (33.61 ms);
+  KV pool 370,561 -> 375,820; GSM8K 200 0.835. Tokens per step 4.52 -> 4.24 on the four fixed prompts is
+  a different greedy text, not the drafter (MXFP4 moves as much between windows, 4.41 / 4.70).
+  **MXFP4 (production) all knobs on: 33.61 ms, BetterBench decode 131.0 tok/s** (128 runs; 0.4.0 in
+  production: 130.4), KV pool 384,316, concurrency 1 / 8: 121.5 / 416.1 tok/s. The tiled int4 lm_head
+  alone: 33.74 -> 33.61 ms (-0.4 %, bit-identical output).
 - Not adopted: merging GDN in_proj_ba into in_proj_qkvz (96 extra rows add a 129th tile -- 93.9 us
   merged vs 79.2 + 3.6 separate), so `RADIANCE_GDN_BA_W4` defaults to 0; a decode-attention retune
   at long context (the shipped rule is within 1 % of the best cell, ~470 GB/s at 32k); W4A8 int8.
