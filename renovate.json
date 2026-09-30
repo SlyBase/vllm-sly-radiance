@@ -10,6 +10,12 @@
   ],
   "automerge": false,
   "prConcurrentLimit": 0,
+  "logLevelRemap": [
+    {
+      "matchMessage": "lookupUpdates error",
+      "newLogLevel": "warn"
+    }
+  ],
   "docker-compose": {
     "enabled": false
   },
