@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [0.4.2] - 2026-09-29
+## [0.4.3] - 2026-09-30
 
 ### Added
 - **Weight-only NVFP4 (NVFP4A16) checkpoints load.** `patch_nvfp4_mxfp4.py` routes compressed-tensors'

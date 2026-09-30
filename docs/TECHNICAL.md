@@ -438,7 +438,7 @@ Launch: the production command below with `-e RADIANCE_NVFP4_MXFP4=1`, `--model 
 and `--quantization compressed-tensors` instead of `quark`; the other flags stay. The boot log prints one
 `[radiance.nvfp4]` line per converted layer with its requant error.
 
-**Weight-only NVFP4 (NVFP4A16, 0.4.2).** A checkpoint without `input_activations`
+**Weight-only NVFP4 (NVFP4A16, 0.4.3).** A checkpoint without `input_activations`
 (`bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4`, built by llm-compressor with the GDN a/b gates, lm_head,
 MTP head and vision tower in bf16) takes a different branch in `_get_scheme_from_parts`:
 `CompressedTensorsW4A4Fp4(use_a16=True)`, whose kernel selection forces Marlin outside SM100/103 and
@@ -447,7 +447,7 @@ scheme declares `input_global_scale` only as a loader home, so the checkpoint lo
 checkpoint's snapshot symlinks may point into an Xet blob store outside a mounted HF cache -- mount the
 model directory and pass it as `--model` with `--served-model-name` if the loader reports missing files.
 
-### What the requantization costs (0.4.2)
+### What the requantization costs (0.4.3)
 
 `radiance_nvfp4_diag.py` (`RADIANCE_NVFP4_DIAG`, measurement only, `--enforce-eager`) serves the NVFP4
 linears without the W4A8 kernel, dequantized to bf16 per forward: `native` (the checkpoint exactly),
