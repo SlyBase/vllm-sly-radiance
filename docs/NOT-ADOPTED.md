@@ -21,6 +21,15 @@ design reasons. Revisit an entry when its reason changes.
 | Top-k/top-p sampler kernels (`patch_topk_*`) | Measured the sampler's share: top-k 20 / top-p 0.95 cost 0.3 % of a step. |
 | 3-rank all-reduce and 5/4-bit wire (`patch_ar_3rank`, `patch_ar_qbits`) | Written for the older two-rank `radiance_allreduce.py`; this image ships StillDeadcode's N-rank module (TP=3 rides RCCL), and the 5/4-bit kernels are not in the rebased libr4d extras. The rest of ggz14's multi-GPU work is in (0.3.5, *Several GPUs*). |
 
+**Own measurements (W4A16 work, 0.4.1):**
+
+| Item | Why not |
+|---|---|
+| W4A8 int8 for the W4A16 GEMMs at M >= 32 (activations quantized per row and K tile in-kernel, int8 WMMA) | Measured (window D, 2026-09-29): never among the five fastest configs of any shape; removed. |
+| GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM (`RADIANCE_GDN_BA_W4`, kept, default 0) | Measured (window E): the 96 extra rows add a 129th tile, a nearly empty third wave on 64 CUs -- 93.9 us merged against 79.2 + 3.6 us for the two GEMMs. |
+| Decode-attention retune at long context | Measured (window E, `bench_decode_attn.py`): the shipped rule is within 1 % of the best of 100+ cells at 32k/96k (136 us per layer call at 32k, ~470 GB/s). |
+| Removing the GDN output `torch.zeros` / the spec-decode copy chains (~100 launches per step) | vLLM needs the zeroed rows for padded tokens (vllm#28182); the copies are the speculative-decoding bookkeeping. ~0.1-0.2 ms, not worth the risk. |
+
 **Other images and forks:**
 
 | Source | Why not |

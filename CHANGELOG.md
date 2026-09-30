@@ -10,6 +10,71 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.1] - 2026-09-27
+
+### Added
+- Split-K for the W4A16 Triton GEMM (`sly/patch_w4a16_tiles.py`, knob `RADIANCE_W4A16_SPLITK`, default on):
+  the stock kernel runs the whole K loop in one workgroup, so the N = 5120 projections at decode M get
+  160–320 workgroups for 64 CUs and stay latency-bound (INT4 target `down_proj`: 139 µs against 82 µs
+  for the MXFP4 split-K kernel on the same shape). Per-shape entries in `_GFX12X_SPLITK`; a shape
+  without an entry runs exactly as in 0.4.0. Affects compressed-tensors INT4 targets and the DFlash2
+  W4A16 drafter. The same kernel carries two cheaper dequant schemes (scale applied to the fp32 tile
+  result; bf16 magic-number nibble conversion with the zero point folded into the tile result) and an
+  interleave-free unpack, selectable per table entry. Split-K partials stay <= 1 MiB (the CUDA-graph
+  memory estimate charges them to the KV pool); `RADIANCE_W4A16_SPLITK_TABLE=<json>` loads a swept
+  table without a rebuild.
+- Serial split-K reduce: the program that finishes a tile last sums the partials in split order
+  (per-tile counter, self-resetting) -- deterministic, and one launch less per split call (134 per
+  step on the INT4 target at one request).
+- Tiled W4A16 weight layout (`RADIANCE_W4A16_TILED`, default on): 16-row x 128-K blocks of 1 KB, so
+  every row group a tile reads is one contiguous burst (the MXFP4 kernel's `WPERM` idea). The HIP
+  skinny path for M <= 5 reads the row layout and is skipped for tiled weights.
+- Fusions for W4A16 layers (`sly/patch_w4a16_fuse.py`): MLP gate_up + silu(gate) * up in one GEMM
+  (`RADIANCE_W4A16_SILU`); GDN in_proj_ba re-quantized to int4 rows of in_proj_qkvz, one GEMM with two
+  contiguous outputs (`RADIANCE_GDN_BA_W4`, INT4 target; frees the bf16 ba weights); the DFlash
+  context-KV projection on the drafter's own int4 rows instead of a 105 MB bf16 copy read every step
+  (`RADIANCE_DFLASH_KV_W4`, exact, frees ~78 MB for the KV cache); the DFlash2 grouped-conv
+  kernel_projection (bf16, 10 calls per step) re-quantized to int4 (`RADIANCE_DFLASH_CONV_W4`; changes
+  proposals only, the target verifies every token).
+- The int4 lm_head in the tiled layout too (`RADIANCE_LMHEAD_INT4_TILED`, default on with
+  `RADIANCE_W4A16_TILED`); it is the largest W4A16 GEMM of a step (2 x 656 MB).
+- `sly/check_w4a16_fuse.py`: the post-load transforms end to end on stand-in layers against the unfused
+  computation (fused silu, merged split, context-KV, conv projection, plain calls into transformed layers).
+- `sly/check_w4a16_splitk.py` (numerics against an fp32 reference and bit-identity of the new paths,
+  CPU via the Triton interpreter or GPU) and `bench_w4a16_tiles.py --splitk`.
+
+### Measured
+- One R9700, 300 W, production arguments, one GPU window (2026-09-28), step gap from streamed greedy
+  requests (median chunk interval, deterministic): **RedHatAI/Qwen3.8-27B-INT4 42.70 → 37.43 ms
+  (−12.4 %)**, 36.69 ms (−14.1 %) together with `RADIANCE_SKINNY_GEMM=all`; the control arm repeated
+  at 42.76 ms. **Quark MXFP4 (production) 34.47 → 34.15 ms (−0.9 %, drafter GEMMs).** At unchanged
+  acceptance (4.29 / 4.21 tokens per step) INT4 decode is ~125 instead of 107.8 tok/s; the gap to
+  MXFP4 shrinks from −19 % to −7 % step time. At 8 concurrent requests INT4 stays far behind
+  (297 vs 426 tok/s: M = 40–64, where the W4A16 kernels reach only ~250 GB/s).
+- GSM8K 200 (cot zero-shot, greedy): INT4 0.825 (0.820 before), MXFP4 0.850 (baseline 0.835–0.845).
+- Window E (2026-09-29, 300 W, tiled weights, serial split-K, all fusions): kernel sweep at M = 8 --
+  down_proj 150.8 -> 87.7 us, out/o 70 -> 40, GDN qkvz 110.6 -> 79.2, attention qkv 98 -> 72, gate_up
+  206 -> 176, drafter context-KV 194 (bf16) -> 54, drafter qkv / o / fc 47 / 48 / 207 -> 37 / 32 / 126; the
+  tiled layout alone is worth 1.1-1.6x at M <= 16. Quark MXFP4 (production), all new knobs off -> on:
+  step gap **34.52 -> 33.72 ms (-2.3 %)**, KV pool **384,316** (the split-K loss of 405 tokens is
+  offset now that the drafter's context-KV no longer needs a bf16 copy). The INT4 target arms of that
+  window were not run (stopped early).
+- Window D (2026-09-29, split-K table of window B): INT4 step gap 42.68 -> 36.53 ms, BetterBench decode
+  (128 runs) **INT4 127.5 tok/s against MXFP4 128.1** in the same window; GSM8K INT4 0.83.
+- Window F2 (2026-09-30, image 0.4.1-rc5 with the window-E table, second starts): **INT4 all knobs off ->
+  on (with `RADIANCE_SKINNY_GEMM=all`) 42.73 -> 34.61 ms (-19.0 %)**, within 3 % of MXFP4 (33.61 ms);
+  KV pool 370,561 -> 375,820; GSM8K 200 0.835. Tokens per step 4.52 -> 4.24 on the four fixed prompts is
+  a different greedy text, not the drafter (MXFP4 moves as much between windows, 4.41 / 4.70).
+  **MXFP4 (production) all knobs on: 33.61 ms, BetterBench decode 131.0 tok/s** (128 runs; 0.4.0 in
+  production: 130.4), KV pool 384,316, concurrency 1 / 8: 121.5 / 416.1 tok/s. The tiled int4 lm_head
+  alone: 33.74 -> 33.61 ms (-0.4 %, bit-identical output).
+- Not adopted: merging GDN in_proj_ba into in_proj_qkvz (96 extra rows add a 129th tile -- 93.9 us
+  merged vs 79.2 + 3.6 separate), so `RADIANCE_GDN_BA_W4` defaults to 0; a decode-attention retune
+  at long context (the shipped rule is within 1 % of the best cell, ~470 GB/s at 32k); W4A8 int8.
+- Kernel level (M = 8, DRAM-cold, `bench_w4a16_tiles.py --splitk`): down_proj 150 → 95 µs,
+  out/o 61 → 48, gate_up 200 → 178, GDN qkvz 106 → 82, attention qkv 89 → 76, drafter qkv 53 → 39,
+  drafter fc 197 → 131.
+
 ## [0.4.0] - 2026-09-25
 
 ### Changed

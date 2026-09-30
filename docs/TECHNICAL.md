@@ -446,6 +446,34 @@ load-time INT4 → MXFP4 requant (the NVFP4 approach) would put it on the tuned 
 int4 → e2m1/e8m0 per 32 is a coarser double rounding than NVFP4's, and the same base model exists as
 direct Quark MXFP4 — not planned.
 
+### W4A16 on gfx1201 (0.4.1)
+
+A rocprof trace of both checkpoints in one window (2026-09-28) put the whole INT4 decode gap into the
+W4A16 GEMMs: step 42.9 vs 34.8 ms, and the per-shape GEMM differences added up to it (down_proj 132 us
+against 82 for the MXFP4 kernel, out/o 65 against 41, gate_up 189 against 171, ...); acceptance was at
+parity. The stock `_triton_w4a16_skinny_fmt_kernel` loses there for three reasons, each fixed in
+`sly/patch_w4a16_tiles.py`:
+
+- **No split-K.** A N = 5120 projection at M = 8 gets 160-320 workgroups for 64 CUs and stays latency-bound
+  (266-331 GB/s). Split-K over group-aligned K ranges; the partials are summed by the program that finishes
+  a tile last (a per-tile counter that resets itself), in split order -- deterministic, and no second launch.
+  Partials stay <= 1 MiB: vLLM measures the CUDA-graph memory as a drop in free device memory during a trial
+  capture and charges it to the KV pool, and 1-10 MiB allocator requests take 20 MiB segments.
+- **Dequant cost.** `(q - 8) * scale` converts every nibble to bf16 and multiplies it; with BLOCK_K = group
+  size one scale covers the whole tile, so the scale can go on the fp32 tile result (DEQ 1), and
+  `0x4300 | q` is exactly 128 + q in bf16 -- the zero point then folds into `rowsum(A) * (128 + zp)` (DEQ 2).
+- **Row layout.** Each tile reads 64 bytes of a row per K step, rows K/2 bytes apart. Weights are stored in
+  1 KB blocks of 16 rows x 128 K instead (`RADIANCE_W4A16_TILED`), the MXFP4 kernel's `WPERM` idea: 1.1-1.6x
+  on the best config at M <= 16.
+
+Around the kernel (`sly/patch_w4a16_fuse.py`, post-load transforms before profiling and capture): the MLP's
+gate_up rows are interleaved so one GEMM writes silu(gate) * up; the DFlash context-KV projection runs on
+the drafter's own int4 K/V rows instead of a 105 MB bf16 copy that every step read in full (194 -> 54 us,
+exact); the DFlash2 grouped-conv kernel_projection (bf16, 10 calls per step) is re-quantized to int4 (it only
+moves proposals). A table from `bench_w4a16_tiles.py --splitk` picks tile, split, dequant, unpack and K step
+per (shape, M bucket); `RADIANCE_W4A16_SPLITK_TABLE=<json>` swaps it without a rebuild. Measured results are
+in the CHANGELOG (0.4.1) and *Not adopted*.
+
 ## ParoQuant, AutoRound and escha checkpoints (0.3.6, opt-in)
 
 ggz14's three other weight formats are in the image, each as a single-file HIP extension built in
