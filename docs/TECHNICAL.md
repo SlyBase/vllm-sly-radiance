@@ -438,6 +438,65 @@ Launch: the production command below with `-e RADIANCE_NVFP4_MXFP4=1`, `--model 
 and `--quantization compressed-tensors` instead of `quark`; the other flags stay. The boot log prints one
 `[radiance.nvfp4]` line per converted layer with its requant error.
 
+**Weight-only NVFP4 (NVFP4A16, 0.4.3).** A checkpoint without `input_activations`
+(`bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4`, built by llm-compressor with the GDN a/b gates, lm_head,
+MTP head and vision tower in bf16) takes a different branch in `_get_scheme_from_parts`:
+`CompressedTensorsW4A4Fp4(use_a16=True)`, whose kernel selection forces Marlin outside SM100/103 and
+aborts the load on ROCm. `patch_nvfp4_mxfp4.py` now routes that branch to the same requant scheme; the
+scheme declares `input_global_scale` only as a loader home, so the checkpoint loads unchanged. That
+checkpoint's snapshot symlinks may point into an Xet blob store outside a mounted HF cache -- mount the
+model directory and pass it as `--model` with `--served-model-name` if the loader reports missing files.
+
+### What the requantization costs (0.4.3)
+
+`radiance_nvfp4_diag.py` (`RADIANCE_NVFP4_DIAG`, measurement only, `--enforce-eager`) serves the NVFP4
+linears without the W4A8 kernel, dequantized to bf16 per forward: `native` (the checkpoint exactly),
+`requant` (this image's MXFP4 requant, bf16 activations) and `fold` (see below);
+`RADIANCE_NVFP4_DIAG_A8=1` adds the kernel's per-token e4m3 activations. `sly/bench_fidelity.py` records
+top-20 prompt logprobs of every arm on 14,125 tokens (code, legal prose, a German and an English
+Markdown text), `sly/check_fidelity.py` compares them with the `native` arm. ThinkingCap NVFP4A16,
+0.4.1-rc3 image, 2026-09-29:
+
+| arm | dNLL vs native (95 %) | KL | top-1 agreement |
+|---|---|---|---|
+| `requant`, bf16 activations | +0.088 (±0.012) | 0.126 | 91.3 % |
+| serve path (W4A8 kernel), eager | +0.094 (±0.012) | 0.133 | 91.1 % |
+| serve path, compiled + DFlash2 (the live server) | +0.093 (±0.012) | 0.133 | 91.3 % |
+| serve path with `RADIANCE_NVFP4_BF16_LAYERS=` (a/b gates bf16) | +0.094; vs serve path +0.000 (±0.005) | 0.133 | 91.1 % |
+| `fold`, bf16 activations | +0.002 (±0.003) | 0.007 | 97.9 % |
+| `fold` + e4m3 activations | +0.005 (±0.004) | 0.013 | 97.2 % |
+
+The requantization is the whole loss: on code the NLL rises from 0.29 to 0.42 and the top-1 token changes
+at 9 % of all positions, while the fp8 activations cost 0.006 and compile vs eager nothing. The cause is
+the scale, not the block size: an NVFP4 block is 16 e2m1 values times an e4m3 scale (3 mantissa bits),
+MXFP4 only has powers of two, so every value is rounded again onto a coarser grid. Offline, on six real
+layers (relRMS against the NVFP4 weights): MXFP4/32 0.108–0.112, MXFP4 with 16-blocks 0.106–0.109,
+**fold 0.021–0.022**. The GDN a/b gates are not the problem either (row 4), and keeping them bf16
+costs +0.6 ms/step (34.53 -> 35.14 ms, 300 W, compiled + DFlash2), so `RADIANCE_NVFP4_BF16_LAYERS` keeps its
+`in_proj_ba` default. The serve path itself runs at the Quark step gap.
+
+**NV fold.** The W4A8 kernel already folds the MX block exponent into the weight byte: `kMag[d]` holds the
+eight e2m1 magnitudes shifted down by `d = Wref[n] - Ws[blk, n]` binades as e4m3 bytes, resolved four at
+a time by `v_perm_b32`, and the per-row factor is applied once in the epilogue. The same lookup indexed by
+`(d, m)` -- `m` the 3-bit mantissa of the e4m3 block scale -- stores e2m1 x m x 2^-d rounded to e4m3,
+which is exact for every even code and within one e4m3 ulp otherwise. That is the `fold` arm: +0.005 NLL
+with fp8 activations instead of +0.093, i.e. ~95 % of the loss back, with the checkpoint's packed weights
+used as stored (no requant pass at load). Cost: a 16x8x2-word table instead of 16x2, 16-blocks instead of
+32 (one scale byte per 16 weights: +5.9 % weight bytes, ~-4 % decode estimated), and a per-row fp32
+factor for the per-partition global scale where the epilogue now applies 2^Wref. The three fold sites
+(folded GEMM, A-tiled prefill, decode band) share the pattern. Not built yet.
+
+**Direct MXFP4 from bf16.** ggz14's study puts NVFP4 at 0.113 relRMS against bf16 and a direct bf16 ->
+MXFP4 quantization at 0.112, against 0.158 for the requant. Where the bf16 original is available, an
+offline MXFP4 conversion (compressed-tensors `mxfp4-pack-quantized` loads through
+`CompressedTensorsW4A4Mxfp4` -> `init_mxfp4_linear_kernel` -> this kernel, no code change) should land
+near the `native` row at the Quark speed; not measured.
+
+**int4 lm_head and int4 embedding** (both on in production for every checkpoint) measured the same way,
+against the `native` arm with a bf16 head and bf16 embedding: `RADIANCE_LMHEAD_INT4=1` +0.003 (±0.002),
+top-1 96.5 %; plus `RADIANCE_EMBED_BITS=4` +0.006 (±0.003) in total. Small next to the requant and paid for
+with ~3.5 GiB of KV pool, so they stay on.
+
 **INT4 (compressed-tensors W4A16, `RedHatAI/Qwen3.8-27B-INT4`)** runs on vLLM's `rdna_hybrid_w4a16` kernels,
 not on the W4A8 kernel, so the MXFP4 GEMM work (cells, A-tiled, WPERM, fused norm quant) does not apply.
 What applies already: the target tile table (`sly/patch_w4a16_tiles.py --target`), int4 lm_head (CT hook),

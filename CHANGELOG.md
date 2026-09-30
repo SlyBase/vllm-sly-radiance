@@ -10,6 +10,28 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.3] - 2026-09-30
+
+### Added
+- **Weight-only NVFP4 (NVFP4A16) checkpoints load.** `patch_nvfp4_mxfp4.py` routes compressed-tensors'
+  `CompressedTensorsW4A4Fp4(use_a16=True)` branch to the radiance requant scheme under
+  `RADIANCE_NVFP4_MXFP4=1`; stock forces Marlin there and aborted the load on ROCm
+  (`bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4`).
+- `radiance_nvfp4_diag.py` + `RADIANCE_NVFP4_DIAG=native|requant|fold` (`RADIANCE_NVFP4_DIAG_A8=1`):
+  measurement-only NVFP4 schemes (bf16 dequant per forward, `--enforce-eager`) -- the exact checkpoint as
+  reference, the requant with bf16 activations, and an emulated native NVFP4 kernel path ("NV fold").
+- `sly/bench_fidelity.py` / `sly/check_fidelity.py`: deterministic prompt-logprob quality gate (top-20,
+  14k tokens, dNLL ±0.012, KL, top-1 agreement) for numerics changes; `sly/check_nvfp4_diag.py` CPU check.
+
+### Measured
+- ThinkingCap NVFP4A16 (docs/TECHNICAL.md, *What the requantization costs*): the NVFP4 -> MXFP4 requant
+  costs +0.093 NLL against the exact checkpoint (top-1 agreement 91 %); fp8 activations +0.006, the GDN
+  a/b gates in MXFP4 vs bf16 ±0.000. An emulated NV fold (e2m1 x e4m3 block scale folded into the e4m3
+  weight byte, as the kernel folds the MX exponent) with fp8 activations: +0.005 (~95 % of the loss
+  back) -- the candidate for a native NVFP4 kernel path. int4 lm_head + int4 embedding: +0.006.
+- Speed of the ThinkingCap serve path (300 W, compiled + DFlash2, short prompt): step 34.5 ms, i.e. the
+  Quark step gap; `RADIANCE_NVFP4_BF16_LAYERS=` (bf16 a/b gates) is +0.6 ms/step slower for no measurable
+  accuracy, so the `in_proj_ba` default stays (its comment no longer cites the rejected GDN merge).
 ## [0.4.2] - 2026-09-30
 
 ### Changed
