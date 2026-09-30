@@ -217,7 +217,9 @@ cache, `--max-model-len 262144`), only `--model` / `--quantization` and the form
   (+4.7 %); that was trajectory noise, not the drafter (see below). NVFP4 costs ~10k KV tokens (its
   fp8 → bf16 → int4 lm_head transient) and its GSM8K is within noise.
 - **INT4 W4A16** runs on vLLM's `rdna_hybrid_w4a16` kernels, not on the W4A8 MXFP4 GEMM: half the
-  prefill, −17 % decode. Its HF repo's `refs/main` pointed at an incomplete snapshot in our cache;
+  prefill, −17 % decode (0.3.6). From 0.4.1 on, split-K, the tiled W4A16 layout and the fusions bring its
+  step gap from 42.7 to 34.6 ms (MXFP4 33.6 ms) and its decode to 127.5 tok/s against MXFP4's 128.1 in
+  the same window (see CHANGELOG 0.4.1); prefill and concurrency 8 are still behind. Its HF repo's `refs/main` pointed at an incomplete snapshot in our cache;
   pin `--revision` if the load reports missing weight files.
 - **ParoQuant** works but is not tuned for a single card (see *ParoQuant, AutoRound and escha*);
   ggz14's numbers are from 2 × R9700.

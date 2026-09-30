@@ -8,7 +8,7 @@
 # No prebuilt component wheels and no checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
+# stack: torch 2.11.0, triton 3.6.0, torchvision 0.24.1, aiter v0.1.22.post1, vLLM v0.30.0,
 # all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
@@ -38,11 +38,11 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
 # renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCH_VERSION=2.14.0
+ARG TORCH_VERSION=2.11.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TRITON_VERSION=3.8.0
+ARG TRITON_VERSION=3.6.0
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.29.0
+ARG TORCHVISION_VERSION=0.24.1
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
 ARG AITER_VERSION=0.1.22.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
@@ -384,6 +384,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # sly/patch_lmhead_int4_ct.py puts the same hook into CompressedTensorsConfig.get_quant_method, for a
 # compressed-tensors W4A16 target (RedHatAI/Qwen3.8-27B-INT4, lm_head in `ignore` = bf16); the DFlash
 # drafter's head has no quant_config and is shared, so only the target head changes.
+# sly/patch_w4a16_fuse.py wires the W4A16 fusions of patch_w4a16_tiles into the model runner (post-load
+# transforms), Qwen2MoeMLP/Qwen2MLP (gate_up + silu), the GDN layer (qkvz + ba) and the DFlash context-KV
+# projection (int4 rows instead of a 105 MB bf16 copy), and puts its knobs into compile_factors; runs after
+# patch_fused_norm_quant (shared anchors) and patch_nvfp4_compile_key (the compile_factors line).
 # sly/patch_fused_norm_quant.py hooks radiance_fused_norm.py (0.1.6, RADIANCE_FUSED_NORM_QUANT=1,
 # default off) into Qwen3.5/Qwen3-Next: the decoder add+rms_norm, the MLP silu*up and the GDN
 # gated norm each end in the per-token fp8 quant (radiance_add_rms_quant / _silu_mul_quant /
@@ -421,7 +425,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_mamba_align_retire \
+             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse sly/patch_mamba_align_retire \
              sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
       echo "== applying $p =="; \
