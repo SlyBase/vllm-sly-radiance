@@ -12,6 +12,9 @@ weight_packed / weight_scale, _get_weight_params / _transform_param), against th
   * DFlash context-KV on the drafter's own int4 K/V rows: equal to the dequantized bf16 fused weight the
     stock path would build (same codes, same scales),
   * DFlash2 grouped-conv kernel_projection -> RadianceW4Linear within the int4 error,
+  * RADIANCE_DFLASH_BF16 (default 0): the drafter's W4A16 rows dequantized to a bf16 weight once
+    (_radiance_w_bf16, packed rows kept), apply_weights runs one plain GEMM on it, silu-fused layers
+    are never expanded, and off by default the silu fusion still applies,
   * the model-source markers: no transform where the call site is missing.
 
 CPU (Triton interpreter), in a plain `docker run` without device flags, after applying the patch:
@@ -164,6 +167,30 @@ kp = conv.kernel_projection
 out = call(lambda *a: kp(x), lambda *a: H._radiance_w4a16_gemm_impl(x, kp.w_q, kp.w_s, kp.group_size))
 rel = ((out.cpu().float() - ref_c).square().mean() / ref_c.square().mean()).sqrt().item()
 report(out.shape == (8, 64) and rel < 0.15, "conv projection int4", f"rel rms {rel:.3f}")
+
+# --- RADIANCE_DFLASH_BF16: the drafter's W4A16 rows dequantized once at load, plain GEMM after ---
+os.environ["RADIANCE_DFLASH_BF16"] = "1"
+bf = MLP(64)
+cnt = H.radiance_w4a16_postload(conv, bf)  # conv stands in for the (unrelated) target model
+exp = getattr(bf.gate_up_proj, "_radiance_w_bf16", None)
+err_w = (exp.cpu().float() - bf.gate_up_proj.ref_w).abs().max().item() if exp is not None else float("nan")
+report(cnt["bf16"] == 1 and exp is not None and exp.dtype == DT and err_w <= fl(bf.gate_up_proj.ref_w),
+       "bf16 pre-expansion: postload dequantizes the W4A16 rows (packed rows kept)", f"err {err_w:.3e}")
+rk = H.RDNAHybridW4A16LinearKernel.__new__(H.RDNAHybridW4A16LinearKernel)  # the real apply_weights, no __init__
+rk.config, rk.w_q_name, rk.w_s_name, rk.w_zp_name = types.SimpleNamespace(group_size=GS), "weight_packed", "weight_scale", None
+out = rk.apply_weights(bf.gate_up_proj, x)
+err = (out.cpu().float() - (x.cpu().float() @ bf.gate_up_proj.ref_w.t())).abs().max().item()
+report(out.shape == (8, 128) and out.dtype == DT and err <= fl(ref),
+       "bf16 pre-expansion: apply_weights is one plain GEMM on the expanded weight", f"err {err:.3e}")
+report(H._radiance_postload_bf16(bf.gate_up_proj) is False, "bf16 pre-expansion: idempotent on an expanded layer")
+sil = MLP(64)
+report(H._radiance_postload_mlp(sil) and H._radiance_postload_bf16(sil.gate_up_proj) is False,
+       "bf16 pre-expansion: a silu-fused layer is never expanded (interleaved rows)")
+del os.environ["RADIANCE_DFLASH_BF16"]
+off = MLP(64)
+cnt = H.radiance_w4a16_postload(conv, off)
+report(cnt["bf16"] == 0 and cnt["silu"] == 1 and not hasattr(off.gate_up_proj, "_radiance_w_bf16"),
+       "bf16 pre-expansion: off by default, the silu fusion still applies")
 
 # --- markers: a model source without the call site is left alone ---
 NoSite = type("NoSite", (MLP,), {"__module__": "radiance_no_call_site"})
