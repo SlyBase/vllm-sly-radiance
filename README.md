@@ -145,6 +145,8 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
 | `RADIANCE_LMHEAD_INT4` | `1` | int4 vocabulary head (656 MB instead of 2.5 GB per call; GSM8K unchanged). `RADIANCE_LMHEAD_FP8=1` is the more exact fallback |
+| `RADIANCE_LMHEAD_INT2` | `1` (with greedy decoding) | the 2-bit greedy vocabulary head: 2-bit coarse pass + bf16 top-16 re-rank, ≈7.5× less head traffic per decode step than int4; greedy-only (declines under sampling, byte-identical default otherwise) |
+| `RADIANCE_DFLASH_BF16` | `0` (opt-in) | expands the drafter's W4A16 rows to bf16 at load: +3.22 GiB VRAM, 3.88× the hot-path weight budget; default path byte-identical |
 | `RADIANCE_FUSED_NORM_QUANT` | `1` | fused norm/activation + fp8 quant in front of every W4A8 GEMM |
 | `RADIANCE_KV_GROUP_SIZE` | `8` | groups the KV cache pages 2+6+1 instead of padding to the drafter's bucket: more KV tokens |
 | `RADIANCE_EMBED_INT8` + `RADIANCE_EMBED_BITS` | `1` + `4` | int4 embedding table, 1.76 GiB more KV |

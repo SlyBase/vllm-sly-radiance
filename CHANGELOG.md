@@ -10,6 +10,30 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.4] - 2026-10-02
+
+### Added
+- **Greedy int2 lm_head** (`RADIANCE_LMHEAD_INT2=1`, `sly/mxfp4/radiance_lmhead_int2.py` +
+  `sly/patch_lmhead_int2.py`): two-stage vocabulary head — a 2-bit coarse pass over all 151,936 rows
+  and a bf16 re-rank of the top-16 — with roughly 7.5× less lm_head weight traffic per decode step
+  than the int4 head (≈1.26 GiB saved at [151936, 5120]). Greedy-only: it declines under sampling
+  and whenever `RADIANCE_LMHEAD_INT4` is active, so the default path is byte-identical.
+  Pre-flight: `sly/check_lmhead_int2.py` (real-weight coverage gate) and 11 CPU unit tests.
+- **Drafter bf16 pre-expansion** (`RADIANCE_DFLASH_BF16=1`, default off): the DFlash2 drafter's W4A16
+  rows are dequantized once at the post-load hook into per-layer bf16 weights, and its `apply_weights`
+  runs plain bf16 GEMMs; +3.22 GiB VRAM for 3.88× the hot-path weight budget. The default path is
+  byte-identical (template parse + packer round-trip validated).
+- **W4A8 prefill cell sweep** (`sly/mxfp4/bench_prefill_cells.py`): the prefill counterpart of
+  `bench_decode_cells.py` — M = 96…8192, row-major vs fragment-tiled arms, `--check` validates every
+  cell against an independent fp32 reference before any timing counts.
+- `sly/audit_kernel_binary.sh`: a CPU-only VGPR/spill audit of the compiled kernel binaries
+  (`--vgpr-max 213 --spill-max 0 --strict`), run against the image's .so as a per-kernel record.
+
+### Measured
+- CPU only so far: all 11 int2 unit tests pass and the packer round-trip is bit-exact; the greedy
+  coverage gate (≥ 99.5 % in the coarse top-16 on real weights) runs in a 300 W GPU window, and the
+  production numbers follow at the acceptance gate.
+
 ## [0.4.3] - 2026-09-30
 
 ### Added
