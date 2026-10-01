@@ -146,6 +146,7 @@ def main(a):
                               M, N, K, stream)
 
             ref = None
+            rm_check = None
             if a.check:
                 ref = R._exact_ref(q_rm, s_rm, W[0], WS[0], N, K)
 
@@ -183,7 +184,9 @@ def main(a):
                 us_at = time_arm(at_call, copies, a.iters, a.reps, check=at_check)
                 rows.append((name, N, K, M, "atiled", us_at, wbytes,
                              wbytes + M * K + M * N * 2))
-            del y, res, wgt, out, q_rm, s_rm, q_at, s_at
+            # out / q_* / s_* stay referenced by the closures above (rm_call, at_call),
+            # so they free when the closures die at the end of this iteration
+            del y, res, wgt
         W = WS = WR = None
         torch.cuda.empty_cache()
 
