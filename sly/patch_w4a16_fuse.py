@@ -7,7 +7,9 @@ rdna_hybrid_w4a16.py (patch_w4a16_tiles); this only wires them in:
      right after the drafter is loaded -- inside the load memory profile, before profiling and graph
      capture. It interleaves the gate/up rows of every W4A16 MLP (fused silu), merges each GDN layer's
      bf16 in_proj_ba into its W4A16 in_proj_qkvz as int4 rows, and re-quantizes the DFlash2 grouped-conv
-     kernel_projection (bf16, 10 calls per step) to int4.
+     kernel_projection (bf16, 10 calls per step) to int4. With RADIANCE_DFLASH_BF16=1 the drafter arm
+     instead dequantizes its W4A16 row sets to bf16 weights once (apply_weights runs plain GEMMs) and
+     skips the silu / conv int4 transforms.
   2. qwen2_moe.py Qwen2MoeMLP.forward (the dense MLP of Qwen3.5/3.8) and qwen2.py Qwen2MLP.forward (the
      drafter's Qwen3MLP): gate_up GEMM + silu(gate) * up in one kernel (radiance_w4a16_silu) when the
      layer was interleaved. Sets _RADIANCE_W4_SILU so the post-load step knows the call site exists.
@@ -18,12 +20,15 @@ rdna_hybrid_w4a16.py (patch_w4a16_tiles); this only wires them in:
 
   5. envs.py compile_factors: RADIANCE_W4A16_*, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_*,
      RADIANCE_LMHEAD_INT4_TILED -- the transforms
-     change the traced graph (fused ops instead of gate_up + act, one merged GEMM, a replaced module),
-     so a knob flip must not replay an AOT graph compiled with the other setting.
+     change the traced graph (fused ops instead of gate_up + act, one merged GEMM, a replaced module,
+     or a plain GEMM on a load-time bf16 weight), so a knob flip must not replay an AOT graph compiled
+     with the other setting.
 
 Every site keeps the stock path when its layer was not transformed (MXFP4 target, bf16, other
 quantizations). Knobs: RADIANCE_W4A16_SILU, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_CONV_W4,
-RADIANCE_DFLASH_KV_W4 (default 1; RADIANCE_GDN_BA_W4 default 0 since window E). Runs after sly/patch_fused_norm_quant (its anchors include the
+RADIANCE_DFLASH_KV_W4 (default 1; RADIANCE_GDN_BA_W4 default 0 since window E), RADIANCE_DFLASH_BF16
+(default 0: the load-time bf16 expansion of the drafter's W4A16 rows, see patch_w4a16_tiles).
+Runs after sly/patch_fused_norm_quant (its anchors include the
 fused-norm lines) and sly/patch_nvfp4_compile_key (the compile_factors line).
 """
 import sysconfig

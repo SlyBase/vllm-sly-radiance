@@ -31,6 +31,14 @@ nibble conversion with zero point and scale folded into the tile result) and an 
 (UNPACK 1: 8 dots against stride-8 activation columns), selectable per table entry. Entries of
 _GFX12X_SPLITK take precedence over the tile table; split_k 1 with the stock dequant runs the stock kernel,
 so such a row is bit-identical to the tile table. RADIANCE_W4A16_SPLITK=0 disables the table.
+
+RADIANCE_DFLASH_BF16 (default 0): the drafter's own W4A16 row sets are also dequantized once at the
+post-load hook into a per-layer bf16 weight (layer._radiance_w_bf16); apply_weights then runs one
+plain GEMM instead of unpacking the packed rows on every step. The packed rows stay (the int4
+context-KV path reads them), the drafter's silu / conv int4 transforms are skipped in this mode so
+all rows keep their natural order, and the lm_head (a ParallelLMHead scheme without .kernel) is
+never touched. Cost: +3.2 GiB VRAM for this drafter (context-expansion.md); check_w4a16_fuse.py
+covers the expansion, the apply_weights short-circuit and the guards on the CPU path.
 """
 
 import sysconfig
@@ -690,18 +698,61 @@ def _radiance_postload_gdn(mod):
     return True
 
 
+def _radiance_w4_unpack_bf16(w_q, w_s, group_size, chunk_rows=1024):
+    """Full dequant of one packed symmetric weight to the scales' dtype, [N, K]: the same elements
+    the GEMM kernels unpack per call -- nibble j of word i is K index 8*i + j, shift (j // 2) * 4 +
+    (j % 2) * 16, value (nibble - 8) * scale of its group (skinny or tiled w_q, scales [N, K/G])."""
+    rows_i32 = radiance_w4a16_untile(w_q).contiguous().view(torch.int32)
+    n, k8 = rows_i32.shape
+    k = k8 * 8
+    shifts = torch.tensor([(j // 2) * 4 + (j % 2) * 16 for j in range(8)], dtype=torch.int32,
+                          device=rows_i32.device)
+    out = torch.empty((n, k), dtype=w_s.dtype, device=rows_i32.device)
+    for r0 in range(0, n, chunk_rows):  # keep the shift / scale transients small at load time
+        r1 = min(r0 + chunk_rows, n)
+        q = ((rows_i32[r0:r1, :, None] >> shifts[None, None, :]) & 0xF).to(w_s.dtype).reshape(r1 - r0, k)
+        out[r0:r1] = q.sub_(8).mul_(w_s[r0:r1].repeat_interleave(group_size, dim=1))
+    return out
+
+
+def _radiance_postload_bf16(layer):
+    """RADIANCE_DFLASH_BF16=1: stash the full dequant of one W4A16 layer as _radiance_w_bf16 so
+    apply_weights runs a plain GEMM on it. The packed rows and scales stay in place (the int4
+    context-KV path of radiance_dflash_kv_project reads them), so the cost is the extra copy.
+    Returns True when the layer was expanded."""
+    if (getattr(layer, "_radiance_silu", False) or getattr(layer, "_radiance_ba", 0)
+            or getattr(layer, "_radiance_w_bf16", None) is not None):
+        return False  # rows interleaved for a fused op, or already expanded
+    parts = _radiance_w4_parts(layer)
+    if parts is None:
+        return False
+    kern, w_q, w_s = parts
+    layer._radiance_w_bf16 = _radiance_w4_unpack_bf16(w_q, w_s, kern.config.group_size)
+    return True
+
+
 def radiance_w4a16_postload(model, drafter=None):
     import os
     import sys
 
-    counts = {"silu": 0, "gdn_ba": 0, "conv_w4": 0}
+    counts = {"silu": 0, "gdn_ba": 0, "conv_w4": 0, "bf16": 0}
     silu_on = os.environ.get("RADIANCE_W4A16_SILU", "1") == "1"
     # GDN qkvz + ba merge: off by default -- the 96 extra rows add a 129th tile (a nearly empty third wave on
     # 64 CUs): 93.9 us merged vs 79.2 + 3.6 us separate at M = 8 (window E sweep, 2026-09-29)
     ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "0") == "1"
     conv_on = os.environ.get("RADIANCE_DFLASH_CONV_W4", "1") == "1"
+    # RADIANCE_DFLASH_BF16: the drafter runs plain GEMMs on load-expanded bf16 weights, so skip
+    # its silu / conv int4 transforms and keep every row set in its natural order
+    bf16_on = os.environ.get("RADIANCE_DFLASH_BF16", "0") == "1"
     for root in (model, drafter):
         if root is None:
+            continue
+        if bf16_on and root is drafter and model is not drafter:
+            for name, mod in list(root.named_modules()):
+                try:
+                    counts["bf16"] += _radiance_postload_bf16(mod)
+                except Exception as exc:  # never fail a model load on a speed transform
+                    sys.stderr.write(f"[radiance.w4a16] post-load bf16 expansion skipped for {name}: {exc!r}\n")
             continue
         for name, mod in list(root.named_modules()):
             try:
@@ -722,8 +773,11 @@ def radiance_w4a16_postload(model, drafter=None):
             _radiance_sk_locks(next(model.parameters()).device)  # MODE 2 counters, outside any capture
         except StopIteration:
             pass
-    sys.stderr.write(f"[radiance.w4a16] post-load: gate_up+silu fused {counts['silu']}, GDN qkvz+ba merged "
-                     f"{counts['gdn_ba']}, drafter conv projections int4 {counts['conv_w4']}\n")
+    msg = (f"[radiance.w4a16] post-load: gate_up+silu fused {counts['silu']}, GDN qkvz+ba merged "
+           f"{counts['gdn_ba']}, drafter conv projections int4 {counts['conv_w4']}")
+    if counts["bf16"]:
+        msg += f", drafter W4A16 rows expanded to bf16 {counts['bf16']}"
+    sys.stderr.write(msg + "\n")
     return counts
 
 
@@ -969,11 +1023,16 @@ apply(F,
       '        x_2d = x.reshape(-1, x.shape[-1])\n'
       '        N = w_q.shape[0]\n'
       '        out_shape = x.shape[:-1] + (N,)\n',
+      '        _radiance_w = getattr(layer, "_radiance_w_bf16", None)\n'
+      '        if _radiance_w is not None:\n'
+      '            # radiance (RADIANCE_DFLASH_BF16): the packed rows were dequantized to this bf16\n'
+      '            # weight once at load -- one plain GEMM, no per-call nibble unpack / scale fold\n'
+      '            return torch.nn.functional.linear(x, _radiance_w, bias)\n'
       '        x_2d = x.reshape(-1, x.shape[-1])\n'
       '        N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
       '        out_shape = x.shape[:-1] + (N,)\n',
-      'N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n        out_shape',
-      'rdna_hybrid_w4a16: apply_weights handles tiled weights')
+      'no per-call nibble unpack / scale fold',
+      'rdna_hybrid_w4a16: apply_weights handles tiled weights + a load-time bf16 expansion')
 apply(F,
       '            cu_count,\n'
       '            c.group_size,\n'
