@@ -23,8 +23,10 @@ check therefore has two parts:
        1 release above:  within tolerance (RDNA4 runs latest aiter for kernel coverage), noted
        2+ releases above: the PR body must carry a justification (mentions gfx1201 or the
                           sanctioned-stand rationale); without one the warn demands it.
-     The PR body is passed as GH_PR_BODY (see ci.yml); absent on push events -- then the
-     distance is noted but no justification is demanded.
+     The PR body (GH_PR_BODY) and PR comments (GH_PR_COMMENTS) are passed in (see ci.yml);
+     absent on push events -- then the distance is noted but no justification is demanded.
+     Renovate-generated PRs carry a template body, so justifications normally live in a
+     comment -- both are searched.
 
 Usage: python3 ci/check_aiter_contract.py --aiter-src DIR [--repo ROOT]
        --aiter-src = a dir whose aiter/ subdirectory is the package (the dry-run's sparse tree)
@@ -188,7 +190,6 @@ def check_drift(repo_root):
     if not (aiter_pin and vllm_pin):
         warn("drift check skipped: AITER_VERSION/VLLM_VERSION pins missing")
         return
-    pr_body = os.environ.get("GH_PR_BODY", "")
     try:
         req = urllib.request.Request(
             f"https://raw.githubusercontent.com/vllm-project/vllm/v{vllm_pin}/docker/Dockerfile.rocm_base",
@@ -213,10 +214,12 @@ def check_drift(repo_root):
         print(f"aiter drift OK: {aiter_pin} is 1 release above vLLM v{vllm_pin}'s sanctioned v{sanctioned} "
               f"(within tolerance -- RDNA4 runs latest aiter for kernel coverage)")
         return
-    # 2+ releases above the sanctioned stand: require a justification in the PR body
-    justified = bool(re.search(r"gfx1201|sanctioned|above (the )?sanctioned|kernel coverage|why.{0,40}(above|newer|bump)", pr_body, re.I))
+    # 2+ releases above the sanctioned stand: require a justification -- in the PR body OR a
+    # PR comment (renovate PRs carry a template body, so it usually lives in a comment)
+    just_text = os.environ.get("GH_PR_BODY", "") + "\n" + os.environ.get("GH_PR_COMMENTS", "")
+    justified = bool(re.search(r"gfx1201|sanctioned|above (the )?sanctioned|kernel coverage|why.{0,40}(above|newer|bump)", just_text, re.I))
     if justified:
-        print(f"aiter drift noted: {aiter_pin} is {dist} releases above vLLM v{vllm_pin}'s sanctioned v{sanctioned}; PR body justifies")
+        print(f"aiter drift noted: {aiter_pin} is {dist} releases above vLLM v{vllm_pin}'s sanctioned v{sanctioned}; justified in PR body/comment")
     else:
         warn(f"aiter {aiter_pin} is {dist} releases above vLLM v{vllm_pin}'s sanctioned AITER_BRANCH v{sanctioned} "
              f"-- add a one-line justification to the PR body (gfx1201 kernel coverage / why this release)")
