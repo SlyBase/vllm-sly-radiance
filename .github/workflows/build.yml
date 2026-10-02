@@ -49,9 +49,12 @@ jobs:
   image:
     # never for a PR from a fork (its code would execute on the self-hosted runner); own-
     # branch PRs are the build-check use case (a compile break before the merge, CPU-only).
+    # For a fork PR, head.repo.full_name is the fork's full name -> != -> skipped; for an
+    # own-branch PR it equals github.repository -> runs. Only evaluated when the trigger is a
+    # pull_request (the left side short-circuits every other event).
     if: >-
-      github.event_name != 'pull_request' ||
-      github.head_repo.owner.login == github.repo.owner.login
+      github.event != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, rocm-build]
     timeout-minutes: 300
     env:
