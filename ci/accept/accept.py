@@ -430,9 +430,17 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
         if not base:
             continue
         ratio = value / base
-        add(f"throughput conc {level}", ratio >= thresholds["aggregate_tps_min_ratio"],
+        # Conc 1 is an arrival metric: 24 sequential requests with idle gaps
+        # between them, so the aggregate mixes cold TTFT with host state and
+        # spreads ~20% run to run (0.4.5 warm runs: 91.8-108% of a freshly
+        # calibrated baseline), while conc 8 overlaps and is stable at ~1.0x.
+        # Same class of problem that demoted tokens/step to soft, but conc 1
+        # still gates real regressions -- wider band, not soft.
+        min_ratio = thresholds.get(f"aggregate_tps_min_ratio_conc_{level}",
+                                   thresholds["aggregate_tps_min_ratio"])
+        add(f"throughput conc {level}", ratio >= min_ratio,
             f"{value} t/s ({ratio:.3f}x)",
-            f">= {thresholds['aggregate_tps_min_ratio']:.2f}x of {base} t/s")
+            f">= {min_ratio:.2f}x of {base} t/s")
 
     spec = results.get("spec", {})
 
