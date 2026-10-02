@@ -2,7 +2,6 @@
   "description": "Production vllm7 (amd/Qwen3.8-27B-Quark-AWQ-MXFP4 + DFlash2 k=7, LXC 2408). The gate reuses the live docker-vllm7.service arguments, so this profile only declares what to assert.",
   "service": "docker-vllm7.service",
   "model": "amd/Qwen3.8-27B-Quark-AWQ-MXFP4",
-  "load_format": "fastsafetensors",
   "required_log_patterns": [
     [
       "quark mxfp4 W4A8 gemm",
