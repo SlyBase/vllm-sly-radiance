@@ -250,6 +250,29 @@ unaffected, and the failure happens while building the payload, before anything 
 launchers pass `-e VLLM_NO_USAGE_STATS=1`; add it to your own `docker run` if you assembled one by
 hand. `VLLM_NO_USAGE_STATS=0` restores both the telemetry and the traceback.
 
+## GPU not detected
+
+`rocm-smi` / `amd-smi` see the card, but every HSA path (`rocminfo`, `rocm-bandwidth-test`,
+torch/vLLM device enumeration) fails with `HSA_STATUS_ERROR_OUT_OF_RESOURCES` ("the runtime
+failed to allocate the necessary resources … spawn threads or create internal OS-specific
+events") and the precheck reports `No CUDA GPUs are available` / `arch check FAIL`. This
+signature isolates the failure to the **HSA runtime's KFD-context setup, not device access** —
+do not chase container device flags or image rebuilds while `rocm-smi` works.
+`rocm-bandwidth-test` is a best-effort, non-blocking startup sweep, so it is the symptom; the
+crash loop comes from vLLM's own HSA init.
+
+Recovery, in order (the startup precheck prints this block too):
+
+1. **Reboot the host.** Stale, state-dependent amdgpu/KFD state clears on a clean reboot — this
+   exact signature has been reproduced upstream and clears on reboot. Cheapest fix, try first.
+2. **Raise the container pids limit or run rootful.** Rootless Podman caps pids at 2048; HSA
+   plus the vLLM workers spawn past it. `ulimit`/`--pids-limit max`.
+3. **If it survives a clean reboot**, it is a host-kernel KFD regression. Capture evidence
+   *before* rebooting or it is gone: `strace -f` of the failing `hsa_init` (which syscall/ioctl
+   fails — KFD ioctl, ENOMEM from thread spawn, fd exhaustion), a `dmesg` diff before/after, and
+   `/sys/class/kfd/kfd/topology`. A 6.x LTS kernel is the workaround until the host-kernel fix
+   lands.
+
 ## Flags
 
 | Flag | Suggested | Notes |

@@ -73,6 +73,34 @@ def print_banner():
     print(dim(f"  radiance ") + c(ACCENT, f"v{ver}"))
 
 
+def _hsa_host_diagnostics():
+    """Host-side facts for an HSA-init failure: torch sees no GPU while rocm-smi still sees
+    the card. Prints the facts that triage it without a GPU window -- host kernel, /dev/kfd
+    access, container pids limit -- plus the recovery order. Every read is best-effort."""
+    kernel = os.uname().release
+    kfd = bad("missing") if not os.path.exists("/dev/kfd") else (
+        ok("present, readable") if os.access("/dev/kfd", os.R_OK) else bad("present, NOT readable"))
+
+    def _cg(name):
+        try:
+            with open(f"/sys/fs/cgroup/{name}") as f:
+                return f.read().strip()
+        except Exception:
+            return "?"
+
+    pids_max = _cg("pids.max")      # cgroup v2; the container's own view (rootless Podman: 2048)
+    pids_cur = _cg("pids.current")
+    print(bad("  >>> GPU enumeration failed. If rocm-smi still sees the card, this is host-side\n"
+              "      KFD state, not the image. In order:\n"
+              "      1. Reboot the host -- stale amdgpu/KFD state clears on a clean reboot.\n"
+              "      2. Raise the container pids limit (rootless Podman defaults to 2048; HSA +\n"
+              "         vLLM workers spawn past it) or run rootful.\n"
+              "      3. If it survives a clean reboot, capture `strace -f` of the failing\n"
+              "         hsa_init + `dmesg` BEFORE rebooting and file a report. See\n"
+              "         DOCKERHUB.md > 'GPU not detected'."))
+    print(dim(f"  host kernel : {kernel}\n  /dev/kfd    : {kfd}\n  pids limit  : {pids_max} (current {pids_cur})"))
+
+
 # ------------------------------------------------------------------ GPUs
 def section_gpus():
     hdr("GPUs")
@@ -91,6 +119,7 @@ def section_gpus():
           + os.environ.get("HIP_VISIBLE_DEVICES", "unset") + ")"))
     if n == 0:
         print("  " + bad("no GPUs visible; vLLM will not start"))
+        _hsa_host_diagnostics()
         return
 
     want = (os.environ.get("RADIANCE_GFX_ARCH")
@@ -111,6 +140,8 @@ def section_gpus():
 
     verdict = ok("PASS") if good == n else bad("FAIL")
     print(f"  arch check : {verdict} " + dim(f"({good}/{n} {want})"))
+    if good < n:
+        _hsa_host_diagnostics()
 
     # P2P: bidirectional peer access across every ordered pair
     if n >= 2:
