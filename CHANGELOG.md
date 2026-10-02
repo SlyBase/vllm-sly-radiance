@@ -10,6 +10,15 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.5] - 2026-10-02
+
+### Added
+- **Self-service HSA/KFD diagnostics** (issue #73): when GPU enumeration fails while `rocm-smi`
+  still sees the card, the startup precheck now prints the host-side facts that triage it
+  without a GPU window — host kernel, `/dev/kfd` access, container pids limit — plus the
+  recovery order (reboot first, raise the pids limit, then capture `strace`/`dmesg` evidence
+  before rebooting). `docs` and `radiance_preamble` only; the default GPU path is unchanged.
+
 ## [0.4.4] - 2026-10-02
 
 ### Added
