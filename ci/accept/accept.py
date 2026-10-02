@@ -60,12 +60,14 @@ def log(msg: str) -> None:
 class GpuWindow:
     """Thin client for /usr/local/sbin/gpu-window in LXC 2408."""
 
-    def __init__(self, target: str, key: str | None, owner: str, ttl: int, dry_run: bool = False):
+    def __init__(self, target: str, key: str | None, owner: str, ttl: int,
+                 dry_run: bool = False, load_format: str = "auto"):
         self.target = target
         self.key = key
         self.owner = owner
         self.ttl = ttl
         self.dry_run = dry_run
+        self.load_format = load_format
         self.held = False
 
     def _ssh(self, *args: str, timeout: int = 900) -> str:
@@ -101,7 +103,7 @@ class GpuWindow:
         return res
 
     def start(self, image: str, service: str) -> dict:
-        return self._json("start", image, service, timeout=2400)
+        return self._json("start", image, service, self.load_format, timeout=2400)
 
     def logs(self, lines: int = 4000) -> str:
         return self._ssh("logs", str(lines), timeout=300)
@@ -548,7 +550,9 @@ def main() -> int:
 
     results: dict = {}
     failures: list[str] = []
-    win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run)
+    load_format = profile.get("load_format", "auto")
+    win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
+                    load_format=load_format)
 
     try:
         log(f"status: {json.dumps(win.status())}")
