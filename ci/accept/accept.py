@@ -345,8 +345,12 @@ def run_betterbench(python: str, cwd: Path, base_url: str, model: str,
 
 
 def run_gsm8k(python: str, base_url: str, model: str, limit: int, out_dir: Path) -> dict:
+    # 16 concurrent completions: with temperature=0 the answers are deterministic, so
+    # the accuracy is independent of the serving concurrency, and 200 items decode in a
+    # fraction of the time. (Was 4: the eval, not the server, was the bottleneck, and
+    # every extra minute is production down.)
     model_args = (f"model={model},base_url={base_url}/v1/chat/completions,"
-                  f"num_concurrent=4,max_retries=3,timeout=600")
+                  f"num_concurrent=16,max_retries=3,timeout=600")
     cmd = [python, "-m", "lm_eval",
            "--model", "local-chat-completions",
            "--model_args", model_args,

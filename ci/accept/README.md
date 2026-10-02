@@ -70,10 +70,10 @@ fail open.
 
 ## Modes
 
-| | `fast` (~25 min) | `full` (~70 min) |
+| | `fast` (~22 min) | `full` (~27 min) |
 | --- | --- | --- |
 | when | every build | major/minor VERSION bump, or by hand |
-| BetterBench | conc 1, 8 · 24 requests | conc 1, 2, 4, 8, 16 · 48 requests |
+| BetterBench | conc 1, 8 · 24 requests | conc 1, 2, 4, 8 · 48 requests |
 | GSM8K | — | 200 items |
 | everything else | yes | yes |
 
@@ -157,7 +157,7 @@ sudoers whitelist and an SSH forced command.
 
 ### Alerts during a window
 
-A window takes port 8000 down for 13–25 minutes and `VllmDown` has `for: 10m`, so every single
+A window takes port 8000 down for 20-30 minutes and `VllmDown` has `for: 10m`, so every single
 acceptance run used to page. `acquire` therefore creates two Alertmanager silences — `job="vllm"`
 for `VllmDown`/`TargetDown`, and `alertname=~"Vllm.*"` for the two alerts built on `vllm:*`
 recording rules, which drop the `job` label — and `release` winds them down to `now + 300 s` so the

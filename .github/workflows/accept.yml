@@ -5,7 +5,7 @@
 # and asks the restricted `gpu-window` helper in 2408 over SSH to hand the GPU over for a
 # measurement window and to give it back afterwards (Betriebsregel Nr. 1).
 #
-# Because the window takes production down for 20-70 minutes, the job sits in the protected
+# Because the window takes production down for 20-30 minutes, the job sits in the protected
 # environment `gpu-window`: GitHub waits for a human approval before the runner does anything.
 # `gpu-window acquire` additionally refuses a window while the server is actually serving
 # (running/waiting requests or recent POST /v1/ lines) unless it is forced.
@@ -16,8 +16,8 @@
 #     gated; an old tag can even predate ci/accept/ and would fail at the checkout)
 #   - workflow_dispatch                                 -> choose image, profile, mode by hand
 #
-# Mode: `fast` (~25 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
-# for every build; `full` (~70 min: the whole conc sweep plus GSM8K) is selected automatically
+# Mode: `fast` (~22 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
+# for every build; `full` (~27 min: the whole conc sweep plus GSM8K) is selected automatically
 # when the major or minor part of VERSION changed, i.e. for a release, and can be forced by hand.
 #
 # After the gate
