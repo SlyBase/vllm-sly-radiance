@@ -84,16 +84,22 @@ jobs:
         # the dry-run already checked out aiter/ at the pinned tag -- this reuses it: the
         # radiance_attn_decode surface (_UAParams fields, use_2d_kernel, get_unified_attention_config)
         # must survive the bump BEFORE the merge, not in the GPU accept gate after it.
-        # GH_PR_BODY lets the drift check demand a justification in the PR body when the pin
-        # runs 2+ releases above vLLM's sanctioned AITER_BRANCH (e.g. 0.1.24 over 0.1.21.post2).
+        # GH_PR_BODY + GH_PR_COMMENTS let the drift check demand a justification when the pin
+        # runs 2+ releases above vLLM's sanctioned AITER_BRANCH (e.g. 0.1.24 over 0.1.21.post2);
+        # renovate PRs carry a template body, so justifications usually live in a comment.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            PR_BODY=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+            curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
-              | python3 -c 'import sys,json; print(json.load(sys.stdin).get("body") or "")')
-            GH_PR_BODY="$PR_BODY" python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+              | python3 -c 'import sys,json; print(json.load(sys.stdin).get("body") or "")' > .pr_body
+            curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments?per_page=100" \
+              | python3 -c 'import sys,json; print("\n".join(c.get("body") or "" for c in json.load(sys.stdin)))' > .pr_comments
+            GH_PR_BODY="$(cat .pr_body)" GH_PR_COMMENTS="$(cat .pr_comments)" \
+              python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+            rm -f .pr_body .pr_comments
           else
             python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
           fi
