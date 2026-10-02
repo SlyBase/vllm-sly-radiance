@@ -80,6 +80,12 @@ jobs:
       - name: apply the Dockerfile patch loop twice (apply, then all-NOOP)
         run: ci/patch_dryrun.sh
 
+      - name: aiter contract vs the pinned tag (AST, CPU-only)
+        # the dry-run already checked out aiter/ at the pinned tag -- this reuses it: the
+        # radiance_attn_decode surface (_UAParams fields, use_2d_kernel, get_unified_attention_config)
+        # must survive the bump BEFORE the merge, not in the GPU accept gate after it
+        run: python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+
       - name: upload logs
         if: always()
         uses: actions/upload-artifact@v7
