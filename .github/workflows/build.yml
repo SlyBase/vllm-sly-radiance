@@ -3,9 +3,18 @@
 # vllm7 container, so this workflow never starts a GPU container and never deploys (that stays
 # with Ansible + systemctl, see the homelab repo).
 #
-# Triggers: a VERSION bump on main, a v* tag, or manual dispatch. Never pull_request -- a PR
-# from a fork must not reach the self-hosted runner. Pushes the image to ghcr.io only for tags
-# or when asked (push_ghcr); a main-branch build is a build check, nothing more.
+# Triggers:
+#   - a VERSION bump on main or a v* tag (the production build: a main-branch build is a build
+#     check, nothing more);
+#   - pull_request -- but ONLY for PRs from this repo's own branches (the head_repo == repo
+#     check): a PR from a fork must not reach the self-hosted runner (its code would execute
+#     on it). Own-branch PRs (the renovate/* trio PRs, feature branches) are the classic
+#     case where a build catches a compile-level break BEFORE the merge, at CPU-only cost
+#     instead of after it;
+#   - manual dispatch.
+#
+# Pushes the image to ghcr.io only for tags or when asked (push_ghcr); a PR or a
+# main-branch build never publishes -- the `if:` guards on the push step enforce it.
 name: build
 
 on:
@@ -13,6 +22,10 @@ on:
     branches: [main]
     paths: [VERSION]
     tags: ["v*"]
+  pull_request:
+    # only when the image's pins can have moved (the trio bump PRs); a pure ci/ or docs PR
+    # would burn hours of runner time for a build that cannot change anything
+    paths: [Dockerfile]
   workflow_dispatch:
     inputs:
       push_ghcr:
@@ -34,6 +47,11 @@ concurrency:
 
 jobs:
   image:
+    # never for a PR from a fork (its code would execute on the self-hosted runner); own-
+    # branch PRs are the build-check use case (a compile break before the merge, CPU-only).
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_repo.owner.login == github.repo.owner.login
     runs-on: [self-hosted, linux, x64, rocm-build]
     timeout-minutes: 300
     env:
