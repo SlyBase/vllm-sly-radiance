@@ -36,9 +36,19 @@ By hand: *Actions → accept → Run workflow* (image, profile, `fast`/`full`, `
 ```bash
 python3 ci/accept/accept.py \
   --profile ci/accept/profiles/vllm7-mxfp4.json \
-  --image vllm-sly-radiance:0.2.5-rocm10.0 \
-  --mode fast --out out/accept-0.2.5
+  --image vllm-sly-radiance:0.4.5-rocm10.0 \
+  --mode fast --owner manual --out out/accept-manual
 ```
+
+### While production is busy
+
+If `acquire` is refused because production is serving traffic (or a window is
+already held), `accept.py` does not fail the gate. It backs off (default 90 s,
+`ACCEPT_ACQUIRE_DELAY`) and retries until either the window opens or the total
+patience runs out (default 60 min, `ACCEPT_ACQUIRE_WAIT`). `--force` is **not**
+escalated automatically — it remains an explicit opt-in for planned maintenance
+windows. Any other refusal (foreign lock owner, bad TTL, …) still fails the
+gate immediately.
 
 `--dry-run` prints the `gpu-window` calls without running anything.
 

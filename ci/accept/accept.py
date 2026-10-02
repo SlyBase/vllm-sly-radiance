@@ -48,6 +48,11 @@ NEEDLE_FILLER = (
     "curves and no error counters worth reporting. "
 )
 
+# gpu-window refuses while production is busy; instead of failing the gate on
+# the first refusal, wait and retry. `force` stays an explicit opt-in (CLI flag
+# / dispatch input) -- the retry never escalates to it.
+BUSY_HINT = "retry later or use force"
+
 
 def log(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -505,6 +510,36 @@ def render_markdown(meta: dict, checks: list[dict], results: dict,
 
 
 # --------------------------------------------------------------------------- #
+def _acquire_with_retry(win: "GpuWindow", args: argparse.Namespace) -> dict:
+    """acquire, but retry while production is busy (or the lock is held).
+
+    gpu-window's `force` skips the busy check; that stays an explicit opt-in.
+    This only makes the gate tolerant of a busy production instead of failing
+    on the first refusal: back off and re-check. Any *other* refusal (e.g. a
+    foreign lock, bad ttl) is surfaced immediately -- we never paper over it.
+    """
+    if args.dry_run:
+        return win.acquire(force=args.force)
+
+    max_wait = int(os.environ.get("ACCEPT_ACQUIRE_WAIT", "3600"))   # total patience
+    delay = int(os.environ.get("ACCEPT_ACQUIRE_DELAY", "90"))      # backoff (s)
+    t0 = time.time()
+    attempt = 0
+    while True:
+        try:
+            return win.acquire(force=args.force)
+        except RuntimeError as exc:
+            msg = str(exc)
+            retriable = BUSY_HINT in msg or "already held" in msg or "locked" in msg
+            if not retriable or time.time() - t0 >= max_wait:
+                raise
+            attempt += 1
+            log(f"GPU window busy (attempt {attempt}): {msg.strip()[:160]} -- "
+                f"waiting {delay}s (patience {int(max_wait - (time.time() - t0))}s left)")
+            time.sleep(delay)
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", required=True)
@@ -561,7 +596,7 @@ def main() -> int:
     try:
         log(f"status: {json.dumps(win.status())}")
         log(f"acquiring GPU window (owner={args.owner}, ttl={args.ttl}s)")
-        results["acquire"] = win.acquire(force=args.force)
+        results["acquire"] = _acquire_with_retry(win, args)
 
         log(f"starting candidate {args.image} ({profile['service']})")
         results["start"] = win.start(args.image, profile["service"])
