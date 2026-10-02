@@ -62,7 +62,7 @@ ARG VLLM_VERSION=0.30.0
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
 # first time a Gemma-4 checkpoint is actually served on this image.
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.17.0
+ARG TRANSFORMERS_VERSION=5.18.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
