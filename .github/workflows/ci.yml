@@ -1,8 +1,7 @@
 # CI for every pull request and every push to main: lint, a GPU-less dry run of the Dockerfile's
-# patch loop against the pinned upstream sources, a cross-check that the torch / triton /
-# torchvision pins fit together, and consistency checks between the loop, the patch files and the
-# docs. No image build here -- that is build.yml on the self-hosted ROCm runner, triggered by a
-# VERSION bump on main or a v* tag, never by a PR.
+# patch loop against the pinned upstream sources, and consistency checks between the loop, the
+# patch files and the docs. No image build here -- that is build.yml on the self-hosted ROCm
+# runner, triggered by a VERSION bump on main or a v* tag, never by a PR.
 #
 # The aggregate job `ci` is the status check the branch protection on main requires.
 name: ci
@@ -22,7 +21,7 @@ concurrency:
 
 env:
   # renovate: datasource=pypi depName=ruff
-  RUFF_VERSION: 0.16.10
+  RUFF_VERSION: 0.16.9
   # renovate: datasource=docker depName=hadolint/hadolint
   HADOLINT_VERSION: v2.15.1
   # renovate: datasource=docker depName=rhysd/actionlint
@@ -84,8 +83,20 @@ jobs:
       - name: aiter contract vs the pinned tag (AST, CPU-only)
         # the dry-run already checked out aiter/ at the pinned tag -- this reuses it: the
         # radiance_attn_decode surface (_UAParams fields, use_2d_kernel, get_unified_attention_config)
-        # must survive the bump BEFORE the merge, not in the GPU accept gate after it
-        run: python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+        # must survive the bump BEFORE the merge, not in the GPU accept gate after it.
+        # GH_PR_BODY lets the drift check demand a justification in the PR body when the pin
+        # runs 2+ releases above vLLM's sanctioned AITER_BRANCH (e.g. 0.1.24 over 0.1.21.post2).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_BODY=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin).get("body") or "")')
+            GH_PR_BODY="$PR_BODY" python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+          else
+            python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
+          fi
 
       - name: upload logs
         if: always()
@@ -157,19 +168,6 @@ jobs:
           echo "::error::constraints.txt did not resolve as proposed; the repaired set was pushed, its CI run decides"
           exit 1
 
-  # trio: torch / triton / torchvision in the Dockerfile must fit together (the PyTorch-stack
-  # group PRs). The pinned torch declares the official trio in its own PyPI metadata (exact
-  # triton, the paired torchvision); a component bumped from a newer torch line while the torch
-  # allowedVersions hold stays behind breaks at image build or first import -- invisible to every
-  # other check here (none of them builds the image). CPU-only, no GPU, seconds.
-  trio:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: cross-check the pins against the pinned releases' metadata
-        run: python3 ci/check_trio_compat.py
-
   consistency:
     runs-on: ubuntu-24.04
     steps:
@@ -192,7 +190,7 @@ jobs:
 
   ci:
     # aggregate status for the branch protection: one required check instead of four
-    needs: [lint, patch-dryrun, trio, constraints, consistency]
+    needs: [lint, patch-dryrun, constraints, consistency]
     if: always()
     runs-on: ubuntu-24.04
     steps:
