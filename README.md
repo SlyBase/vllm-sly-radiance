@@ -191,6 +191,26 @@ KV pool (~326k tokens) still holds two full 131k requests. Measured 2026-09-25 (
 Decode and concurrency are unchanged within noise. (These are prefill-only sweeps, which read ~5 % higher
 than the prefill phase of the full run in the table above; compare within one table.)
 
+### KV-cache offload (opt-in, off by default)
+
+A second-tier prefix cache behind the GPU prefix cache for long-context / agent-style sessions, where
+every turn re-sends the whole conversation and the prefix outgrows the GPU pool. Off by default: with
+`KVCACHE` unset (or `off`) the serve command is byte-identical to the unmodified script — nothing is
+mounted, patched or passed to the engine.
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `KVCACHE` | `off` | `off` (default) = stock behaviour; `ram` = GPU → RAM tier in `/dev/shm` + the 6 behavioural patches; `disk` = GPU → RAM → disk + the full 15-patch instrumented set |
+| `KVCACHE_RAM_GIB` | `16` | size of the RAM tier (GiB); needs `/dev/shm` big enough |
+| `KVCACHE_DISK` | — | host path of a dedicated filesystem for the disk tier (`KVCACHE=disk` only); the disk tier also wants `kvcache-reap.sh` (see `kv-cache/README.md`) to keep the fs below 70 % |
+
+The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
+the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).
+The disk tier additionally needs its own filesystem plus a host systemd reaper (your step, not the
+image's). Measured (one R9700, TP=1, `KVCACHE_RAM_GIB=16`, 110k-token agent sessions): a ~81k-token
+request drops from **38.8 s** (no cache) to **~13 s** (RAM tier) — see `kv-cache/README.md`. This
+reduces re-prefill latency for long sessions; it does **not** raise `--max-model-len`.
+
 ### Other checkpoints and GPUs
 
 | Switch | For |

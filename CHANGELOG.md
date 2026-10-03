@@ -10,6 +10,28 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.5.0] - 2026-10-03
+
+### Added
+- **Opt-in KV-cache offload** (`KVCACHE=off|ram|disk`, off by default): a second-tier prefix cache
+  behind the GPU prefix cache for long-context / agent-style sessions, where every turn re-sends the
+  whole conversation and the prefix outgrows the GPU pool. `KVCACHE=ram` adds a RAM tier in `/dev/shm`
+  plus the 6 behavioural patches (mixed-hit, eagle-groups, mamba-stride, reconcile-reask, swa-align/
+  touch, align-last-block); `KVCACHE=disk` adds a filesystem secondary tier plus the full 15-patch
+  instrumented set and wants a host `kvcache-reap.sh` reaper. Off by default: with `KVCACHE` unset the
+  serve command is byte-identical to the unmodified script. The offload patches, `kvwatch.py` and the
+  `turnbench`/`tierbench` benches ship in `kv-cache/` and are applied at container start via the
+  existing `/patches` mount (not baked).
+- **MXFP6-PARO build tooling**: `paroquant/build_mxfp6.py` (the RTN builder with the per-row
+  exponent-spread clamp) and `requant.sh FORMAT=mxfp6` (E2M3 grid) — the host-side tools to produce a
+  MXFP6 W6A8 checkpoint from a base model. The serving path (MXFP6 kernel + loader integration,
+  `QUANT=mxfp6`) lands with the kernel port in a follow-up; this release ships the tooling and the
+  KV-offload feature only.
+
+### Measured
+- KV offload, one R9700 (gfx1201), TP=1, `KVCACHE_RAM_GIB=16`, three ~110k-token agent-style
+  sessions served round-robin: a ~81k-token request drops from **38.8 s** (no cache) to **13.2 s**
+  (RAM tier), tokens served from the tier in brackets. Numbers from `kv-cache/README.md`.
 ## [0.4.7] - 2026-10-04
 
 ### Changed
