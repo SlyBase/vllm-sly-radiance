@@ -39,7 +39,7 @@ Read this before changing anything. It keeps the image, the docs and the release
 | `docs/TECHNICAL.md` | deep dives per change | a change needs more than two lines of explanation |
 | `docs/BENCHMARKS.md` | methodology, full tables, history, checkpoint comparison | a new reference run; move the old README numbers here |
 | `docs/NOT-ADOPTED.md` | what other stacks do and why this one does not | an A/B rejects something |
-| `docs/MULTI-GPU.md`, `docs/DEVELOPMENT.md` | TP>1 notes; build, CI, Renovate, releases | the respective area changes |
+| `docs/MULTI-GPU.md`, `docs/DEVELOPMENT.md`, `docs/WINDOWS-WSL2.md` | TP>1 notes; build, CI, Renovate, releases; Windows 11 / WSL2 | the respective area changes |
 | `sly/README.md` | per-patch reference (German) | a `sly/` file is added or changed |
 
 ## Releases

@@ -53,6 +53,7 @@ see there for why.
 Requirements: one R9700 (or another gfx1201 card with 32 GB), ROCm-capable kernel driver
 (`/dev/kfd`, `/dev/dri`), Docker, ~20 GB of disk for the model + drafter, and enough free host RAM for the model load (on the
 maintainer's 32 GB host the other VMs are paused while the model loads).
+Windows 11 through WSL2: see [docs/WINDOWS-WSL2.md](docs/WINDOWS-WSL2.md).
 
 ```bash
 # 1. model + drafter into the Hugging Face cache
@@ -206,7 +207,7 @@ than the prefill phase of the full run in the table above; compare within one ta
 | `sly/` | everything this fork adds: patches, kernels, attention tunes, benches ([reference](sly/README.md)) |
 | `patch_*.py`, `radiance_*.py`, `paroquant/`, `escha/`, launch scripts in the root | the upstream repositories' files, synced daily; the Dockerfile loop and `ci/unused_patches.txt` say which are used |
 | `ci/` | CI scripts, the acceptance gate, the release tagging |
-| `docs/` | [technical deep dives](docs/TECHNICAL.md), [benchmarks](docs/BENCHMARKS.md), [not adopted](docs/NOT-ADOPTED.md), [multi-GPU](docs/MULTI-GPU.md), [development & releases](docs/DEVELOPMENT.md) |
+| `docs/` | [technical deep dives](docs/TECHNICAL.md), [benchmarks](docs/BENCHMARKS.md), [not adopted](docs/NOT-ADOPTED.md), [multi-GPU](docs/MULTI-GPU.md), [Windows / WSL2](docs/WINDOWS-WSL2.md), [development & releases](docs/DEVELOPMENT.md) |
 | `CHANGELOG.md` | per-version changes = release notes; contributor rules in [AGENTS.md](AGENTS.md) |
 
 ## Credits

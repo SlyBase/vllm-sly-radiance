@@ -158,6 +158,7 @@ single-node hosts; needs `--cap-add SYS_NICE` under Docker's default seccomp.
 
 - AMD Radeon AI PRO R9700 (gfx1201). Compiled for gfx1201 only, won't run on other GPUs. Two GPUs (TP=2) is the only configuration tested so far.
 - Linux host with the amdgpu kernel driver and `/dev/kfd` + `/dev/dri`. ROCm userspace is inside the image.
+- Windows 11 works through WSL2 with Adrenalin 26.8.1 or later: see [docs/WINDOWS-WSL2.md](https://github.com/SlyBase/vllm-sly-radiance/blob/main/docs/WINDOWS-WSL2.md) in the source repo.
 - podman or docker, with device passthrough. podman is what this is developed against; the source repo's launcher auto-detects either.
 
 ## Run
