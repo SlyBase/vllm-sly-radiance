@@ -6,7 +6,7 @@ with hand-written MXFP4 kernels, DFlash2 speculative decoding and the full 262k 
 concurrent requests**, with every number measured and reproducible.
 
 ```bash
-docker pull ghcr.io/slybase/vllm-sly-radiance:0.4.0-rocm10.0
+docker pull ghcr.io/slybase/vllm-sly-radiance:0.4.6-rocm10.0
 ```
 
 ## Tech stack
@@ -71,7 +71,7 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 \
   -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
-  ghcr.io/slybase/vllm-sly-radiance:0.4.0-rocm10.0 \
+  ghcr.io/slybase/vllm-sly-radiance:0.4.6-rocm10.0 \
   --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 --quantization quark \
   --max-model-len 262144 --gpu-memory-utilization 0.96 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
