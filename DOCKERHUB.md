@@ -262,13 +262,29 @@ do not chase container device flags or image rebuilds while `rocm-smi` works.
 `rocm-bandwidth-test` is a best-effort, non-blocking startup sweep, so it is the symptom; the
 crash loop comes from vLLM's own HSA init.
 
+**If another container on this same host is already serving on this GPU, the host KFD state is
+healthy — do not reboot.** The failure is then a container *launch/credential* issue on the failing
+container, not a host-side one (a working sibling proves the kernel driver is fine). Check its
+device access and group membership first; rebooting changes nothing in that case.
+
 Recovery, in order (the startup precheck prints this block too):
 
-1. **Reboot the host.** Stale, state-dependent amdgpu/KFD state clears on a clean reboot — this
-   exact signature has been reproduced upstream and clears on reboot. Cheapest fix, try first.
-2. **Raise the container pids limit or run rootful.** Rootless Podman caps pids at 2048; HSA
+1. **Fix the container's device access.** `/dev/kfd` is typically `0660` (owner + group only). A
+   rootless container maps its root to your host user (e.g. uid 1000), which is neither the
+   device's owner nor in its group, so `open("/dev/kfd")` returns **EPERM** and HSA init dies with
+   `OUT_OF_RESOURCES` even though `rocm-smi` (a different access path) sees the card. Grant the
+   device's group explicitly — `--device /dev/kfd --device /dev/dri --group-add <gid-of-/dev/kfd>`
+   (works in Podman remote mode) — or launch local-mode with `--group-add keep-groups` (which
+   remote mode rejects), or run rootful. Verify with a bare open: `python3 -c "import os;
+   os.close(os.open('/dev/kfd', os.O_RDWR)); print('kfd ok')"`. Separately, if a sibling already
+   holds the VRAM (e.g. at `gpu_memory_utilization` 0.96), free it or lower the sibling's
+   utilization — otherwise a genuine out-of-resources hits at allocation once access is fixed.
+2. **Reboot the host.** Stale, state-dependent amdgpu/KFD state clears on a clean reboot — this
+   exact signature has been reproduced upstream and clears on reboot. Cheapest fix when no other
+   container is using the GPU, try first.
+3. **Raise the container pids limit or run rootful.** Rootless Podman caps pids at 2048; HSA
    plus the vLLM workers spawn past it. `ulimit`/`--pids-limit max`.
-3. **If it survives a clean reboot**, it is a host-kernel KFD regression. Capture evidence
+4. **If it survives a clean reboot**, it is a host-kernel KFD regression. Capture evidence
    *before* rebooting or it is gone: `strace -f` of the failing `hsa_init` (which syscall/ioctl
    fails — KFD ioctl, ENOMEM from thread spawn, fd exhaustion), a `dmesg` diff before/after, and
    `/sys/class/kfd/kfd/topology`. A 6.x LTS kernel is the workaround until the host-kernel fix
