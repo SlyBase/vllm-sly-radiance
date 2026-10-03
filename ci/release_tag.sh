@@ -37,6 +37,18 @@ publish_release() {
   git show "${COMMIT}:ci/changelog_section.py" >/dev/null 2>&1 \
     && python3 ci/changelog_section.py --ref "$TAG" "$VER" > "$notes" \
     || echo "No CHANGELOG.md section for ${VER} at this commit." > "$notes"
+  # Append the commit list since the previous release tag (auto-generated; no manual curation).
+  # `git describe` finds the most recent tag before $SHA; if none exists, skip silently.
+  local prev_tag
+  prev_tag=$(git describe --tags --abbrev=0 "${SHA}^" 2>/dev/null || true)
+  if [ -n "$prev_tag" ]; then
+    {
+      echo ""
+      echo "### Commits since ${prev_tag}"
+      echo ""
+      git log --oneline --no-merges "${prev_tag}..${SHA}" | sed 's/^\([0-9a-f]*\) /-\`\1\` /'
+    } >> "$notes"
+  fi
   { echo; echo "---"; echo "Image: \`ghcr.io/slybase/vllm-sly-radiance:${VER}-rocm10.0\` (published by the build workflow for this tag)."; echo "${WHY}"; } >> "$notes"
   gh release create "$TAG" --verify-tag --title "vllm-sly-radiance ${VER}" --notes-file "$notes"
   rm -f "$notes"
