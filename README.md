@@ -217,6 +217,7 @@ reduces re-prefill latency for long sessions; it does **not** raise `--max-model
 |---|---|
 | `RADIANCE_NVFP4_MXFP4=1` + `--quantization compressed-tensors` | NVFP4 checkpoints (e.g. `unsloth/Qwen3.8-27B-NVFP4`), requantized to MXFP4 at load — same speed as Quark |
 | `RADIANCE_PAROQUANT=1`, `RADIANCE_AUTOROUND=1`, `RADIANCE_ESCHA=1` (no `--quantization`) | ParoQuant, AutoRound, escha checkpoints |
+| `QUANT=mxfp6 ./serve.sh` / `./setup.sh --mxfp6` | ParoQuant MXFP6 (W6A8); needs TP>=2 (upstream-validated), one R9700 is TP=1 |
 | `--tensor-parallel-size 2/3/4/8`, `RADIANCE_TP_PAD=3`, `RADIANCE_AR_*` | several cards — see [docs/MULTI-GPU.md](docs/MULTI-GPU.md) |
 
 ## Repository

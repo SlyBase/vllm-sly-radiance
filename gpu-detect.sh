@@ -149,6 +149,21 @@ rad_kv_lookup() {
   echo "$hit"
 }
 
+# Shared by every MXFP6 entry point: a single-card MXFP6-PARO serve is not supported upstream
+# (ggz14 validated TP>=2 only). RADIANCE_MXFP6_FORCE_TP1=1 bypasses this for exploratory testing
+# on one card -- undocumented in README on purpose, not a supported configuration.
+rad_require_tp2() {
+  [ "${RAD_TP:-1}" -ge 2 ] && return 0
+  if [ "${RADIANCE_MXFP6_FORCE_TP1:-0}" = 1 ]; then
+    echo "${1:-this checkpoint} normally needs TP>=2 (detected TP=${RAD_TP:-1}) -- continuing," \
+         "RADIANCE_MXFP6_FORCE_TP1=1 (exploratory, unsupported)" >&2
+    return 0
+  fi
+  echo "${1:-this checkpoint} needs TP>=2 (detected TP=${RAD_TP:-1}); set" \
+       "RADIANCE_MXFP6_FORCE_TP1=1 to try it anyway (exploratory, unsupported)" >&2
+  return 1
+}
+
 rad_detect_gpus
 
 # Run directly (not sourced) -> report. `return` fails outside a function in a sourced file
