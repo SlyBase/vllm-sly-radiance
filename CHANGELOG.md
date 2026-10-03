@@ -10,6 +10,18 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.6] - 2026-10-03
+
+### Fixed
+- **Ship `radiance_lmhead_int2.py` into the image** (issue #90): the module was wired into
+  the Dockerfile patch loop (`patch_lmhead_int2`) but omitted from the release-stage
+  site-packages `COPY` allowlist, so `import radiance_lmhead_int2` raised
+  `ModuleNotFoundError` in every image and the int2 lm_head feature silently fell through to
+  int4/fp8/stock — `RADIANCE_LMHEAD_INT2` was a no-op because the module never reached disk.
+  Added the missing allowlist entry; the module now lands in `${SP}/` like its int4/fp8 siblings.
+- **README quickstart version** (issue #90): `docker pull` and `docker run` examples pointed at
+  the stale `0.4.0` tag; updated to `0.4.6`.
+
 ## [0.4.5] - 2026-10-02
 
 ### Added
