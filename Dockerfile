@@ -2,8 +2,10 @@
 # patches and kernels. Single multistage build on the official AMD ROCm image, in five stages:
 #   1. builder    compile torch/triton/torchvision/aiter/vLLM from source into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
-#   3. assemble   install the wheels, apply the patches, build the R4D kernel library
-#   3b. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
+#   3. stack      install the wheels, trim and snapshot the stack
+#   3a. kernels   compile radiance's own HIP extensions (R4D, MXFP4, GDN, quant plugins)
+#   3b. assemble  apply the patches on top of the stack, add the kernels from 3a
+#   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
 # No prebuilt component wheels and no checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
@@ -157,9 +159,24 @@ RUN cd /src/pytorch \
        python -m build --wheel --no-isolation --outdir /wheels . \
     && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
+# --- ccache for the compiles below (triton, torchvision, aiter, vLLM) ---
+# A BuildKit cache mount keeps the ccache directory on the runner across builds, outside every layer,
+# so a stack bump (an aiter or vLLM patch release) recompiles only the translation units that
+# actually changed. vLLM's setup.py and triton (TRITON_BUILD_WITH_CCACHE) pick ccache up on their
+# own; `ccache -s` after the vLLM build prints the hit rate into build.log. torch is deliberately
+# not wrapped (yet): adding the mount to its RUN would change that layer's cache key and force the
+# ~90 min compile once for nothing -- the next torch bump rebuilds it anyway, add the mount then.
+# The mount is subject to BuildKit's garbage collection like the layer cache (builder.gc in the
+# runner's daemon.json); CCACHE_MAXSIZE caps it from the inside.
+ARG CCACHE_MAXSIZE=20G
+ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=${CCACHE_MAXSIZE}
+
 # --- triton ---
-RUN git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/triton.git /src/triton \
-    && cd /src/triton && pip wheel --no-build-isolation --no-deps . -w /wheels \
+# /root/.triton holds the LLVM toolchain triton downloads for its build: cached too, not re-fetched.
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    --mount=type=cache,id=radiance-triton-home,target=/root/.triton \
+    git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/triton.git /src/triton \
+    && cd /src/triton && TRITON_BUILD_WITH_CCACHE=true pip wheel --no-build-isolation --no-deps . -w /wheels \
     && pip install /wheels/triton-*.whl && rm -rf /src/triton
 
 # --- torchvision ---
@@ -167,14 +184,16 @@ RUN git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/tri
 # which is false in `docker build` (no GPU) -> it picks CppExtension, where torch's build-time hipify
 # double-compiles vision.cpp + vision_hip.cpp -> "multiple definition of vision::cuda_version()".
 # FORCE_CUDA=1 forces CUDAExtension (correct hipify source replacement); hipcc needs no GPU to compile.
-RUN git clone --depth 1 -b v${TORCHVISION_VERSION} https://github.com/pytorch/vision.git /src/vision \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    git clone --depth 1 -b v${TORCHVISION_VERSION} https://github.com/pytorch/vision.git /src/vision \
     && cd /src/vision && FORCE_CUDA=1 USE_ROCM=1 pip wheel --no-build-isolation --no-deps . -w /wheels \
     && rm -rf /src/vision
 
 # --- aiter (gfx1201; kernels JIT at runtime, PREBUILD_KERNELS=0) ---
 # PRETEND_VERSION: the checkout is shallow, so setuptools-scm cannot describe the tag and would fall
 # back to a placeholder version; pin it to the tag being built.
-RUN git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://github.com/ROCm/aiter.git /src/aiter \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://github.com/ROCm/aiter.git /src/aiter \
     && cd /src/aiter && GPU_ARCHS=${GFX_ARCH} PREBUILD_KERNELS=0 \
        SETUPTOOLS_SCM_PRETEND_VERSION=${AITER_VERSION} \
        pip wheel --no-build-isolation --no-deps . -w /wheels \
@@ -190,11 +209,13 @@ RUN git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://gith
 # ARG at the point of use, not at the top of the stage: an ARG line is a cache-key instruction, so
 # declaring it up there would make a vLLM bump rebuild torch, triton, torchvision and aiter too.
 ARG VLLM_VERSION
-RUN git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
     && cd /src/vllm && python use_existing_torch.py \
     && pip install "setuptools-rust>=1.9.0" \
     && VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
        pip wheel --no-build-isolation --no-deps . -w /wheels \
+    && ccache -s \
     && rm -rf /src/vllm
 RUN ls -la /wheels
 
@@ -227,11 +248,11 @@ COPY prune_rocm.sh /tmp/prune_rocm.sh
 RUN bash /tmp/prune_rocm.sh ${GFX_ARCH} && rm -f /tmp/prune_rocm.sh
 
 # =====================================================================================
-# STAGE 3 assemble: install the wheels and apply the patches and kernels
+# STAGE 3 stack: install the wheels, trim and snapshot the installed stack
 # =====================================================================================
-# Runs on the FULL base because it needs the toolchain (hipcc, headers, static archives) to
-# compile the HIP kernels. Only the resulting /opt/vllm venv is carried into the release image.
-FROM ${ROCM_BASE} AS assemble
+# Runs on the FULL base because the kernels stage built on top of it needs the toolchain (hipcc,
+# headers, static archives). Only the resulting /opt/vllm venv is carried into the release image.
+FROM ${ROCM_BASE} AS stack
 ARG GFX_ARCH
 ARG AITER_VERSION
 ARG VLLM_VERSION
@@ -293,6 +314,126 @@ RUN set -eu; \
     find /opt/vllm -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} +; \
     /usr/bin/python3 /opt/split_venv.py snapshot /opt/vllm /opt/vllm.stable.json
+
+# =====================================================================================
+# STAGE 3a kernels: radiance's own HIP extensions, compiled beside the patch chain
+# =====================================================================================
+# Every kernel here depends on the installed stack (torch for the import checks, the full ROCm dev
+# tree for hipcc) and on its own sources -- never on the radiance Python modules or the patch chain.
+# Built in assemble, behind `COPY sly/` and the radiance_*.py COPY, they recompiled (~2 min) on
+# every Python-only change; as their own stage, each one copies only its own sources, so they stay
+# cached until those change, and BuildKit runs this stage in parallel with assemble's patch chain.
+# Output goes to /out, which assemble COPYs into site-packages; the import checks find it via
+# PYTHONPATH=/out.
+FROM stack AS kernels
+ARG GFX_ARCH
+RUN mkdir -p /out /opt/kernels
+
+# --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
+# sly/r4d/r4d_extras_rx10.patch is ggz14's r4d_radiance_extras_rx10.patch (written against libr4d
+# b9e42ab) rebased onto this pin: the kernel sources applied as-is, the four registry files
+# (build.sh, r4d.h, r4d_module.hip, r4d_registry.hip) were merged by hand -- every conflict was
+# additive, the pin's N-rank all-reduce family next to the extras. It adds the narrow-state (bf16 /
+# fp16 SSM cache) gated-delta-net decode kernels that radiance_gdn.py binds when
+# --mamba-ssm-cache-dtype is 16-bit, the lazy-snapshot GDN kernels (RADIANCE_GDN_LAZY), the fused
+# GDN decode step (RADIANCE_GDN_FUSED_UPDATE), the 8-bit legs of the R4D prefill attention
+# (R4D_ATTN_FP8, R4D backend only) and the TP=2 all-reduce with a fused decoder epilogue. ggz14's
+# three-rank all-reduce is left out: it was written for the older two-rank radiance_allreduce.py,
+# and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
+# ride RCCL.
+# One shared object holding every hand-written kernel this image runs: paged attention (prefill and
+# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
+# its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
+# fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
+# path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
+# builder stage because it has to be compiled by the same hipcc the venv loads it against.
+# ARGs are declared at the point of use: they are cache-key instructions, so putting them at the top
+# of the stage would invalidate the wheel install above on every kernel bump.
+ARG R4D_REPO
+ARG R4D_VERSION
+# R4D_VERSION is a commit SHA (see the ARG's own comment at the top of the file for why), so the
+# clone can't use `git clone --depth 1 -b <ref>` -- that resolves tags and branches, not arbitrary
+# SHAs. `git fetch <sha>` instead, confirmed against Codeberg's Gitea directly (a live
+# `git fetch --depth 1 origin <sha>` against this exact repo returned the object, i.e.
+# uploadpack.allowAnySHA1InWant is on) -- so this stays a shallow single-object fetch, not a full
+# clone. This ALSO changes the shape of the correctness check below: the previous version compared
+# `r4d.__version__` (from `#define R4D_VERSION "..."` in r4d.h) against the pinned tag, but that
+# macro was NOT bumped by either of the two PRs merged into main after v0.5.0 -- confirmed via
+# `git log -p -- r4d.h` against the live repo, it still reads "0.5.0" at this exact commit. Asserting
+# a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
+# original check was actually protecting against), not the self-reported semver string, which prints
+# only as informational context alongside it.
+COPY sly/r4d/r4d_extras_rx10.patch /opt/kernels/
+RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
+ && git init -q && git remote add origin ${R4D_REPO} \
+ && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
+ && GOT=$(git rev-parse HEAD) \
+ && [ "$GOT" = "${R4D_VERSION}" ] \
+    || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
+ && git apply /opt/kernels/r4d_extras_rx10.patch \
+ && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
+ && PYTHONPATH=/out python -c "import sys, torch, r4d; \
+print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
+      'upstream past 0.5.0 since the tag -- informational only) built:'); \
+[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$GOT" \
+ && cd / && rm -rf /src/libr4d
+
+# --- RADIANCE MXFP4 W4A8: the hand-written fp8-WMMA GEMM kernel for gfx1201, compiled here for the
+#     same reason as R4D above -- it has to link against the same hipcc/ROCm toolchain the venv
+#     loads it against, and this is the only stage that has the full (unpruned) ROCm dev tree. ---
+# sly/mxfp4/radiance_mxfp4_fp8.hip is a SINGLE-FILE pybind11 extension (no torch/ATen headers --
+# every exported fn takes raw `uintptr_t` addresses, see its own PYBIND11_MODULE block), unlike
+# R4D's multi-translation-unit build.sh, so it compiles with one hipcc invocation rather than a
+# library build script. It has to be importable as the bare module name `radiance_mxfp4_fp8`
+# (`import radiance_mxfp4_fp8 as _ext` in sly/mxfp4/radiance_mxfp4.py, copied to ${SP}/ in assemble) --
+# same trick as r4d.so above: CPython's default EXTENSION_SUFFIXES includes plain ".so", so an
+# unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
+# renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
+# never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
+# torch is imported before the extension for the same reason as R4D's check above and the
+# release-stage JIT probe below: a bare HIP extension has no ROCm entry in ld.so.conf and cannot
+# resolve libamdhip64 on its own, so `import radiance_mxfp4_fp8` alone fails with
+# "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
+# fine -- torch's import is what actually pulls the runtime into the process.
+COPY sly/mxfp4/radiance_mxfp4_fp8.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_mxfp4_fp8.hip -o /out/radiance_mxfp4_fp8.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
+
+# sly/gdn/radiance_gdn_decode.hip: HIP port of vLLM's fused GDN MTP decode kernel (0.3.3, see the file
+# header). Same single-file pybind11 build as above; registered as torch.ops._C.fused_gdn_decode_post_conv_mtp
+# by radiance_gdn_decode.py only under RADIANCE_GDN_FUSED_DECODE=1.
+COPY sly/gdn/radiance_gdn_decode.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_gdn_decode.hip -o /out/radiance_gdn_decode_ext.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
+
+# ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
+# above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
+# paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
+# asked: RADIANCE_AUTOROUND=1 (patch_autoround), RADIANCE_ESCHA=1 (patch_escha),
+# RADIANCE_PAROQUANT=1 (radiance_quant_plugins.pth). Dispatch is by the checkpoint's quant_method.
+COPY radiance_autoround.hip radiance_autoround_kernels.h radiance_escha.hip /opt/quant/
+COPY escha/escha_kernels.h escha/escha_act.h /opt/quant/escha/
+COPY paroquant/radiance_paroquant.hip paroquant/par_kernels.h /opt/quant/
+# The three are independent single-file compiles (~20 s each), so they run side by side; each `wait`
+# returns its own hipcc's exit status, so one failed compile still fails the step.
+RUN cd /opt/quant \
+ && pids= \
+ && for k in autoround escha paroquant; do \
+      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=${GFX_ARCH} $(python -m pybind11 --includes) \
+        radiance_$k.hip -o /out/radiance_${k}_kernel.so & pids="$pids $!"; \
+    done \
+ && for pid in $pids; do wait "$pid" || exit 1; done \
+ && PYTHONPATH=/out python -c "import torch, radiance_autoround_kernel, radiance_escha_kernel, radiance_paroquant_kernel; print('quant plugin kernels built')" \
+ && cd / && rm -rf /opt/quant
+
+# =====================================================================================
+# STAGE 3b assemble: the stack plus radiance's modules, patches and kernels
+# =====================================================================================
+FROM stack AS assemble
 
 # --- runtime modules and configs ---
 # radiance_amdsmi.py and .pth: amdsmi init-order fix. amdsmi must init before HIP at site-init in
@@ -434,99 +575,9 @@ RUN set -eu; cd /opt/patches; \
     done; \
     python -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('${SP}/radiance_*.py')]; print('radiance modules parse OK')"
 
-# --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
-# sly/r4d/r4d_extras_rx10.patch is ggz14's r4d_radiance_extras_rx10.patch (written against libr4d
-# b9e42ab) rebased onto this pin: the kernel sources applied as-is, the four registry files
-# (build.sh, r4d.h, r4d_module.hip, r4d_registry.hip) were merged by hand -- every conflict was
-# additive, the pin's N-rank all-reduce family next to the extras. It adds the narrow-state (bf16 /
-# fp16 SSM cache) gated-delta-net decode kernels that radiance_gdn.py binds when
-# --mamba-ssm-cache-dtype is 16-bit, the lazy-snapshot GDN kernels (RADIANCE_GDN_LAZY), the fused
-# GDN decode step (RADIANCE_GDN_FUSED_UPDATE), the 8-bit legs of the R4D prefill attention
-# (R4D_ATTN_FP8, R4D backend only) and the TP=2 all-reduce with a fused decoder epilogue. ggz14's
-# three-rank all-reduce is left out: it was written for the older two-rank radiance_allreduce.py,
-# and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
-# ride RCCL.
-# One shared object holding every hand-written kernel this image runs: paged attention (prefill and
-# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
-# its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
-# fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
-# path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
-# builder stage because it has to be compiled by the same hipcc the venv loads it against.
-# ARGs are declared at the point of use: they are cache-key instructions, so putting them at the top
-# of the stage would invalidate the wheel install above on every kernel bump.
-ARG R4D_REPO
-ARG R4D_VERSION
-# R4D_VERSION is a commit SHA (see the ARG's own comment at the top of the file for why), so the
-# clone can't use `git clone --depth 1 -b <ref>` -- that resolves tags and branches, not arbitrary
-# SHAs. `git fetch <sha>` instead, confirmed against Codeberg's Gitea directly (a live
-# `git fetch --depth 1 origin <sha>` against this exact repo returned the object, i.e.
-# uploadpack.allowAnySHA1InWant is on) -- so this stays a shallow single-object fetch, not a full
-# clone. This ALSO changes the shape of the correctness check below: the previous version compared
-# `r4d.__version__` (from `#define R4D_VERSION "..."` in r4d.h) against the pinned tag, but that
-# macro was NOT bumped by either of the two PRs merged into main after v0.5.0 -- confirmed via
-# `git log -p -- r4d.h` against the live repo, it still reads "0.5.0" at this exact commit. Asserting
-# a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
-# original check was actually protecting against), not the self-reported semver string, which prints
-# only as informational context alongside it.
-RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
- && git init -q && git remote add origin ${R4D_REPO} \
- && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
- && GOT=$(git rev-parse HEAD) \
- && [ "$GOT" = "${R4D_VERSION}" ] \
-    || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
- && git apply /opt/patches/sly/r4d/r4d_extras_rx10.patch \
- && GFX_ARCH=${GFX_ARCH} OUT=${SP}/r4d.so ./build.sh \
- && python -c "import sys, torch, r4d; \
-print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
-      'upstream past 0.5.0 since the tag -- informational only) built:'); \
-[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$GOT" \
- && cd / && rm -rf /src/libr4d
-
-# --- RADIANCE MXFP4 W4A8: the hand-written fp8-WMMA GEMM kernel for gfx1201, compiled here for the
-#     same reason as R4D above -- it has to link against the same hipcc/ROCm toolchain the venv
-#     loads it against, and this is the only stage that has the full (unpruned) ROCm dev tree. ---
-# sly/mxfp4/radiance_mxfp4_fp8.hip is a SINGLE-FILE pybind11 extension (no torch/ATen headers --
-# every exported fn takes raw `uintptr_t` addresses, see its own PYBIND11_MODULE block), unlike
-# R4D's multi-translation-unit build.sh, so it compiles with one hipcc invocation rather than a
-# library build script. It has to be importable as the bare module name `radiance_mxfp4_fp8`
-# (`import radiance_mxfp4_fp8 as _ext` in sly/mxfp4/radiance_mxfp4.py, copied to ${SP}/ above) --
-# same trick as r4d.so above: CPython's default EXTENSION_SUFFIXES includes plain ".so", so an
-# unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
-# renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
-# never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
-# torch is imported before the extension for the same reason as R4D's check above and the
-# release-stage JIT probe below: a bare HIP extension has no ROCm entry in ld.so.conf and cannot
-# resolve libamdhip64 on its own, so `import radiance_mxfp4_fp8` alone fails with
-# "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
-# fine -- torch's import is what actually pulls the runtime into the process.
-RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
-      $(python -m pybind11 --includes) \
-      /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
- && python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
-
-# sly/gdn/radiance_gdn_decode.hip: HIP port of vLLM's fused GDN MTP decode kernel (0.3.3, see the file
-# header). Same single-file pybind11 build as above; registered as torch.ops._C.fused_gdn_decode_post_conv_mtp
-# by radiance_gdn_decode.py only under RADIANCE_GDN_FUSED_DECODE=1.
-RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
-      $(python -m pybind11 --includes) \
-      /opt/patches/sly/gdn/radiance_gdn_decode.hip -o ${SP}/radiance_gdn_decode_ext.so \
- && python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
-
-# ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
-# above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
-# paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
-# asked: RADIANCE_AUTOROUND=1 (patch_autoround), RADIANCE_ESCHA=1 (patch_escha),
-# RADIANCE_PAROQUANT=1 (radiance_quant_plugins.pth). Dispatch is by the checkpoint's quant_method.
-COPY radiance_autoround.hip radiance_autoround_kernels.h radiance_escha.hip /opt/quant/
-COPY escha/escha_kernels.h escha/escha_act.h /opt/quant/escha/
-COPY paroquant/radiance_paroquant.hip paroquant/par_kernels.h /opt/quant/
-RUN cd /opt/quant \
- && for k in autoround escha paroquant; do \
-      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=${GFX_ARCH} $(python -m pybind11 --includes) \
-        radiance_$k.hip -o ${SP}/radiance_${k}_kernel.so || exit 1; \
-    done \
- && python -c "import torch, radiance_autoround_kernel, radiance_escha_kernel, radiance_paroquant_kernel; print('quant plugin kernels built')" \
- && cd / && rm -rf /opt/quant
+# radiance's own HIP extensions, compiled in the kernels stage above. Plain .so files straight into
+# site-packages, as before: CPython imports an unadorned `<modname>.so` without a build tag.
+COPY --from=kernels /out/ ${SP}/
 
 # The installed extensions were stripped before the snapshot above; only bytecode is left to drop.
 RUN find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true
