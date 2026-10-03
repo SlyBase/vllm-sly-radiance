@@ -10,6 +10,16 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.4.7] - 2026-10-04
+
+### Changed
+- **Faster image builds, same image.** radiance's HIP extensions (R4D, MXFP4 fp8, GDN decode,
+  autoround/escha/paroquant) are compiled in their own `kernels` stage that copies only their
+  own sources: a Python- or patch-only change no longer recompiles them (~2 min per build), and
+  BuildKit builds them beside the patch chain. The three quant plugin kernels compile in
+  parallel. The builder stage keeps a ccache in a BuildKit cache mount for triton, torchvision,
+  aiter and vLLM, so a stack patch bump recompiles only what changed (torch not yet wrapped).
+
 ## [0.4.6] - 2026-10-03
 
 ### Fixed
