@@ -10,6 +10,23 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.6.0] - 2026-10-03
+
+### Added
+- **MXFP6-PARO (W6A8) serving**: `QUANT=mxfp6 ./serve.sh`, `./setup.sh --mxfp6`,
+  `./setup-paroquant.sh --mxfp6` — OCP MXFP6 E2M3 weights on the existing fp8-WMMA kernels
+  (`launch6_p` / `launch6_at_p`), ported from ggz14's radiance-vllm-mxfp4 (PR #57 / upstream
+  mirror) onto this fork's diverged `sly/mxfp4/` kernel base via a 3-way merge against the
+  common ancestor — this fork's own decode-band tuning (`decode_bk64`, `dec_tune16`, A-tiled
+  multi-consumer tracking) and ggz14's MXFP6 staging land in the same files without conflict.
+  `paroquant/radiance_paroquant_mxfp4.py` (`ParoQuantMXFP6Config`) taken wholesale from the PR —
+  this file was untouched on `main` since the merge-base. The MXFP6 checkpoint is a build
+  artifact of `paroquant/build_mxfp6.py` (0.5.0), not an external dependency.
+- **`RADIANCE_MXFP6_FORCE_TP1`**: upstream validated MXFP6-PARO on TP>=2 only
+  (`rad_require_tp2` gate); this override allows exploratory single-card testing. Deliberately
+  undocumented in the README options table — not a supported configuration, for this fork's own
+  GPU-window testing only.
+
 ## [0.5.0] - 2026-10-03
 
 ### Added
