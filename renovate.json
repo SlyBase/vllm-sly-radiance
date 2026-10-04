@@ -86,7 +86,7 @@
         "pytorch-stack"
       ],
       "prBodyNotes": [
-        "Tested trio: bump torch, triton and torchvision together. Patch anchors: patch_gfx1201 (triton driver.py), patch_dynamo_metrics (torch/_dynamo/utils.py) -- CI patch-dryrun must stay green, then a full builder-stage rebuild (hours) and an A/B on the GPU before the image goes to production."
+        "Tested trio: bump torch, triton and torchvision together. Patch anchors: patch_gfx1201 (triton driver.py), patch_dynamo_metrics (torch/_dynamo/utils.py) -- CI patch-dryrun must stay green. triton comes from PyPI: update TRITON_SHA256 in the Dockerfile with TRITON_VERSION (digests.sha256 of the cp312 manylinux x86_64 wheel on pypi.org/pypi/triton/<version>/json), else the build fails at the download. A torch bump changes ci/torch_key.py's tag, so build.yml compiles torch once (~2 h) and pushes the new wheel image; then an A/B on the GPU before the image goes to production."
       ]
     },
     {
