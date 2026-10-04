@@ -98,7 +98,7 @@ ARG RBT_VERSION=rocm-6.4.4
 # homelab, which is the entire reason this is a SHA and not just `main`.
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
 # renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
-ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
+ARG R4D_VERSION=a3e4833d29c3c7e6c36f43277ff9a7c9193950a3
 # Where the torch wheel comes from:
 #   torch-amd-wheel (default)  AMD's wheel from stable.repo.amd.com/rocm/whl-next, TORCH_VERSION +
 #                  rocm${TORCH_AMD_ROCM}; seconds instead of a 2 h compile. Gate-tested 2026-10-04
