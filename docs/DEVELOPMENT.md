@@ -5,7 +5,7 @@ How the image is built, tested and released. Contributor and agent rules are in 
 ## Build
 
 Everything the build needs is in this directory (flat Docker context). Multi-stage: **buildbase**
-→ **torch-build** / **torch-wheel** (PyTorch from source for gfx1201, or that wheel from ghcr.io, see
+→ **torch** (AMD's prebuilt PyTorch wheel for ROCm 10.0 by default, or PyTorch from source, see
 below) → **builder** (Triton as the hash-pinned PyPI wheel; torchvision, AITER, vLLM from source)
 → **rocmprune** → **assemble**
 (wheels, upstream RDNA4 patches, then the `sly/` patches, libr4d, the HIP kernel) → **venvsplit**
@@ -30,12 +30,15 @@ cd vllm-sly-radiance
 docker build -t vllm-sly-radiance:$(cat VERSION)-rocm10.0 .
 ```
 
-A cold local build compiles PyTorch and takes hours (`MAX_JOBS=4` by default, torch itself at 3 —
-raise it on a box with RAM to spare). With the builder stage cached, a change to the `sly/` layer
-rebuilds in ~10 minutes.
+A cold build takes about 30 minutes on the runner (`MAX_JOBS=4` by default): PyTorch is AMD's
+wheel from `stable.repo.amd.com/rocm/whl-next` (`torch==2.11.0+rocm10.0.0` plus
+`amd-torch-device-gfx1201`), installed against the image's own `/opt/rocm`. How that fits
+(metadata rewrite, `rocm_sdk/` stand-in, no strip of `torch/lib`) is in the comment on the
+`torch-amd` stage. With the builder stage cached, a change to the `sly/` layer rebuilds in ~10 minutes.
 
-The torch wheel can come from an image instead: `--build-arg TORCH_FROM=<image>` takes the
-`torch-wheel` target from there and skips the compile. CI keeps one per torch definition at
+For a ROCm release AMD has no wheel for yet (a 10.1 beta, say), `--build-arg TORCH_FROM=torch-wheel`
+compiles PyTorch from source instead (~2 h, torch at `MAX_JOBS=3`). That compile can also come from an
+image: `--build-arg TORCH_FROM=<image>` takes the `torch-wheel` target from there. CI keeps one per torch definition at
 `ghcr.io/slybase/vllm-sly-radiance-torch:<tag>`, the tag from [`ci/torch_key.py`](../ci/torch_key.py)
 (torch version, ROCm major.minor, GPU arch, hash of the torch stages and the base image). A local
 build can use it too when logged in to ghcr.io:
@@ -101,7 +104,7 @@ Workflows (`.github/workflows/`):
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci` | PR, push to `main`, manual | `lint` (ruff E9/F63/F7/F82, shellcheck, hadolint, actionlint, `docker buildx build --check`), `patch-dryrun` (`ci/patch_dryrun.sh`: the pinned upstream sources from the Dockerfile ARGs in a venv, then the Dockerfile patch loop twice — pass 1 must apply every hunk, pass 2 must be all NOOP; `ci/patch_dryrun_skip.txt` is the documented skip allowlist), `constraints` (`ci/check_constraints.py`, see below), `consistency` (`ci/check_consistency.py`: every patch file is in the loop or in `ci/unused_patches.txt`, every `sly/patch_*.py` is documented in `sly/README.md`, image changes bump `VERSION`). The aggregate status **`ci`** is the required check on `main`. |
-| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): torch wheel from `ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>` (missing → `--target torch-wheel` once, ~2 h, and pushed) → `docker build` → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.0` only for `v*` tags or the `push_ghcr` input. Build log is an artifact. |
+| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` with AMD's PyTorch wheel (input `torch_from_source`: PyTorch from `ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>`, missing → `--target torch-wheel` once, ~2 h, and pushed) → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.0` only for `v*` tags or the `push_ghcr` input. Build log is an artifact. |
 | `upstream-sync` | daily 04:00 UTC, manual | Fast-forwards `upstream/*` from Codeberg (never force) and opens/updates a PR `upstream/<name>` → `main` (label `upstream-sync`) listing the new commits, the test-merge conflict status and the image-relevant files. Never merges. Needs the `SYNC_TOKEN` secret (fine-grained PAT, contents + pull-requests write) to create PRs. |
 | `renovate` | every 6 h, push to `main` touching the config, manual | Self-hosted Renovate (same setup as SlyBase/helm-charts) with the upstream-sync App token (`SYNC_APP_*`). Optional secret `RENOVATE_GITHUB_COM_TOKEN` (read-only PAT) lifts the rate limit for lookups in other repositories. |
 

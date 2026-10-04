@@ -10,6 +10,40 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.7.0] - 2026-10-04
+
+### Fixed
+- **0.4.6 – 0.6.2 did not start on the GPU.** aiter 0.1.24 (Renovate, `9d8c19d`) dropped the module
+  alias `aiter.ops.triton.unified_attention`, and vLLM 0.30.0's `rocm_aiter_unified_attn` backend still
+  imports it. EngineCore died during model construction with `ModuleNotFoundError`. The traceback
+  surfaced in `qwen3_5.py` → `make_layers`, which is why transformers was suspected first. aiter is
+  back on **0.1.22.post1**, the version production 0.4.1 runs, and Renovate holds it below 0.1.24 until
+  vLLM imports the new path.
+
+### Changed
+- **PyTorch is AMD's prebuilt wheel instead of a 2-hour source build.** `torch==2.11.0+rocm10.0.0` and
+  `amd-torch-device-gfx1201` come from `stable.repo.amd.com/rocm/whl-next`, built by AMD for exactly
+  this ROCm release, and run against the image's own `/opt/rocm`. ROCm 10.0 is TheRock-based and
+  loads the wheel's `.kpack` device code. Four pieces make it fit:
+  - `fix_amd_torch_metadata.py` drops the wheels' `rocm[libraries]` / `rocm-bootstrap` /
+    `triton==3.8` requirements. Otherwise pip silently replaces torch with the CUDA torch from PyPI.
+  - a `rocm_sdk/` stand-in preloads torch's ROCm libraries from `/opt/rocm`, so the process has one
+    HIP runtime.
+  - `torch/lib` is not stripped; strip breaks the wheel's `libtorch_hip.so`.
+  - the stack stage now fails if a non-ROCm torch ever ends up in the venv.
+  
+  Triton stays 3.6.0 (the PyPI wheel, as in 0.6.2), torchvision 0.24.1 is compiled against the new
+  torch. The source build remains available as `--build-arg TORCH_FROM=torch-wheel` (or `build.yml`
+  input `torch_from_source`) for a ROCm release AMD has no wheel for yet.
+
+### Measured
+- Accept gate, `full` (run 37202109954, image built from this change with transformers 5.17.0; this
+  release keeps 5.18.0, which was cleared of the crash above): **PASS**. BetterBench conc 1/2/4/8
+  120.1 / 203.1 / 308.1 / 374.5 t/s (0.97–1.05× baseline), acceptance 0.476 (base 0.468), GSM8K 0.835
+  (base 0.845), all log markers. Soft misses: KV pool 379,461 tokens (0.98× of the baseline,
+  −1.3 % against production 0.4.1's 384,316), startup 316 s (base 186 s).
+- Cold build on the runner: ~30 min instead of ~2 h 45 min. Image 5.27 GB.
+
 ## [0.6.2] - 2026-10-04
 
 Build only: the image contents are the same stack (torch 2.11.0, triton 3.6.0, torchvision 0.24.1,
