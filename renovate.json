@@ -75,6 +75,16 @@
       "enabled": false
     },
     {
+      "description": "Hold aiter below 0.1.24: 0.1.24 dropped the module alias aiter.ops.triton.unified_attention that vLLM 0.30.0's rocm_aiter_unified_attn backend imports (EngineCore ModuleNotFoundError at startup; the 0.4.6 / 0.6.0 gate crash). Lift together with a vLLM that imports aiter.ops.triton.attention.unified_attention, or a patch for that import.",
+      "matchDepNames": [
+        "ROCm/aiter"
+      ],
+      "allowedVersions": "<0.1.24",
+      "addLabels": [
+        "aiter"
+      ]
+    },
+    {
       "description": "PyTorch stack moves together (torch / triton / torchvision pins are a tested trio, see the Dockerfile comment)",
       "matchDepNames": [
         "pytorch/pytorch",

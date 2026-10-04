@@ -15,7 +15,7 @@
 #
 # Pushes the image to ghcr.io only for tags or when asked (push_ghcr); a PR or a
 # main-branch build never publishes -- the `if:` guards on the push step enforce it.
-# The one exception is build-internal: any build may push the torch wheel image
+# The one exception is build-internal: a torch_from_source build may push the torch wheel image
 # (ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>) when its key is not there yet --
 # a wheel, not a runnable image, so nothing that could be mistaken for a release.
 name: build
@@ -39,6 +39,10 @@ on:
         description: override ARG ROCM_BASE (empty = Dockerfile default)
         type: string
         default: ""
+      torch_from_source:
+        description: compile torch from source (via the ghcr.io torch image) instead of AMD's wheel
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -95,18 +99,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # torch takes ~2 h to compile here and changes only with a torch bump, so it lives in its
-      # own image (Dockerfile target torch-wheel, tag from ci/torch_key.py) instead of only in the
-      # runner's BuildKit cache, which a full disk or a prune wipes. Present -> TORCH_FROM points at
-      # it and the build never enters torch-build. Missing -> compile it once (a still-cached torch
-      # layer makes that a cache hit) and push it; a failed push only costs the next build the same.
-      - name: torch wheel (ghcr.io or compile once)
+      # Default: the Dockerfile's TORCH_FROM (AMD's prebuilt wheel), nothing to do here.
+      # torch_from_source: torch compiled here (~2 h) for a ROCm release AMD has no wheel for yet.
+      # That compile lives in its own image (Dockerfile target torch-wheel, tag from
+      # ci/torch_key.py) instead of only in the runner's BuildKit cache, which a full disk or a
+      # prune wipes. Present -> TORCH_FROM points at it. Missing -> compile it once and push it;
+      # a failed push only costs the next such build the same.
+      - name: torch wheel (AMD wheel, or source via ghcr.io)
         id: torch
         env:
           ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
           TORCH_REMOTE: ${{ steps.meta.outputs.torch_remote }}
+          FROM_SOURCE: ${{ inputs.torch_from_source }}
         run: |
           set -o pipefail
+          if [ "$FROM_SOURCE" != "true" ]; then
+            echo "torch wheel: Dockerfile default (AMD whl-next)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if docker buildx imagetools inspect "$TORCH_REMOTE" >/dev/null 2>&1; then
             echo "torch wheel: $TORCH_REMOTE (from ghcr.io)" | tee -a "$GITHUB_STEP_SUMMARY"
             echo "from=$TORCH_REMOTE" >> "$GITHUB_OUTPUT"
@@ -134,7 +145,7 @@ jobs:
           set -o pipefail
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
-            --build-arg "TORCH_FROM=${TORCH_FROM}" \
+            ${TORCH_FROM:+--build-arg "TORCH_FROM=${TORCH_FROM}"} \
             --build-arg "RADIANCE_VERSION=${VER}" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

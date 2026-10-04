@@ -1,8 +1,8 @@
 # vllm-radiance: vLLM/torch/triton/aiter stack for RDNA4 (gfx1201 / R9700), plus the radiance
 # patches and kernels. Single multistage build on the official AMD ROCm image, in five stages:
 #   1. buildbase  build toolchain + venv shared by 1a and 1b
-#   1a. torch-build / torch-wheel   compile torch from source (or take that wheel from ghcr.io,
-#                 see TORCH_FROM below -- a ~2 h compile that only a torch bump has to repeat)
+#   1a. torch     AMD's prebuilt torch wheel for this ROCm release (torch-amd-wheel, default), or
+#                 torch compiled from source (torch-build / torch-wheel) -- see TORCH_FROM below
 #   1b. builder   triton from PyPI, torchvision/aiter/vLLM compiled from source, into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
 #   3. stack      install the wheels, trim and snapshot the stack
@@ -10,13 +10,14 @@
 #   3b. assemble  apply the patches on top of the stack, add the kernels from 3a
 #   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
-# Prebuilt from upstream: only triton (the PyPI wheel of the same tag, hash-pinned -- it bundles
-# its own LLVM and HIP headers and loads libamdhip64 at runtime, so a source build produced the
-# same thing in 25 min) and transformers. No checked-in binaries. The release image carries neither the
+# Prebuilt from upstream: torch (AMD's TheRock wheel for ROCm 10.0, loaded against this image's
+# /opt/rocm -- see the torch-amd stage), triton (the PyPI wheel of the same tag, hash-pinned -- it
+# bundles its own LLVM and HIP headers and loads libamdhip64 at runtime, so a source build produced
+# the same thing in 25 min) and transformers. No checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.11.0, triton 3.6.0, torchvision 0.24.1, aiter v0.1.22.post1, vLLM v0.30.0,
-# all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
+# stack: torch 2.11.0 (AMD wheel, +rocm10.0.0), triton 3.6.0 (PyPI), torchvision 0.24.1, aiter
+# v0.1.22.post1, vLLM v0.30.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
 ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
@@ -54,8 +55,13 @@ ARG TRITON_VERSION=3.6.0
 ARG TRITON_SHA256=74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCHVISION_VERSION=0.24.1
+# HELD at 0.1.22.post1 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
+# `aiter.ops.triton.unified_attention` (the kernel lives only at aiter.ops.triton.attention.
+# unified_attention now), and vLLM 0.30.0's rocm_aiter_unified_attn backend still imports the old
+# path -> EngineCore dies in qwen3_5.py make_layers with ModuleNotFoundError. That was the 0.4.6 and
+# 0.6.0 gate crash. Lift the hold together with a vLLM that imports the new path (or a patch).
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.24
+ARG AITER_VERSION=0.1.22.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG VLLM_VERSION=0.30.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
@@ -93,13 +99,17 @@ ARG RBT_VERSION=rocm-6.4.4
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
 # renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
 ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
-# Where the torch wheel comes from. The default `torch-wheel` is the stage below, i.e. compiled
-# here from source (~2 h at MAX_JOBS=3), so a plain `docker build .` needs nothing but the base
-# image. build.yml passes `ghcr.io/slybase/vllm-sly-radiance-torch:<key>` instead -- the same
-# torch-wheel target, built once and pushed -- with <key> a hash of the buildbase/torch-build
-# definition plus ROCM_BASE, GFX_ARCH and TORCH_VERSION (ci/torch_key.py). That decouples the
-# compile from the runner's local BuildKit cache: a pruned or full disk no longer costs 2 h.
-ARG TORCH_FROM=torch-wheel
+# Where the torch wheel comes from:
+#   torch-amd-wheel (default)  AMD's wheel from stable.repo.amd.com/rocm/whl-next, TORCH_VERSION +
+#                  rocm${TORCH_AMD_ROCM}; seconds instead of a 2 h compile. Gate-tested 2026-10-04
+#                  (accept run 37202109954): throughput 0.97-1.05x, GSM8K 0.835.
+#   torch-wheel    compiled here from source (~2 h at MAX_JOBS=3) -- for a ROCm release AMD has no
+#                  wheel for yet (e.g. a 10.1 beta).
+#   ghcr.io/slybase/vllm-sly-radiance-torch:<key>  that source build, pushed once by build.yml
+#                  (input torch_from_source); <key> from ci/torch_key.py.
+ARG TORCH_FROM=torch-amd-wheel
+# ROCm release of AMD's torch wheel; must match ROCM_BASE (the wheel's rocm_sdk check_version).
+ARG TORCH_AMD_ROCM=10.0.0
 
 # =====================================================================================
 # STAGE 1 buildbase: build toolchain and venv for the torch build and the builder stage
@@ -197,6 +207,31 @@ RUN cd /src/pytorch \
 FROM scratch AS torch-wheel
 COPY --from=torch-build /wheels/ /
 
+# AMD's own torch wheel for this ROCm release (TheRock build, stable.repo.amd.com whl-next). The
+# device code for GFX_ARCH ships in the separate amd-torch-device-<arch> wheel as a .kpack file that
+# the ROCm 10 HIP runtime (itself TheRock-built, librocm_kpack) loads. Four things make it fit:
+#   * --no-deps + fix_amd_torch_metadata.py: the wheels declare rocm[libraries] (a second ROCm in
+#     the venv next to /opt/rocm), rocm-bootstrap and triton==3.8.0+git. Left in, pip replaces torch
+#     with the newest PyPI (CUDA) torch the first time anything resolves against it; the script drops
+#     them and pins triton==TRITON_VERSION (binaries untouched, RECORD rebuilt).
+#   * rocm_sdk/ (a stand-in package): torch/_rocm_init.py preloads its ROCm libraries through
+#     rocm_sdk; the stand-in loads them from /opt/rocm, so there is one HIP runtime in the process.
+#   * the stack trim does not strip torch/lib (strip breaks TheRock's libtorch_hip.so ELF layout).
+#   * the stack stage fails if pip ever swaps in a non-ROCm torch.
+FROM buildbase AS torch-amd
+ARG TORCH_VERSION
+ARG TORCH_AMD_ROCM
+ARG TRITON_VERSION
+ARG GFX_ARCH
+COPY fix_amd_torch_metadata.py /tmp/
+RUN pip download --no-deps --index-url https://stable.repo.amd.com/rocm/whl-next \
+      "torch==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" "amd-torch-device-${GFX_ARCH}==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" \
+      -d /dl \
+    && for w in /dl/*.whl; do python /tmp/fix_amd_torch_metadata.py "${TRITON_VERSION}" "$w" /wheels; done \
+    && rm -rf /dl
+FROM scratch AS torch-amd-wheel
+COPY --from=torch-amd /wheels/ /
+
 # Resolves to the stage above by default, or to the ghcr.io image of it; BuildKit then skips
 # torch-build entirely.
 FROM ${TORCH_FROM} AS torch
@@ -211,8 +246,11 @@ ARG TRITON_SHA256
 ARG TORCHVISION_VERSION
 ARG AITER_VERSION
 
-COPY --from=torch /torch-*.whl /wheels/
-RUN pip install /wheels/torch-*.whl
+COPY --from=torch / /wheels/
+COPY rocm_sdk/ /opt/py/lib/python3.12/site-packages/rocm_sdk/
+RUN pip install --no-deps /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
+    && pip install filelock "typing-extensions>=4.10.0" "setuptools<82" "sympy>=1.13.3" "networkx>=2.5.1" jinja2 "fsspec>=0.8.5" \
+    && python -c "import torch; print('builder torch', torch.__version__, torch.version.hip)"
 
 # --- ccache for the compiles below (torchvision, aiter, vLLM) ---
 # A BuildKit cache mount keeps the ccache directory on the runner across builds, outside every layer,
@@ -330,13 +368,16 @@ ENV SP=/opt/vllm/lib/python3.12/site-packages
 # current, ci/check_constraints.py keeps it complete): without it a rebuild that misses the cache
 # resolves vLLM's open ranges to whatever is newest that day.
 COPY --from=builder /wheels /wheels
+COPY rocm_sdk/ ${SP}/rocm_sdk/
 COPY constraints.txt /tmp/constraints.txt
 RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
  && pip install --no-cache-dir --no-deps \
-      /wheels/torch-*.whl /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
+      /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
+      /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
  && pip install --no-cache-dir -c /tmp/constraints.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
  && pip install --no-cache-dir -c /tmp/constraints.txt /opt/rocm/share/amd_smi pillow pybind11 \
+ && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
  && rm -rf /wheels /root/.cache /tmp/constraints.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
@@ -364,7 +405,7 @@ RUN set -eu; \
     rm -rf ${SP}/triton/backends/nvidia/bin ${SP}/triton/backends/nvidia/lib; \
     find ${SP}/aiter_meta/hsa -mindepth 1 -maxdepth 1 -type d -name 'gfx*' ! -name "${GFX_ARCH}" \
       -exec rm -rf {} +; \
-    find /opt/vllm -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    find /opt/vllm -type f -name '*.so*' ! -path '*/torch/lib/*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} +; \
     /usr/bin/python3 /opt/split_venv.py snapshot /opt/vllm /opt/vllm.stable.json
 
