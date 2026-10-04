@@ -1,3 +1,9 @@
+# ------------ DEPRECATION WARNING ------------
+This project is no longer being maintained. I ditched vLLM and moved to a
+standalone inference engine project. That poject is available at https://codeberg.org/StillDeadcode/radiance.
+I would suggest you migrate to the standalone engine now, it its faster, easier to work on, starts faster and has less cpu overhead (and thus lower energy cost).
+# ------------ DEPRECATION WARNING ------------
+
 # vllm-radiance
 
 A vLLM inference server image for the **AMD Radeon AI PRO R9700 (gfx1201 / RDNA4)**. It bundles a working
