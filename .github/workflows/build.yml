@@ -15,6 +15,9 @@
 #
 # Pushes the image to ghcr.io only for tags or when asked (push_ghcr); a PR or a
 # main-branch build never publishes -- the `if:` guards on the push step enforce it.
+# The one exception is build-internal: any build may push the torch wheel image
+# (ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>) when its key is not there yet --
+# a wheel, not a runnable image, so nothing that could be mistaken for a release.
 name: build
 
 on:
@@ -73,23 +76,65 @@ jobs:
           # rocm/dev-ubuntu-24.04:10.0.0-full@sha256:... -> rocm10.0
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           TAG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          TORCH_REMOTE="${REGISTRY_IMAGE}-torch:$(python3 ci/torch_key.py --rocm-base "$ROCM_BASE")"
           {
             echo "version=$VER"; echo "rocm_base=$ROCM_BASE"; echo "tag=$TAG"
             echo "remote_tag=${REGISTRY_IMAGE}:${VER}-rocm${ROCM_MM}"
+            echo "torch_remote=$TORCH_REMOTE"
           } >> "$GITHUB_OUTPUT"
-          echo "building $TAG from $ROCM_BASE"
+          echo "building $TAG from $ROCM_BASE, torch wheel $TORCH_REMOTE"
           docker version --format 'docker {{.Server.Version}}'
           df -h /var/lib/docker | tail -1
+
+      # Every build logs in: the torch wheel image is read (and, once per key, written) by PR
+      # and main builds too, not only by the publishing ones.
+      - name: login to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # torch takes ~2 h to compile here and changes only with a torch bump, so it lives in its
+      # own image (Dockerfile target torch-wheel, tag from ci/torch_key.py) instead of only in the
+      # runner's BuildKit cache, which a full disk or a prune wipes. Present -> TORCH_FROM points at
+      # it and the build never enters torch-build. Missing -> compile it once (a still-cached torch
+      # layer makes that a cache hit) and push it; a failed push only costs the next build the same.
+      - name: torch wheel (ghcr.io or compile once)
+        id: torch
+        env:
+          ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
+          TORCH_REMOTE: ${{ steps.meta.outputs.torch_remote }}
+        run: |
+          set -o pipefail
+          if docker buildx imagetools inspect "$TORCH_REMOTE" >/dev/null 2>&1; then
+            echo "torch wheel: $TORCH_REMOTE (from ghcr.io)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=$TORCH_REMOTE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "torch wheel $TORCH_REMOTE not on ghcr.io yet -> torch-wheel target"
+          DOCKER_BUILDKIT=1 docker build --progress=plain --target torch-wheel \
+            --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            -t "$TORCH_REMOTE" . 2>&1 | tee torch-build.log
+          if docker push "$TORCH_REMOTE"; then
+            echo "torch wheel: built and pushed $TORCH_REMOTE" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=$TORCH_REMOTE" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::push of $TORCH_REMOTE failed; this build uses the local torch-wheel stage"
+            echo "from=torch-wheel" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: docker build
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
           VER: ${{ steps.meta.outputs.version }}
+          TORCH_FROM: ${{ steps.torch.outputs.from }}
         run: |
           set -o pipefail
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            --build-arg "TORCH_FROM=${TORCH_FROM}" \
             --build-arg "RADIANCE_VERSION=${VER}" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -113,14 +158,6 @@ jobs:
           " 2>&1 | tail -5
           LV=$(docker image inspect "$TAG" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
           [ "$LV" = "$VER" ] || { echo "::error::label org.opencontainers.image.version is '$LV', not $VER"; exit 1; }
-
-      - name: login to ghcr.io
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: push to ghcr.io
         if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
@@ -159,7 +196,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: build-log-${{ steps.meta.outputs.version }}
-          path: build.log
+          path: |
+            build.log
+            torch-build.log
           if-no-files-found: ignore
 
       - name: prune dangling images

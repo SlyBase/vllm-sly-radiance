@@ -10,6 +10,33 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.6.2] - 2026-10-04
+
+Build only: the image contents are the same stack (torch 2.11.0, triton 3.6.0, torchvision 0.24.1,
+aiter 0.1.24, vLLM 0.30.0). Nothing changes at runtime.
+
+### Changed
+- **The torch wheel comes from ghcr.io instead of the runner's build cache.** The torch compile
+  (~2 h of a ~2 h 45 min cold build) moved into its own stages (`buildbase` → `torch-build` →
+  `torch-wheel`). `build.yml` pushes that target once per torch definition to
+  `ghcr.io/slybase/vllm-sly-radiance-torch:<tag>`, the tag from the new `ci/torch_key.py`, and
+  passes it as `TORCH_FROM` from then on. Before, the wheel lived only in the runner's BuildKit
+  cache, and that cache is lost whenever the disk fills or someone runs a prune. That happened on
+  2026-10-04: the cache was gone, and a transformers-only PR compiled torch again. A plain
+  `docker build .` still compiles torch locally, because `TORCH_FROM` defaults to the in-file stage.
+- **triton is the PyPI wheel of the same tag**, hash-pinned with the new `TRITON_SHA256` ARG,
+  instead of a 25-minute source build. The manylinux wheel ships the AMD backend with its own LLVM,
+  HIP headers and device bitcode, and loads `libamdhip64.so` at runtime. That is what the source
+  build against this base produced too. The anchor in `patch_gfx1201.py` (`triton/backends/amd/driver.py`)
+  is byte-identical in the wheel. A triton bump now needs the new hash: the Renovate PR note says so,
+  and a stale hash fails at the download instead of installing a different file.
+
+### Measured
+- Cold build on the runner (LXC 2408, 8 cores, empty BuildKit cache): torch 7,174 s + triton
+  1,482 s of 2 h 46 min (run 37157999145). With the torch wheel on ghcr.io and triton from PyPI,
+  the same cold build skips both, about 2 h 25 min less. The first build per torch key still compiles
+  torch once.
+
 ## [0.6.0] - 2026-10-03
 
 ### Added

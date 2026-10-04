@@ -1,13 +1,18 @@
 # vllm-radiance: vLLM/torch/triton/aiter stack for RDNA4 (gfx1201 / R9700), plus the radiance
 # patches and kernels. Single multistage build on the official AMD ROCm image, in five stages:
-#   1. builder    compile torch/triton/torchvision/aiter/vLLM from source into /wheels
+#   1. buildbase  build toolchain + venv shared by 1a and 1b
+#   1a. torch-build / torch-wheel   compile torch from source (or take that wheel from ghcr.io,
+#                 see TORCH_FROM below -- a ~2 h compile that only a torch bump has to repeat)
+#   1b. builder   triton from PyPI, torchvision/aiter/vLLM compiled from source, into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
 #   3. stack      install the wheels, trim and snapshot the stack
 #   3a. kernels   compile radiance's own HIP extensions (R4D, MXFP4, GDN, quant plugins)
 #   3b. assemble  apply the patches on top of the stack, add the kernels from 3a
 #   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
-# No prebuilt component wheels and no checked-in binaries. The release image carries neither the
+# Prebuilt from upstream: only triton (the PyPI wheel of the same tag, hash-pinned -- it bundles
+# its own LLVM and HIP headers and loads libamdhip64 at runtime, so a source build produced the
+# same thing in 25 min) and transformers. No checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
 # stack: torch 2.11.0, triton 3.6.0, torchvision 0.24.1, aiter v0.1.22.post1, vLLM v0.30.0,
@@ -43,6 +48,10 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe348
 ARG TORCH_VERSION=2.11.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.6.0
+# sha256 of triton-${TRITON_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl on
+# PyPI (https://pypi.org/pypi/triton/<version>/json, digests.sha256). Bump together with
+# TRITON_VERSION: a stale hash fails the build at the download, it never installs the wrong file.
+ARG TRITON_SHA256=74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCHVISION_VERSION=0.24.1
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
@@ -84,11 +93,24 @@ ARG RBT_VERSION=rocm-6.4.4
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
 # renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
 ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
+# Where the torch wheel comes from. The default `torch-wheel` is the stage below, i.e. compiled
+# here from source (~2 h at MAX_JOBS=3), so a plain `docker build .` needs nothing but the base
+# image. build.yml passes `ghcr.io/slybase/vllm-sly-radiance-torch:<key>` instead -- the same
+# torch-wheel target, built once and pushed -- with <key> a hash of the buildbase/torch-build
+# definition plus ROCM_BASE, GFX_ARCH and TORCH_VERSION (ci/torch_key.py). That decouples the
+# compile from the runner's local BuildKit cache: a pruned or full disk no longer costs 2 h.
+ARG TORCH_FROM=torch-wheel
 
 # =====================================================================================
-# STAGE 1 builder: compile the stack from source into /wheels
+# STAGE 1 buildbase: build toolchain and venv for the torch build and the builder stage
 # =====================================================================================
-FROM ${ROCM_BASE} AS builder
+FROM ${ROCM_BASE} AS buildbase
+# Only GFX_ARCH, TORCH_VERSION and MAX_JOBS are used here. TRITON/TORCHVISION/AITER_VERSION are
+# declared anyway, in this order, because a declared ARG is part of every RUN's cache key below it
+# and the torch layer on the runner was built with them; removing them would re-run the ~2 h
+# compile for an identical wheel. The ghcr.io wheel (TORCH_FROM) is what keeps torch from being
+# rebuilt now -- drop these three with the next torch bump. (Until then an aiter bump re-runs
+# this stage's apt/venv steps, ~2 min, and leaves the ghcr.io wheel's key untouched.)
 ARG GFX_ARCH
 ARG TORCH_VERSION
 ARG TRITON_VERSION
@@ -122,6 +144,18 @@ ENV PATH=/opt/py/bin:$PATH
 RUN pip install -U pip wheel setuptools "setuptools-scm>=8.0" "cmake<4" ninja pybind11 numpy \
       pyyaml typing_extensions cffi requests build
 RUN mkdir -p /wheels
+
+# =====================================================================================
+# STAGE 1a torch-build / torch-wheel: torch from source (skipped when TORCH_FROM is an image)
+# =====================================================================================
+FROM buildbase AS torch-build
+# Same ARG list as buildbase, same order: see the cache-key note there.
+ARG GFX_ARCH
+ARG TORCH_VERSION
+ARG TRITON_VERSION
+ARG TORCHVISION_VERSION
+ARG AITER_VERSION
+ARG MAX_JOBS=4
 
 # --- torch (AOTriton off: its gfx1201 source-configure fails and vLLM never uses torch
 #     SDPA-flash; USE_MAGMA=0: base has no magma) ---
@@ -159,25 +193,44 @@ RUN cd /src/pytorch \
        python -m build --wheel --no-isolation --outdir /wheels . \
     && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
-# --- ccache for the compiles below (triton, torchvision, aiter, vLLM) ---
+# The wheel alone, as an image of its own: build.yml pushes this target to ghcr.io (see TORCH_FROM).
+FROM scratch AS torch-wheel
+COPY --from=torch-build /wheels/ /
+
+# Resolves to the stage above by default, or to the ghcr.io image of it; BuildKit then skips
+# torch-build entirely.
+FROM ${TORCH_FROM} AS torch
+
+# =====================================================================================
+# STAGE 1b builder: triton from PyPI, torchvision/aiter/vLLM from source into /wheels
+# =====================================================================================
+FROM buildbase AS builder
+ARG GFX_ARCH
+ARG TRITON_VERSION
+ARG TRITON_SHA256
+ARG TORCHVISION_VERSION
+ARG AITER_VERSION
+
+COPY --from=torch /torch-*.whl /wheels/
+RUN pip install /wheels/torch-*.whl
+
+# --- ccache for the compiles below (torchvision, aiter, vLLM) ---
 # A BuildKit cache mount keeps the ccache directory on the runner across builds, outside every layer,
 # so a stack bump (an aiter or vLLM patch release) recompiles only the translation units that
-# actually changed. vLLM's setup.py and triton (TRITON_BUILD_WITH_CCACHE) pick ccache up on their
-# own; `ccache -s` after the vLLM build prints the hit rate into build.log. torch is deliberately
-# not wrapped (yet): adding the mount to its RUN would change that layer's cache key and force the
-# ~90 min compile once for nothing -- the next torch bump rebuilds it anyway, add the mount then.
-# The mount is subject to BuildKit's garbage collection like the layer cache (builder.gc in the
-# runner's daemon.json); CCACHE_MAXSIZE caps it from the inside.
+# actually changed. vLLM's setup.py picks ccache up on its own; `ccache -s` after the vLLM build
+# prints the hit rate into build.log. The mount is subject to BuildKit's garbage collection like the
+# layer cache (builder.gc in the runner's daemon.json); CCACHE_MAXSIZE caps it from the inside.
 ARG CCACHE_MAXSIZE=20G
 ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=${CCACHE_MAXSIZE}
 
-# --- triton ---
-# /root/.triton holds the LLVM toolchain triton downloads for its build: cached too, not re-fetched.
-RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
-    --mount=type=cache,id=radiance-triton-home,target=/root/.triton \
-    git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/triton.git /src/triton \
-    && cd /src/triton && TRITON_BUILD_WITH_CCACHE=true pip wheel --no-build-isolation --no-deps . -w /wheels \
-    && pip install /wheels/triton-*.whl && rm -rf /src/triton
+# --- triton: the PyPI wheel of the pinned tag, hash-checked ---
+# Not compiled here any more (was 25 min): the manylinux wheel carries the AMD backend
+# (triton/backends/amd, with its own HIP headers and device bitcode) and its own LLVM, and finds
+# ROCm only at runtime by dlopen("libamdhip64.so") -- which is all a source build against this base
+# produced too. patch_gfx1201.py's driver.py anchor is byte-identical in the wheel.
+RUN echo "triton==${TRITON_VERSION} --hash=sha256:${TRITON_SHA256}" > /tmp/triton.txt \
+    && pip download --no-deps --require-hashes --only-binary=:all: -r /tmp/triton.txt -d /wheels \
+    && pip install --no-deps /wheels/triton-*.whl && rm /tmp/triton.txt
 
 # --- torchvision ---
 # FORCE_CUDA=1 is REQUIRED: torchvision's BUILD_CUDA_SOURCES gates on torch.cuda.is_available(),
