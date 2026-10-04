@@ -10,6 +10,19 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.6.1] - 2026-10-04
+
+### Fixed
+- **Revert `transformers` 5.18.0 -> 5.17.0 (hypothesis test)**: both the 0.4.6 and 0.6.0 accept-gate
+  candidates failed to become healthy with an identical crash in vLLM's own
+  `model_executor/models/qwen3_5.py` (`Qwen3_5Model.__init__` -> `make_layers`), independent of
+  this fork's own patches (neither touches that file). The crash first appears on `main` after
+  `transformers` 5.17.0 -> 5.18.0 (PR #68, 2026-09-30) among several candidate commits since the
+  last known-good `v0.4.5` (aiter 0.1.24, an ubuntu:24.04 digest bump, the kernels-stage build
+  restructure). This reverts the transformers pin as the cheapest, most isolated thing to test
+  first; if the gate goes green on this revert it confirms the culprit, if not the search
+  continues among the other candidates. Not a confirmed root cause until the gate proves it.
+
 ## [0.6.0] - 2026-10-03
 
 ### Added
