@@ -49,7 +49,10 @@ publish_release() {
       git log --oneline --no-merges "${prev_tag}..${SHA}" | sed 's/^\([0-9a-f]*\) /-\`\1\` /'
     } >> "$notes"
   fi
-  { echo; echo "---"; echo "Image: \`ghcr.io/slybase/vllm-sly-radiance:${VER}-rocm10.0\` (published by the build workflow for this tag)."; echo "${WHY}"; } >> "$notes"
+  # the tag suffix is the ROCm major.minor of ROCM_BASE at that commit (same rule as build.yml)
+  local rocm_mm
+  rocm_mm=$(git show "${COMMIT}:Dockerfile" | sed -nE 's/^ARG ROCM_BASE=[^:]+:([0-9]+\.[0-9]+)\..*/\1/p' | head -1)
+  { echo; echo "---"; echo "Image: \`ghcr.io/slybase/vllm-sly-radiance:${VER}-rocm${rocm_mm:-10.1}\` (published by the build workflow for this tag)."; echo "${WHY}"; } >> "$notes"
   gh release create "$TAG" --verify-tag --title "vllm-sly-radiance ${VER}" --notes-file "$notes"
   rm -f "$notes"
 }

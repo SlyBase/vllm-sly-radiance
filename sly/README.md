@@ -166,7 +166,7 @@ git push -u origin merge/stilldeadcode && gh pr create
 ## Build & Push
 
 The `build` workflow (`.github/workflows/build.yml`, self-hosted runner
-`rocm-build` in LXC 2408, CPU only) builds `vllm-sly-radiance:<VERSION>-rocm10.0`
+`rocm-build` in LXC 2408, CPU only) builds `vllm-sly-radiance:<VERSION>-rocm10.1`
 on every `VERSION` change on `main` and pushes it to ghcr.io for `v*` tags or
 `gh workflow run build.yml -f push_ghcr=true`. Manual equivalent:
 

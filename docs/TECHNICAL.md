@@ -560,7 +560,7 @@ from the checkpoint).
 
 ## Build details
 
-- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
+- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
 - PyTorch 2.14.0, torchvision 0.29.0, Triton 3.8.0, aiter 0.1.22.post1, transformers 5.17.0, vLLM 0.30.0; libr4d pinned

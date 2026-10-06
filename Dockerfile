@@ -10,17 +10,17 @@
 #   3b. assemble  apply the patches on top of the stack, add the kernels from 3a
 #   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
-# Prebuilt from upstream: torch (AMD's TheRock wheel for ROCm 10.0, loaded against this image's
+# Prebuilt from upstream: torch (AMD's TheRock wheel for ROCm 10.1, loaded against this image's
 # /opt/rocm -- see the torch-amd stage), triton (the PyPI wheel of the same tag, hash-pinned -- it
 # bundles its own LLVM and HIP headers and loads libamdhip64 at runtime, so a source build produced
 # the same thing in 25 min) and transformers. No checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.11.0 (AMD wheel, +rocm10.0.0), triton 3.6.0 (PyPI), torchvision 0.24.1, aiter
-# v0.1.22.post1, vLLM v0.30.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
-# ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
+# stack: torch 2.12.0 (AMD wheel, +rocm10.1.0), triton 3.6.0 (PyPI), torchvision 0.27.0, aiter
+# v0.1.22.post1, vLLM v0.30.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
+# ROCM_BASE below is what the homelab's production image is built from; 10.0 needs --build-arg ROCM_BASE and TORCH_AMD_ROCM / TORCH_VERSION=2.11.0 / TORCHVISION_VERSION=0.24.1).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
-ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
+ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
 ARG GFX_ARCH=gfx1201
 # The release stage starts from a clean distro image rather than the ROCm base, and COPYs in only
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's
@@ -46,7 +46,14 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe348
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
 # renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCH_VERSION=2.11.0
+# ROCm 10.1 moved torch to 2.12: AMD's whl-next has no 2.11 wheel for rocm10.1 (2.12 / 2.13 / 2.14 only).
+# 2.12 is the oldest and pairs with torchvision 0.27.0. triton stays on the PyPI 3.6.0 of 0.7.0 on
+# purpose (upstream pairs 2.12 with 3.7.x, AMD's 10.1 wheel with its own 3.8.0): one moving part less
+# in the A/B; 3.7.0 is the next step. The 2.11
+# pin existed because torch >= 2.12 hit ROCm/ROCm#6406 (CPU spins at 100% after the first GPU op,
+# an AsyncEventsLoop busy-wait in libhsa-runtime64); the fix landed in TheRock on 2026-08-22 and is
+# part of ROCm 10.1 -- tests-lessons/F/test.sh checks the idle CPU of the engine.
+ARG TORCH_VERSION=2.12.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.6.0
 # sha256 of triton-${TRITON_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl on
@@ -54,7 +61,7 @@ ARG TRITON_VERSION=3.6.0
 # TRITON_VERSION: a stale hash fails the build at the download, it never installs the wrong file.
 ARG TRITON_SHA256=74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.24.1
+ARG TORCHVISION_VERSION=0.27.0
 # HELD at 0.1.22.post1 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
 # `aiter.ops.triton.unified_attention` (the kernel lives only at aiter.ops.triton.attention.
 # unified_attention now), and vLLM 0.30.0's rocm_aiter_unified_attn backend still imports the old
@@ -102,14 +109,14 @@ ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
 # Where the torch wheel comes from:
 #   torch-amd-wheel (default)  AMD's wheel from stable.repo.amd.com/rocm/whl-next, TORCH_VERSION +
 #                  rocm${TORCH_AMD_ROCM}; seconds instead of a 2 h compile. Gate-tested 2026-10-04
-#                  (accept run 37202109954): throughput 0.97-1.05x, GSM8K 0.835.
+#                  (accept run 37202109954, torch 2.11 / ROCm 10.0): throughput 0.97-1.05x, GSM8K 0.835.
 #   torch-wheel    compiled here from source (~2 h at MAX_JOBS=3) -- for a ROCm release AMD has no
-#                  wheel for yet (e.g. a 10.1 beta).
+#                  wheel for yet (e.g. a beta).
 #   ghcr.io/slybase/vllm-sly-radiance-torch:<key>  that source build, pushed once by build.yml
 #                  (input torch_from_source); <key> from ci/torch_key.py.
 ARG TORCH_FROM=torch-amd-wheel
 # ROCm release of AMD's torch wheel; must match ROCM_BASE (the wheel's rocm_sdk check_version).
-ARG TORCH_AMD_ROCM=10.0.0
+ARG TORCH_AMD_ROCM=10.1.0
 
 # =====================================================================================
 # STAGE 1 buildbase: build toolchain and venv for the torch build and the builder stage
@@ -361,7 +368,11 @@ ENV SP=/opt/vllm/lib/python3.12/site-packages
 # --- install the wheels ---
 # torch/triton/vision/aiter with --no-deps so pip does not replace them; vLLM with its pure-python
 # dependencies. amdsmi (the ROCm python bindings the base image ships) is required for vLLM's ROCm
-# platform detection. The transformers pin goes in the SAME pip invocation as the vLLM wheel so the
+# platform detection: ROCm <= 10.0 ships it as an installable package (setup.py), ROCm 10.1 only as a
+# bare relocatable tree (/opt/rocm/share/amd_smi/amdsmi, no setup.py/pyproject), which resolves
+# <root>/lib/libamd_smi.so.27 relative to itself -- so it is put on sys.path with a .pth (named so it
+# sorts before radiance_amdsmi.pth, which imports it at site-init) instead of being installed.
+# The transformers pin goes in the SAME pip invocation as the vLLM wheel so the
 # resolver sees it as a constraint -- installing it afterwards would first pull the newest release
 # and then downgrade it, leaving both in the layer.
 # Everything that comes from PyPI is pinned by constraints.txt (see its header; Renovate keeps it
@@ -376,7 +387,10 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
       /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
  && pip install --no-cache-dir -c /tmp/constraints.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
- && pip install --no-cache-dir -c /tmp/constraints.txt /opt/rocm/share/amd_smi pillow pybind11 \
+ && pip install --no-cache-dir -c /tmp/constraints.txt pillow pybind11 \
+ && if [ -f /opt/rocm/share/amd_smi/setup.py ]; then pip install --no-cache-dir /opt/rocm/share/amd_smi; \
+    else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
+ && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
  && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
  && rm -rf /wheels /root/.cache /tmp/constraints.txt
 
