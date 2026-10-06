@@ -16,6 +16,12 @@ that the op re-quantizes:
 Per-fusion switches (only read when the master knob is on, default 1 each):
 RADIANCE_FUSED_NORM_QUANT_ADD_RMS, RADIANCE_FUSED_NORM_QUANT_SILU, RADIANCE_FUSED_NORM_QUANT_GDN.
 
+RADIANCE_MXFP4_GATED_FOLD=1 (default 0, needs the master knob and the SILU fusion): the dense MLP's
+gate_up GEMM takes the SwiGLU into its epilogue (`radiance::mxfp4_gated_quant`), so the [M, 2I] bf16
+gate_up tensor is never written; a second row kernel quantises the product for down_proj. Decode /
+verify band only (M <= 64 and <= RADIANCE_MXFP4_DECODE_MAX_M, the shapes that run the decode GEMM
+at split-K 1); every other M runs the unchanged GEMM + silu_mul_quant pair inside the same op.
+
 Rules this module follows (same as radiance_mxfp4.py): the gates below run in traced code, so they
 are plain attribute / dtype / shape reads that dynamo folds into constants per layer; no stderr in
 traced code (the one-shot activation log lives inside the op bodies); every output is allocated
@@ -39,6 +45,7 @@ ENABLED = _flag("RADIANCE_FUSED_NORM_QUANT", "0")
 ADD_RMS = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_ADD_RMS", "1")
 SILU = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_SILU", "1")
 GDN = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_GDN", "1")
+GATED_FOLD = SILU and _flag("RADIANCE_MXFP4_GATED_FOLD", "0")
 
 # Kernel launcher limits (radiance_mxfp4_fp8.hip): add_rms K <= 10240, silu N <= 18432 (MAXG 9,
 # 0.1.6), gdn N <= 10240 with 128-wide heads; all 8-aligned.
@@ -47,6 +54,7 @@ _SILU_MAX_N = 18432
 _GDN_MAX_N = 10240
 
 _ext = None
+_rmx = None
 _rmx_tiled_wanted = _rmx_tiled_register = None
 _ROCM = False
 _GemmaRMSNorm = _RMSNormGated = _SiluAndMul = ()
@@ -57,7 +65,7 @@ if ENABLED:
     if not _rmx.ENABLED or _rmx._ext is None:
         sys.stderr.write("[radiance.fused_norm] RADIANCE_FUSED_NORM_QUANT=1 but the W4A8 kernel is "
                          "not active (RADIANCE_MXFP4_W4A8 / extension) -- fusions OFF\n")
-        ADD_RMS = SILU = GDN = False
+        ADD_RMS = SILU = GDN = GATED_FOLD = False
     else:
         if _rmx.MIN_M > 0:
             raise RuntimeError("RADIANCE_FUSED_NORM_QUANT=1 needs RADIANCE_MXFP4_W4A8_MIN_M=0: below "
@@ -68,6 +76,10 @@ if ENABLED:
                                "RADIANCE_MXFP4_SANITIZE=1 (the fused kernels quantize before any "
                                "nan_to_num could run).")
         _ext = _rmx._ext
+        if GATED_FOLD and not hasattr(_ext, "launch_gated"):
+            sys.stderr.write("[radiance.fused_norm] RADIANCE_MXFP4_GATED_FOLD=1 but the extension "
+                             "has no launch_gated -- gated fold OFF\n")
+            GATED_FOLD = False
         if getattr(_rmx, "A_TILED_MIN_M", 0):
             _rmx_tiled_wanted, _rmx_tiled_register = _rmx.a_tiled_wanted, _rmx.a_tiled_register
         from vllm.model_executor.layers.activation import SiluAndMul as _SiluAndMul
@@ -78,6 +90,7 @@ if ENABLED:
         _ROCM = bool(current_platform.is_rocm())
         sys.stderr.write(f"[radiance.fused_norm] armed: add_rms_quant={int(ADD_RMS)} "
                          f"silu_mul_quant={int(SILU)} gdn_norm_quant={int(GDN)} "
+                         f"gated_fold={int(GATED_FOLD)} "
                          f"a_tiled_min_m={getattr(_rmx, 'A_TILED_MIN_M', 0)}\n")
 
 _seen: set = set()
@@ -177,6 +190,43 @@ def _(gate_up):
             torch.empty((M,), device=gate_up.device, dtype=torch.float32))
 
 
+@torch.library.custom_op("radiance::mxfp4_gated_quant", mutates_args=())
+def _mxfp4_gated_quant_op(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Tensor,
+                          weight_scale: torch.Tensor, weight_ref: torch.Tensor
+                          ) -> tuple[torch.Tensor, torch.Tensor]:
+    """MLP gate_up (W4A8, pre-quantized activation) + silu(gate) * up + per-token e4m3.
+    weight [2I, K/2] (gate rows first), returns (q [M, H] e4m3, scale [M] f32): what
+    mxfp4_linear_pq followed by silu_mul_quant returns, byte for byte. The M branch lives in here
+    (opaque to dynamo): launch_gated serves the decode band and says False for anything else, which
+    then takes the unfused pair. The choice depends on (M, N, K) and process env only, so capture
+    and replay agree. Every output is allocated here (CUDA-graph capture safe)."""
+    M, N = x_fp8.shape[0], weight.shape[0]
+    K = weight_scale.shape[0] * 32
+    H = N // 2
+    if M and GATED_FOLD and _ext is not None and not _tiled(M, H):
+        tiled_in = (_rmx.A_TILED_MIN_M and _rmx.a_tiled_take(x_fp8, M, K))
+        if not tiled_in:
+            p = torch.empty((M, H), device=x_fp8.device, dtype=torch.bfloat16)
+            if _ext.launch_gated(x_fp8.data_ptr(), weight.data_ptr(), weight_scale.data_ptr(),
+                                 weight_ref.data_ptr(), x_scale.data_ptr(), p.data_ptr(),
+                                 M, N, K, torch.cuda.current_stream().cuda_stream):
+                q = torch.empty((M, H), device=x_fp8.device, dtype=torch.float8_e4m3fn)
+                s = torch.empty((M,), device=x_fp8.device, dtype=torch.float32)
+                _once("mxfp4_gated_quant", f"M={M} N={N} K={K}")
+                _ext.launch_quant_rows(p.data_ptr(), q.data_ptr(), s.data_ptr(), M, H,
+                                       torch.cuda.current_stream().cuda_stream)
+                return q, s
+    gu = torch.ops.radiance.mxfp4_linear_pq(x_fp8, x_scale, weight, weight_scale, weight_ref)
+    return _silu_mul_quant_op(gu)
+
+
+@_mxfp4_gated_quant_op.register_fake
+def _(x_fp8, x_scale, weight, weight_scale, weight_ref):
+    M, H = x_fp8.shape[0], weight.shape[0] // 2
+    return (torch.empty((M, H), device=x_fp8.device, dtype=torch.float8_e4m3fn),
+            torch.empty((M,), device=x_fp8.device, dtype=torch.float32))
+
+
 @torch.library.custom_op("radiance::gdn_norm_quant", mutates_args=())
 def _gdn_norm_quant_op(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor,
                        eps: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -263,6 +313,18 @@ def mlp_ok(mlp) -> bool:
     return n % 8 == 0 and n <= _SILU_MAX_N
 
 
+def gated_ok(mlp) -> bool:
+    """Qwen2MoeMLP.forward, gate_up + act_fn + down_proj: the gated fold applies when the SwiGLU
+    fusion does (mlp_ok), gate_up is a folded radiance W4A8 layer (mx_ok) of fused width 2I, and
+    the dense MLP has no expert gate. The caller also requires x to be the (q, scale) pair."""
+    g = getattr(mlp, "gate_up_proj", None)
+    if not (GATED_FOLD and mlp_ok(mlp) and mx_ok(g) and getattr(mlp, "expert_gate", 1) is None):
+        return False
+    return (g.weight.shape[0] == 2 * mlp.down_proj.weight.shape[1] * 2
+            and getattr(g, "bias", None) is None and getattr(g, "skip_bias_add", False) is False
+            and not getattr(g, "_radiance_silu", False))
+
+
 def gdn_ok(attn) -> bool:
     """QwenGatedDeltaNetAttention._output_projection -> out_proj."""
     n = getattr(attn, "norm", None)
@@ -285,6 +347,15 @@ def add_rms_quant(norm, hidden_states: torch.Tensor, residual: torch.Tensor):
 
 def silu_mul_quant(gate_up: torch.Tensor):
     q, s = torch.ops.radiance.silu_mul_quant(gate_up)
+    return (q, s)
+
+
+def gated_gemm_quant(mlp, x):
+    """Qwen2MoeMLP: x = (q, scale) -> gate_up GEMM + SwiGLU + quant -> (q, scale) for down_proj."""
+    g = mlp.gate_up_proj
+    x_fp8, x_scale = x
+    q, s = torch.ops.radiance.mxfp4_gated_quant(x_fp8, x_scale, g.weight, g.weight_scale,
+                                                g.radiance_wref)
     return (q, s)
 
 
