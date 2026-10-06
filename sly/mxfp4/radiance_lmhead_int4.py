@@ -68,6 +68,55 @@ ZP_BIAS = 8  # unsigned nibble = q + 8, the constant the kernel subtracts (HAS_Z
 TILED = os.environ.get("RADIANCE_LMHEAD_INT4_TILED", "1") == "1"
 
 
+# RADIANCE_LMHEAD_INT4_LEAN=0|auto|1 (default 0 = the stock tile table, the A/B control).
+# Radiance's int4 logits kernel spilled registers (744 B scratch per lane) from MT >= 2 and a rolled
+# group loop ("LEAN") fixed it for M > 16 only (c8 step -5 %). This image's head runs the Triton
+# W4A16 kernel and does NOT spill at its production tiles (gfx1201 compile: 139-197 VGPR, 0 spills,
+# 0 B scratch for all five M buckets), so the knob is a *speed* variant, not a spill fix: it
+# routes the head through the split-K kernel (split 1, direct epilogue) with the scale applied to
+# the fp32 tile result instead of to every dequantised weight (DEQ 1) / no interleave unpack
+# (UNPACK 1) -- fewer VALU ops per weight byte, which is what limits M = 40..64 (2.1-2.2 ms vs the
+# 1.17 ms DRAM floor of the 656 MB weight).  auto: buckets M <= 32/40/64 only (M <= 16 keeps the
+# stock tiles, they sit at the floor: 1.31 ms); 1: all buckets (for A/B).
+# RADIANCE_LMHEAD_INT4_LEAN_CFG="32=bm,bn,bk,warps,stages,split_k,mode,deq,unpack[,kstep];40=...;64=..."
+# overrides the config of a bucket (stages "none" = Triton default); the winners of
+# tests-lessons/C/microbench.py print in exactly this format. All configs listed here compile
+# spill-free for gfx1201 (tests-lessons/C/compile_cfgs.py).
+LEAN = os.environ.get("RADIANCE_LMHEAD_INT4_LEAN", "0")
+_LEAN_DEFAULT = {
+    8: (16, 64, 128, 4, 1, 1, 0, 1, 0),
+    16: (16, 64, 128, 4, 1, 1, 0, 1, 0),
+    32: (32, 128, 128, 8, None, 1, 0, 1, 1),
+    40: (64, 128, 64, 8, None, 1, 0, 1, 0),
+    64: (64, 128, 64, 8, None, 1, 0, 1, 0),
+}
+
+
+def _parse_lean_cfg(spec: str) -> dict:
+    out = {}
+    for part in filter(None, (p.strip() for p in spec.split(";"))):
+        bucket, cfg = part.split("=")
+        out[int(bucket)] = tuple(None if v.strip().lower() == "none" else int(v) for v in cfg.split(","))
+    return out
+
+
+def install_lean(n: int, k: int, group_size: int) -> None:
+    """Add the lean configs of this head shape to the split-K table (consulted before the tile table)."""
+    if LEAN not in ("auto", "1"):
+        return
+    from vllm.model_executor.kernels.linear.mixed_precision import rdna_hybrid_w4a16 as _h
+
+    if not (_h._on_gfx12x() and hasattr(_h, "_gfx12x_splitk_table")):
+        return
+    cfgs = dict(_LEAN_DEFAULT)
+    cfgs.update(_parse_lean_cfg(os.environ.get("RADIANCE_LMHEAD_INT4_LEAN_CFG", "")))
+    table = _h._gfx12x_splitk_table()
+    used = {b: c for b, c in sorted(cfgs.items()) if LEAN == "1" or b > 16}
+    for bucket, cfg in used.items():
+        table[(group_size, k, n, bucket)] = cfg
+    logger.info_once("[radiance] int4 lm_head lean configs (%s): %s", LEAN, used)
+
+
 def quant_method_for(layer: torch.nn.Module, prefix: str, inner=None):
     """get_quant_method hook: our method for an enabled ParallelLMHead, else None.
 
@@ -154,6 +203,7 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
             if getattr(_h, "_radiance_tiled_enabled", None) and _h._on_gfx12x() and _h._radiance_tiled_enabled(n, k):
                 w_i8 = _h.radiance_w4a16_tile(w_i8)
         layer.weight = Parameter(w_i8, requires_grad=False)
+        install_lean(n, k, g)
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
         logger.info(
             "[radiance] lm_head quantised to int4 g%d: [%d, %d], %.2f GiB freed",
