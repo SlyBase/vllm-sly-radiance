@@ -869,25 +869,48 @@ static __device__ __forceinline__ T ld_w(const T *p) {
 // at SPEC=7, which reaches 64 at max_num_seqs=8. DTM 1..4 covers every reachable batch of both.
 // Use the SMALLEST DTM that covers M: measured at M=20, DTM=2 beats DTM=3 by 12% (89.1 vs 99.9 us
 // on gate_up) purely because the wider tile computes rows nobody asked for.
+//
+// GATED (RADIANCE_MXFP4_GATED_FOLD, DKS == 1, E6 == false): the gate_up GEMM with the SwiGLU in the
+// epilogue. N is the fused width 2*gI (gate rows 0..gI-1, up rows gI..2gI-1, as MergedColumnParallel
+// lays them out). A block owns BND/2 = 64 output columns: waves 0..DWN/2-1 take the gate rows
+// [g0, g0+64), waves DWN/2.. the up rows [gI+g0, gI+g0+64), so both halves of a column meet in one
+// block and the weight stream is read exactly once (no re-layout of the weight, WPERM order
+// included: tiles are 16 rows and 64 | gI). The epilogue rounds each half to bf16 exactly where the
+// unfused kernel's C store does ((acc*rf)*As), exchanges through LDS, forms
+// bf16(bf16(g/(1+exp(-g))) * u) and stores that product as bf16 [M, gI] into C. The per-token e4m3
+// scale needs the amax over ALL gI columns, i.e. over every block, so quantisation stays a second
+// (row-per-workgroup) launch: radiance_silu_mul_quant<PRE>. Saved: the [M, 2gI] bf16 round trip
+// (written here as [M, gI], read there as [M, gI]) and the silu math off the critical row kernel.
 template <int DWN, int DBK, int DKS, int DTM, bool WPERM, bool DIRECT = true, bool NT = false,
-          bool E6 = false>
+          bool E6 = false, bool GATED = false>
 __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
     const unsigned char *__restrict__ A, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
     const float *__restrict__ As, float *__restrict__ P, int *__restrict__ cnt,
     __bf16 *__restrict__ C, int M, int N, int K, int pb1, int pb2, long astride,
-    const unsigned char *__restrict__ WH = nullptr) {
+    const unsigned char *__restrict__ WH = nullptr, int gI = 0) {
+  static_assert(!GATED || (DKS == 1 && DIRECT && !E6), "gated epilogue: single K split, no fp6");
   constexpr int BND = DWN * 16;
   constexpr int DASTR = DBK + DEC_PAD, DWSTR = DBK + DEC_PAD;
   constexpr int DNTHREADS = DWN * 32;
   __shared__ unsigned char sA[DEC_MTILE * DTM * DASTR];
-  __shared__ unsigned char sW[BND * DWSTR];
+  __shared__ __attribute__((aligned(16))) unsigned char sW[BND * DWSTR];
   __shared__ int s_last;
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
   const int n0 = blockIdx.x * BND;
   const int ks = blockIdx.z;
+  // Global weight row of local row r in [0, BND): contiguous from n0, or (GATED) the gate tile
+  // block followed by the matching up tile block.
+  auto grow = [&](int r) -> int {
+    if constexpr (GATED) {
+      const int g0 = blockIdx.x * (BND / 2);
+      return r < BND / 2 ? g0 + r : gI + g0 + (r - BND / 2);
+    } else {
+      return n0 + r;
+    }
+  };
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.
@@ -926,7 +949,7 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
 #pragma unroll
     for (int it = 0; it < NITW; ++it) {
       const int idx = it * DNTHREADS * 8 + tid * 8;
-      const int r = idx / (DBK / 2), c = idx % (DBK / 2), gn = n0 + r;
+      const int r = idx / (DBK / 2), c = idx % (DBK / 2), gn = grow(r);
       const int gc = gn < N - 1 ? gn : N - 1;                  // clamp, never predicate
       const unsigned long long packed = getw(it, gc, c);
       const int blk = (k0 + c * 2) / 32;
@@ -965,7 +988,7 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
         const int lane_ = sl & 31, rest = sl >> 5;
         const int kst = rest % KSTEPS_T, ntl = rest / KSTEPS_T;
         const int r = ntl * 16 + (lane_ & 15), kloc = kst * 16 + (lane_ >> 4) * 8;
-        const int gn = n0 + r;
+        const int gn = grow(r);
         // Clamp, never predicate; gn is always even here and N % 16 == 0 under WPERM, so
         // clamping to the last even row keeps the uint2 read 8-byte aligned and gc + 1 in
         // bounds; the fragment address is recomputed from the clamped row.
@@ -1043,7 +1066,32 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
     }
   }
 
-  const int n = n0 + wave * 16 + col;
+  const int n = grow(wave * 16 + col);
+
+  if constexpr (GATED) {
+    // All waves park their bf16 C tile in LDS (reusing sW: the last mma_slab ended on a barrier),
+    // row stride BND, then one pass forms the product. 16*DTM rows x BND x 2 B <= sW for DTM <= 4.
+    static_assert(DTM <= 4, "gated epilogue stages C in sW");
+    __bf16 *sC = (__bf16 *)sW;
+    const float rf = __int_as_float((int)Wref[n] << 23);
+#pragma unroll
+    for (int i = 0; i < DTM; ++i)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int m = i * 16 + kb8 + e;
+        sC[m * BND + wave * 16 + col] = (__bf16)(acc[i][e] * rf * (m < M ? As[m] : 0.f));
+      }
+    __syncthreads();
+    const int g0 = blockIdx.x * (BND / 2);
+    constexpr int HALF = BND / 2;
+    for (int idx = tid; idx < M * HALF; idx += DNTHREADS) {
+      const int m = idx / HALF, j = idx % HALF;
+      const float x = (float)sC[m * BND + j];
+      const float t = (float)(__bf16)(x / (1.f + expf(-x)));          // silu, rounded to bf16
+      C[(size_t)m * gI + g0 + j] = (__bf16)(t * (float)sC[m * BND + HALF + j]);
+    }
+    return;
+  }
 
   // At DKS==1 the accumulator already holds the whole K range, so the partial buffer, the
   // threadfence, the atomic and the reduction pass are all pure overhead -- and that overhead is
@@ -1596,13 +1644,17 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
 // Same skeleton and precision contract as radiance_add_rms_quant: every intermediate is rounded
 // exactly where the traced path rounds (silu to bf16, product to bf16, amax over the rounded
 // product). One workgroup per row.
-template <int ART, bool TILED = false>
+//
+// PRE = true (RADIANCE_MXFP4_GATED_FOLD): the input is the already-gated product p = bf16(silu(gate)
+// * up), [M, N] row-major, written by radiance_mxfp4_fp8_gemm_decode<GATED>; the kernel then only
+// takes the row amax and quantises. Same rounding points, so the bytes equal the unfused pair's.
+template <int ART, bool TILED = false, bool PRE = false>
 __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
     const __bf16 *__restrict__ gu, unsigned char *__restrict__ q, float *__restrict__ scale,
     int N) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
-  gu += (long)row * 2 * N;
+  gu += (long)row * (PRE ? 1 : 2) * N;
   if (!TILED) q += (long)row * N;
   const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in add_rms_quant
   // N <= 72*256 = 18432 (Qwen3.8-27B TP=1: 17408). MAXG only sizes this thread-private
@@ -1615,12 +1667,17 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
   for (int g = tid; g < NV; g += ART, ++ng) {
     ArnqVec8 vg, vu;
     vg.u4 = ((const uint4 *)gu)[g];
-    vu.u4 = ((const uint4 *)(gu + N))[g];
+    if constexpr (!PRE) vu.u4 = ((const uint4 *)(gu + N))[g];
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
-      float x = (float)vg.h[j];
-      float t = (float)(__bf16)(x / (1.f + expf(-x)));       // silu, rounded to bf16
-      float p = (float)(__bf16)(t * (float)vu.h[j]);         // product, rounded to bf16
+      float p;
+      if constexpr (PRE) {
+        p = (float)vg.h[j];
+      } else {
+        float x = (float)vg.h[j];
+        float t = (float)(__bf16)(x / (1.f + expf(-x)));     // silu, rounded to bf16
+        p = (float)(__bf16)(t * (float)vu.h[j]);             // product, rounded to bf16
+      }
       pv[ng][j] = p;
       amax = fmaxf(amax, fabsf(p));
     }
@@ -1854,7 +1911,73 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
   launch_at_impl(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream, wh);
 }
 
+// ---- gated fold entry points (RADIANCE_MXFP4_GATED_FOLD) ---------------------------------------
+// launch_gated: decode GEMM over a fused gate_up weight [2*gI, K] with the SwiGLU in the epilogue;
+// p = bf16 [M, gI]. Takes exactly the cell the unfused launch() would (same DWN / BK=128 / DKS=1,
+// same WPERM / NT statics), so the accumulation is the same instruction sequence. Returns false
+// WITHOUT launching when the unfused path would not run this decode kernel at DKS=1 for this
+// shape (M outside the band, scratch/N limits, a K that is not a multiple of 128, a forced split):
+// the caller then runs launch() + the unfused activation. The decision depends only on (M, N, K)
+// and process-wide env, so it is identical at capture and at replay.
+static bool launch_gated(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
+                         uintptr_t p, int M, int N, int K, uintptr_t stream) {
+  if (!wref || M <= 0 || (N & 127) || (K & 127)) return false;
+  static const int decode_max_m = [] {
+    const char *e = getenv("RADIANCE_MXFP4_DECODE_MAX_M");
+    return e ? atoi(e) : 0;
+  }();
+  static const bool dec_wperm = [] {
+    const char *e = getenv("RADIANCE_MXFP4_WPERM");
+    return e && atoi(e) != 0;
+  }();
+  static const bool dec_nt = [] {
+    const char *e = getenv("RADIANCE_MXFP4_DECODE_NT");
+    return e && atoi(e) != 0;
+  }();
+  constexpr int DWN = DEC_DWN;
+  constexpr int DBND = DWN * 16;
+  const int dec_nblk = (N + DBND - 1) / DBND;
+  if (M > 64 || M > decode_max_m || N > DEC_MAX_N) return false;
+  if (split_k_for(dec_nblk, M) != 1) return false;
+  const int tm = (M + DEC_MTILE - 1) / DEC_MTILE;
+  const dim3 dblock(DWN * 32);
+  const int gI = N / 2;
+#define RAD_GATED_LAUNCH(TM_, WP_, NT_)                                                       \
+  hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, 128, 1, TM_, WP_, true, NT_, false, true>), \
+                     dim3(dec_nblk, 1, 1), dblock, 0, (hipStream_t)stream,                     \
+                     (const unsigned char *)a, (const unsigned char *)w,                       \
+                     (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
+                     (float *)nullptr, (int *)nullptr, (__bf16 *)p, M, N, K, 1 << 30, 1 << 30,  \
+                     0L, (const unsigned char *)nullptr, gI)
+#define RAD_GATED_BY_TM(WP_, NT_)                                                             \
+  if (tm == 1) RAD_GATED_LAUNCH(1, WP_, NT_);                                                  \
+  else if (tm == 2) RAD_GATED_LAUNCH(2, WP_, NT_);                                             \
+  else if (tm == 3) RAD_GATED_LAUNCH(3, WP_, NT_);                                             \
+  else RAD_GATED_LAUNCH(4, WP_, NT_)
+  if (dec_wperm) {
+    if (dec_nt) { RAD_GATED_BY_TM(true, true); } else { RAD_GATED_BY_TM(true, false); }
+  } else {
+    RAD_GATED_BY_TM(false, false);
+  }
+#undef RAD_GATED_BY_TM
+#undef RAD_GATED_LAUNCH
+  return true;
+}
+
+// launch_quant_rows: per-token e4m3 quant of an already-gated bf16 [M, N] (see PRE above).
+static void launch_quant_rows(uintptr_t pin, uintptr_t q, uintptr_t scale, int M, int N,
+                              uintptr_t stream) {
+  if (N > 72 * ARNQ_T || (N & 7))
+    throw std::runtime_error("radiance_quant_rows: N must be 8-aligned and <= 18432");
+  hipLaunchKernelGGL((radiance_silu_mul_quant<ARNQ_T, false, true>), dim3(M), dim3(ARNQ_T), 0,
+                     (hipStream_t)stream, (const __bf16 *)pin, (unsigned char *)q, (float *)scale, N);
+}
+
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
+  m.def("launch_gated", &launch_gated,
+        "gate_up decode GEMM + SwiGLU epilogue -> bf16 product [M, N/2]; False = not served here");
+  m.def("launch_quant_rows", &launch_quant_rows,
+        "per-token e4m3 quant of a bf16 [M, N] (gated-fold second pass)");
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");
