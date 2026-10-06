@@ -20,7 +20,7 @@
 # v0.1.22.post1, vLLM v0.30.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
-ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
+ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
 ARG GFX_ARCH=gfx1201
 # The release stage starts from a clean distro image rather than the ROCm base, and COPYs in only
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's
