@@ -39,6 +39,12 @@ if A_TILED_MIN_M and A_TILED_MIN_M <= max(512, DECODE_MAX_M):
     raise RuntimeError("RADIANCE_MXFP4_A_TILED_MIN_M must exceed 512 and RADIANCE_MXFP4_DECODE_MAX_M")
 _A_TILED: dict = {}
 _A_TILED_STATS = [0]
+# Wide decode band (lever 2 from the Radiance mixed-band work): the split-K decode kernel in a wider
+# form (BK=64, 9..16 M-fragments) for M in (128, WIDE_MAX_M]. The launcher in the .hip reads the same
+# env var (cached static); this copy only validates it and announces it. 0 = off (default), max 256.
+# Needs WPERM=1 and DECODE_MAX_M >= 128 so the two decode bands are contiguous; otherwise the .so
+# simply never takes it (M > 128 stays on the folded kernel) and the log says so.
+WIDE_MAX_M = int(os.environ.get("RADIANCE_MXFP4_WIDE_MAX_M", "0"))
 
 
 def a_tiled_wanted(M: int) -> bool:
@@ -83,6 +89,16 @@ def a_tiled_take(q, M: int, K: int) -> bool:
 # as garbage -- one env var drives both.
 CHECK_MAX_M = int(os.environ.get("RADIANCE_MXFP4_CHECK_MAX_M", "128"))
 WPERM = os.environ.get("RADIANCE_MXFP4_WPERM", "0") == "1"
+if WIDE_MAX_M:
+    _why = []
+    if WIDE_MAX_M < 129 or WIDE_MAX_M > 256:
+        _why.append("value outside 129..256 (the .so clamps to 256 and ignores <= 128)")
+    if os.environ.get("RADIANCE_MXFP4_WPERM", "0") != "1":
+        _why.append("RADIANCE_MXFP4_WPERM != 1 (the wide kernel reads fragment order only)")
+    if DECODE_MAX_M < 128:
+        _why.append("RADIANCE_MXFP4_DECODE_MAX_M < 128 (bands would not be contiguous)")
+    sys.stderr.write(f"[radiance.mxfp4] wide decode band M in (128, {min(WIDE_MAX_M, 256)}]"
+                     + (f" INACTIVE: {'; '.join(_why)}\n" if _why else " ON\n"))
 if WPERM:
     # Announce it: this launcher only forwards env vars it declares with -e, and a silently
     # unforwarded flag reads as "the change did nothing" rather than as a mistake. A whole
@@ -550,7 +566,7 @@ def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tens
         if _mk not in _dbg_seen:
             _dbg_seen.add(_mk)
             sys.stderr.write(f"[radiance.mxfp4.mhist] N={N} K={K} M={M} "
-                             f"decode_kernel={'yes' if 0 < M <= DECODE_MAX_M else 'NO'}\n")
+                             f"decode_kernel={'yes' if 0 < M <= DECODE_MAX_M else ('wide' if 128 < M <= WIDE_MAX_M else 'NO')}\n")
     # CHECK_MAX_M narrows the gate to a band. Without it the profile run's large-M calls use
     # up the per-shape reporting budget and the decode band is never checked at all, which
     # is exactly the band a decode kernel has to be right in.
