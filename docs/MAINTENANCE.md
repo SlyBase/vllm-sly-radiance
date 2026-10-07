@@ -52,6 +52,11 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
    to the stack PR's branch and merges nothing (job `calibrated`). The next night gates the PR against it.
    This is what happens on the first night after 1.0.0, because the 1.0.0 baseline only has KV and GSM8K.
 
+**aiter's runtime deps.** The image installs aiter `--no-deps`, so `ci/resolve_stack.py` also reads aiter's own
+`requirements.txt` at the derived tag and pins the packages aiter imports at `import aiter` (today: `flydsl`) in
+`constraints.txt` (`--apply` writes them; `--check` fails on a wrong version, warns on a missing one). Lesson from
+1.1.0: aiter 0.1.23 without flydsl failed only at engine start, as `No module named aiter.ops.triton.unified_attention`.
+
 ## Homelab interfaces (assumed, owned by the homelab repo)
 
 - `gpu-window`: owner `accept-night` allowed only 04:00-06:00; `acquire` returns `ttl_s` and `ttl_clamped`

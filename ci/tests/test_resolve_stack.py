@@ -38,6 +38,10 @@ class FixtureSources:
     def pypi_versions(self, pkg):
         return json.loads((FIX / f"pypi-{pkg}-versions.json").read_text())["versions"]
 
+    def aiter_file(self, ver, path):
+        f = FIX / f"aiter-{ver}" / path
+        return f.read_text() if f.exists() else None
+
     def wheel_sha256(self, project, filename):
         assert "669b31ac" in filename
         return KNOWN_SHA
@@ -221,3 +225,23 @@ class RepoFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AiterRuntimeDeps(unittest.TestCase):
+    def test_flydsl_pin_follows_aiter(self):
+        res = rs.resolve("0.31.0", "10.1.0", SRC)
+        self.assertEqual(res["constraint_pins"], {"flydsl": "0.3.4.1"})
+        prob, warn = rs.check_constraints_pins("einops==0.8.2\nflydsl==0.3.4.1\n", res)
+        self.assertEqual((prob, warn), ([], []))
+        prob, warn = rs.check_constraints_pins("flydsl==0.3.2\n", res)
+        self.assertEqual(len(prob), 1)
+        prob, warn = rs.check_constraints_pins("einops==0.8.2\n", res)
+        self.assertEqual((len(prob), len(warn)), (0, 1))
+
+    def test_missing_requirements_is_a_warning(self):
+        class NoReq(FixtureSources):
+            def aiter_file(self, ver, path):
+                return None
+        res = rs.resolve("0.31.0", "10.1.0", NoReq())
+        self.assertEqual(res["constraint_pins"], {})
+        self.assertTrue(any("requirements.txt" in w for w in res["warnings"]))

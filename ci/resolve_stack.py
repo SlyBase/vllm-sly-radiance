@@ -79,6 +79,10 @@ class Incompatible(Exception):
 
 
 # --------------------------------------------------------------------------- versions
+# aiter runtime deps the image installs explicitly (aiter itself goes in --no-deps).
+AITER_RUNTIME_DEPS = ("flydsl",)
+
+
 def vkey(v: str) -> tuple:
     """Sortable key of a plain release version: 0.1.22.post1 -> (0, 1, 22, 1)."""
     nums = [int(x) for x in re.findall(r"\d+", v.split("+")[0])]
@@ -141,6 +145,15 @@ class LiveSources:
             return self._get(RAW.format(ver=ver, path=path)).decode()
         except urllib.error.HTTPError as exc:
             raise Incompatible(f"vLLM v{ver}: {path} not found ({exc.code}) -- is v{ver} a release tag?") from exc
+
+    def aiter_file(self, ver: str, path: str) -> str | None:
+        """A file of ROCm/aiter at tag v<ver>; None when the tag has no such file."""
+        try:
+            return self._get(f"https://raw.githubusercontent.com/ROCm/aiter/v{ver}/{path}").decode()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise
 
     def index_project(self, project: str) -> list[str]:
         try:
@@ -400,11 +413,52 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
     if errors:
         raise Incompatible("; ".join(errors))
     pins.update(forced)  # overrides win, last
+
+    # --- aiter's own runtime pins. The Dockerfile installs aiter --no-deps; a runtime dep aiter imports
+    # at `import aiter` must come from constraints.txt (1.1.0: aiter 0.1.23 imports flydsl, and the
+    # missing package surfaced only as "No module named aiter.ops.triton.unified_attention" at engine start).
+    constraint_pins: dict[str, str] = {}
+    getter = getattr(src, "aiter_file", None)
+    req = getter(pins["AITER_VERSION"], "requirements.txt") if getter else None
+    if req:
+        for line in req.splitlines():
+            m = re.match(r"\s*([A-Za-z0-9_.-]+)\s*==\s*([^\s;#]+)\s*(?:;.*)?$", line)
+            if m and m.group(1).lower() in AITER_RUNTIME_DEPS:
+                constraint_pins[m.group(1).lower()] = m.group(2)
+        for k, v in constraint_pins.items():
+            notes.append(f"{k} {v} (aiter v{pins['AITER_VERSION']}: requirements.txt, installed --no-deps next to aiter)")
+    elif getter:
+        warnings.append(f"aiter v{pins['AITER_VERSION']} has no requirements.txt: its runtime deps are not checked")
     return {"pins": pins, "notes": notes, "warnings": warnings, "transformers_spec": spec,
-            "triton_file": triton_file, "active_overrides": active, "ref": ref}
+            "triton_file": triton_file, "active_overrides": active, "ref": ref,
+            "constraint_pins": constraint_pins}
 
 
 # --------------------------------------------------------------------------- check
+def constraints_pins(text: str) -> dict[str, str]:
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;#]+)", line)
+        if m:
+            out[m.group(1).lower()] = m.group(2)
+    return out
+
+
+def check_constraints_pins(constraints_text: str | None, res: dict) -> tuple[list[str], list[str]]:
+    """(problems, warnings) for aiter's runtime pins in constraints.txt: a wrong version is a problem,
+    a missing one a warning (aiter 0.1.22 pinned flydsl but never imported it; --apply always writes it)."""
+    problems, warns = [], []
+    have = constraints_pins(constraints_text or "")
+    for name, want in (res.get("constraint_pins") or {}).items():
+        if name not in have:
+            warns.append(f"constraints.txt has no {name} pin (aiter v{res['pins'].get('AITER_VERSION')} pins {name}=={want}); "
+                         "resolve --apply adds it")
+        elif have[name] != want:
+            problems.append(f"constraints.txt pins {name}=={have[name]}, aiter v{res['pins'].get('AITER_VERSION')} "
+                            f"requires {name}=={want}")
+    return problems, warns
+
+
 def check(dockerfile_pins: dict[str, str], res: dict, src=None, verify_hash: bool = False) -> list[str]:
     """Differences between the Dockerfile's pins and the derivation (empty = consistent)."""
     problems = []
@@ -572,6 +626,24 @@ def apply(root: Path, res: dict, base: dict, rocm: str, vllm: str, date: str, sr
                 raise Incompatible("ci/check_constraints.py --update failed: pip cannot resolve vLLM's "
                                    f"v{vllm} requirements with this stack")
             log.append("constraints.txt regenerated (check_constraints.py --update)")
+    # aiter's runtime pins (after a regeneration, which only knows vLLM's requirements)
+    cfile = root / "constraints.txt"
+    if res.get("constraint_pins") and cfile.exists():
+        ctext = cfile.read_text()
+        for name, want in res["constraint_pins"].items():
+            pat = re.compile(rf"^{re.escape(name)}==[^\n]*$", re.M | re.I)
+            if pat.search(ctext):
+                new = pat.sub(f"{name}=={want}", ctext, count=1)
+            else:
+                lines = ctext.rstrip("\n").split("\n")
+                pins_at = [i for i, l in enumerate(lines) if re.match(r"^[A-Za-z0-9_.-]+==", l)]
+                pos = next((i for i in pins_at if lines[i].split("==")[0].lower() > name), (pins_at[-1] + 1) if pins_at else len(lines))
+                lines.insert(pos, f"{name}=={want}")
+                new = "\n".join(lines) + "\n"
+            if new != ctext:
+                log.append(f"constraints.txt {name}=={want} (aiter v{res['pins'].get('AITER_VERSION')})")
+                ctext = new
+        cfile.write_text(ctext)
     return log
 
 
@@ -641,6 +713,11 @@ def main(argv: list[str] | None = None, src=None, root: Path = ROOT) -> int:
 
     if args.check:
         problems = check(cur, res, src, args.verify_hash)
+        cfile = root / "constraints.txt"
+        cprob, cwarn = check_constraints_pins(cfile.read_text() if cfile.exists() else None, res)
+        problems += cprob
+        for w in cwarn:
+            print(f"::warning::{w}")
         for p in problems:
             print(f"::error title=stack mismatch::{p}")
         if problems:
