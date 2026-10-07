@@ -75,132 +75,116 @@
       "enabled": false
     },
     {
-      "description": "Hold aiter below 0.1.24: 0.1.24 dropped the module alias aiter.ops.triton.unified_attention that vLLM 0.30.0's rocm_aiter_unified_attn backend imports (EngineCore ModuleNotFoundError at startup; the 0.4.6 / 0.6.0 gate crash). Lift together with a vLLM that imports aiter.ops.triton.attention.unified_attention, or a patch for that import.",
+      "description": "THE TWO IMAGE TRIGGERS, one group `stack` (branch renovate/stack-update, label `stack`): a vLLM release (github-releases) and a ROCm base image tag (docker, major/minor/patch). postUpgradeTasks run ci/resolve_stack.py --apply, which derives torch / triton / torchvision / aiter / transformers from them, regenerates constraints.txt, bumps VERSION and adds the CHANGELOG skeleton; exit non-zero (no matching AMD wheel, unparseable vLLM pins, unsupported ROCm major) leaves the PR red = incompatible, never merged. rebaseWhen=conflicted: Renovate rebases only on a conflict, so it does not fight the pushes of the Hermes re-anchor agent on this branch (and Renovate stops touching a branch with foreign commits anyway). The accept-night workflow merges it when every gate is green.",
       "matchDepNames": [
-        "ROCm/aiter"
+        "vllm-project/vllm",
+        "rocm/dev-ubuntu-24.04"
       ],
-      "allowedVersions": "<0.1.24",
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "groupName": "stack",
+      "groupSlug": "stack-update",
       "addLabels": [
-        "aiter"
+        "stack"
+      ],
+      "rebaseWhen": "conflicted",
+      "postUpgradeTasks": {
+        "commands": [
+          "python3 ci/resolve_stack.py --apply"
+        ],
+        "fileFilters": [
+          "Dockerfile",
+          "constraints.txt",
+          "renovate.json",
+          "VERSION",
+          "CHANGELOG.md"
+        ],
+        "executionMode": "branch"
+      },
+      "prBodyNotes": [
+        "Automated stack update. `ci/resolve_stack.py --apply` derived every other pin from this vLLM release and ROCm base (see the commit and docs/MAINTENANCE.md). If the `resolve` check is red the stack is incompatible: no AMD wheel for it, or vLLM's pins could not be read. If `patch-dryrun` is red the Hermes re-anchor agent is called and pushes fixes to this branch. The nightly gate (accept-night, 04:00-06:00 Europe/Berlin) merges and releases this PR when every check and the GPU gate are green; nothing else does."
       ]
     },
     {
-      "description": "PyTorch stack moves together (torch / triton / torchvision pins are a tested trio, see the Dockerfile comment)",
+      "description": "ROCm base image: only a new TAG is an image change; a digest refresh of the same tag is not (docs/MAINTENANCE.md)",
+      "matchDepNames": [
+        "rocm/dev-ubuntu-24.04"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "DISABLED -- torch / triton / torchvision. Derived, never bumped on its own (docs/MAINTENANCE.md): a new image version exists only for a vLLM release or a ROCm base tag, and ci/resolve_stack.py derives this pin from them. (resolve_stack: vLLM's docker/Dockerfile.rocm_base names release/X.Y, the triton commit and the torchvision tag; AMD's whl-next index must carry them for the base image's ROCm.)",
       "matchDepNames": [
         "pytorch/pytorch",
         "triton-lang/triton",
         "pytorch/vision"
       ],
-      "groupName": "PyTorch stack",
-      "addLabels": [
-        "pytorch-stack"
-      ],
-      "prBodyNotes": [
-        "Tested trio: bump torch, triton and torchvision together. Patch anchors: patch_gfx1201 (triton driver.py), patch_dynamo_metrics (torch/_dynamo/utils.py) -- CI patch-dryrun must stay green. triton comes from PyPI: update TRITON_SHA256 in the Dockerfile with TRITON_VERSION (digests.sha256 of the cp312 manylinux x86_64 wheel on pypi.org/pypi/triton/<version>/json), else the build fails at the download. A torch bump changes ci/torch_key.py's tag, so build.yml compiles torch once (~2 h) and pushes the new wheel image; then an A/B on the GPU before the image goes to production."
-      ]
+      "enabled": false
     },
     {
-      "description": "Hold torch on the 2.12 line (ROCm 10.1, the first release with the ROCm/ROCm#6406 CPU-spin fix; AMD's whl-next has no 2.11 wheel for rocm10.1 and the Dockerfile follows AMD's wheel). Move to 2.13 / 2.14 only together with torchvision and triton after an A/B, see the Dockerfile comment.",
-      "matchDepNames": [
-        "pytorch/pytorch"
-      ],
-      "allowedVersions": "2.12.x",
-      "addLabels": [
-        "pytorch-stack"
-      ],
-      "prBodyNotes": [
-        "Renovate proposes no newer torch than 2.12.x. TORCH_AMD_ROCM and the wheel must exist on stable.repo.amd.com/rocm/whl-next for the base image's ROCm release; bump torch + triton + torchvision together."
-      ]
-    },
-    {
-      "description": "vLLM: every bump needs the patch dry run, a build and an A/B on the GPU",
-      "matchDepNames": [
-        "vllm-project/vllm"
-      ],
-      "addLabels": [
-        "vllm"
-      ],
-      "prBodyNotes": [
-        "Most patches anchor on vLLM source (see the Dockerfile loop). Expect anchor drift on minor bumps: fix the patches in the same PR, keep CI patch-dryrun green, then build.yml + A/B (func_check, BetterBench, GSM8K gate) before rollout. sly/radiance_attn_drafter rebinds triton_attn.unified_attention and launches triton_unified_attention.kernel_unified_attention / reduce_segments by keyword: run sly/check_attn_drafter.py, check the start log for `drafter attn plan:` (the accept gate requires it) and re-run sly/bench_drafter_attn.py --check on the card. sly/radiance_lookup_draft wraps the V2 runner: GPUModelRunner.__init__ (speculator, req_states), DFlash2Speculator.propose (draft_tokens, draft_logits, _cached_candidate_ids, selector_top_k), req_states.all_token_ids / total_len and the rejection sampler's draft_logits contract: run sly/check_lookup_draft.py and, on the card, sly/bench_lookup_draft.py --check --rejection (the accept gate requires the `lookup draft: installed` marker)."
-      ]
-    },
-    {
-      "description": "aiter: patch_unified_attention_lds / patch_radiance_dispatch / sly/patch_quark_mxfp4 anchor on it; sly/radiance_attn_decode wraps its unified-attention config API",
+      "description": "DISABLED -- aiter. Derived, never bumped on its own (docs/MAINTENANCE.md): a new image version exists only for a vLLM release or a ROCm base tag, and ci/resolve_stack.py derives this pin from them. (resolve_stack: vLLM's AITER_BRANCH; a deliberate hold is an entry in ci/stack_overrides.json.)",
       "matchDepNames": [
         "ROCm/aiter"
       ],
-      "addLabels": [
-        "aiter"
-      ],
-      "prBodyNotes": [
-        "aiter is compiled from source in the builder stage; anchors in patch_unified_attention_lds, patch_radiance_dispatch and sly/patch_quark_mxfp4 plus sly/mxfp4-configs need re-verification. sly/radiance_attn_decode wraps get_unified_attention_config / use_2d_kernel and reads the _UAParams fields: run sly/check_attn_decode.py, check the start log for `decode attn tune installed` (the accept gate requires it), and re-run sly/bench_decode_attn.py --table if the attention tables or kernels changed."
-      ]
+      "enabled": false
     },
     {
-      "description": "ROCm base image: major/minor is a toolchain change (new hipcc, new compile cache key); keep as its own PR",
+      "description": "DISABLED -- transformers. Derived, never bumped on its own (docs/MAINTENANCE.md): a new image version exists only for a vLLM release or a ROCm base tag, and ci/resolve_stack.py derives this pin from them. (resolve_stack: newest PyPI release inside the range of vLLM's requirements/common.txt.)",
       "matchDepNames": [
-        "rocm/dev-ubuntu-24.04"
+        "transformers"
       ],
-      "addLabels": [
-        "rocm"
+      "matchDatasources": [
+        "pypi"
       ],
-      "prBodyNotes": [
-        "A ROCm bump rebuilds every stage (cold build, hours) and invalidates the torch.compile / AOT caches on the GPU host (double start on rollout). Pin the same major.minor in the image tag (build.yml derives rocmX.Y from ROCM_BASE)."
-      ]
+      "enabled": false
     },
     {
-      "description": "Release base: Ubuntu release must match the ROCm base (venv python 3.12) -- digest updates only (docker datasource only: the `runs-on: ubuntu-24.04` runner pins are github-runners and get their PRs, see the GitHub Actions rule)",
+      "description": "DISABLED -- libr4d (git-refs digest), rocm_bandwidth_test and the ubuntu release-base digest. Owner decision 2026-10-07: no feature development, the image changes only for a vLLM release or a ROCm base tag; libr4d moves with a GPU A/B by a human, the other two are not worth an image version.",
       "matchDepNames": [
+        "https://codeberg.org/StillDeadcode/libr4d.git",
+        "ROCm/rocm_bandwidth_test",
         "ubuntu"
       ],
-      "matchUpdateTypes": [
-        "major",
-        "minor"
-      ],
-      "enabled": false,
       "matchDatasources": [
+        "git-refs",
+        "github-tags",
         "docker"
-      ]
-    },
-    {
-      "description": "rocm_bandwidth_test: rocm-7.x tags need the new cmake framework (clang>=19, vendored submodules) -- stay on 6.x",
-      "matchDepNames": [
-        "ROCm/rocm_bandwidth_test"
       ],
-      "allowedVersions": "<7.0.0"
+      "enabled": false
     },
     {
-      "description": "GitHub Actions in one PR -- this also covers the pinned runner images in `runs-on:` (github-runners datasource), which is why they are pinned to `ubuntu-24.04` instead of riding `ubuntu-latest`: a runner image change is a toolchain change and belongs in a PR that CI can fail on, not in a label that flips on a date",
+      "description": "DISABLED -- image Python dependencies (constraints.txt). Regenerated by ci/resolve_stack.py --apply (check_constraints.py --update) on a stack PR; ci/check_constraints.py proves it on every PR. The GENERATED rules below stay: that script maintains and checks them.",
+      "matchManagers": [
+        "pip_requirements"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions in one PR, automerged when ci is green -- CI only, no image change, no release (this also covers the pinned runner images in `runs-on:`)",
       "matchManagers": [
         "github-actions"
       ],
-      "groupName": "GitHub Actions"
+      "groupName": "GitHub Actions",
+      "automerge": true,
+      "automergeType": "pr"
     },
     {
-      "description": "CI lint tools in one PR",
+      "description": "CI lint tools in one PR, automerged when ci is green -- CI only, no image change, no release",
       "matchDepNames": [
         "ruff",
         "hadolint/hadolint",
         "rhysd/actionlint"
       ],
-      "groupName": "CI tools"
-    },
-    {
-      "description": "Image Python dependencies (constraints.txt): one weekly PR for all minor/patch updates (renovate/python-deps) and one for the majors (renovate/major-python-deps, Renovate's default major split). Each PR is checked by ci/check_constraints.py (the pins must be exactly what pip resolves for the pinned vLLM); the image itself is built by build.yml after merge + VERSION bump",
-      "matchManagers": [
-        "pip_requirements"
-      ],
-      "groupName": "Python dependencies (image)",
-      "schedule": [
-        "before 6am on monday"
-      ],
-      "addLabels": [
-        "python-deps"
-      ],
-      "prBodyNotes": [
-        "Pins in constraints.txt. CI `constraints` job: `python3 ci/check_constraints.py` must be green (a failure names the vLLM range the bump leaves, or a new/obsolete transitive dependency -- add an `allowedVersions` rule in renovate.json or fix the file). Changes the image's cold venv layer: the next release is a full ~750 MB venv download once. Merge, then bump VERSION for build.yml + the acceptance gate."
-      ],
-      "groupSlug": "python-deps"
+      "groupName": "CI tools",
+      "automerge": true,
+      "automergeType": "pr"
     },
     {
       "description": "GENERATED by ci/check_constraints.py: aiohttp !=4.0.0a0,!=4.0.0a1 (required by fsspec)",

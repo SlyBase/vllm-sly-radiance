@@ -1,7 +1,7 @@
 {
-  "description": "Production vllm7 (amd/Qwen3.8-27B-Quark-AWQ-MXFP4 + DFlash2 k=7, LXC 2408). The gate reuses the live docker-vllm7.service arguments, so this profile only declares what to assert.",
+  "description": "Production setup since 1.0.0 (the Radiance launch of docker-vllm7.service on LXC 2408, unit disabled; the production LLM itself is radiance-serve on LXC 2413): Swift-1.5 checkpoint /root/swift-heretic-gptq (served name slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ) + DFlash2 k=7, R4D_HYBRID, util 0.98, FULL_DECODE_ONLY, RADIANCE_MXFP4_WIDE_MAX_M=192, RADIANCE_ADAPTIVE_WIDTH=perseq (README reference launch). The gate does NOT carry a copy of that launch: gpu-window reads the ExecStart of the live docker-vllm7.service and only swaps image, container name and compile-cache directories, so the homelab unit is the one place that defines the launch; this profile only declares what to assert.",
   "service": "docker-vllm7.service",
-  "model": "amd/Qwen3.8-27B-Quark-AWQ-MXFP4",
+  "model": "slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ",
   "required_log_patterns": [
     [
       "quark mxfp4 W4A8 gemm",

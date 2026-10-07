@@ -171,3 +171,7 @@ Renovate runs without an hourly or concurrent PR cap (`prHourlyLimit` / `prConcu
 the default 2/h and a cap of 5, updates sat rate-limited on the dashboard for days. Grouping keeps the
 PR count small (torch stack, Python deps, CI tools, actions); a dependency bump with image impact is
 integrated like any other change (VERSION, CHANGELOG, build, GPU gate).
+
+Image-relevant bumps are not made by hand any more: only a vLLM release or a ROCm base tag opens a `stack`
+PR, and `ci/resolve_stack.py` derives the rest. Pipeline, night gate, Hermes rules and the pause switch:
+[MAINTENANCE.md](MAINTENANCE.md).

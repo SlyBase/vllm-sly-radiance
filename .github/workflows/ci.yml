@@ -159,7 +159,13 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin "$BASE_REF" "$HEAD_REF"
           git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
-          python3 ci/check_constraints.py --repair --base "origin/$BASE_REF" | tee repair.log
+          if [[ "$HEAD_REF" == renovate/stack-* ]]; then
+            # a stack PR changes vLLM: re-resolve the whole file (what resolve_stack.py --apply does where
+            # Renovate's container cannot, i.e. not on linux/python 3.12) instead of repairing single pins
+            python3 ci/check_constraints.py --update | tee repair.log
+          else
+            python3 ci/check_constraints.py --repair --base "origin/$BASE_REF" | tee repair.log
+          fi
           python3 ci/check_constraints.py
           git config user.name "constraints-repair[bot]"
           git config user.email "constraints-repair@users.noreply.github.com"
@@ -194,9 +200,93 @@ jobs:
             python3 ci/check_consistency.py
           fi
 
+  resolve:
+    # The Dockerfile's torch/triton/torchvision/aiter/transformers pins must be what the pinned vLLM
+    # release and the ROCm base derive (ci/resolve_stack.py; deliberate deviations: ci/stack_overrides.json).
+    # On a stack PR this is the "incompatible" check: no AMD wheel / unreadable vLLM pins = red = never merged.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: resolver unit tests (offline, recorded fixtures)
+        run: python3 -m unittest discover -s ci/tests
+
+      - name: Dockerfile pins vs the derived stack
+        run: |
+          # the stack PR additionally downloads AMD's triton wheel (~430 MB) to verify TRITON_SHA256
+          if [[ "$HEAD_REF" == renovate/stack-* ]]; then EXTRA=--verify-hash; else EXTRA=; fi
+          python3 ci/resolve_stack.py --check $EXTRA
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+
+  reanchor-brief:
+    # A stack PR whose sly patches no longer apply to the new vLLM: hand it to the owner's Hermes agent
+    # (signed webhook, brief = rules + failing hunks, docs/MAINTENANCE.md). Hermes pushes fixes to the
+    # PR branch, CI re-runs, and a new head sha may call it again. At most once per head sha.
+    needs: [patch-dryrun]
+    if: >-
+      always() && needs.patch-dryrun.result == 'failure' && github.event_name == 'pull_request' &&
+      startsWith(github.head_ref, 'renovate/stack-') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      vars.AUTO_MAINTAIN != 'off'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: patch-dryrun-logs
+          path: .dryrun
+
+      - name: signed webhook to Hermes (once per head sha)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HERMES_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HERMES_SECRET" ]; then
+            echo "::warning::HERMES_WEBHOOK_SECRET not set -- skipping the Hermes re-anchor call; a human has to fix the patches"
+            exit 0
+          fi
+          MARKER="<!-- stack-patch-reanchor sha=${HEAD_SHA} -->"
+          if gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '.[].body' | grep -qF "$MARKER"; then
+            echo "Hermes was already called for ${HEAD_SHA}: not again"
+            exit 0
+          fi
+          PAYLOAD_FILE=$(mktemp)
+          python3 ci/build_brief.py --repo "$REPO" --pr "$PR" --url "$PR_URL" --ref "$HEAD_REF" \
+            --sha "$HEAD_SHA" --base "origin/${BASE_REF}" --logs .dryrun > "$PAYLOAD_FILE"
+          # same signing as upstream-sync.yml: HMAC-SHA256 over the exact bytes, --data-binary
+          SIG=$(openssl dgst -sha256 -hmac "$HERMES_SECRET" < "$PAYLOAD_FILE" | sed 's/^.* //')
+          curl --fail --silent --show-error \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: stack_patch_broken" \
+            -H "X-Hub-Signature-256: sha256=$SIG" \
+            --data-binary @"$PAYLOAD_FILE" \
+            https://hooks.timonds.de/webhooks/stack-patch-reanchor-slybase
+          gh pr comment "$PR" --repo "$REPO" --body "${MARKER}
+          The sly patches no longer apply to this stack (\`ci/patch_dryrun.sh\` is red). The Hermes re-anchor agent was called for head \`${HEAD_SHA:0:12}\`; it pushes fixes to this branch or comments \`needs human\`. See docs/MAINTENANCE.md."
+
   ci:
-    # aggregate status for the branch protection: one required check instead of four
-    needs: [lint, patch-dryrun, constraints, consistency]
+    # aggregate status for the branch protection: one required check instead of five
+    needs: [lint, patch-dryrun, constraints, consistency, resolve]
     if: always()
     runs-on: ubuntu-24.04
     steps:

@@ -569,6 +569,13 @@ def main() -> int:
     ap.add_argument("--record-baseline", action="store_true",
                     help="write the measured values back into the baseline file "
                          "(use once against the current production image to calibrate)")
+    ap.add_argument("--record-baseline-on-pass", action="store_true",
+                    help="like --record-baseline, but only when the verdict is PASS (accept-night: the baseline "
+                         "moves forward with a release that passed, never with a regression)")
+    ap.add_argument("--deadline", type=float, default=None, metavar="EPOCH",
+                    help="unix time the measurement must be done by (accept-night: 05:45 Europe/Berlin). A phase "
+                         "that would start after it aborts the run -- the release phase still runs, so the GPU "
+                         "goes back in time")
     ap.add_argument("--dry-run", action="store_true", help="print the gpu-window calls, run nothing")
     args = ap.parse_args()
 
@@ -601,11 +608,16 @@ def main() -> int:
     win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
                     load_format=load_format)
 
+    def before(phase: str) -> None:
+        if args.deadline and time.time() > args.deadline:
+            raise RuntimeError(f"deadline passed before phase '{phase}' -- the window is out of time")
+
     try:
         log(f"status: {json.dumps(win.status())}")
         log(f"acquiring GPU window (owner={args.owner}, ttl={args.ttl}s)")
         results["acquire"] = _acquire_with_retry(win, args)
 
+        before("start")
         log(f"starting candidate {args.image} ({profile['service']})")
         results["start"] = win.start(args.image, profile["service"])
         log(f"candidate up: {json.dumps(results['start'])}")
@@ -618,6 +630,7 @@ def main() -> int:
                 f"forbidden={[f['name'] for f in results['logs']['forbidden']]}")
 
         model = profile["model"]
+        before("smoke")
         log("smoke tests")
         results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
         if not results["smoke"]["ok"]:
@@ -626,7 +639,8 @@ def main() -> int:
         if args.dry_run:
             log("DRY-RUN: skipping betterbench and gsm8k")
         else:
-            before = scrape_metrics(base_url)
+            before("betterbench")
+            metrics_before = scrape_metrics(base_url)
             log(f"betterbench ({args.mode})")
             results["betterbench"] = run_betterbench(
                 args.bb_python, Path(args.bb_dir), base_url, model, config,
@@ -634,10 +648,11 @@ def main() -> int:
                 {"image": args.image, "profile": name, "mode": args.mode, "run": args.owner},
             )
             after = scrape_metrics(base_url)
-            results["spec"] = spec_delta(before, after)
+            results["spec"] = spec_delta(metrics_before, after)
             log(f"spec: {json.dumps(results['spec'])}")
 
             if args.mode == "full":
+                before("gsm8k")
                 results["gsm8k"] = run_gsm8k(args.eval_python, base_url, model,
                                              args.gsm8k_limit, out_dir / "lmeval")
                 log(f"gsm8k: {results['gsm8k']['exact_match']}")
@@ -686,9 +701,11 @@ def main() -> int:
     # not report smoke as passed".
     if args.record_baseline and args.dry_run:
         log("DRY-RUN: not writing the baseline")
-    elif args.record_baseline and "error" not in results:
+    elif (args.record_baseline or (args.record_baseline_on_pass and not hard_fail)) and "error" not in results:
         new = dict(baseline_file)
         new["recorded"] = {"image": args.image, "at": meta["started"], "mode": args.mode}
+        new["image"] = args.image
+        new["measured"] = meta["started"].split(" ")[0]
         if results.get("start", {}).get("kv_tokens"):
             new["kv_tokens"] = results["start"]["kv_tokens"]
             new["startup_s"] = results["start"].get("startup_s")
