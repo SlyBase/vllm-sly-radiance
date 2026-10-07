@@ -12,6 +12,7 @@
 #
 # Triggers
 #   - build.yml finished successfully on main           -> queued automatically, waits for approval
+#     ONLY while AUTO_MAINTAIN=off; with the automated maintenance on, accept-night.yml gates + releases
 #     (not for a v* tag: a tag only publishes to ghcr and points at a commit that main already
 #     gated; an old tag can even predate ci/accept/ and would fail at the checkout)
 #   - workflow_dispatch                                 -> choose image, profile, mode by hand
@@ -67,9 +68,14 @@ concurrency:
 jobs:
   plan:
     # Cheap, unprotected: decide what to test. No GPU, no runner from the homelab.
+    # The automatic path after a main build runs only while the automated maintenance is paused
+    # (AUTO_MAINTAIN=off): with it on, accept-night gates and releases, and a run here would sit in the
+    # gpu-window environment waiting for an approval nobody gives -- holding the shared `gpu-window`
+    # concurrency group, so every night gate behind it stays pending (seen 2026-10-07).
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
+      (vars.AUTO_MAINTAIN == 'off' &&
+       github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     outputs:
