@@ -30,7 +30,7 @@ ROCm base builds, all of it AMD's prebuilt rocm10.1 wheels. No new knob.
   alias vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24, which dropped it.
 - **transformers 5.18.0 -> 5.17.0**: vLLM 0.31 declares `transformers >= 5.10.4, < 5.18.0`; 5.17.0 is the newest it allows
   (Renovate capped below 5.18.0). `constraints.txt`: `openai-harmony` -> `oss-harmony` (vLLM 0.31's rename), nothing else moved.
-- ROCm base, libr4d and the base-image digests are unchanged (libr4d: Renovate #104 and the upstream-sync #103 are not taken, they need a GPU A/B).
+- **libr4d 5dc6302 -> a3e4833** (Renovate #104): the new commit only touches libr4d's README (7 added lines), so the kernels and the `r4d_extras_rx10` patch chain are byte-identical to 1.0.0. The upstream-sync PR #103 (stilldeadcode README, no image file) is not taken. ROCm base and base-image digests are unchanged.
 
 ### Removed
 - Four patches left the apply loop because vLLM 0.31.0 contains them: `sly/patch_short_prefill` (GDN 1-token prefill),

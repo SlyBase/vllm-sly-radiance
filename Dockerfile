@@ -116,7 +116,7 @@ ARG RBT_VERSION=rocm-6.4.4
 # homelab, which is the entire reason this is a SHA and not just `main`.
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
 # renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
-ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
+ARG R4D_VERSION=a3e4833d29c3c7e6c36f43277ff9a7c9193950a3
 # Where the torch wheel comes from:
 #   torch-amd-wheel (default)  AMD's wheel from stable.repo.amd.com/rocm/whl-next, TORCH_VERSION +
 #                  rocm${TORCH_AMD_ROCM}; seconds instead of a 2 h compile. Gate-tested 2026-10-04
@@ -323,6 +323,10 @@ RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
 #     pip does not try to fetch them; the versions built above ARE the pinned ones, so this is now
 #     just "use what was compiled above", not an override.
 #     setuptools-rust is a pyproject build requirement that --no-build-isolation does not install.
+#     vLLM 0.31 moved use_existing_torch.py to tools/ and added an OPTIONAL Rust frontend (vllm-rs,
+#     vllm._rust_tool_parser; setup.py builds them with optional=True unless VLLM_REQUIRE_RUST_FRONTEND
+#     is set). The image has no Rust toolchain and uses neither (VLLM_USE_RUST_FRONTEND is off, the
+#     qwen3 tool parsers are Python), so the extensions are simply not built.
 #     VLLM_VERSION_OVERRIDE pins the reported version to the tag: the tree is dirty (use_existing_torch
 #     rewrites the requirements files) and shallow, so setuptools-scm would otherwise stamp the wheel
 #     with a guessed next-release dev version plus the build date. ---
@@ -331,7 +335,7 @@ RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
 ARG VLLM_VERSION
 RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
     git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
-    && cd /src/vllm && python use_existing_torch.py \
+    && cd /src/vllm && python $([ -f tools/use_existing_torch.py ] && echo tools/use_existing_torch.py || echo use_existing_torch.py) \
     && pip install "setuptools-rust>=1.9.0" \
     && VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
        pip wheel --no-build-isolation --no-deps . -w /wheels \
