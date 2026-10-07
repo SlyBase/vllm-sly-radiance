@@ -10,6 +10,28 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.1.1] - 2026-10-08
+
+### Fixed
+- **Split-K decode GEMM could read stale partials.** The W4A8 decode kernel
+  (`radiance_mxfp4_fp8_gemm_decode`, every MXFP4 linear at M <= `RADIANCE_MXFP4_DECODE_MAX_M` and, since 1.0,
+  the wide band up to `RADIANCE_MXFP4_WIDE_MAX_M`) splits K over 2 or 4 blocks on narrow shapes (o_proj,
+  out_proj, down, in_proj_ba) and the last block to arrive sums the partials. Only thread 0 fenced before the
+  counter bump, and `__syncthreads` is workgroup scope, so the other threads' partial stores were not
+  guaranteed visible to the reducing block on another CU. Now every thread fences, thread 0 bumps the
+  counter with an agent-scope acq_rel atomic, and the reducing block fences again before it reads
+  (the pattern libr4d's tiled W4A8 split tail documents for the same bug). Production runs this kernel
+  on every decode/verify step. The same fix is in the opt-in AutoRound, EsCHA (both kernels) and the
+  second ParoQuant decode kernel (the first already fenced on every thread) and in ggz14's root copy of
+  the MXFP4 kernel. Written 2026-10-04 as 0.7.1 and never released; ported onto 1.1.0 unchanged.
+
+### Added
+- `sly/mxfp4/check_decode_splitk.py`: alternates two inputs launch after launch and requires every
+  output to be bit-identical to its golden, per production shape x M x split, including the wide band.
+
+### Measured
+- Pending: `check_decode_splitk.py` on 1.1.0 (control) and 1.1.1, decode step A/B, GSM8K 200.
+
 ## [1.1.0] - 2026-10-07
 
 The newest stack that still runs on ROCm 10.1: vLLM 0.31.0 on the torch / triton / torchvision / aiter combination vLLM's own
