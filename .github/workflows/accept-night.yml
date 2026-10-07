@@ -1,0 +1,366 @@
+# Unattended night gate for the automatically maintained stack (docs/MAINTENANCE.md).
+#
+# What it does: once a night, picks the oldest open `renovate/stack-*` PR (label `stack`) whose CI is fully
+# green, runs the GPU acceptance gate (ci/accept/accept.py, owner `accept-night`) with that PR's image
+# against the baseline of the current release, and
+#   green -> writes the Measured numbers into the CHANGELOG, moves the baseline forward, waits for CI on
+#            that commit, merges the PR (merge commit) and dispatches release.yml (tag v<VERSION>, the tag
+#            build publishes to ghcr.io; the GitHub release body is the CHANGELOG section);
+#   red   -> comments the report on the PR and labels it `gate-failed`; no merge, no automatic retry for the
+#            same head sha (a new sha -- Renovate rebase, Hermes push -- is a new candidate next night);
+#   no green stack PR -> nothing touches the GPU.
+#
+# Time window. The GPU may be taken ONLY between 04:00 and 06:00 Europe/Berlin: it stops Radiance (the
+# production LLM, LXC 2413) and must give it back before 06:00. Two crons (02:00 and 03:00 UTC) cover
+# summer and winter time; the `plan` job proceeds only if the Berlin hour is 4. The budget inside the window:
+# acquire patience until ~04:10, accept.py --deadline 05:45 (no phase starts after it), TTL ends 05:50.
+# gpu-window enforces the same on its side: owner `accept-night` is refused outside 04:00-06:00 and its TTL
+# is clamped (homelab repo; interface assumptions in docs/MAINTENANCE.md).
+#
+# Pause switch: repository variable AUTO_MAINTAIN=off skips this workflow (and Renovate's stack PRs).
+# The manual gate stays accept.yml (approval-gated environment `gpu-window`); the two share one
+# concurrency group, so they can never hold the GPU at the same time.
+name: accept-night
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "only consider this PR number (empty = oldest eligible)"
+        type: string
+        default: ""
+      dry_run:
+        description: "pick and report only: no GPU, no merge (the Berlin-hour check still applies)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-window
+  cancel-in-progress: false
+
+env:
+  # production LLM (Radiance, LXC 2413); gpu-window restores it, this is the independent check
+  PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.54:8000/health' }}
+
+jobs:
+  plan:
+    if: vars.AUTO_MAINTAIN != 'off'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      issues: read
+    outputs:
+      go: ${{ steps.pick.outputs.go }}
+      pr: ${{ steps.pick.outputs.pr }}
+      sha: ${{ steps.pick.outputs.sha }}
+      ref: ${{ steps.pick.outputs.ref }}
+      mode: ${{ steps.meta.outputs.mode }}
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+      ttl: ${{ steps.meta.outputs.ttl }}
+      acquire_wait: ${{ steps.meta.outputs.acquire_wait }}
+      deadline: ${{ steps.meta.outputs.deadline }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: pick the stack PR (only inside the Berlin 04:00-04:59 hour)
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_INPUT: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          HOUR=$(TZ=Europe/Berlin date +%H)
+          echo "Europe/Berlin hour: $HOUR"
+          if [ "$HOUR" != "04" ]; then
+            echo "outside 04:00-04:59 Europe/Berlin: nothing to do (the other cron covers the other season)"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          PICK=$(python3 ci/night_pick.py --repo "$REPO" ${PR_INPUT:+--pr "$PR_INPUT"})
+          if [ "$PICK" = "{}" ]; then
+            echo "no green stack PR: the GPU stays untouched"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "picked: $PICK"
+          {
+            echo "go=true"
+            echo "pr=$(echo "$PICK" | jq -r .number)"
+            echo "sha=$(echo "$PICK" | jq -r .sha)"
+            echo "ref=$(echo "$PICK" | jq -r .ref)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: dry run stops here
+        if: steps.pick.outputs.go == 'true' && github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "dry_run: would gate PR #${{ steps.pick.outputs.pr }} @ ${{ steps.pick.outputs.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STOP=1" >> "$GITHUB_ENV"
+
+      - name: image, mode and time budget
+        id: meta
+        if: steps.pick.outputs.go == 'true' && env.STOP != '1'
+        env:
+          SHA: ${{ steps.pick.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$SHA"
+          VER=$(tr -d '[:space:]' < VERSION)
+          OLD=$(git show origin/main:VERSION | tr -d '[:space:]')
+          eval "$(python3 ci/read_pins.py --shell)"
+          ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
+          NOW=$(date +%s)
+          START_BY=$(TZ=Europe/Berlin date -d "today 04:10" +%s)
+          DEADLINE=$(TZ=Europe/Berlin date -d "today 05:45" +%s)
+          TTL_END=$(TZ=Europe/Berlin date -d "today 05:50" +%s)
+          LEFT_MIN=$(( (DEADLINE - NOW) / 60 ))
+          # fast ~22 min + 2 starts ~10 min; full ~27 min + GSM8K. A minor/major VERSION move gets the full gate.
+          if [ "$(echo "$VER" | cut -d. -f1,2)" != "$(echo "$OLD" | cut -d. -f1,2)" ] && [ "$LEFT_MIN" -ge 75 ]; then MODE=full; else MODE=fast; fi
+          if [ "$LEFT_MIN" -lt 50 ]; then
+            echo "only ${LEFT_MIN} min left before 05:45: too late to start, try again tomorrow"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          WAIT=$(( START_BY - NOW )); [ "$WAIT" -lt 120 ] && WAIT=120
+          {
+            echo "go=true"
+            echo "version=$VER"; echo "mode=$MODE"
+            echo "image=vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+            echo "ttl=$(( TTL_END - NOW ))"
+            echo "acquire_wait=$WAIT"
+            echo "deadline=$DEADLINE"
+          } >> "$GITHUB_OUTPUT"
+          echo "gate PR #${{ steps.pick.outputs.pr }} @ ${SHA:0:12}: v$VER (main has $OLD), mode $MODE, ${LEFT_MIN} min budget" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    needs: plan
+    if: needs.plan.outputs.go == 'true' && needs.plan.outputs.image != ''
+    runs-on: [self-hosted, linux, gpu-accept]
+    # NO `environment:` here: nobody is awake to approve at 04:00. The protection is the schedule, the
+    # Berlin-hour check above and gpu-window's own owner policy (accept-night only inside 04:00-06:00).
+    timeout-minutes: 120
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+      prod_ok: ${{ steps.health.outputs.prod_ok }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: gpu-window status
+        env:
+          ACCEPT_SSH: ${{ vars.ACCEPT_SSH || 'gpuwin@192.168.178.51' }}
+        run: ssh -o BatchMode=yes "$ACCEPT_SSH" status
+
+      - name: run gate (owner accept-night)
+        id: gate
+        env:
+          ACCEPT_HOST: ${{ vars.ACCEPT_HOST || '192.168.178.51' }}
+          ACCEPT_SSH: ${{ vars.ACCEPT_SSH || 'gpuwin@192.168.178.51' }}
+          ACCEPT_BB_PYTHON: /opt/accept/venv/bin/python
+          ACCEPT_BB_DIR: /opt/accept/betterbench
+          ACCEPT_EVAL_PYTHON: /opt/accept/venv/bin/python
+          ACCEPT_ACQUIRE_WAIT: ${{ needs.plan.outputs.acquire_wait }}
+          ACCEPT_ACQUIRE_DELAY: "30"
+          IMAGE: ${{ needs.plan.outputs.image }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          TTL: ${{ needs.plan.outputs.ttl }}
+          DEADLINE: ${{ needs.plan.outputs.deadline }}
+        run: |
+          set +e
+          set -o pipefail
+          python3 ci/accept/accept.py \
+            --profile ci/accept/profiles/vllm7-mxfp4.json \
+            --image "$IMAGE" --mode "$MODE" \
+            --owner accept-night --ttl "$TTL" --deadline "$DEADLINE" \
+            --record-baseline-on-pass \
+            --out out/accept-night
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: verdict
+        id: verdict
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          p = pathlib.Path("out/accept-night/report.json")
+          if not p.exists():
+              print("verdict=infra")
+          else:
+              r = json.loads(p.read_text())
+              # no acquire result = the window was never taken (busy / refused): infrastructure, retry tomorrow
+              if "acquire" not in r.get("results", {}):
+                  print("verdict=infra")
+              else:
+                  print("verdict=" + ("pass" if r["verdict"] == "PASS" else "fail"))
+          PY
+
+      - name: upload report and baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: night-gate
+          path: |
+            out/accept-night/
+            ci/accept/baselines/
+          retention-days: 30
+
+      - name: production (Radiance) health, independent of the gate result
+        id: health
+        if: always()
+        run: |
+          code=000
+          for _ in $(seq 1 20); do   # gpu-window waits up to 600 s itself; a few more minutes of patience here
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PROD_HEALTH_URL" || echo 000)
+            [ "$code" = "200" ] && break
+            sleep 30
+          done
+          echo "production /health = $code"
+          echo "prod_ok=$([ "$code" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: fail loudly when production is not back
+        if: always() && steps.health.outputs.prod_ok != 'true'
+        run: |
+          echo "::error::Radiance is NOT healthy after the night window -- production is down, a human must restore it (docs/MAINTENANCE.md, 'Radiance is down')"
+          exit 1
+
+  green:
+    # merge + release; only for a pass with production healthy
+    needs: [plan, gate]
+    if: always() && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # The App token, not GITHUB_TOKEN: its push to the PR branch must start CI, its merge must start
+      # build.yml on main (events caused by GITHUB_TOKEN start nothing).
+      - uses: actions/create-github-app-token@v3
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: night-gate
+          path: night
+
+      - name: Measured line + baseline, CI, merge, release
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.plan.outputs.pr }}
+          GATED_SHA: ${{ needs.plan.outputs.sha }}
+          REF: ${{ needs.plan.outputs.ref }}
+          VERSION_: ${{ needs.plan.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$GATED_SHA" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "night gate green for ${GATED_SHA:0:12}, but the branch moved on (now $(git rev-parse --short HEAD)): not merging a commit the gate did not see. The next night gates the new head. $RUN_URL"
+            exit 0
+          fi
+          git config user.name "accept-night[bot]"
+          git config user.email "accept-night@users.noreply.github.com"
+          python3 ci/fill_measured.py --version "$VERSION_" --report night/out/accept-night/report.json --run-url "$RUN_URL"
+          cp night/ci/accept/baselines/*.json ci/accept/baselines/
+          if [ -n "$(git status --porcelain)" ]; then
+            git add CHANGELOG.md ci/accept/baselines
+            git commit -q -m "night gate green: Measured numbers and baseline for ${VERSION_}" -m "$RUN_URL"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${REF}"
+          fi
+          NEW=$(git rev-parse HEAD)
+
+          # that commit changed CHANGELOG / baseline only, but the required check `ci` runs again: wait for it
+          for _ in $(seq 1 90); do
+            R=$(gh api "repos/${REPO}/commits/${NEW}/check-runs?per_page=100" --jq '[.check_runs[] | select(.name=="ci")] | last | .conclusion // .status // "none"')
+            echo "ci on ${NEW:0:12}: $R"
+            [ "$R" = "success" ] && break
+            case "$R" in failure|cancelled|timed_out) gh pr comment "$PR" --repo "$REPO" --body "night gate green, but \`ci\` is $R on the Measured commit ${NEW:0:12}: not merging. $RUN_URL"; exit 1;; esac
+            sleep 30
+          done
+          [ "$R" = "success" ] || { echo "::error::ci did not finish in 45 min"; exit 1; }
+
+          gh pr merge "$PR" --repo "$REPO" --merge --match-head-commit "$NEW" \
+            --subject "Merge stack PR #${PR} (night gate green, v${VERSION_})" \
+            --body "Acceptance gate green: $RUN_URL"
+          MERGE_SHA=$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)
+          echo "merged as $MERGE_SHA"
+          GH_TOKEN="$DISPATCH_TOKEN" gh workflow run release.yml --repo "$REPO" --ref main \
+            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$MERGE_SHA"
+          {
+            echo "### Released v${VERSION_} via the night gate"
+            echo "- PR #${PR} merged as \`${MERGE_SHA}\`"
+            echo "- release.yml dispatched: tag v${VERSION_}, build publishes to ghcr.io"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: say so on the PR when something above failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          gh pr comment "${{ needs.plan.outputs.pr }}" --repo "${{ github.repository }}" \
+            --body "night gate was green, but merging / releasing failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} -- a human has to finish it (docs/MAINTENANCE.md)." || true
+
+  red:
+    needs: [plan, gate]
+    if: always() && (needs.gate.outputs.verdict == 'fail' || needs.gate.outputs.verdict == 'infra' || needs.gate.result == 'failure' || needs.gate.result == 'cancelled')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: night-gate
+          path: night
+
+      - name: comment the report, label gate-failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.plan.outputs.pr }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERDICT: ${{ needs.gate.outputs.verdict }}
+          PROD_OK: ${{ needs.gate.outputs.prod_ok }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          REPORT=night/out/accept-night/report.md
+          [ -s "$REPORT" ] || echo "(no report.md: the gate did not get as far as writing one)" > "$REPORT"
+          if [ "$VERDICT" = "infra" ] || [ -z "$VERDICT" ]; then
+            # no measurement happened (window busy, refused, runner down): no failed-sha marker, tomorrow retries
+            HEAD="Night gate did not run (infrastructure: the GPU window was not taken or the job died) for ${SHA:0:12}. No verdict; it is tried again the next night."
+            MARKER=""
+          else
+            HEAD="Night gate RED for ${SHA:0:12}. Not merged, not released; not retried for this head sha (a new push is a new candidate)."
+            MARKER="<!-- accept-night:failed sha=${SHA} -->"
+          fi
+          [ "$PROD_OK" = "true" ] || HEAD="$HEAD **Radiance was not healthy afterwards -- see the failed gate job.**"
+          {
+            echo "$MARKER"; echo "$HEAD"; echo; echo "Run: $RUN_URL"; echo; cat "$REPORT"
+          } > body.md
+          gh pr comment "$PR" --repo "$REPO" --body-file body.md
+          if [ -n "$MARKER" ]; then
+            gh label create gate-failed --repo "$REPO" --color B60205 --description "night GPU gate was red" 2>/dev/null || true
+            gh pr edit "$PR" --repo "$REPO" --add-label gate-failed
+          fi

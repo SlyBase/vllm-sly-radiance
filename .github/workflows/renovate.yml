@@ -13,7 +13,7 @@ on:
     - cron: "17 */6 * * *"
   push:
     branches: [main]
-    paths: [renovate.json, .github/workflows/renovate.yml]
+    paths: [renovate.json, .github/workflows/renovate.yml, .github/renovate-entrypoint.sh]
   workflow_dispatch:
     inputs:
       log_level:
@@ -31,6 +31,8 @@ concurrency:
 
 jobs:
   renovate:
+    # pause switch of the automated maintenance (docs/MAINTENANCE.md): repo variable AUTO_MAINTAIN=off
+    if: vars.AUTO_MAINTAIN != 'off'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -43,7 +45,14 @@ jobs:
       - uses: renovatebot/github-action@6d26fcf0275dc65624cbc3d51fe78bc773f98321 # v46.3.6
         with:
           token: ${{ steps.app_token.outputs.token }}
+          # postUpgradeTasks (ci/resolve_stack.py --apply) need python3 (+ venv/pip for
+          # check_constraints.py --update) inside Renovate's container: the entrypoint installs it
+          # as root and drops to Renovate's user.
+          docker-user: root
+          docker-cmd-file: .github/renovate-entrypoint.sh
         env:
+          # the one command renovate.json's postUpgradeTasks may run (anchored regex, exact string)
+          RENOVATE_ALLOWED_POST_UPGRADE_COMMANDS: '["^python3 ci/resolve_stack\\.py --apply$"]'
           RENOVATE_REPOSITORIES: '["${{ github.repository }}"]'
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: required

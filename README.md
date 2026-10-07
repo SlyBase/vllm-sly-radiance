@@ -259,7 +259,7 @@ reduces re-prefill latency for long sessions; it does **not** raise `--max-model
 | `sly/` | everything this fork adds: patches, kernels, attention tunes, benches ([reference](sly/README.md)) |
 | `patch_*.py`, `radiance_*.py`, `paroquant/`, `escha/`, launch scripts in the root | the upstream repositories' files, synced daily; the Dockerfile loop and `ci/unused_patches.txt` say which are used |
 | `ci/` | CI scripts, the acceptance gate, the release tagging |
-| `docs/` | [technical deep dives](docs/TECHNICAL.md), [benchmarks](docs/BENCHMARKS.md), [not adopted](docs/NOT-ADOPTED.md), [multi-GPU](docs/MULTI-GPU.md), [Windows / WSL2](docs/WINDOWS-WSL2.md), [development & releases](docs/DEVELOPMENT.md) |
+| `docs/` | [technical deep dives](docs/TECHNICAL.md), [benchmarks](docs/BENCHMARKS.md), [not adopted](docs/NOT-ADOPTED.md), [multi-GPU](docs/MULTI-GPU.md), [Windows / WSL2](docs/WINDOWS-WSL2.md), [development & releases](docs/DEVELOPMENT.md), [automated maintenance](docs/MAINTENANCE.md) |
 | `CHANGELOG.md` | per-version changes = release notes; contributor rules in [AGENTS.md](AGENTS.md) |
 
 ## Credits
