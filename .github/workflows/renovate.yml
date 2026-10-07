@@ -33,7 +33,7 @@ jobs:
   renovate:
     # pause switch of the automated maintenance (docs/MAINTENANCE.md): repo variable AUTO_MAINTAIN=off
     if: vars.AUTO_MAINTAIN != 'off'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       # docker-cmd-file below is bind-mounted from the workspace; without a checkout docker creates
