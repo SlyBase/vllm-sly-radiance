@@ -69,8 +69,10 @@ see there for why.
 ## Quickstart
 
 Requirements: one R9700 (or another gfx1201 card with 32 GB), ROCm-capable kernel driver
-(`/dev/kfd`, `/dev/dri`), Docker, ~20 GB of disk for the model + drafter, and enough free host RAM for the model load (on the
-maintainer's 32 GB host the other VMs are paused while the model loads).
+(`/dev/kfd`, `/dev/dri`), Docker, ~20 GB of disk for the model + drafter, and enough free host RAM for the model load. Since **1.2** the
+MXFP4 checkpoint is sharded by default, so vLLM loads it shard-by-shard and the peak host RAM is the largest shard (5 GiB)
+instead of the whole ~19 GiB model — a 16 GiB box now loads it in minutes rather than swapping for hours. On the maintainer's
+32 GB host the other VMs are paused while the model loads; on 16 GiB hosts they no longer need to be.
 Windows 11 through WSL2: see [docs/WINDOWS-WSL2.md](docs/WINDOWS-WSL2.md).
 
 ```bash
