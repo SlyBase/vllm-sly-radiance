@@ -68,6 +68,10 @@ second start.
   c8 arrivals 418.3 / 411.0 / 407.9 (neutral in the combination; the isolated +4.7 % of `perseq` does not show here);
   multi-turn follow-up with a prefix hit 3.3–3.6 s on both.
 - GSM8K 200 (cot zero-shot, greedy, flexible-extract): 0.84 (0.7.0 in the same window: 0.83).
+- **BetterBench full at 300 W** (1.0.0 then 0.7.0, same window): weighted decode 135.8 / 137.4 tok/s (within noise);
+  prefill 1.5k / 6k / 12k / 24k / 47k 3132 / 3136 / 3105 / 2949 / 2635 against 3108 / 3049 / 2946 / 2648 / 2164 tok/s
+  (+1 / +3 / +5 / +11 / +22 %); concurrency 1 / 2 / 4 / 8 / 16 120 / 213 / 338 / 461 / 466 against 121 / 219 / 338 /
+  446 / 449 tok/s; TTFT 47k 17.9 s against 21.7 s; KV pool 436,906 against 391,193 tokens.
 - Not adopted (docs/NOT-ADOPTED.md): gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM state, draft refill
   after a prefix hit, plain R4D backend.
 

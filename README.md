@@ -2,8 +2,8 @@
 
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
 with hand-written MXFP4 kernels, DFlash2 speculative decoding and the full 262k context on a single
-32 GB card: **~133 tok/s single-stream decode, ~3,200 tok/s prefill, 410 tok/s at 8
-concurrent requests** (0.4.0 reference run, see [Performance](#performance)), with every number measured and reproducible.
+32 GB card: **~136 tok/s single-stream decode, ~3,100 tok/s prefill (2,635 at 47k), 461 tok/s at 8
+concurrent requests, 437k-token KV pool** (1.0.0 reference run at 300 W, see [Performance](#performance)), with every number measured and reproducible.
 
 ```bash
 docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
@@ -25,9 +25,23 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
 
 ## Performance
 
-> **Release 1.0.0:** the 1.0 reference run (300 W BetterBench) is pending; the table below is the last full reference
-> run, image **0.4.0**, and is kept for comparison. What 1.0.0 changed was measured as A/B/A deltas at 210 W and is in the
-> [CHANGELOG](CHANGELOG.md) (prefill 64k +24 %, KV pool 430,433 tokens, TTFT −11 % at 160 tokens; GSM8K 0.84).
+**Reference run of image 1.0.0** on 2026-10-07 against 0.7.0 in the same GPU window (1.0.0 first, then 0.7.0), 300 W
+(firmware fan curve), Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 + DFlash2 k = 7, production arguments of each image, BetterBench
+0.4.0 default config (3 warmup + 20 passes per category, prefill 8 runs per depth, concurrency 1–16 × 48 requests,
+T 0.7 / top_p 0.95 / top_k 20):
+
+| | **1.0.0** | 0.7.0 | Δ |
+|---|---|---|---|
+| **Decode, single stream** (weighted) | **135.8 tok/s** | 137.4 tok/s | −1.2 % (within the ±5 % of one 20-pass sample) |
+| update gap p50 / p99 | 34.4 / 35.2 ms | 34.3 / 35.0 ms | ± 0 |
+| **Prefill** 1.5k / 6k / 12k / 24k / 47k prompt tokens | **3,132 / 3,136 / 3,105 / 2,949 / 2,635** tok/s | 3,108 / 3,049 / 2,946 / 2,648 / 2,164 | +1 / +3 / +5 / +11 / **+22 %** |
+| time to first token, 47k tokens | **17.9 s** | 21.7 s | −18 % |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | 120 / 213 / 338 / **461 / 466** tok/s | 121 / 219 / 338 / 446 / 449 | −1 / −3 / 0 / **+3 / +4 %** |
+| TTFT p50 at 8 / 16 concurrent | 197 / 2,738 ms | 224 / 3,140 ms | −12 / −13 % |
+| KV pool (262k context) | **436,906 tokens** | 391,193 | +12 % |
+| GSM8K 200 (210 W, same day) | 0.84 | 0.83 | |
+
+The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 
 Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
 (`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
