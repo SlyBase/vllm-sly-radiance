@@ -36,6 +36,15 @@ on:
         description: "pick and report only: no GPU, no merge (the Berlin-hour check still applies)"
         type: boolean
         default: true
+      run_now:
+        description: "owner-approved window NOW: skip the 04:00 Berlin check, gpu-window owner accept-manual, ~2 h budget from now"
+        type: boolean
+        default: false
+      mode:
+        description: "gate scope: auto (fast, full for a minor/major move), fast or full"
+        type: choice
+        options: [auto, fast, full]
+        default: auto
 
 permissions:
   contents: read
@@ -45,8 +54,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # production LLM (Radiance, LXC 2413); gpu-window restores it, this is the independent check
-  PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.54:8000/health' }}
+  # production LLM health (repo variable; vLLM on LXC 2408 or Radiance on 2413); gpu-window restores
+  # production on release, this is the independent check
+  PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.51:8000/health' }}
 
 jobs:
   plan:
@@ -65,6 +75,7 @@ jobs:
       ref: ${{ steps.pick.outputs.ref }}
       mode: ${{ steps.meta.outputs.mode }}
       calibrate: ${{ steps.meta.outputs.calibrate }}
+      owner: ${{ steps.meta.outputs.owner }}
       image: ${{ steps.meta.outputs.image }}
       version: ${{ steps.meta.outputs.version }}
       ttl: ${{ steps.meta.outputs.ttl }}
@@ -81,11 +92,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_INPUT: ${{ inputs.pr }}
+          RUN_NOW: ${{ github.event_name == 'workflow_dispatch' && inputs.run_now || false }}
         run: |
           set -euo pipefail
           HOUR=$(TZ=Europe/Berlin date +%H)
           echo "Europe/Berlin hour: $HOUR"
-          if [ "$HOUR" != "04" ]; then
+          if [ "$RUN_NOW" = "true" ]; then
+            echo "run_now: owner-approved window now, the 04:00 check is skipped" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$HOUR" != "04" ]; then
             echo "outside 04:00-04:59 Europe/Berlin: nothing to do (the other cron covers the other season)"
             echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -113,6 +127,8 @@ jobs:
         if: steps.pick.outputs.go == 'true' && env.STOP != '1'
         env:
           SHA: ${{ steps.pick.outputs.sha }}
+          RUN_NOW: ${{ github.event_name == 'workflow_dispatch' && inputs.run_now || false }}
+          MODE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'auto' }}
         run: |
           set -euo pipefail
           git checkout --quiet "$SHA"
@@ -121,12 +137,20 @@ jobs:
           eval "$(python3 ci/read_pins.py --shell)"
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           NOW=$(date +%s)
-          START_BY=$(TZ=Europe/Berlin date -d "today 04:10" +%s)
-          DEADLINE=$(TZ=Europe/Berlin date -d "today 05:45" +%s)
-          TTL_END=$(TZ=Europe/Berlin date -d "today 05:50" +%s)
+          if [ "$RUN_NOW" = "true" ]; then
+            # owner-approved window now: the same shape as the night (10 min to acquire, 105 min of gate,
+            # 120 min TTL), owner accept-manual (gpu-window restricts only accept-night to 04:00-06:00)
+            START_BY=$(( NOW + 600 )); DEADLINE=$(( NOW + 6300 )); TTL_END=$(( NOW + 7200 )); OWNER=accept-manual
+          else
+            START_BY=$(TZ=Europe/Berlin date -d "today 04:10" +%s)
+            DEADLINE=$(TZ=Europe/Berlin date -d "today 05:45" +%s)
+            TTL_END=$(TZ=Europe/Berlin date -d "today 05:50" +%s)
+            OWNER=accept-night
+          fi
           LEFT_MIN=$(( (DEADLINE - NOW) / 60 ))
           # fast ~22 min + 2 starts ~10 min; full ~27 min + GSM8K. A minor/major VERSION move gets the full gate.
           if [ "$(echo "$VER" | cut -d. -f1,2)" != "$(echo "$OLD" | cut -d. -f1,2)" ] && [ "$LEFT_MIN" -ge 75 ]; then MODE=full; else MODE=fast; fi
+          case "$MODE_INPUT" in fast|full) MODE=$MODE_INPUT;; esac
           if [ "$LEFT_MIN" -lt 50 ]; then
             echo "only ${LEFT_MIN} min left before 05:45: too late to start, try again tomorrow"
             echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
@@ -152,7 +176,7 @@ jobs:
           fi
           {
             echo "go=true"
-            echo "version=$VER"; echo "mode=$MODE"; echo "calibrate=$CALIBRATE"
+            echo "version=$VER"; echo "mode=$MODE"; echo "calibrate=$CALIBRATE"; echo "owner=$OWNER"
             echo "image=$IMG"
             echo "ttl=$(( TTL_END - NOW ))"
             echo "acquire_wait=$WAIT"
@@ -193,6 +217,7 @@ jobs:
           IMAGE: ${{ needs.plan.outputs.image }}
           MODE: ${{ needs.plan.outputs.mode }}
           CALIBRATE: ${{ needs.plan.outputs.calibrate }}
+          OWNER: ${{ needs.plan.outputs.owner || 'accept-night' }}
           TTL: ${{ needs.plan.outputs.ttl }}
           DEADLINE: ${{ needs.plan.outputs.deadline }}
         run: |
@@ -202,7 +227,7 @@ jobs:
           python3 ci/accept/accept.py \
             --profile ci/accept/profiles/vllm7-mxfp4.json \
             --image "$IMAGE" --mode "$MODE" \
-            --owner accept-night --ttl "$TTL" --deadline "$DEADLINE" \
+            --owner "$OWNER" --ttl "$TTL" --deadline "$DEADLINE" \
             $REC \
             --out out/accept-night
           echo "rc=$?" >> "$GITHUB_OUTPUT"
