@@ -64,6 +64,7 @@ jobs:
       sha: ${{ steps.pick.outputs.sha }}
       ref: ${{ steps.pick.outputs.ref }}
       mode: ${{ steps.meta.outputs.mode }}
+      calibrate: ${{ steps.meta.outputs.calibrate }}
       image: ${{ steps.meta.outputs.image }}
       version: ${{ steps.meta.outputs.version }}
       ttl: ${{ steps.meta.outputs.ttl }}
@@ -131,10 +132,28 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           WAIT=$(( START_BY - NOW )); [ "$WAIT" -lt 120 ] && WAIT=120
+          # A gate against an incomplete baseline would skip the throughput checks and could merge a slower
+          # stack (which would then record itself as the baseline). So: baseline incomplete for this mode ->
+          # this night measures the CURRENT RELEASE (main's VERSION image) with --record-baseline, commits the
+          # baseline to the PR branch and merges nothing. The next night gates the PR against it.
+          CALIBRATE=$(MODE="$MODE" python3 - <<'PY'
+          import json, os
+          b = json.load(open("ci/accept/baselines/vllm7-mxfp4.json"))
+          m = b.get("modes", {}).get(os.environ["MODE"], {})
+          ok = bool(m.get("aggregate_tps")) and b.get("mean_tokens_per_step") is not None and b.get("kv_tokens")
+          print("false" if ok else "true")
+          PY
+          )
+          IMG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          if [ "$CALIBRATE" = "true" ]; then
+            OLD_ROCM=$(git show origin/main:Dockerfile | sed -nE 's/^ARG ROCM_BASE=[^:]+:([0-9]+\.[0-9]+)\..*/\1/p' | head -1)
+            IMG="vllm-sly-radiance:${OLD}-rocm${OLD_ROCM}"
+            echo "baseline incomplete for mode $MODE: calibration run of the current release $IMG, no merge tonight" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           {
             echo "go=true"
-            echo "version=$VER"; echo "mode=$MODE"
-            echo "image=vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+            echo "version=$VER"; echo "mode=$MODE"; echo "calibrate=$CALIBRATE"
+            echo "image=$IMG"
             echo "ttl=$(( TTL_END - NOW ))"
             echo "acquire_wait=$WAIT"
             echo "deadline=$DEADLINE"
@@ -173,16 +192,18 @@ jobs:
           ACCEPT_ACQUIRE_DELAY: "30"
           IMAGE: ${{ needs.plan.outputs.image }}
           MODE: ${{ needs.plan.outputs.mode }}
+          CALIBRATE: ${{ needs.plan.outputs.calibrate }}
           TTL: ${{ needs.plan.outputs.ttl }}
           DEADLINE: ${{ needs.plan.outputs.deadline }}
         run: |
           set +e
           set -o pipefail
+          REC=--record-baseline-on-pass; [ "$CALIBRATE" = "true" ] && REC=--record-baseline
           python3 ci/accept/accept.py \
             --profile ci/accept/profiles/vllm7-mxfp4.json \
             --image "$IMAGE" --mode "$MODE" \
             --owner accept-night --ttl "$TTL" --deadline "$DEADLINE" \
-            --record-baseline-on-pass \
+            $REC \
             --out out/accept-night
           echo "rc=$?" >> "$GITHUB_OUTPUT"
           exit 0
@@ -236,7 +257,7 @@ jobs:
   green:
     # merge + release; only for a pass with production healthy
     needs: [plan, gate]
-    if: always() && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
+    if: always() && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -319,9 +340,49 @@ jobs:
           gh pr comment "${{ needs.plan.outputs.pr }}" --repo "${{ github.repository }}" \
             --body "night gate was green, but merging / releasing failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} -- a human has to finish it (docs/MAINTENANCE.md)." || true
 
+  calibrated:
+    # baseline calibration night: commit the recorded baseline (current release) to the PR branch, merge nothing
+    needs: [plan, gate]
+    if: always() && needs.plan.outputs.calibrate == 'true' && needs.gate.outputs.verdict != 'infra' && needs.gate.outputs.prod_ok == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+          token: ${{ steps.app_token.outputs.token }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: night-gate
+          path: night
+      - name: commit the calibrated baseline to the PR branch
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.plan.outputs.pr }}
+          REF: ${{ needs.plan.outputs.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "accept-night[bot]"
+          git config user.email "accept-night@users.noreply.github.com"
+          cp night/ci/accept/baselines/*.json ci/accept/baselines/
+          if [ -n "$(git status --porcelain ci/accept/baselines)" ]; then
+            git add ci/accept/baselines
+            git commit -q -m "night gate: baseline calibrated on the current release (no merge)" -m "$RUN_URL"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${REF}"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "Night gate: the baseline was incomplete, so tonight measured the current release and committed it as the baseline (no merge, no release). The next night gates this PR against it. $RUN_URL"
+
   red:
     needs: [plan, gate]
-    if: always() && (needs.gate.outputs.verdict == 'fail' || needs.gate.outputs.verdict == 'infra' || needs.gate.result == 'failure' || needs.gate.result == 'cancelled')
+    if: always() && needs.plan.outputs.calibrate != 'true' && (needs.gate.outputs.verdict == 'fail' || needs.gate.outputs.verdict == 'infra' || needs.gate.result == 'failure' || needs.gate.result == 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

@@ -47,6 +47,10 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
 4. **Baseline**: the gate compares against the current release. The profile/baseline describe the production
    setup (Swift-1.5 checkpoint, the 1.0 launch). The launch itself lives in the homelab unit
    `docker-vllm7.service`, whose `ExecStart` gpu-window copies.
+   An incomplete baseline (no throughput / tokens-per-step for the gate's mode) is never gated against: that
+   night measures the CURRENT release (main's VERSION image) with `--record-baseline`, commits the baseline
+   to the stack PR's branch and merges nothing (job `calibrated`). The next night gates the PR against it.
+   This is what happens on the first night after 1.0.0, because the 1.0.0 baseline only has KV and GSM8K.
 
 ## Homelab interfaces (assumed, owned by the homelab repo)
 
