@@ -2,7 +2,7 @@
   "_comment": "Reference numbers of the running production image (vllm7 = docker-vllm7.service, LXC 2408, R9700 at the production 210 W, MXFP4 + DFlash2 k=7, max-model-len 262144, --max-num-batched-tokens 2048). Recalibrated 2026-09-25 on 0.4.0 with a full-mode record_baseline gate run (36119585981): the conc 8/16 values had been the 0.2.2/0.2.3 numbers (388/386 t/s); every 0.3.x-0.4.0 full run at 210 W measured 360-370 t/s there (BetterBench reference 2026-09-25: 362/369), so the old values failed a neutral release.",
   "image": "vllm-sly-radiance:0.4.0-rocm10.0",
   "measured": "2026-09-25",
-  "kv_tokens": 386338,
+  "kv_tokens": 436906,
   "startup_s": 185.8,
   "mean_tokens_per_step": 26.7424,
   "acceptance_rate": 0.4676,
@@ -31,5 +31,6 @@
   },
   "_note_fast_vs_full": "fast und full sind NICHT vergleichbar: fast faehrt 24 Requests auf conc 1 und 8, full 48 auf 1/2/4/8/16. conc 8 misst in fast 331-352 t/s gegen 388 in full - dieselbe Engine, nur ein kuerzerer Lauf. Ein fast-Lauf gegen die full-Zahlen gemessen meldet auf jedem einzelnen Build 10 % Regression.",
   "_note_fast_spread": "Alle fast-Zahlen sind MITTELWERTE zweier Laeufe, nie der beste. Streuung der beiden Laeufe (0.2.8 / 0.2.9): conc 1 = 111.33/111.29 (0.04 %), conc 8 = 362.46/360.84 (0.4 %), tokens/step = 8.3777/8.3581 (0.2 %), startup_s = 271.2/261.1 (4 %). conc 8 streute in aelteren Laeufen bis 4.8 %: mehr Requests pro Lauf waeren das eigentliche Mittel, nicht eine weichere Schwelle.",
-  "_note_startup": "startup_s streut mit 13 % am staerksten (321.4 / 366.9) und misst nicht die Engine, sondern die Umgebung: das Laden der 18.44 GiB schwankt am selben Tag zwischen 61 s und 158 s, ohne dass Platte, Page-Cache oder ZFS-Fragmentierung das erklaeren (am 2026-09-18 nachgemessen: dd 341-513 MB/s je nach Blockgroesse, mmap 458 MB/s, ARC 0.77 GiB - die Datei ist bei jedem Start kalt). Der Produktions-Rollout selbst brauchte 243 s bis health 200, beide Male. Die Pruefung ist deshalb bewusst weich (hard: false)."
+  "_note_startup": "startup_s streut mit 13 % am staerksten (321.4 / 366.9) und misst nicht die Engine, sondern die Umgebung: das Laden der 18.44 GiB schwankt am selben Tag zwischen 61 s und 158 s, ohne dass Platte, Page-Cache oder ZFS-Fragmentierung das erklaeren (am 2026-09-18 nachgemessen: dd 341-513 MB/s je nach Blockgroesse, mmap 458 MB/s, ARC 0.77 GiB - die Datei ist bei jedem Start kalt). Der Produktions-Rollout selbst brauchte 243 s bis health 200, beide Male. Die Pruefung ist deshalb bewusst weich (hard: false).",
+  "_note_kv_1_0": "kv_tokens raised to 436906 for 1.0.0 (util 0.98 + FULL_DECODE_ONLY, warm cache, 2026-10-07); the other baseline numbers are still the 0.4.0/0.4.5 calibration."
 }

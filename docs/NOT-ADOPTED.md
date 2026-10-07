@@ -75,7 +75,7 @@ The measurement plan (BetterBench 0.6.0, thinking off first, then drafter/greedy
 [like-for-like recipe](BENCHMARKS.md#recipe-like-for-like-against-paiton-queued-not-yet-run).
 
 **Transferable = runtime flags only. Queued for an A/B** (production args, 300 W, same window, control
-first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 430,433 at 1.0.0 and later):
+first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 436,906 at 1.0.0 and later):
 
 | Arm | Paiton setting | Ours today | Why it might help |
 |---|---|---|---|

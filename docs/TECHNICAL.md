@@ -678,7 +678,7 @@ state, draft refill after a prefix hit, plain R4D and `R4D_ATTN_FP8`.
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
-- PyTorch 2.12.0 (AMD's rocm10.1 wheel), torchvision 0.27.0, Triton 3.6.0, aiter 0.1.22.post1, transformers 5.17.0, vLLM 0.30.0; libr4d pinned
+- PyTorch 2.12.0 (AMD's rocm10.1 wheel), torchvision 0.27.0, Triton 3.6.0, aiter 0.1.22.post1, transformers 5.18.0, vLLM 0.30.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.

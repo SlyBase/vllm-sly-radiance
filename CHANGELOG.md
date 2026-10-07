@@ -38,7 +38,7 @@ second start.
   for 10.1), torchvision 0.27.0; triton 3.6.0, aiter 0.1.22.post1, vLLM 0.30.0 unchanged. Image tag
   `1.0.0-rocm10.1`. The torch >= 2.12 CPU spin that held torch back is fixed in ROCm 10.1. Performance is neutral (step
   35.35 / 35.59 / 35.13 ms, prefill within 1-2 %). Fresh compile caches on first start; to stay on 10.0 see TECHNICAL.md.
-- README reference launch, options table and docs layout updated; the KV pool reference in AGENTS.md is now 430,433 (the full 1.0 launch).
+- README reference launch, options table and docs layout updated; the KV pool reference in AGENTS.md is now 436,906 (the full 1.0 launch, warm compile cache).
 - `tests-lessons/` moved to `sly/tests/lessons/`; the working notes are folded into TECHNICAL.md.
 
 ### Removed

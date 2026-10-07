@@ -17,7 +17,7 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
 | ROCm | 10.1 (`rocm/dev-ubuntu-24.04:10.1.0-full`, HIP 7.16, pruned to gfx1201) |
 | PyTorch / Triton / torchvision | 2.12.0 (AMD's `+rocm10.1.0` wheel) / 3.6.0 / 0.27.0 (compiled against it) |
 | vLLM | 0.30.0 (V1 engine, V2 model runner), built from source |
-| AITER / transformers | 0.1.22.post1 / 5.17.0 |
+| AITER / transformers | 0.1.22.post1 / 5.18.0 |
 | Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (prefill attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
 | Model | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, gated-delta-net hybrid) |
 | Drafter | [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16), DFlash2 k = 7 + prompt lookup |
