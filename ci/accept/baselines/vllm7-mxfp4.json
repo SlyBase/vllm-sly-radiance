@@ -3,18 +3,28 @@
   "image": "vllm-sly-radiance:1.0.0-rocm10.1",
   "measured": "2026-10-07",
   "kv_tokens": 436906,
-  "startup_s": null,
-  "mean_tokens_per_step": null,
-  "acceptance_rate": null,
-  "gsm8k": 0.84,
+  "startup_s": 175.7,
+  "mean_tokens_per_step": 9.932,
+  "acceptance_rate": 0.5022,
+  "gsm8k": 0.845,
   "modes": {
     "fast": {
       "aggregate_tps": {}
     },
     "full": {
-      "aggregate_tps": {}
+      "aggregate_tps": {
+        "1": 117.6,
+        "2": 201.61,
+        "4": 312.15,
+        "8": 353.74
+      }
     }
   },
   "_note_fast_vs_full": "fast and full are NOT comparable: fast runs 24 requests at conc 1 and 8, full 48 at 1/2/4/8/16 (same engine, shorter run). Never measure a fast run against full numbers.",
-  "_note_startup": "startup_s measures the environment (weight load 61-158 s on the same day), not the engine; the check is soft (hard: false)."
+  "_note_startup": "startup_s measures the environment (weight load 61-158 s on the same day), not the engine; the check is soft (hard: false).",
+  "recorded": {
+    "image": "vllm-sly-radiance:1.0.0-rocm10.1",
+    "at": "2026-10-07 13:04:55Z",
+    "mode": "full"
+  }
 }
