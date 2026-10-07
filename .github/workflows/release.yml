@@ -61,6 +61,7 @@ jobs:
           SHA_INPUT: ${{ inputs.sha }}
           ACTOR: ${{ github.actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_NOTIFY: ${{ vars.RELEASE_NOTIFY || '@slydlake' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
