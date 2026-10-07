@@ -439,14 +439,15 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
 #   * aiter's prebuilt assembly kernels for other archs (hsa/gfx942, gfx950, gfx1250, ~115 MB):
 #     aiter looks them up under hsa/<device arch>, and there is none for gfx1201.
 #   * debug symbols of the installed extensions (worth ~1 GB): release builds, but they still carry
-#     .debug_* sections that nothing reads at runtime. The radiance kernels built further down
+#     .debug_* sections that nothing reads at runtime. Not torch/lib and not torchvision (AMD's wheel
+#     is TheRock-built like torch: strip leaves its _C.so with an unloadable ELF layout). The radiance kernels built further down
 #     (R4D, the MXFP4 GEMM, the GDN decode kernel) are not stripped: tiny, and they carry device fatbins.
 COPY split_venv.py /opt/split_venv.py
 RUN set -eu; \
     rm -rf ${SP}/triton/backends/nvidia/bin ${SP}/triton/backends/nvidia/lib; \
     find ${SP}/aiter_meta/hsa -mindepth 1 -maxdepth 1 -type d -name 'gfx*' ! -name "${GFX_ARCH}" \
       -exec rm -rf {} +; \
-    find /opt/vllm -type f -name '*.so*' ! -path '*/torch/lib/*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    find /opt/vllm -type f -name '*.so*' ! -path '*/torch/lib/*' ! -path '*/torchvision/*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} +; \
     /usr/bin/python3 /opt/split_venv.py snapshot /opt/vllm /opt/vllm.stable.json
 
