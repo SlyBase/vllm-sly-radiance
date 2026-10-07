@@ -38,7 +38,7 @@ second start.
   for 10.1), torchvision 0.27.0; triton 3.6.0, aiter 0.1.22.post1, vLLM 0.30.0 unchanged. Image tag
   `1.0.0-rocm10.1`. The torch >= 2.12 CPU spin that held torch back is fixed in ROCm 10.1. Performance is neutral (step
   35.35 / 35.59 / 35.13 ms, prefill within 1-2 %). Fresh compile caches on first start; to stay on 10.0 see TECHNICAL.md.
-- README reference launch, options table and docs layout updated; the KV pool reference in AGENTS.md is now 436,097.
+- README reference launch, options table and docs layout updated; the KV pool reference in AGENTS.md is now 430,433 (the full 1.0 launch).
 - `tests-lessons/` moved to `sly/tests/lessons/`; the working notes are folded into TECHNICAL.md.
 
 ### Removed
@@ -61,7 +61,13 @@ second start.
   shortened, 4.15 verify rows saved per step; 8-way concurrent greedy diverges at near-ties (batch-shape numerics).
 - ROCm 10.1: greedy 35.35 / 35.59 / 35.13 ms, prefill 2k 2357 / 2344 / 2385, 8k 2432 / 2382 / 2401 tok/s, KV 385,934 on
   the second start of the test run (fresh cache dirs), greedy text 4 of 8 identical (A/A: 8 of 8).
-- GSM8K: pending
+- **Release candidate as shipped** (ROCm 10.1 image, all 1.0 flags) against 0.7.0, same window, 210 W, base1 / rc / base2:
+  KV pool 391,193 / **430,433** / 391,193 (+10 %; the varlen graphs of `perseq` and the 10.1 runtime take ~6k of the
+  436k from the util/graph change alone); greedy 34.84 / 35.04 / 35.06 ms; TTFT 160 tokens 103.8 / **93.1** / 106.3 ms;
+  prefill 8k / 32k / 64k 2666 / **2737** / 2556, 2128 / **2376** / 2083, 1645 / **2025** / 1627 tok/s (+5 / +13 / +24 %);
+  c8 arrivals 418.3 / 411.0 / 407.9 (neutral in the combination; the isolated +4.7 % of `perseq` does not show here);
+  multi-turn follow-up with a prefix hit 3.3–3.6 s on both.
+- GSM8K 200 (cot zero-shot, greedy, flexible-extract): 0.84 (0.7.0 in the same window: 0.83).
 - Not adopted (docs/NOT-ADOPTED.md): gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM state, draft refill
   after a prefix hit, plain R4D backend.
 

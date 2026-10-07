@@ -9,7 +9,7 @@
 #
 # DECISION CRITERIA (against the control arms of the same window)
 #   1 both starts of 10.1 reach /health, no Traceback / EngineCore death in the log
-#   2 KV pool of the second start >= 436,097 tokens at util 0.98 (1.0.0 production number; the util 0.9655 arm shows 391,193)
+#   2 KV pool of the second start >= 430,433 tokens at util 0.98 (1.0.0 production number; the util 0.9655 arm shows 391,193)
 #   3 idle CPU after the first requests < 150 % for the whole container. ROCm/ROCm#6406 (torch >= 2.12 spins a core in
 #     libhsa-runtime64 after the first GPU op) is why the torch pin sat on 2.11; ROCm 10.1 should carry the fix
 #   4 greedy: tok/upd within 1 % and ms/step within +-2 % of the control (the A/A spread is the noise floor); texts

@@ -27,7 +27,7 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
 
 > **Release 1.0.0:** the 1.0 reference run (300 W BetterBench) is pending; the table below is the last full reference
 > run, image **0.4.0**, and is kept for comparison. What 1.0.0 changed was measured as A/B/A deltas at 210 W and is in the
-> [CHANGELOG](CHANGELOG.md) (prefill 64k +23 %, KV pool 436,097 tokens, c8 with arrivals +4.7 %).
+> [CHANGELOG](CHANGELOG.md) (prefill 64k +24 %, KV pool 430,433 tokens, TTFT −11 % at 160 tokens; GSM8K 0.84).
 
 Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
 (`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
