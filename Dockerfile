@@ -415,6 +415,11 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
  && pip install --no-cache-dir -c /tmp/constraints.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
  && pip install --no-cache-dir -c /tmp/constraints.txt pillow pybind11 \
+ # aiter 0.1.23 imports flydsl at `import aiter` (aiter/ops/topk_select.py -> aiter.ops.flydsl); aiter is
+ # installed --no-deps above, so its pinned runtime dep comes here. Without it every aiter import fails and
+ # the backward-compat finder for aiter.ops.triton.unified_attention swallows the error
+ # (ModuleNotFoundError at engine start).
+ && pip install --no-cache-dir --no-deps -c /tmp/constraints.txt flydsl \
  && if [ -f /opt/rocm/share/amd_smi/setup.py ]; then pip install --no-cache-dir /opt/rocm/share/amd_smi; \
     else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
  && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
@@ -801,6 +806,7 @@ RUN WANT_VLLM=${VLLM_VERSION} WANT_AITER=${AITER_VERSION} WANT_TF=${TRANSFORMERS
     python -c 'import os, torch, vllm._C, amdsmi, importlib.metadata as m; \
 import r4d; \
 v, a, t = m.version("vllm"), m.version("amd-aiter"), m.version("transformers"); \
+m.version("flydsl"); \
 assert v.startswith(os.environ["WANT_VLLM"]), "vllm wheel reports " + v + ", built tag is " + os.environ["WANT_VLLM"]; \
 assert a.startswith(os.environ["WANT_AITER"]), "aiter wheel reports " + a + ", built tag is " + os.environ["WANT_AITER"]; \
 assert t == os.environ["WANT_TF"], "transformers is " + t + ", pinned is " + os.environ["WANT_TF"]; \

@@ -27,7 +27,10 @@ ROCm base builds, all of it AMD's prebuilt rocm10.1 wheels. No new knob.
   source-built torch). torch 2.14 is on the index but is not what vLLM pins. The 0.5.0 - 0.5.4 GPU hang was torch 2.13 with
   triton 3.7.1 outside upstream's pairing; this release is upstream's pairing.
 - **aiter 0.1.22.post1 -> 0.1.23** (vLLM 0.31's `AITER_BRANCH`). 0.1.23 still has the `aiter.ops.triton.unified_attention`
-  alias vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24, which dropped it.
+  alias vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24, which dropped it. aiter 0.1.23 imports
+  **flydsl** (pinned 0.3.4.1 in aiter's requirements.txt) at `import aiter`; aiter is installed `--no-deps`, so the first
+  build failed at engine start with `No module named 'aiter.ops.triton.unified_attention'` (the compat finder swallows the
+  real ImportError). flydsl 0.3.4.1 is now installed explicitly and the release-stage check asserts it.
 - **transformers 5.18.0 -> 5.17.0**: vLLM 0.31 declares `transformers >= 5.10.4, < 5.18.0`; 5.17.0 is the newest it allows
   (Renovate capped below 5.18.0). `constraints.txt`: `openai-harmony` -> `oss-harmony` (vLLM 0.31's rename), nothing else moved.
 - **libr4d 5dc6302 -> a3e4833** (Renovate #104): the new commit only touches libr4d's README (7 added lines), so the kernels and the `r4d_extras_rx10` patch chain are byte-identical to 1.0.0. The upstream-sync PR #103 (stilldeadcode README, no image file) is not taken. ROCm base and base-image digests are unchanged.
