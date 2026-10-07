@@ -9,6 +9,11 @@
 #   red   -> comments the report on the PR and labels it `gate-failed`; no merge, no automatic retry for the
 #            same head sha (a new sha -- Renovate rebase, Hermes push -- is a new candidate next night);
 #   no green stack PR -> nothing touches the GPU.
+# Second candidate, only when no stack PR is eligible: an UNRELEASED main (VERSION merged by hand, no tag
+# v<VERSION> yet; ci/night_pick.py). Gated the same way against the current release; green -> the Measured
+# numbers and the new baseline go in through a PR from night/measured-v<VERSION> (merged once `ci` is
+# green, it may touch only CHANGELOG.md and the baselines), then release.yml tags that merge commit. Red ->
+# a commit comment on main's head with the report; the same head is not retried.
 #
 # Time window. The GPU may be taken ONLY between 04:00 and 06:00 Europe/Berlin: it stops Radiance (the
 # production LLM, LXC 2413) and must give it back before 06:00. Two crons (02:00 and 03:00 UTC) cover
@@ -29,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "only consider this PR number (empty = oldest eligible)"
+        description: "only consider this PR number, or `main` for the unreleased main (empty = oldest eligible PR, then main)"
         type: string
         default: ""
       dry_run:
@@ -70,6 +75,7 @@ jobs:
       issues: read
     outputs:
       go: ${{ steps.pick.outputs.go }}
+      kind: ${{ steps.pick.outputs.kind }}
       pr: ${{ steps.pick.outputs.pr }}
       sha: ${{ steps.pick.outputs.sha }}
       ref: ${{ steps.pick.outputs.ref }}
@@ -105,12 +111,13 @@ jobs:
           fi
           PICK=$(python3 ci/night_pick.py --repo "$REPO" ${PR_INPUT:+--pr "$PR_INPUT"})
           if [ "$PICK" = "{}" ]; then
-            echo "no green stack PR: the GPU stays untouched"
+            echo "no green stack PR and no unreleased main: the GPU stays untouched"
             echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "picked: $PICK"
           {
             echo "go=true"
+            echo "kind=$(echo "$PICK" | jq -r '.kind // "pr"')"
             echo "pr=$(echo "$PICK" | jq -r .number)"
             echo "sha=$(echo "$PICK" | jq -r .sha)"
             echo "ref=$(echo "$PICK" | jq -r .ref)"
@@ -119,7 +126,7 @@ jobs:
       - name: dry run stops here
         if: steps.pick.outputs.go == 'true' && github.event_name == 'workflow_dispatch' && inputs.dry_run
         run: |
-          echo "dry_run: would gate PR #${{ steps.pick.outputs.pr }} @ ${{ steps.pick.outputs.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "dry_run: would gate ${{ steps.pick.outputs.kind }} #${{ steps.pick.outputs.pr }} @ ${{ steps.pick.outputs.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "STOP=1" >> "$GITHUB_ENV"
 
       - name: image, mode and time budget
@@ -127,6 +134,7 @@ jobs:
         if: steps.pick.outputs.go == 'true' && env.STOP != '1'
         env:
           SHA: ${{ steps.pick.outputs.sha }}
+          KIND: ${{ steps.pick.outputs.kind }}
           RUN_NOW: ${{ github.event_name == 'workflow_dispatch' && inputs.run_now || false }}
           MODE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'auto' }}
         run: |
@@ -134,6 +142,10 @@ jobs:
           git checkout --quiet "$SHA"
           VER=$(tr -d '[:space:]' < VERSION)
           OLD=$(git show origin/main:VERSION | tr -d '[:space:]')
+          if [ "$KIND" = "main" ]; then
+            # unreleased main: VERSION is main's own, the comparison is against the current release (newest tag)
+            OLD=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$SHA" | sed 's/^v//')
+          fi
           eval "$(python3 ci/read_pins.py --shell)"
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           NOW=$(date +%s)
@@ -160,15 +172,27 @@ jobs:
           # stack (which would then record itself as the baseline). So: baseline incomplete for this mode ->
           # this night measures the CURRENT RELEASE (main's VERSION image) with --record-baseline, commits the
           # baseline to the PR branch and merges nothing. The next night gates the PR against it.
-          CALIBRATE=$(MODE="$MODE" python3 - <<'PY'
+          baseline_incomplete() { MODE="$1" python3 - <<'PY'
           import json, os
           b = json.load(open("ci/accept/baselines/vllm7-mxfp4.json"))
           m = b.get("modes", {}).get(os.environ["MODE"], {})
           ok = bool(m.get("aggregate_tps")) and b.get("mean_tokens_per_step") is not None and b.get("kv_tokens")
           print("false" if ok else "true")
           PY
-          )
+          }
+          CALIBRATE=$(baseline_incomplete "$MODE")
+          # a late cron start can push a minor move from full down to fast; when only the full baseline exists,
+          # run full anyway while it still fits (the gate's --deadline bounds it) instead of calibrating
+          if [ "$CALIBRATE" = "true" ] && [ "$MODE" = "fast" ] && [ "$MODE_INPUT" = "auto" ] && [ "$LEFT_MIN" -ge 60 ] \
+             && [ "$(baseline_incomplete full)" = "false" ]; then
+            MODE=full; CALIBRATE=false
+            echo "fast baseline incomplete, full complete and ${LEFT_MIN} min left: mode full" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           IMG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          if [ "$CALIBRATE" = "true" ] && [ "$KIND" = "main" ]; then
+            echo "baseline incomplete for mode $MODE: an unreleased main is not gated against it (gate it with accept.yml)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [ "$CALIBRATE" = "true" ]; then
             OLD_ROCM=$(git show origin/main:Dockerfile | sed -nE 's/^ARG ROCM_BASE=[^:]+:([0-9]+\.[0-9]+)\..*/\1/p' | head -1)
             IMG="vllm-sly-radiance:${OLD}-rocm${OLD_ROCM}"
@@ -182,7 +206,8 @@ jobs:
             echo "acquire_wait=$WAIT"
             echo "deadline=$DEADLINE"
           } >> "$GITHUB_OUTPUT"
-          echo "gate PR #${{ steps.pick.outputs.pr }} @ ${SHA:0:12}: v$VER (main has $OLD), mode $MODE, ${LEFT_MIN} min budget" | tee -a "$GITHUB_STEP_SUMMARY"
+          WHAT="PR #${{ steps.pick.outputs.pr }}"; [ "$KIND" = "main" ] && WHAT="unreleased main"
+          echo "gate $WHAT @ ${SHA:0:12}: v$VER (current release $OLD), mode $MODE, ${LEFT_MIN} min budget" | tee -a "$GITHUB_STEP_SUMMARY"
 
   gate:
     needs: plan
@@ -282,7 +307,7 @@ jobs:
   green:
     # merge + release; only for a pass with production healthy
     needs: [plan, gate]
-    if: always() && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
+    if: always() && needs.plan.outputs.kind != 'main' && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -365,6 +390,86 @@ jobs:
           gh pr comment "${{ needs.plan.outputs.pr }}" --repo "${{ github.repository }}" \
             --body "night gate was green, but merging / releasing failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} -- a human has to finish it (docs/MAINTENANCE.md)." || true
 
+  green-main:
+    # unreleased main passed: Measured numbers + baseline through a PR (CHANGELOG.md and baselines only), then release
+    needs: [plan, gate]
+    if: always() && needs.plan.outputs.kind == 'main' && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app_token
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: night-gate
+          path: night
+
+      - name: Measured line + baseline via PR, release
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          GATED_SHA: ${{ needs.plan.outputs.sha }}
+          VERSION_: ${{ needs.plan.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "accept-night[bot]"
+          git config user.email "accept-night@users.noreply.github.com"
+          REL_SHA=$GATED_SHA
+          python3 ci/fill_measured.py --version "$VERSION_" --report night/out/accept-night/report.json --run-url "$RUN_URL"
+          cp night/ci/accept/baselines/*.json ci/accept/baselines/
+          if [ -n "$(git status --porcelain)" ]; then
+            BR="night/measured-v${VERSION_}"
+            git checkout -q -b "$BR"
+            git add CHANGELOG.md ci/accept/baselines
+            git commit -q -m "night gate green: Measured numbers and baseline for ${VERSION_}" -m "$RUN_URL"
+            git push -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BR}"
+            NEW=$(git rev-parse HEAD)
+            URL=$(gh pr create --repo "$REPO" --base main --head "$BR" \
+              --title "v${VERSION_}: Measured numbers and baseline (night gate green)" \
+              --body "The night gate was green for main @ ${GATED_SHA:0:12} (v${VERSION_}). This PR only fills the CHANGELOG Measured line and records the new baseline; the release is cut on its merge commit. $RUN_URL")
+            PRN=${URL##*/}
+            R=none
+            for _ in $(seq 1 90); do
+              R=$(gh api "repos/${REPO}/commits/${NEW}/check-runs?per_page=100" --jq '[.check_runs[] | select(.name=="ci")] | last | .conclusion // .status // "none"')
+              echo "ci on ${NEW:0:12}: $R"
+              [ "$R" = "success" ] && break
+              case "$R" in failure|cancelled|timed_out) break;; esac
+              sleep 30
+            done
+            if [ "$R" = "success" ] && gh pr merge "$PRN" --repo "$REPO" --merge --match-head-commit "$NEW" \
+                 --subject "Merge #${PRN}: v${VERSION_} Measured numbers (night gate green)" --body "$RUN_URL" --delete-branch; then
+              MERGE_SHA=$(gh pr view "$PRN" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)
+              git fetch -q origin main
+              # release the merge commit only if it adds nothing but the Measured/baseline commit to what was gated
+              EXTRA=$(git diff --name-only "$GATED_SHA" "$MERGE_SHA" | grep -vE '^(CHANGELOG\.md|ci/accept/baselines/)' || true)
+              if [ -z "$EXTRA" ]; then REL_SHA=$MERGE_SHA
+              else echo "::warning::main moved on with other files ($EXTRA): releasing the gated commit ${GATED_SHA:0:12} itself"; fi
+            else
+              echo "::warning::Measured PR #${PRN} not merged (ci: $R): releasing the gated commit; merge #${PRN} by hand"
+            fi
+          fi
+          GH_TOKEN="$DISPATCH_TOKEN" gh workflow run release.yml --repo "$REPO" --ref main \
+            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$REL_SHA"
+          {
+            echo "### Released v${VERSION_} via the night gate (unreleased main)"
+            echo "- gated: \`${GATED_SHA}\`, tagged: \`${REL_SHA}\`"
+            echo "- release.yml dispatched: tag v${VERSION_}, build publishes to ghcr.io"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   calibrated:
     # baseline calibration night: commit the recorded baseline (current release) to the PR branch, merge nothing
     needs: [plan, gate]
@@ -410,7 +515,7 @@ jobs:
     if: always() && needs.plan.outputs.calibrate != 'true' && (needs.gate.outputs.verdict == 'fail' || needs.gate.outputs.verdict == 'infra' || needs.gate.result == 'failure' || needs.gate.result == 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       issues: write
     steps:
@@ -425,6 +530,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.plan.outputs.pr }}
+          KIND: ${{ needs.plan.outputs.kind }}
           SHA: ${{ needs.plan.outputs.sha }}
           VERDICT: ${{ needs.gate.outputs.verdict }}
           PROD_OK: ${{ needs.gate.outputs.prod_ok }}
@@ -445,6 +551,11 @@ jobs:
           {
             echo "$MARKER"; echo "$HEAD"; echo; echo "Run: $RUN_URL"; echo; cat "$REPORT"
           } > body.md
+          if [ "$KIND" = "main" ]; then
+            # no PR: the report goes on main's head commit, where ci/night_pick.py looks for the marker
+            gh api "repos/${REPO}/commits/${SHA}/comments" -F body=@body.md >/dev/null
+            exit 0
+          fi
           gh pr comment "$PR" --repo "$REPO" --body-file body.md
           if [ -n "$MARKER" ]; then
             gh label create gate-failed --repo "$REPO" --color B60205 --description "night GPU gate was red" 2>/dev/null || true

@@ -43,7 +43,13 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
      The release body ends with `cc @slydlake` (repository variable `RELEASE_NOTIFY`, `-` turns it off), so the
      GitHub app notifies the owner of every new release.
    - red: PR comment with the report, label `gate-failed`, no merge, no retry for the same sha.
-   - no green PR: the GPU is not touched.
+   - no green PR: the second candidate is an **unreleased main** (main's VERSION has no tag yet, e.g. a stack
+     PR merged by hand): `ci` green on main's head, the last main image build green for that VERSION, not
+     already red for that head. It is gated the same way; green -> Measured + baseline go in through a PR
+     `night/measured-v<VERSION>` (CHANGELOG.md and baselines only, merged when `ci` is green), release.yml tags
+     that merge commit (or the gated commit if main moved on with other files). Red -> report as a commit
+     comment on main's head, not retried for that head. `workflow_dispatch` with `pr=main` picks only it.
+   - neither: the GPU is not touched.
    The manual path (`accept.yml`, approval-gated) keeps working; on `workflow_run` it skips a version that is
    already tagged or was gated by the night run.
 4. **Baseline**: the gate compares against the current release. The profile/baseline describe the production
