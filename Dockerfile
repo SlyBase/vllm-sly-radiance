@@ -68,7 +68,7 @@ ARG TORCHVISION_VERSION=0.27.0
 # path -> EngineCore dies in qwen3_5.py make_layers with ModuleNotFoundError. That was the 0.4.6 and
 # 0.6.0 gate crash. Lift the hold together with a vLLM that imports the new path (or a patch).
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.22.post1
+ARG AITER_VERSION=0.1.23
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG VLLM_VERSION=0.30.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
