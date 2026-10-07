@@ -52,21 +52,31 @@ def _dflash_kv_weight_rows(qkv_proj, q_size: int) -> torch.Tensor:
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):'''
 
-SLICE_OLD = """        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)"""
+SLICE_OLD = """        if all(
+            isinstance(proj.quant_method, UnquantizedLinearMethod)
+            for proj in self._context_qkv_projs
+        ):"""
 SLICE_NEW = """        self._kv_source_attn = layers_attn
-        if layers_attn[0].qkv_proj.weight.dtype in _DFLASH_FP8:
+        self._kv_lazy = layers_attn[0].qkv_proj.weight.dtype in _DFLASH_FP8
+        if self._kv_lazy:
             # Deferred: a quantized qkv_proj cannot be read until its quant method has processed
-            # the weights, which happens after load_weights returns.
+            # the weights, which happens after load_weights returns (_project_context_kv builds
+            # the fused buffer on first use). Upstream's own answer for a quantized drafter is one
+            # quant-method GEMM per layer; this keeps the single fused GEMM.
             self._fused_kv_weight = None
-        else:
-            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight = torch.cat(kv_weights, dim=0)"""
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
+        elif all(
+            isinstance(proj.quant_method, UnquantizedLinearMethod)
+            for proj in self._context_qkv_projs
+        ):"""
 
-LAZY_OLD = """        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )"""
-LAZY_NEW = """        if self._fused_kv_weight is None:
+LAZY_OLD = """        if self._fused_kv_weight is not None:
+            all_kv_flat = F.linear("""
+LAZY_NEW = """        if self._fused_kv_weight is None and self._kv_lazy:
             self._fused_kv_weight = torch.cat(
                 [
                     _dflash_kv_weight_rows(a.qkv_proj, a.q_size)
@@ -74,15 +84,14 @@ LAZY_NEW = """        if self._fused_kv_weight is None:
                 ],
                 dim=0,
             )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )"""
+        if self._fused_kv_weight is not None:
+            all_kv_flat = F.linear("""
 
 
 def main() -> None:
     apply(F, HELPER_OLD, HELPER_NEW, "_dflash_kv_weight_rows", "dflash: quantized fused KV helper")
-    apply(F, SLICE_OLD, SLICE_NEW, "self._kv_source_attn", "dflash: defer fused KV build")
-    apply(F, LAZY_OLD, LAZY_NEW, "if self._fused_kv_weight is None",
+    apply(F, SLICE_OLD, SLICE_NEW, "self._kv_lazy = ", "dflash: defer fused KV build")
+    apply(F, LAZY_OLD, LAZY_NEW, "self._fused_kv_weight is None and self._kv_lazy",
           "dflash: materialize fused KV on first use")
 
 

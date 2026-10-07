@@ -6,7 +6,7 @@ with hand-written MXFP4 kernels, DFlash2 speculative decoding and the full 262k 
 concurrent requests, 437k-token KV pool** (1.0.0 reference run at 300 W, see [Performance](#performance)), with every number measured and reproducible.
 
 ```bash
-docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
+docker pull ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1
 ```
 
 ## Tech stack
@@ -15,9 +15,9 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
 |---|---|
 | GPU | AMD Radeon AI PRO R9700, 32 GB, gfx1201 (RDNA4) — one card; TP 2/3/4/8 paths included but untested here |
 | ROCm | 10.1 (`rocm/dev-ubuntu-24.04:10.1.0-full`, HIP 7.16, pruned to gfx1201) |
-| PyTorch / Triton / torchvision | 2.12.0 (AMD's `+rocm10.1.0` wheel) / 3.6.0 / 0.27.0 (compiled against it) |
-| vLLM | 0.30.0 (V1 engine, V2 model runner), built from source |
-| AITER / transformers | 0.1.22.post1 / 5.18.0 |
+| PyTorch / Triton / torchvision | 2.13.0 / 3.8.0 (`git669b31ac`) / 0.28.0, all AMD's `+rocm10.1.0` wheels (the trio vLLM 0.31's ROCm base builds) |
+| vLLM | 0.31.0 (V1 engine, V2 model runner), built from source |
+| AITER / transformers | 0.1.23 / 5.17.0 |
 | Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (prefill attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
 | Model | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, gated-delta-net hybrid) |
 | Drafter | [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16), DFlash2 k = 7 + prompt lookup |
@@ -90,7 +90,7 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
   -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
-  ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1 \
+  ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1 \
   --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 --quantization quark \
   --max-model-len 262144 --gpu-memory-utilization 0.98 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
@@ -149,6 +149,7 @@ production arguments; the numbers are the gain it measured when it went in
 | `RADIANCE_MXFP4_WIDE_MAX_M=192` (1.0) | M 129…192 ran on a 256-row tile with up to 49 % padding; now the split-K decode kernel | TTFT of a 160-token prompt **−13.8 %** |
 | `RADIANCE_ADAPTIVE_WIDTH=perseq` (1.0, ported from the Radiance engine) | acceptance differs 2× between requests; per-request verify width on varlen FULL graphs ([why ggz14's version lost](docs/TECHNICAL.md#100-what-the-release-adds-and-the-measurements-behind-it)) | 8 concurrent requests **+4.7 %** |
 | ROCm 10.1 + torch 2.12 (1.0) | current AMD toolchain; the CPU-spin bug that held torch back is fixed | neutral (±1–2 %) |
+| vLLM 0.31.0 + torch 2.13 / triton 3.8.0 / torchvision 0.28.0 / aiter 0.1.23 (1.1) | the combination vLLM's own ROCm base builds, as AMD wheels | *pending GPU run* |
 | Constraints for every PyPI pin, 4.8 GB image with a stable/volatile layer split | reproducible builds, ~35 MB update pulls | – |
 
 What was tried and rejected, with reasons: [docs/NOT-ADOPTED.md](docs/NOT-ADOPTED.md).

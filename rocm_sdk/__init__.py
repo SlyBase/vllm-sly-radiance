@@ -7,6 +7,7 @@ from there instead: one ROCm, one HIP runtime in the process, and aiter/vLLM/rad
 by that tree's hipcc see the same libraries torch does. The source-built torch never imports this.
 """
 import ctypes
+import fnmatch
 import glob
 import os
 import warnings
@@ -24,7 +25,8 @@ def _rocm_version():
 
 def initialize_process(preload_shortnames=(), check_version=None, **_):
     have = _rocm_version()
-    if check_version and have and not have.startswith(check_version):
+    # torch 2.13 passes a glob ('10.1.*'); 2.11 passed a plain prefix
+    if check_version and have and not (fnmatch.fnmatch(have, check_version) or have.startswith(check_version)):
         warnings.warn(f"torch wheel built for ROCm {check_version}, {_ROCM} is {have}", stacklevel=2)
     # /opt/rocm/lib is deliberately not in ld.so.conf (it carries its own copies of system
     # libraries), so torch's NEEDED entries resolve only against what is already loaded: dlopen

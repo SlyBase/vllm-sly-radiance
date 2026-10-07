@@ -39,24 +39,24 @@ vLLM's ROCm builds target datacenter cards (MI300 / CDNA). RDNA4 workstation car
 
 ## Stack
 
-Everything below is compiled from source for `gfx1201` in the image build (0.5.0 onward); nothing is
-pulled from a prebuilt wheel index.
+vLLM and AITER are compiled from source for `gfx1201` in the image build; PyTorch, Triton and torchvision
+are AMD's prebuilt ROCm wheels (1.1.0: the `+rocm10.1.0` builds from `stable.repo.amd.com/rocm/whl-next`).
 
 | Component | Version |
 |---|---|
-| vLLM | 0.27.1 |
-| PyTorch | 2.11.0 |
-| Triton | 3.6.0 |
-| torchvision | 0.24.1 |
-| AITER | 0.1.17 |
-| transformers | 5.14.1 (pinned) |
+| vLLM | 0.31.0 |
+| PyTorch | 2.13.0 |
+| Triton | 3.8.0 (`git669b31ac`) |
+| torchvision | 0.28.0 |
+| AITER | 0.1.23 |
+| transformers | 5.17.0 (pinned; vLLM 0.31 requires < 5.18) |
 | ROCm userspace | 10.1, bundled |
 | Base | `rocm/dev-ubuntu-24.04:10.1.0-full` (Ubuntu 24.04, Python 3.12) |
 
 The PyTorch / Triton / torchvision versions are the ones upstream builds vLLM against **on ROCm**, not a
 newer combination chosen for this image. Read the ROCm numbers, not `pyproject.toml`: 0.27.1's build-system
 asks for `torch == 2.13.0`, which is the CUDA build, while upstream's own ROCm image builds torch
-release/2.11 with torchvision 0.24.1 and pins no torch in `requirements/rocm.txt`. That distinction is
+release/2.11 with torchvision 0.24.1 and pins no torch in `requirements/rocm.txt` (as of 0.27.1; 0.31.0's ROCm base builds release/2.13, torchvision 0.28.0, Triton 669b31a, which is what 1.1.0 ships). That distinction is
 deliberate: see the tensor-parallel hang note below.
 
 transformers is pinned because vLLM does not pin it -- `requirements/common.txt` asks only for

@@ -44,7 +44,7 @@ import ast
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 V1 = SP / "vllm/v1"
@@ -263,12 +263,21 @@ def main():
     append_tail(SCHED, SCHED_TAIL, "def _radiance_aw_obj", "scheduler.py chooser")
 
     # async scheduling: placeholders are assigned in _update_after_schedule
-    apply(
-        V1 / "core/sched/async_scheduler.py",
-        "                request.next_decode_eligible_step = self.current_step + self.pp_size\n",
-        "                request.next_decode_eligible_step = self.current_step + self.pp_size\n"
+    # 0.31 replaced `self.pp_size` by `self.decode_stagger` (XPU PP microbatching); the hook is the
+    # line after the assignment in both shapes.
+    _HOOK = (
         "        # RADIANCE (patch_adaptive_width.py): batch-level verify width for the next step.\n"
-        "        self._radiance_aw_after_schedule(scheduler_output)\n",
+        "        self._radiance_aw_after_schedule(scheduler_output)\n"
+    )
+    _A030 = "                request.next_decode_eligible_step = self.current_step + self.pp_size\n"
+    _A031 = (
+        "                request.next_decode_eligible_step = (\n"
+        "                    self.current_step + self.decode_stagger\n"
+        "                )\n"
+    )
+    apply_any(
+        V1 / "core/sched/async_scheduler.py",
+        [(_A030, _A030 + _HOOK), (_A031, _A031 + _HOOK)],
         "_radiance_aw_after_schedule(scheduler_output)",
         "async_scheduler.py hook",
     )

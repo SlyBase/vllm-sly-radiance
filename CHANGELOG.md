@@ -10,6 +10,40 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.1.0] - 2026-10-07
+
+The newest stack that still runs on ROCm 10.1: vLLM 0.31.0 on the torch / triton / torchvision / aiter combination vLLM's own
+ROCm base builds, all of it AMD's prebuilt rocm10.1 wheels. No new knob.
+
+### Changed
+- **vLLM 0.30.0 -> 0.31.0** (released 2026-10-05). Every `sly/` patch was re-anchored against v0.31.0 (details in
+  docs/TECHNICAL.md, section 1.1.0): the DFlash context-KV hooks (`patch_dflash_fused_kv_fp8`, `patch_dflash_w4_packed`,
+  `patch_w4a16_fuse`), `patch_gdn_metadata`, `patch_w4a16_tiles`, `patch_fused_norm_quant`, `patch_adaptive_width`,
+  `radiance_lookup_draft` (DFlash2's `top_k` / `candidate_sampler`), `radiance_r4d_attn`. Behaviour is unchanged.
+- **torch 2.12.0 -> 2.13.0+rocm10.1.0**, **triton 3.6.0 (PyPI) -> 3.8.0+git669b31ac.rocm10.1.0**, **torchvision 0.27.0
+  (compiled) -> 0.28.0+rocm10.1.0 (AMD wheel, `amd-torchvision-device-gfx1201`)**: the exact pairing vLLM 0.31's
+  `docker/Dockerfile.rocm_base` builds (release/2.13, Triton 669b31a, vision v0.28.0), from AMD's whl-next index. Triton is
+  hash-pinned (`TRITON_BUILD`, `TRITON_SHA256`); torchvision is no longer compiled in the default build (still is for a
+  source-built torch). torch 2.14 is on the index but is not what vLLM pins. The 0.5.0 - 0.5.4 GPU hang was torch 2.13 with
+  triton 3.7.1 outside upstream's pairing; this release is upstream's pairing.
+- **aiter 0.1.22.post1 -> 0.1.23** (vLLM 0.31's `AITER_BRANCH`). 0.1.23 still has the `aiter.ops.triton.unified_attention`
+  alias vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24, which dropped it.
+- **transformers 5.18.0 -> 5.17.0**: vLLM 0.31 declares `transformers >= 5.10.4, < 5.18.0`; 5.17.0 is the newest it allows
+  (Renovate capped below 5.18.0). `constraints.txt`: `openai-harmony` -> `oss-harmony` (vLLM 0.31's rename), nothing else moved.
+- ROCm base, libr4d and the base-image digests are unchanged (libr4d: Renovate #104 and the upstream-sync #103 are not taken, they need a GPU A/B).
+
+### Removed
+- Four patches left the apply loop because vLLM 0.31.0 contains them: `sly/patch_short_prefill` (GDN 1-token prefill),
+  `sly/patch_gdn_nonspec_mask`, `sly/patch_mamba_align_retire` (vllm#55450, already native in 0.30.0) and
+  `sly/patch_rocm_load_max_split` (0.31 gates the load-time allocator scope on `is_cuda_alike()` and also applies it to
+  `profile_run`). The files stay in the tree for the 0.30.x lineage (`ci/unused_patches.txt`).
+
+### Measured
+- pending: decode step gap, prefill 8k / 32k / 64k, c8 arrivals, TTFT 160 tokens, KV pool (reference 436,906), GSM8K 200,
+  startup time (fresh and second start), A/B/A against 1.0.0 in one 300 W window.
+- pending: DFlash acceptance with the context-KV precompute inside the FULL graph (0.31), `lookup draft: installed` marker,
+  `perseq` adaptive width on 0.31's varlen graphs.
+
 ## [1.0.0] - 2026-10-08
 
 Longer prefills are faster, the KV pool is 11.5 % larger, concurrent decode is ~5 % faster, and the image moves to

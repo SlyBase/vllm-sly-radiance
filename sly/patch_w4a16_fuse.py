@@ -158,8 +158,11 @@ apply(F,
       IMPORT + "\n_DFLASH_FP8 = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)\n",
       "rdna_hybrid_w4a16 as _radiance_w4a16",
       "qwen3_dflash: W4A16 fusion import")
+# vLLM 0.31 split the projection into `if self._fused_kv_weight is not None: F.linear ... else:
+# per-layer quant-method path`; patch_dflash_fused_kv_fp8 puts the deferred build in front of it.
+# The int4 rows take precedence over both, everything else falls through unchanged.
 apply(F,
-      "        if self._fused_kv_weight is None:\n"
+      "        if self._fused_kv_weight is None and self._kv_lazy:\n"
       "            self._fused_kv_weight = torch.cat(\n"
       "                [\n"
       "                    _dflash_kv_weight_rows(a.qkv_proj, a.q_size)\n"
@@ -167,9 +170,11 @@ apply(F,
       "                ],\n"
       "                dim=0,\n"
       "            )\n"
-      "        all_kv_flat = F.linear(\n"
-      "            normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
-      "        )\n",
+      "        if self._fused_kv_weight is not None:\n"
+      "            all_kv_flat = F.linear(\n"
+      "                normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
+      "            )\n"
+      "            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)\n",
       "        all_kv_flat = None\n"
       "        if _radiance_w4a16 is not None:\n"
       "            # radiance (sly/patch_w4a16_fuse.py): the drafter's own int4 K/V rows, no bf16 copy\n"
@@ -177,7 +182,7 @@ apply(F,
       "                self, normed_context_states\n"
       "            )\n"
       "        if all_kv_flat is None:\n"
-      "            if self._fused_kv_weight is None:\n"
+      "            if self._fused_kv_weight is None and self._kv_lazy:\n"
       "                self._fused_kv_weight = torch.cat(\n"
       "                    [\n"
       "                        _dflash_kv_weight_rows(a.qkv_proj, a.q_size)\n"
@@ -185,9 +190,12 @@ apply(F,
       "                    ],\n"
       "                    dim=0,\n"
       "                )\n"
-      "            all_kv_flat = F.linear(\n"
-      "                normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
-      "            )\n",
+      "            if self._fused_kv_weight is not None:\n"
+      "                all_kv_flat = F.linear(\n"
+      "                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
+      "                )\n"
+      "        if all_kv_flat is not None:\n"
+      "            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)\n",
       "all_kv_flat = _radiance_w4a16.radiance_dflash_kv_project(",
       "qwen3_dflash: int4 context-KV projection")
 

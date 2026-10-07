@@ -31,3 +31,8 @@ patch_verify_head.py      verify-head gate for radiance_verifyhead.py (not copie
 # --- carried from upstream/ggz14 (integrated 2026-09-19, VERSION 0.2.6): in the tree, NOT in our loop.
 patch_ar_qbits.py         all-reduce wire width (RADIANCE_AR_QBITS 5/4) needs libr4d rx8's wht5/wht4 kernels, which the rx10 extras on this pin do not carry
 patch_gdn_lazy.py         lazy GDN state snapshots (RADIANCE_GDN_LAZY, libr4d rx10); ggz14 itself defaults it off (corrupts multi-turn chat)
+# --- dropped at the vLLM 0.31.0 bump (1.1.0): native upstream, files kept for the 0.30.x lineage.
+sly/patch_short_prefill.py     GDN 1-token prefill: 0.31's GDNAttentionMetadataBuilder.build classifies first chunks via is_prefilling / seq_len and passes treat_short_extends_as_decodes=False itself
+sly/patch_gdn_nonspec_mask.py  0.31 keeps non_spec_sequence_masks_cpu defined at the top of the mixed branch, and patch_gdn_metadata's 0.31 shape preserves that line, so the numpy path no longer leaves it unbound
+sly/patch_mamba_align_retire.py     vllm#55450 (align-mode Mamba retirement crosses null gaps) is in 0.31.0's single_type_kv_cache_manager.py verbatim (_num_retired_blocks, _remove_blocks_in_range)
+sly/patch_rocm_load_max_split.py    0.31.0's Worker._scoped_allocator_max_split gates on is_cuda_alike() (ROCm included) and also wraps profile_run

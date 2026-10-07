@@ -44,7 +44,7 @@ covers the expansion, the apply_weights short-circuit and the guards on the CPU 
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 F = Path(sysconfig.get_paths()["purelib"]) / "vllm/model_executor/kernels/linear/mixed_precision/rdna_hybrid_w4a16.py"
 
@@ -928,18 +928,18 @@ apply(F,
       'rdna_hybrid_w4a16: dispatch consults the split-K table')
 
 # --- 5. the stock kernel reads LAYOUT 1 (tiled) weights too: prefill and tile-table calls ---
-apply(F,
-      '    BLOCK_K: tl.constexpr,\n'
-      '):\n'
-      '    """\n'
-      '    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
-      '    BLOCK_K: tl.constexpr,\n'
-      '    LAYOUT: tl.constexpr = 0,  # radiance: 1 = radiance_w4a16_tile blocks [N/16, K/128, 16, 16]\n'
-      '):\n'
-      '    """\n'
-      '    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
-      'LAYOUT: tl.constexpr = 0,  # radiance',
-      'rdna_hybrid_w4a16: stock kernel LAYOUT parameter')
+# (0.31 folded the docstring's opening line into the quotes: `"""Fused W4A16 GEMM ...`)
+_LAYOUT_NEW = ('    BLOCK_K: tl.constexpr,\n'
+               '    LAYOUT: tl.constexpr = 0,  # radiance: 1 = radiance_w4a16_tile blocks [N/16, K/128, 16, 16]\n'
+               '):\n')
+apply_any(F,
+          [('    BLOCK_K: tl.constexpr,\n):\n    """\n    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
+            _LAYOUT_NEW + '    """\n    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n'),
+           ('    BLOCK_K: tl.constexpr,\n):\n    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
+            _LAYOUT_NEW + '    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n')],
+          'LAYOUT: tl.constexpr = 0,  # radiance',
+          'rdna_hybrid_w4a16: stock kernel LAYOUT parameter')
+
 apply(F,
       '        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
       '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',

@@ -3,7 +3,7 @@
 #   1. buildbase  build toolchain + venv shared by 1a and 1b
 #   1a. torch     AMD's prebuilt torch wheel for this ROCm release (torch-amd-wheel, default), or
 #                 torch compiled from source (torch-build / torch-wheel) -- see TORCH_FROM below
-#   1b. builder   triton from PyPI, torchvision/aiter/vLLM compiled from source, into /wheels
+#   1b. builder   AMD's triton wheel, torchvision (AMD's wheel, or compiled), aiter/vLLM compiled, into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
 #   3. stack      install the wheels, trim and snapshot the stack
 #   3a. kernels   compile radiance's own HIP extensions (R4D, MXFP4, GDN, quant plugins)
@@ -11,14 +11,15 @@
 #   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
 # Prebuilt from upstream: torch (AMD's TheRock wheel for ROCm 10.1, loaded against this image's
-# /opt/rocm -- see the torch-amd stage), triton (the PyPI wheel of the same tag, hash-pinned -- it
-# bundles its own LLVM and HIP headers and loads libamdhip64 at runtime, so a source build produced
-# the same thing in 25 min) and transformers. No checked-in binaries. The release image carries neither the
+# /opt/rocm -- see the torch-amd stage), triton (AMD's wheel of the commit vLLM builds against, from
+# the same index, hash-pinned -- it bundles its own LLVM and HIP headers and loads libamdhip64 at
+# runtime, so a source build produced the same thing in 25 min), torchvision (AMD's wheel) and
+# transformers. No checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.12.0 (AMD wheel, +rocm10.1.0), triton 3.6.0 (PyPI), torchvision 0.27.0, aiter
-# v0.1.22.post1, vLLM v0.30.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
-# ROCM_BASE below is what the homelab's production image is built from; 10.0 needs --build-arg ROCM_BASE and TORCH_AMD_ROCM / TORCH_VERSION=2.11.0 / TORCHVISION_VERSION=0.24.1).
+# stack: torch 2.13.0 (AMD wheel, +rocm10.1.0), triton 3.8.0 (AMD wheel, git669b31ac), torchvision 0.28.0
+# (AMD wheel), aiter v0.1.23, vLLM v0.31.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
+# ROCM_BASE below is what the homelab's production image is built from; 10.0 needs --build-arg ROCM_BASE and TORCH_AMD_ROCM / TORCH_VERSION=2.11.0 / TORCHVISION_VERSION=0.24.1 / TRITON_BUILD=git4cff872c.rocm10.0.0 and a torch that AMD ships for 10.0).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
 ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
 ARG GFX_ARCH=gfx1201
@@ -46,37 +47,47 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe348
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
 # renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-# ROCm 10.1 moved torch to 2.12: AMD's whl-next has no 2.11 wheel for rocm10.1 (2.12 / 2.13 / 2.14 only).
-# 2.12 is the oldest and pairs with torchvision 0.27.0. triton stays on the PyPI 3.6.0 of 0.7.0 on
-# purpose (upstream pairs 2.12 with 3.7.x, AMD's 10.1 wheel with its own 3.8.0): one moving part less
-# in the A/B; 3.7.0 is the next step. The 2.11
+# 1.1.0: the newest stack vLLM 0.31.0 itself builds its ROCm base image with (docker/Dockerfile.rocm_base:
+# PYTORCH_BRANCH release/2.13, TRITON_BRANCH 669b31a = release/internal/3.8.x, PYTORCH_VISION_BRANCH
+# v0.28.0, AITER_BRANCH v0.1.23), taken as AMD's prebuilt wheels for ROCm 10.1 from whl-next: torch
+# 2.13.0, triton 3.8.0+git669b31ac (exactly that commit), torchvision 0.28.0. AMD ships 2.12 / 2.13 /
+# 2.14 for rocm10.1; 2.14 is not what vLLM pins, so it is not used. (1.0.0 ran torch 2.12 with the PyPI
+# triton 3.6.0 and a compiled torchvision 0.27.0 -- a combination upstream never tested.) The 2.11
 # pin existed because torch >= 2.12 hit ROCm/ROCm#6406 (CPU spins at 100% after the first GPU op,
 # an AsyncEventsLoop busy-wait in libhsa-runtime64); the fix landed in TheRock on 2026-08-22 and is
 # part of ROCm 10.1 -- sly/tests/lessons/F/test.sh checks the idle CPU of the engine.
-ARG TORCH_VERSION=2.12.0
+ARG TORCH_VERSION=2.13.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TRITON_VERSION=3.6.0
-# sha256 of triton-${TRITON_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl on
-# PyPI (https://pypi.org/pypi/triton/<version>/json, digests.sha256). Bump together with
-# TRITON_VERSION: a stale hash fails the build at the download, it never installs the wrong file.
-ARG TRITON_SHA256=74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca
+ARG TRITON_VERSION=3.8.0
+# AMD's triton wheel carries a local version: triton-<TRITON_VERSION>+<TRITON_BUILD>-cp312-cp312-linux_x86_64.whl
+# on https://stable.repo.amd.com/rocm/whl-next (the same index as torch). 669b31a is the commit vLLM's
+# docker/Dockerfile.rocm_base builds (release/internal/3.8.x); the PyPI wheels do not carry it.
+ARG TRITON_BUILD=git669b31ac.rocm10.1.0
+# sha256 of that wheel. Bump together with TRITON_VERSION / TRITON_BUILD: a stale hash fails the
+# build at the download, it never installs the wrong file.
+ARG TRITON_SHA256=2f745c62aebb33167bfb6d586f569fbea67f8fc5181b03798b91a6b9187a625e
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.27.0
-# HELD at 0.1.22.post1 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
+ARG TORCHVISION_VERSION=0.28.0
+# HELD below 0.1.24 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
 # `aiter.ops.triton.unified_attention` (the kernel lives only at aiter.ops.triton.attention.
-# unified_attention now), and vLLM 0.30.0's rocm_aiter_unified_attn backend still imports the old
-# path -> EngineCore dies in qwen3_5.py make_layers with ModuleNotFoundError. That was the 0.4.6 and
-# 0.6.0 gate crash. Lift the hold together with a vLLM that imports the new path (or a patch).
+# unified_attention now), and vLLM's rocm_aiter_unified_attn backend still imports the old path
+# (0.30.0 and 0.31.0 alike) -> EngineCore dies in qwen3_5.py make_layers with ModuleNotFoundError. That
+# was the 0.4.6 and 0.6.0 gate crash. 0.1.23 is what vLLM 0.31.0's ROCm base pins and still has the alias
+# (aiter/ops/triton/__init__.py maps it to attention.unified_attention). Lift the hold together with a
+# vLLM that imports the new path (or a patch).
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.22.post1
+ARG AITER_VERSION=0.1.23
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.30.0
+ARG VLLM_VERSION=0.31.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
 # turned the global read into AmbiguousGlobalPerLayerAttributeError, which no released vLLM config
 # convertor handled at the time -- a Gemma-4 checkpoint then failed during argument parsing, before
 # a model or an attention backend exists. 5.14.1 was the last release before that change.
+# vLLM 0.31.0 caps transformers at < 5.18.0 (requirements/common.txt: >= 5.10.4, < 5.18.0), so 1.1.0
+# goes from 5.18.0 back to 5.17.0, the newest release it allows (pip would otherwise fail the
+# resolution). 5.17.0 is the version of the 0.29.0 stack and of the 0.6.x accept run.
 # BUMPED to 5.17.0 for the vLLM 0.29.0 stack. NOT independently re-verified against a live Gemma-4
 # checkpoint load (no GPU in this environment) -- static check only: the exact
 # `AmbiguousGlobalPerLayerAttributeError` class name is absent from configuration_utils.py and
@@ -86,7 +97,7 @@ ARG VLLM_VERSION=0.30.0
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
 # first time a Gemma-4 checkpoint is actually served on this image.
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.18.0
+ARG TRANSFORMERS_VERSION=5.17.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
@@ -229,10 +240,15 @@ FROM buildbase AS torch-amd
 ARG TORCH_VERSION
 ARG TORCH_AMD_ROCM
 ARG TRITON_VERSION
+ARG TORCHVISION_VERSION
 ARG GFX_ARCH
 COPY fix_amd_torch_metadata.py /tmp/
+# torchvision comes from the same index, built against exactly this torch (its wheel metadata asks for
+# a bare `torch` and `rocm-bootstrap`, which the script drops); the builder compiles torchvision only
+# when /wheels has no torchvision wheel (the TORCH_FROM source-build path).
 RUN pip download --no-deps --index-url https://stable.repo.amd.com/rocm/whl-next \
       "torch==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" "amd-torch-device-${GFX_ARCH}==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" \
+      "torchvision==${TORCHVISION_VERSION}+rocm${TORCH_AMD_ROCM}" "amd-torchvision-device-${GFX_ARCH}==${TORCHVISION_VERSION}+rocm${TORCH_AMD_ROCM}" \
       -d /dl \
     && for w in /dl/*.whl; do python /tmp/fix_amd_torch_metadata.py "${TRITON_VERSION}" "$w" /wheels; done \
     && rm -rf /dl
@@ -244,11 +260,12 @@ COPY --from=torch-amd /wheels/ /
 FROM ${TORCH_FROM} AS torch
 
 # =====================================================================================
-# STAGE 1b builder: triton from PyPI, torchvision/aiter/vLLM from source into /wheels
+# STAGE 1b builder: triton (AMD wheel), torchvision (AMD wheel or compiled), aiter/vLLM from source into /wheels
 # =====================================================================================
 FROM buildbase AS builder
 ARG GFX_ARCH
 ARG TRITON_VERSION
+ARG TRITON_BUILD
 ARG TRITON_SHA256
 ARG TORCHVISION_VERSION
 ARG AITER_VERSION
@@ -268,24 +285,29 @@ RUN pip install --no-deps /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.wh
 ARG CCACHE_MAXSIZE=20G
 ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=${CCACHE_MAXSIZE}
 
-# --- triton: the PyPI wheel of the pinned tag, hash-checked ---
-# Not compiled here any more (was 25 min): the manylinux wheel carries the AMD backend
-# (triton/backends/amd, with its own HIP headers and device bitcode) and its own LLVM, and finds
-# ROCm only at runtime by dlopen("libamdhip64.so") -- which is all a source build against this base
-# produced too. patch_gfx1201.py's driver.py anchor is byte-identical in the wheel.
-RUN echo "triton==${TRITON_VERSION} --hash=sha256:${TRITON_SHA256}" > /tmp/triton.txt \
-    && pip download --no-deps --require-hashes --only-binary=:all: -r /tmp/triton.txt -d /wheels \
+# --- triton: AMD's wheel of the pinned commit, hash-checked ---
+# Not compiled here any more (was 25 min): the wheel carries the AMD backend (triton/backends/amd,
+# with its own HIP headers and device bitcode) and its own LLVM, and finds ROCm only at runtime by
+# dlopen("libamdhip64.so") -- which is all a source build against this base produced too. It comes from
+# AMD's whl-next index (the PyPI triton has no 3.8 build of the commit vLLM pins). patch_gfx1201.py's
+# driver.py anchor is checked by ci/patch_dryrun.sh against the same commit.
+RUN echo "triton==${TRITON_VERSION}+${TRITON_BUILD} --hash=sha256:${TRITON_SHA256}" > /tmp/triton.txt \
+    && pip download --no-deps --require-hashes --only-binary=:all: --index-url https://stable.repo.amd.com/rocm/whl-next \
+         -r /tmp/triton.txt -d /wheels \
     && pip install --no-deps /wheels/triton-*.whl && rm /tmp/triton.txt
 
 # --- torchvision ---
+# Normally AMD's prebuilt wheel from the torch-amd stage is already in /wheels. Compiled only for a
+# source-built torch (TORCH_FROM=torch-wheel or the ghcr.io image):
 # FORCE_CUDA=1 is REQUIRED: torchvision's BUILD_CUDA_SOURCES gates on torch.cuda.is_available(),
 # which is false in `docker build` (no GPU) -> it picks CppExtension, where torch's build-time hipify
 # double-compiles vision.cpp + vision_hip.cpp -> "multiple definition of vision::cuda_version()".
 # FORCE_CUDA=1 forces CUDAExtension (correct hipify source replacement); hipcc needs no GPU to compile.
 RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    if ls /wheels/torchvision-*.whl >/dev/null 2>&1; then echo "torchvision: AMD wheel, no compile"; else \
     git clone --depth 1 -b v${TORCHVISION_VERSION} https://github.com/pytorch/vision.git /src/vision \
     && cd /src/vision && FORCE_CUDA=1 USE_ROCM=1 pip wheel --no-build-isolation --no-deps . -w /wheels \
-    && rm -rf /src/vision
+    && rm -rf /src/vision; fi
 
 # --- aiter (gfx1201; kernels JIT at runtime, PREBUILD_KERNELS=0) ---
 # PRETEND_VERSION: the checkout is shallow, so setuptools-scm cannot describe the tag and would fall
@@ -384,7 +406,8 @@ COPY constraints.txt /tmp/constraints.txt
 RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
  && pip install --no-cache-dir --no-deps \
       /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
-      /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
+      /wheels/triton-*.whl /wheels/torchvision-*.whl $(ls /wheels/amd_torchvision_device_*.whl 2>/dev/null) \
+      /wheels/*aiter-*.whl \
  && pip install --no-cache-dir -c /tmp/constraints.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
  && pip install --no-cache-dir -c /tmp/constraints.txt pillow pybind11 \
@@ -612,13 +635,14 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # separately relaxes aiter's CDNA-only MXFP4 gates so its own Triton gemm_afp4wfp4 path is reachable
 # on gfx1201 -- RADIANCE_MXFP4=1 for the aiter path, RADIANCE_MXFP4_W4A8=1 for the hand-written
 # kernel layered on top; see sly/README.md for why both are needed rather than either alone.
-# sly/patch_short_prefill.py fixes a gated-delta-net metadata-classification bug where a 1-token
-# prefill (the common case for a cache-hit continuation) is misclassified as a decode step.
+# DROPPED at the vLLM 0.31.0 bump, now native upstream: sly/patch_short_prefill.py (a 1-token prefill,
+# the common case for a cache-hit continuation, misclassified as a GDN decode step: 0.31's
+# GDNAttentionMetadataBuilder.build classifies first chunks via is_prefilling / seq_len and passes
+# treat_short_extends_as_decodes=False itself) and sly/patch_gdn_nonspec_mask.py (0.31's counts block
+# keeps `non_spec_sequence_masks_cpu` defined at the top, which patch_gdn_metadata's 0.31 shape preserves).
 # sly/patch_dflash_w4_packed.py lets the DFlash drafter be a compressed-tensors W4A16 checkpoint
-# (qkv_proj has weight_packed, no raw .weight -- deferred + dequantised like the fp8 case);
-# sly/patch_gdn_nonspec_mask.py defines non_spec_sequence_masks_cpu on patch_gdn_metadata's numpy
-# path (UnboundLocalError at engine init as soon as --speculative-config is set). Both are
-# prerequisites for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
+# (qkv_proj has weight_packed, no raw .weight -- deferred + dequantised like the fp8 case); a
+# prerequisite for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
 # sly/patch_lmhead_fp8.py hooks radiance_lmhead_fp8.py into QuarkConfig.get_quant_method: with
 # RADIANCE_LMHEAD_FP8=1 the (Quark-excluded, otherwise bf16) lm_head is quantised to fp8 per
 # output channel after loading and applied via row-wise torch._scaled_mm -- halves the 2.54 GB
@@ -644,14 +668,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # gated norm each end in the per-token fp8 quant (radiance_add_rms_quant / _silu_mul_quant /
 # _gdn_norm_quant in the .hip below) and hand (q, scale) straight to the W4A8 GEMM's pq entry,
 # plus the knob in vLLM's compile cache key. Anchors are the already-patched files, so it runs last.
-# sly/patch_mamba_align_retire.py backports vllm#55450 (0.2.3): align-mode Mamba state retirement
-# skips null gaps instead of stopping at them -- with async scheduling the stock code pinned one
-# gated-delta-net block per group per prefill chunk until the request finished (258k prompt: KV
-# pool exhausted, two self-preemptions).
-# sly/patch_rocm_load_max_split.py lets Worker.load_model's max_split_size_mb:20 allocator scope run
-# on ROCm (stock gates it on is_cuda()): without it, packed W4A16 weights were carved out of the
-# freed 2.37 GiB bf16 embed/lm_head segments and pinned them (INT4 target k=7: 2.9 GiB stranded,
-# 313k -> 386k KV tokens; MXFP4 prod: 376k -> 386k).
+# DROPPED at the 0.31.0 bump, native upstream: sly/patch_mamba_align_retire.py (vllm#55450 is in
+# single_type_kv_cache_manager.py: _remove_blocks_in_range skips null gaps) and
+# sly/patch_rocm_load_max_split.py (Worker._scoped_allocator_max_split now gates on is_cuda_alike() and
+# also wraps profile_run).
 # patch_tp3_pad (ggz14) installs the three radiance_tp3pad.py hooks for TP=3 via zero-weight dummy
 # heads; every hook returns immediately unless RADIANCE_TP_PAD=3, so TP 1/2 serves are unchanged.
 # sly/patch_ar_knobs.py makes the TP=2 all-reduce size gate (RADIANCE_AR_MAX_KB) and the 6-bit
@@ -672,12 +692,12 @@ RUN set -eu; cd /opt/patches; \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
-             sly/patch_quark_mxfp4 sly/patch_short_prefill \
-             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
+             sly/patch_quark_mxfp4 \
+             sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse sly/patch_mamba_align_retire \
-             sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode sly/patch_adaptive_width \
+             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
+             sly/patch_gdn_fused_decode sly/patch_adaptive_width \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
@@ -779,6 +799,7 @@ v, a, t = m.version("vllm"), m.version("amd-aiter"), m.version("transformers"); 
 assert v.startswith(os.environ["WANT_VLLM"]), "vllm wheel reports " + v + ", built tag is " + os.environ["WANT_VLLM"]; \
 assert a.startswith(os.environ["WANT_AITER"]), "aiter wheel reports " + a + ", built tag is " + os.environ["WANT_AITER"]; \
 assert t == os.environ["WANT_TF"], "transformers is " + t + ", pinned is " + os.environ["WANT_TF"]; \
+import torchvision, torchvision.ops; \
 print("stack OK | vllm", v, "| torch", torch.__version__, "| aiter", a, \
       "| torchvision", m.version("torchvision"), "| triton", m.version("triton"), \
       "| transformers", t, "| r4d", r4d.__version__)'

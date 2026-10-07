@@ -253,9 +253,28 @@ LENS_OLD_029 = '            query_lens = query_start_loc[1:] - query_start_loc[:
 
 LENS_NEW_029 = '            query_lens = query_start_loc[1:] - query_start_loc[:-1]\n            assert spec_sequence_masks_cpu is not None\n            non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu\n            query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]\n\n            # Use CPU tensors to avoid CPU-GPU sync\n            if _r_np:\n                # --- RADIANCE: same integers, one numpy pass. `size` is the numpy\n                # spelling of `size(0)` for these 1-D per-request vectors.\n                # non_spec_sequence_masks_cpu is left as a tensor above: unlike\n                # non_spec_query_lens_cpu it escapes this block and indexes torch\n                # tensors further down the builder.\n                _qlen_np = query_lens_cpu.numpy()\n                _nonspec_np = _qlen_np[~_mask_np]\n                num_decodes = int((_nonspec_np == 1).sum())\n                num_zero_len = int((_nonspec_np == 0).sum())\n                num_prefills = _nonspec_np.size - num_decodes - num_zero_len\n                num_decode_tokens = num_decodes\n                num_prefill_tokens = int(_nonspec_np.sum()) - num_decode_tokens\n                num_spec_decode_tokens = (\n                    int(_qlen_np.sum()) - num_prefill_tokens - num_decode_tokens\n                )\n            else:\n                non_spec_query_lens_cpu = query_lens_cpu[non_spec_sequence_masks_cpu]\n                num_decodes = (non_spec_query_lens_cpu == 1).sum().item()\n                # Exclude zero-length padded sequences from prefill count.\n                num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()\n                num_prefills = (\n                    non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len\n                )\n                num_decode_tokens = num_decodes\n                num_prefill_tokens = (\n                    non_spec_query_lens_cpu.sum().item() - num_decode_tokens\n                )\n                num_spec_decode_tokens = (\n                    query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens\n                )\n'
 
+# --- vLLM 0.31 shape --------------------------------------------------------------------------
+# 0.31 inserts the uniform-spec-length probe (`uniform_spec_sequence_length`, a torch.all over
+# `spec_query_lens_cpu`) between `query_lens_cpu` and the request counts. The counts themselves are
+# the 0.29 text, so the 0.29 pair is reused with the probe spliced in at the same place.
+_UNIFORM_031 = (
+    "            spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]\n"
+    "            if spec_query_lens_cpu.numel() > 0:\n"
+    "                first_spec_sequence_length = int(spec_query_lens_cpu[0])\n"
+    "                if first_spec_sequence_length > 0 and bool(\n"
+    "                    torch.all(spec_query_lens_cpu == first_spec_sequence_length)\n"
+    "                ):\n"
+    "                    uniform_spec_sequence_length = first_spec_sequence_length\n"
+)
+_CUT = "\n            # Use CPU tensors to avoid CPU-GPU sync\n"
+LENS_OLD_031 = LENS_OLD_029.replace(_CUT, _UNIFORM_031 + _CUT, 1)
+LENS_NEW_031 = LENS_NEW_029.replace(_CUT, _UNIFORM_031 + _CUT, 1)
+assert LENS_OLD_031 != LENS_OLD_029 and LENS_NEW_031 != LENS_NEW_029
+
+
 apply(F, PREAMBLE_OLD, PREAMBLE_NEW, "_RADIANCE_GDN_META", "gdn metadata: helpers")
 apply_any(F, [(MASK_OLD, MASK_NEW), (MASK_OLD_029, MASK_NEW_029)],
           "one numpy pass over the same buffer", "gdn metadata: spec mask")
-apply_any(F, [(LENS_OLD, LENS_NEW), (LENS_OLD_029, LENS_NEW_029)],
+apply_any(F, [(LENS_OLD, LENS_NEW), (LENS_OLD_029, LENS_NEW_029), (LENS_OLD_031, LENS_NEW_031)],
           "same integers, one numpy pass", "gdn metadata: request counts")
 apply(F, IDX_OLD, IDX_NEW, "read once, by the copy_", "gdn metadata: index tensors")

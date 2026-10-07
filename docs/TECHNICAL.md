@@ -673,12 +673,37 @@ artefacts; mount fresh ones or accept the double start on rollout.
 See docs/NOT-ADOPTED.md, section *Own measurements, 1.0*: gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM
 state, draft refill after a prefix hit, plain R4D and `R4D_ATTN_FP8`.
 
+## 1.1.0: vLLM 0.31.0 on the AMD torch trio
+
+The stack is what vLLM 0.31.0's own `docker/Dockerfile.rocm_base` builds (`PYTORCH_BRANCH` release/2.13, `TRITON_BRANCH`
+669b31a = release/internal/3.8.x, `PYTORCH_VISION_BRANCH` v0.28.0, `AITER_BRANCH` v0.1.23), taken as AMD's prebuilt wheels for
+ROCm 10.1 from `stable.repo.amd.com/rocm/whl-next`: torch 2.13.0, `triton-3.8.0+git669b31ac.rocm10.1.0` (the exact commit;
+hash-pinned, `TRITON_BUILD` + `TRITON_SHA256`), torchvision 0.28.0 with `amd-torchvision-device-gfx1201` (no source build any
+more; the builder still compiles it for a source-built torch). The 0.5.0 – 0.5.4 hang was torch 2.13 with triton 3.7.1 and
+torchvision 0.28 *outside* upstream's pairing; this is upstream's pairing. torch 2.14 is available but not what vLLM pins.
+transformers goes back to 5.17.0 because vLLM 0.31 declares `< 5.18.0`. aiter 0.1.23 still carries the
+`aiter.ops.triton.unified_attention` alias that vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24.
+
+Patches re-anchored for 0.31.0 (behaviour unchanged): `patch_dflash_fused_kv_fp8`, `sly/patch_dflash_w4_packed`,
+`sly/patch_w4a16_fuse` (DFlash context-KV: upstream now routes a quantized `qkv_proj` through one quant-method GEMM per layer;
+the fused deferred bf16 weight and the int4 rows keep precedence), `patch_gdn_metadata` (new uniform-spec-length probe),
+`sly/patch_w4a16_tiles` (docstring reflow), `sly/patch_fused_norm_quant` (`_output_projection` now serves `forward_cuda` too),
+`sly/patch_adaptive_width` (`decode_stagger`), `sly/radiance_lookup_draft` (`DFlash2Speculator.top_k` /
+`candidate_sampler.cached_candidate_ids`), `radiance_r4d_attn` (`get_supported_kernel_block_sizes(kv_cache_spec=None)`).
+Not applied any more, native in 0.31.0: `sly/patch_short_prefill`, `sly/patch_gdn_nonspec_mask`, `sly/patch_mamba_align_retire`
+(already native in 0.30.0), `sly/patch_rocm_load_max_split`.
+
+What the CPU dry run cannot show, for the GPU window: 0.31 moves the DFlash context-KV precompute *into* the FULL draft graph
+(`_precompute_context_kv` inside `capture`), so the W4A16 context-KV GEMM now runs under capture; `_scoped_allocator_max_split`
+also wraps `profile_run` (KV pool size); `GDNAttentionMetadataBuilder` gained `update_block_table` / `uniform_spec_sequence_length`
+and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what `patch_adaptive_width` did by hand, now redundant).
+
 ## Build details
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
-- PyTorch 2.12.0 (AMD's rocm10.1 wheel), torchvision 0.27.0, Triton 3.6.0, aiter 0.1.22.post1, transformers 5.18.0, vLLM 0.30.0; libr4d pinned
+- PyTorch 2.13.0, torchvision 0.28.0, Triton 3.8.0+git669b31ac (all AMD's rocm10.1 wheels), aiter 0.1.23, transformers 5.17.0, vLLM 0.31.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.
