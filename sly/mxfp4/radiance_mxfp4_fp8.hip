@@ -1439,7 +1439,7 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
     // block for M=129 (49% of the rows are padding), the decode kernel only ceil(M/16)*16.
     // Needs the fragment-order weight (dec_wperm), the plain MXFP4 weight (no wh plane) and the
     // split-K scratch; anything else falls through. Which M actually win is measured per shape by
-    // tests-lessons/A/bench_wide_cells.py -- WIDE_MAX_M is the knob that picks the edge.
+    // sly/tests/lessons/A/bench_wide_cells.py -- WIDE_MAX_M is the knob that picks the edge.
     static const int wide_max_m = [] {
       const char *e = getenv("RADIANCE_MXFP4_WIDE_MAX_M");
       int v = e ? atoi(e) : 0;

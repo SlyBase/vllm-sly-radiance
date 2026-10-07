@@ -52,7 +52,7 @@ FG = both), one default BetterBench run per arm, second start each. Record per a
 tokens per update, step gap, conc 1/8, the KV pool from the log.
 
 **Step 3 — only for a winner: production conditions.** Repeat control vs winner on the production arguments
-(262k, thinking on, prefix caching on). It must hold the KV pool at 384,316 tokens (the FP8 drafter is heavier
+(262k, thinking on, prefix caching on). It must hold the KV pool at 436,097 tokens (1.0.0 and later; 384,316 before) (the FP8 drafter is heavier
 and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
 (recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
 

@@ -3,10 +3,10 @@
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
 with hand-written MXFP4 kernels, DFlash2 speculative decoding and the full 262k context on a single
 32 GB card: **~133 tok/s single-stream decode, ~3,200 tok/s prefill, 410 tok/s at 8
-concurrent requests**, with every number measured and reproducible.
+concurrent requests** (0.4.0 reference run, see [Performance](#performance)), with every number measured and reproducible.
 
 ```bash
-docker pull ghcr.io/slybase/vllm-sly-radiance:0.4.6-rocm10.0
+docker pull ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1
 ```
 
 ## Tech stack
@@ -14,16 +14,20 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:0.4.6-rocm10.0
 | Layer | Version |
 |---|---|
 | GPU | AMD Radeon AI PRO R9700, 32 GB, gfx1201 (RDNA4) — one card; TP 2/3/4/8 paths included but untested here |
-| ROCm | 10.0 (`rocm/dev-ubuntu-24.04:10.0.0-full`, pruned to gfx1201) |
-| PyTorch / Triton / torchvision | 2.14.0 / 3.8.0 / 0.29.0, built from source for gfx1201 |
+| ROCm | 10.1 (`rocm/dev-ubuntu-24.04:10.1.0-full`, HIP 7.16, pruned to gfx1201) |
+| PyTorch / Triton / torchvision | 2.12.0 (AMD's `+rocm10.1.0` wheel) / 3.6.0 / 0.27.0 (compiled against it) |
 | vLLM | 0.30.0 (V1 engine, V2 model runner), built from source |
 | AITER / transformers | 0.1.22.post1 / 5.17.0 |
-| Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
+| Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (prefill attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
 | Model | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, gated-delta-net hybrid) |
 | Drafter | [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16), DFlash2 k = 7 + prompt lookup |
 | Also serves | NVFP4, compressed-tensors INT4, ParoQuant, AutoRound, escha checkpoints ([comparison](docs/BENCHMARKS.md#other-checkpoints-on-one-r9700-036-2026-09-24)) |
 
 ## Performance
+
+> **Release 1.0.0:** the 1.0 reference run (300 W BetterBench) is pending; the table below is the last full reference
+> run, image **0.4.0**, and is kept for comparison. What 1.0.0 changed was measured as A/B/A deltas at 210 W and is in the
+> [CHANGELOG](CHANGELOG.md) (prefill 64k +23 %, KV pool 436,097 tokens, c8 with arrivals +4.7 %).
 
 Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
 (`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
@@ -71,18 +75,19 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 \
   -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
-  ghcr.io/slybase/vllm-sly-radiance:0.4.6-rocm10.0 \
+  -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
+  ghcr.io/slybase/vllm-sly-radiance:1.0.0-rocm10.1 \
   --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 --quantization quark \
-  --max-model-len 262144 --gpu-memory-utilization 0.96 \
+  --max-model-len 262144 --gpu-memory-utilization 0.98 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
   --speculative-config.num_speculative_tokens 7 \
   --speculative-config.draft_sample_method probabilistic \
   --speculative-config.attention_backend TRITON_ATTN \
-  --attention-backend ROCM_AITER_UNIFIED_ATTN \
+  --attention-backend R4D_HYBRID \
   --max-num-seqs 8 --max-num-batched-tokens 2048 \
-  --compilation-config.cudagraph_mode FULL_AND_PIECEWISE \
+  --compilation-config.cudagraph_mode FULL_DECODE_ONLY \
   --compilation-config.cudagraph_capture_sizes '[8,16,24,32,40,48,56,64]' \
   --enable-prefix-caching --skip-mm-profiling --enable-mm-embeds \
   --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 \
@@ -97,7 +102,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 ```
 
 - **First start** compiles kernels and CUDA graphs (~10 min) and reports a ~2 GiB smaller KV pool;
-  **restart once** — the warm start takes 4–6 min and gets the full 384k-token KV pool. Keep the cache
+  **restart once** — the warm start takes 4–6 min and gets the full 436k-token KV pool. Keep the cache
   volumes.
 - **Power:** 210 W costs ~6.5 % decode and ~20 % prefill against 300 W (table above). The card allows
   up to 330 W: +4 … +8 % prefill and ~+1 % step time over 300 W, but the junction runs at 102 °C average
@@ -125,6 +130,11 @@ production arguments; the numbers are the gain it measured when it went in
 | libr4d narrow-state GDN kernels (bf16 SSM cache) | the pinned libr4d fell back to Triton for a 16-bit state | prefill +5 %, step −0.7 ms |
 | Verify-batch decode attention tune (aiter 0.1.21+), split-KV drafter attention | the upstream tune had silently stopped applying | decode at 99k context **2.5×** |
 | Prompt lookup over the whole context | the drafter only sees the last 2,048 tokens | edits/quotes of far text **+57–116 %** |
+| `--attention-backend R4D_HYBRID`: libr4d prefill attention for runs >= 512 tokens, AITER for the rest (1.0) | plain R4D prefills faster but decodes at 60.9 instead of 34.9 ms/step; the hybrid keeps AITER's decode | prefill 8k / 32k / 64k **+3 / +13 / +23 %** |
+| `--gpu-memory-utilization 0.98` + `FULL_DECODE_ONLY` (1.0) | the PIECEWISE graph set cost 1.24 GiB of graphs and 1.69 GiB peak activation | KV pool 391,193 → **436,097** tokens (+11.5 %) |
+| `RADIANCE_MXFP4_WIDE_MAX_M=192` (1.0) | M 129…192 ran on a 256-row tile with up to 49 % padding; now the split-K decode kernel | TTFT of a 160-token prompt **−13.8 %** |
+| `RADIANCE_ADAPTIVE_WIDTH=perseq` (1.0, ported from the Radiance engine) | acceptance differs 2× between requests; per-request verify width on varlen FULL graphs ([why ggz14's version lost](docs/TECHNICAL.md#100-what-the-release-adds-and-the-measurements-behind-it)) | 8 concurrent requests **+4.7 %** |
+| ROCm 10.1 + torch 2.12 (1.0) | current AMD toolchain; the CPU-spin bug that held torch back is fixed | neutral (±1–2 %) |
 | Constraints for every PyPI pin, 4.8 GB image with a stable/volatile layer split | reproducible builds, ~35 MB update pulls | – |
 
 What was tried and rejected, with reasons: [docs/NOT-ADOPTED.md](docs/NOT-ADOPTED.md).
@@ -143,6 +153,10 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_MXFP4_W4A8` | `1` | the hand-written fp8-WMMA MXFP4 GEMM ahead of AITER's |
 | `RADIANCE_MXFP4_W4A8_MIN_M` | `0` | the W4A8 kernel also for small M (decode) |
 | `RADIANCE_MXFP4_DECODE_MAX_M` | `128` | split-K decode kernel up to M = 128: covers `max-num-seqs × 8` and the mixed CUDA-graph sizes |
+| `RADIANCE_MXFP4_WIDE_MAX_M` | `192` (default `0` = off) | split-K decode kernel with 9–12 M fragments for M 129…192 instead of the padded 256-row tile: TTFT of 160-token prompts −13.8 %. Not 256: the folded tile wins again there (+11 % GEMM time at M 256). Needs `WPERM=1` |
+| `RADIANCE_ADAPTIVE_WIDTH` | `perseq` (default `0` = off) | per-request verify width, graph-safe (varlen FULL graphs): c8 with arrivals +4.7 %, one stream unchanged. `uniform` (one width per batch) gave +1.5 %. Tuning knobs `RADIANCE_AW_*` in [sly/README.md](sly/README.md) |
+| `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
+| `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
 | `RADIANCE_LMHEAD_INT4` | `1` | int4 vocabulary head (656 MB instead of 2.5 GB per call; GSM8K unchanged). `RADIANCE_LMHEAD_FP8=1` is the more exact fallback |
@@ -168,7 +182,10 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 
 | Argument | Recommended | Trade-off |
 |---|---|---|
-| `--max-model-len` | `262144` | the model maximum; the KV pool (384k tokens) then holds one full-length request plus change. Lower it only together with the options below — it does not make a single request faster |
+| `--max-model-len` | `262144` | the model maximum; the KV pool (436k tokens) then holds one full-length request plus change. Lower it only together with the options below — it does not make a single request faster |
+| `--attention-backend` | `R4D_HYBRID` | libr4d for long prefill runs, AITER for decode and short chunks. Plain `R4D` is not recommended (decode 60.9 vs 34.9 ms/step). `ROCM_AITER_UNIFIED_ATTN` is the fallback (slower long prefill) |
+| `--gpu-memory-utilization` | `0.98` | with `FULL_DECODE_ONLY` the profiled activation peak is 0.65 GiB, so 0.98 leaves room; 0.98 with `FULL_AND_PIECEWISE` gives only 404,947 KV tokens |
+| `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | graphs only for pure decode batches (0.22 GiB instead of 1.24); prefill and mixed steps run eagerly, no measured TTFT or c8 cost. Keep the capture-size list |
 | `--max-num-batched-tokens` | `2048` | prefill chunk size. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k |
 | `--max-num-seqs` | `8` | 8 × (7 + 1) = 64 verify tokens per step, inside `DECODE_MAX_M`; above 8 requests queue (conc 16 = conc 8 throughput) |
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
@@ -179,7 +196,7 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 
 **Less context, more prefill:** if your requests stay well below 262k tokens, set
 `--max-model-len 131072 --max-num-batched-tokens 4096`: +3.5 … +4.8 % prefill on 8k–64k prompts, and the
-KV pool (~326k tokens) still holds two full 131k requests. Measured 2026-09-25 (300 W, prefill sweep):
+KV pool (~326k tokens) still holds two full 131k requests. Measured with image 0.4.0 on 2026-09-25 (300 W, prefill sweep; KV pools are 0.4.0 values, 1.0.0 holds ~11 % more):
 
 | `--max-model-len` / `--max-num-batched-tokens` | Prefill 2k / 8k / 16k / 32k / 64k tok/s | KV pool |
 |---|---|---|
@@ -237,6 +254,10 @@ This image stands on other people's work:
 
 - **[StillDeadcode](https://codeberg.org/StillDeadcode)** — vllm-radiance and libr4d: the RDNA4 build, the
   gfx1201 kernels and fixes everything here runs on.
+- **Radiance engine fork** ([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork
+  slydlake/radiance) — the `adaptive_k` verify-width policy behind `RADIANCE_ADAPTIVE_WIDTH` and the M-band findings
+  (wide decode tile) behind `RADIANCE_MXFP4_WIDE_MAX_M`, ported to vLLM's graph model.
+- **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.
 - **[vLLM](https://github.com/vllm-project/vllm)**, **[AITER](https://github.com/ROCm/aiter)**, the

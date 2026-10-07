@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests-lessons/F/test.sh -- vllm-sly-radiance 0.8.0-rc-rocm10.1 (torch 2.12 / ROCm 10.1) against 0.7.0-rocm10.0.
+# sly/tests/lessons/F/test.sh -- vllm-sly-radiance 0.8.0-rc-rocm10.1 (torch 2.12 / ROCm 10.1) against 0.7.0-rocm10.0.
 # Runs on 2408 as root; the GPU must be free (the main session owns the window: 300 W, firmware fan curve).
 # Lives in /root/lessons/F/ next to greedy.py. Arms (A/B/A):
 #   base (0.7.0) -> rc (10.1: cold start, then second start) -> base again
@@ -9,7 +9,7 @@
 #
 # DECISION CRITERIA (against the control arms of the same window)
 #   1 both starts of 10.1 reach /health, no Traceback / EngineCore death in the log
-#   2 KV pool of the second start == 384,316 tokens (the production number; the 0.7.0 arm shows it too)
+#   2 KV pool of the second start >= 436,097 tokens at util 0.98 (1.0.0 production number; the util 0.9655 arm shows 391,193)
 #   3 idle CPU after the first requests < 150 % for the whole container. ROCm/ROCm#6406 (torch >= 2.12 spins a core in
 #     libhsa-runtime64 after the first GPU op) is why the torch pin sat on 2.11; ROCm 10.1 should carry the fix
 #   4 greedy: tok/upd within 1 % and ms/step within +-2 % of the control (the A/A spread is the noise floor); texts

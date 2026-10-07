@@ -90,6 +90,6 @@ DECISION (all must hold for an arm to be adopted; compare against the MEAN of of
      as often as in off. If perseq-nograph runs and loses ~3 % while perseq (graphs) wins, ggz14's
      result is explained by the lost FULL graph.
   4. greedy single-stream step ms and tok/upd equal to off (nothing shrunk below 32 unshrunk rows).
-  5. KV pool unchanged (384,316 tokens): the extra FULL graphs (uniform: ~15, perseq: ~7) must not
+  5. KV pool unchanged (436,097 tokens at util 0.98 + FULL_DECODE_ONLY): the extra FULL graphs (uniform: ~15, perseq: ~7) must not
      shrink it. If they do, restrict RADIANCE_AW_LENS (e.g. 3,5) or RADIANCE_AW_GRAPH_MIN_REQS=6.
 EOF

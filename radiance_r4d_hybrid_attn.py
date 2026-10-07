@@ -52,7 +52,7 @@ Knobs (read at import):
   RADIANCE_USE_R4D                0 = libr4d off (shared with the R4D backend and the GDN hooks); the hybrid
                                   then refuses to load like `--attention-backend R4D` does
   R4D_ATTN_FP8                    0 (default) | 1 | 2 | 3: libr4d's own opt-in 8-bit legs of the prefill kernel
-                                  (QK8 / PV8 / both). Orthogonal; see NOTES-H.md for what it costs in accuracy.
+                                  (QK8 / PV8 / both). Orthogonal; see docs/TECHNICAL.md (1.0) for what it costs in accuracy.
 """
 
 import dataclasses

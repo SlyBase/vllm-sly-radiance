@@ -52,7 +52,7 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe348
 # in the A/B; 3.7.0 is the next step. The 2.11
 # pin existed because torch >= 2.12 hit ROCm/ROCm#6406 (CPU spins at 100% after the first GPU op,
 # an AsyncEventsLoop busy-wait in libhsa-runtime64); the fix landed in TheRock on 2026-08-22 and is
-# part of ROCm 10.1 -- tests-lessons/F/test.sh checks the idle CPU of the engine.
+# part of ROCm 10.1 -- sly/tests/lessons/F/test.sh checks the idle CPU of the engine.
 ARG TORCH_VERSION=2.12.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.6.0

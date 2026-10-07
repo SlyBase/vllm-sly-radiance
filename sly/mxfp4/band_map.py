@@ -3,7 +3,7 @@
 
 Pure-Python replica of launch_impl()/launch_at_impl() in radiance_mxfp4_fp8.hip plus the Python
 side gates in radiance_mxfp4.py (A_TILED_MIN_M). Keep it in step with the .hip: it is a map, not
-the source of truth, and the GPU bench (tests-lessons/A/bench_wide_cells.py) is what measures.
+the source of truth, and the GPU bench (sly/tests/lessons/A/bench_wide_cells.py) is what measures.
 
   python3 band_map.py                         # production env (DECODE_MAX_M=128, WPERM=1, A_TILED 513)
   python3 band_map.py --wide 256              # with RADIANCE_MXFP4_WIDE_MAX_M=256

@@ -25,7 +25,7 @@ Read this before changing anything. It keeps the image, the docs and the release
 - A/B in one GPU window, control arm first and repeated last; only compare arms of the same window
   (prefill differs by ~±3 % between sessions, the same image repeats within 0.3 % inside one).
 - The first start after an image or flag change compiles fresh and shows a smaller KV pool; measure
-  the second start. The KV pool must stay at 384,316 tokens (262k context) for the production setup.
+  the second start. The KV pool must stay at 436,097 tokens (262k context, `--gpu-memory-utilization 0.98`, `FULL_DECODE_ONLY`; 1.0.0 and later; 384,316 up to 0.7.x) for the production setup.
 - Decode: rank by the step gap (deterministic) or by ≥ 128 BetterBench runs per arm — a single 64-run
   BetterBench sample carries ±5 % on the weighted decode (every run is one sampling trajectory).
 - Quality: GSM8K 200 (cot zero-shot, greedy) against the baseline in `ci/accept/baselines/`.

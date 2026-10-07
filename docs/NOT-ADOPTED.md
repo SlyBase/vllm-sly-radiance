@@ -8,7 +8,7 @@ design reasons. Revisit an entry when its reason changes.
 
 | Item | Why not |
 |---|---|
-| Dynamic verify width (`RADIANCE_DYNAMIC_WIDTH`, `patch_dynwidth` / `patch_async_dynwidth`) | Measured: conc 4/8/16 −3 %, conc 2 unchanged (ABAB, 300 W). Unequal per-request widths cost more than the trimmed verify rows save on this card. |
+| Dynamic verify width as ggz14 wrote it (`RADIANCE_DYNAMIC_WIDTH`, `patch_dynwidth` / `patch_async_dynwidth`) | Measured: conc 4/8/16 −3 %, conc 2 unchanged (ABAB, 300 W). Unequal per-request widths made every batch non-uniform, so the step fell from the FULL graph to the ~65-piece PIECEWISE route. **Superseded in 1.0.0 by `RADIANCE_ADAPTIVE_WIDTH=perseq`** (Radiance's adaptive_k with varlen FULL graphs, c8 arrivals +4.7 %), see [TECHNICAL.md](TECHNICAL.md#100-what-the-release-adds-and-the-measurements-behind-it). |
 | GDN in_proj merge (`RADIANCE_GDN_MERGE_INPROJ`, `radiance_gdnmerge.py`) | Upstream's merged forward replaces `forward_hip` with the AITER GDN core; this image serves `forward_cuda` (FLA). A forward_cuda-sliced variant measured step −0.16 ms, prefill −1.5…−2.2 %, and −8.5k KV tokens (the weight copies fragment the arena). |
 | Streaming decode loads (`RADIANCE_MXFP4_DECODE_NT=1`) | Measured on top of WPERM: step 37.6 vs 37.3 ms — slower. |
 | libr4d decode GEMM (`RADIANCE_MXFP4_R4D_DECODE_MAX_M`) | Measured: not bit-identical, no step gain, −810 KV tokens. |
@@ -29,6 +29,16 @@ design reasons. Revisit an entry when its reason changes.
 | GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM (`RADIANCE_GDN_BA_W4`, kept, default 0) | Measured (window E): the 96 extra rows add a 129th tile, a nearly empty third wave on 64 CUs -- 93.9 us merged against 79.2 + 3.6 us for the two GEMMs. |
 | Decode-attention retune at long context | Measured (window E, `bench_decode_attn.py`): the shipped rule is within 1 % of the best of 100+ cells at 32k/96k (136 us per layer call at 32k, ~470 GB/s). |
 | Removing the GDN output `torch.zeros` / the spec-decode copy chains (~100 launches per step) | vLLM needs the zeroed rows for padded tokens (vllm#28182); the copies are the speculative-decoding bookkeeping. ~0.1-0.2 ms, not worth the risk. |
+
+**Own measurements, 1.0 (2026-10-07/08, 210 W, A/B/A, second start):**
+
+| Item | Why not |
+|---|---|
+| Gated gate_up + SwiGLU fold (W4A8 decode band; bytes exact) | Isolated −0.16…−0.23 ms per step at M 8–24, but server greedy 35.00 / 35.12 / 35.07 ms: no end-to-end gain. down_proj needs a per-token activation scale, so its quantization stays a separate launch and the fold removes nothing there. |
+| int4 lm_head LEAN configs (split-K DEQ1/UNPACK1 for M > 16) | vLLM's Triton kernel has no spills to remove; no candidate is ≥ 5 % faster in any M bucket. |
+| fp16 SSM state (`--mamba-ssm-cache-dtype float16`, A4) | KV −1.6k tokens, prefill +0.3 %, c8 401.3 vs 398.8 / 403.2: neutral. |
+| Draft refill after a prefix-cache hit | Not needed: vLLM keeps the drafter's KV in the paged cache, so a hit restores it. Multi-turn turn 2 with a prefix hit: 4.20 / 3.82 tokens per step, 3.3 / 3.5 s against 7.1 s cold. |
+| `--attention-backend R4D` (plain), `R4D_ATTN_FP8` with R4D | See row A5 below: decode 60.9 vs 34.9 ms per step, c8 302 vs ~402; fp8 legs +2 % at 64k. `R4D_HYBRID` is adopted instead. |
 
 **Other images and forks:**
 
@@ -65,15 +75,15 @@ The measurement plan (BetterBench 0.6.0, thinking off first, then drafter/greedy
 [like-for-like recipe](BENCHMARKS.md#recipe-like-for-like-against-paiton-queued-not-yet-run).
 
 **Transferable = runtime flags only. Queued for an A/B** (production args, 300 W, same window, control
-first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 384,316):
+first and last, second start, ≥ 128 BetterBench runs per arm or the step gap; KV pool must stay 436,097 at 1.0.0 and later):
 
 | Arm | Paiton setting | Ours today | Why it might help |
 |---|---|---|---|
 | A1 | `GPU_MAX_HW_QUEUES=1` | `2` | Paiton: "removes a slower decode mode some fresh processes start in"; ours picked 2 against the random default, 1 was not in that sweep |
 | A2 | `draft_sample_method: greedy` | `probabilistic` | lossless either way; greedy drafts skip the draft-side sampling, and the lookup draft already writes point masses |
 | A3 | `tcclaviger/Qwen3.8-27B-DFlash2-FP8` drafter | `syvai/...-W4A16` | Paiton's tokens/update (json ≈ 7.2, code ≈ 6.0) are well above ours (5.66 / 4.94); the old "fewer tokens per update" row above came from other stacks, re-check on this image. Costs KV (heavier drafter) |
-| A4 | `--mamba-ssm-cache-dtype float16` | `bfloat16` | fp16 state: more mantissa, same bytes; the libr4d extras have fp16 kernels (also on the radlight list) |
-| A5 | `--attention-backend R4D` | `ROCM_AITER_UNIFIED_ATTN` (quickstart) | Paiton and `serve-mxfp4.sh` both use R4D for the target |
+| A4 | `--mamba-ssm-cache-dtype float16` | `bfloat16` | fp16 state: more mantissa, same bytes; the libr4d extras have fp16 kernels (also on the radlight list) | **Measured 1.0: neutral, not adopted** (KV −1.6k tokens, prefill +0.3 %, c8 401.3 vs 398.8 / 403.2).
+| A5 | `--attention-backend R4D` | `R4D_HYBRID` (1.0.0) | **Measured, plain R4D not adopted:** prefill 64k +19 % but decode 60.9 vs 34.9 ms per step and c8 302 vs ~402 tok/s. The hybrid (libr4d only for prefill runs >= 512 tokens) keeps the prefill gain and the AITER decode: adopted in 1.0.0. `R4D_ATTN_FP8` on plain R4D: 64k 1918 tok/s (+2 % over the f16 legs), not adopted. |
 | A6 | `cudagraph_capture_sizes` incl. `1, 2, 4` | `[8 … 64]` | only matters if a step ever runs below 8 tokens (non-spec paths) — expect neutral |
 
 `--max-num-batched-tokens 4096` at shorter context is already the README's "less context, more prefill"
