@@ -248,8 +248,9 @@ def install():
             return orig_cfg(op, params, backend, arch)
         return cfg
 
-    def use_2d_kernel(params):
-        use_2d = orig_2d(params)
+    def use_2d_kernel(params, *args, **kwargs):
+        # aiter 0.1.23 passes a second argument (backend); forward whatever aiter's own rule takes.
+        use_2d = orig_2d(params, *args, **kwargs)
         if use_2d and FORCE_3D and params.max_seqlen_k > 512:
             try:
                 p = plan(params)
