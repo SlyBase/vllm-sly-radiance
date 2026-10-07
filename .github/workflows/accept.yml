@@ -78,6 +78,7 @@ jobs:
       mode: ${{ steps.meta.outputs.mode }}
       profile: ${{ steps.meta.outputs.profile }}
       sha: ${{ steps.meta.outputs.sha }}
+      skip: ${{ steps.meta.outputs.skip }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -110,7 +111,17 @@ jobs:
             echo "VERSION $OLD -> $VER, mode=$MODE"
           fi
 
+          # accept-night.yml already gated and merged this commit (and dispatches the release): a
+          # second, approval-gated gate for the same VERSION would only wait for a click forever
+          SKIP=false
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ -n "$(git tag -l "v${VER}")" ] || git log -1 --format=%s | grep -q "night gate green"; then
+              SKIP=true; echo "v${VER} is released or was gated by accept-night: nothing to do"
+            fi
+          fi
+
           {
+            echo "skip=$SKIP"
             echo "image=$IMAGE"; echo "version=$VER"; echo "mode=$MODE"
             echo "profile=${PROFILE_INPUT:-vllm7-mxfp4}"; echo "sha=$SHA"
           } >> "$GITHUB_OUTPUT"
@@ -130,6 +141,7 @@ jobs:
 
   gate:
     needs: plan
+    if: needs.plan.outputs.skip != 'true'
     runs-on: [self-hosted, linux, gpu-accept]
     # Protected: a reviewer has to approve before production is touched.
     environment: gpu-window
@@ -174,9 +186,11 @@ jobs:
       - name: production health (independent of the gate result)
         if: always()
         env:
-          ACCEPT_HOST: ${{ vars.ACCEPT_HOST || '192.168.178.51' }}
+          # production is Radiance on LXC 2413 (gpu-window GPU_WINDOW_PROD=radiance restores it);
+          # before 2026-10-06 it was vllm7 on 2408:8000 -- set the variable to that to go back
+          PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.54:8000/health' }}
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${ACCEPT_HOST}:8000/health" || echo 000)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PROD_HEALTH_URL" || echo 000)
           echo "production /health = $code"
           test "$code" = "200"
 

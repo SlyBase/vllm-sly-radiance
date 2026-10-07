@@ -26,9 +26,25 @@ on:
     paths: [VERSION]
     tags: ["v*"]
   pull_request:
-    # only when the image's pins can have moved (the trio bump PRs); a pure ci/ or docs PR
-    # would burn hours of runner time for a build that cannot change anything
-    paths: [Dockerfile]
+    # only when something that ends up in the image can have moved (the stack PRs bump the pins in
+    # Dockerfile / constraints.txt, and the Hermes re-anchor agent pushes patch fixes into sly/ and the
+    # patch_*.py files to the same branch -- accept-night needs an image of exactly the head it gates,
+    # in the local docker of LXC 2408); a pure ci/ or docs PR would burn hours of runner time for a
+    # build that cannot change anything
+    paths:
+      - Dockerfile
+      - VERSION
+      - constraints.txt
+      - "sly/**"
+      - "dflash2/**"
+      - "patch_*.py"
+      - "radiance_*"
+      - "*.hip"
+      - "r4d_*.patch"
+      - "fix_amd_torch_metadata.py"
+      - "split_venv.py"
+      - "prune_rocm.sh"
+      - "rocm_sdk/**"
   workflow_dispatch:
     inputs:
       push_ghcr:
