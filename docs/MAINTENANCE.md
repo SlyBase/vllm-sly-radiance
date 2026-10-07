@@ -40,6 +40,8 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
    - green: fill CHANGELOG "Measured" from the report (`ci/fill_measured.py`), record the new baseline
      (`--record-baseline-on-pass`), merge (merge commit), dispatch `release.yml` with reason
      `night gate green: <run url>`.
+     The release body ends with `cc @slydlake` (repository variable `RELEASE_NOTIFY`, `-` turns it off), so the
+     GitHub app notifies the owner of every new release.
    - red: PR comment with the report, label `gate-failed`, no merge, no retry for the same sha.
    - no green PR: the GPU is not touched.
    The manual path (`accept.yml`, approval-gated) keeps working; on `workflow_run` it skips a version that is
