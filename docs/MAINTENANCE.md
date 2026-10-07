@@ -88,6 +88,11 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
 Set the repository variable `AUTO_MAINTAIN=off` (Settings, Variables). `renovate.yml`, `accept-night.yml` and
 the brief job of `ci.yml` then skip; remove or set anything else to resume. Open stack PRs stay as they are.
 
+
+`accept.yml`'s automatic run after a main build is skipped while the automation is on (it would wait for an
+approval in the `gpu-window` environment and hold the shared `gpu-window` concurrency group, so the night
+gate behind it would never start). With `AUTO_MAINTAIN=off` it is back to the old human-approved gate.
+
 ## When it is red
 
 - `resolve` red on a stack PR: no matching AMD wheel or unparseable vLLM pins. Read the job's reason; wait
