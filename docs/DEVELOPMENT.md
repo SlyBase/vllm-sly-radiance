@@ -6,7 +6,7 @@ How the image is built, tested and released. Contributor and agent rules are in 
 
 Everything the build needs is in this directory (flat Docker context). Multi-stage: **buildbase**
 → **torch** (AMD's prebuilt PyTorch wheel for ROCm 10.1 by default, or PyTorch from source, see
-below) → **builder** (Triton as the hash-pinned PyPI wheel; torchvision, AITER, vLLM from source)
+below) → **builder** (Triton as AMD's hash-pinned wheel; AITER, vLLM from source; torchvision is AMD's wheel from the torch stage, compiled only for a source-built torch)
 → **rocmprune** → **assemble**
 (wheels, upstream RDNA4 patches, then the `sly/` patches, libr4d, the HIP kernel) → **venvsplit**
 → **final** (clean `ubuntu:24.04` + pruned ROCm + venv + entrypoint).
@@ -31,8 +31,9 @@ docker build -t vllm-sly-radiance:$(cat VERSION)-rocm10.1 .
 ```
 
 A cold build takes about 30 minutes on the runner (`MAX_JOBS=4` by default): PyTorch is AMD's
-wheel from `stable.repo.amd.com/rocm/whl-next` (`torch==2.12.0+rocm10.1.0` plus
-`amd-torch-device-gfx1201`), installed against the image's own `/opt/rocm`. How that fits
+wheel from `stable.repo.amd.com/rocm/whl-next` (`torch==2.13.0+rocm10.1.0` plus
+`amd-torch-device-gfx1201`; torchvision 0.28.0 + `amd-torchvision-device-gfx1201` and
+`triton==3.8.0+git669b31ac.rocm10.1.0` come from the same index), installed against the image's own `/opt/rocm`. How that fits
 (metadata rewrite, `rocm_sdk/` stand-in, no strip of `torch/lib`) is in the comment on the
 `torch-amd` stage. With the builder stage cached, a change to the `sly/` layer rebuilds in ~10 minutes.
 
@@ -67,9 +68,9 @@ patch_*.py, radiance_*.py     upstream vllm-radiance RDNA4 patches and runtime m
 sly/
   README.md                   per-patch reference (German)
   patch_quark_mxfp4.py        Quark/MXFP4 loader gates for vLLM 0.29.0 + kernel plugin registration
-  patch_short_prefill.py      GDN 1-token-prefill fix
+  patch_short_prefill.py      GDN 1-token-prefill fix (not applied since 1.1.0: native in vLLM 0.31)
   patch_dflash_w4_packed.py   W4A16 (compressed-tensors) DFlash drafter
-  patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path
+  patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path (not applied since 1.1.0)
   patch_lmhead_fp8.py         hook radiance_lmhead_fp8 into QuarkConfig
   patch_w4a16_tiles.py        gfx1201 tile table, split-K, tiled layout and fused epilogues for the W4A16 GEMMs
   bench_w4a16_tiles.py        tile / split-K sweep that produced the tables
