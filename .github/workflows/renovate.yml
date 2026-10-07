@@ -36,6 +36,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # docker-cmd-file below is bind-mounted from the workspace; without a checkout docker creates
+      # an empty directory there and the image entrypoint hands "/renovate-entrypoint.sh" to
+      # Renovate as a repository name (platform-unknown-error).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - uses: actions/create-github-app-token@v3
         id: app_token
         with:
