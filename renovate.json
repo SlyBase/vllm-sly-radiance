@@ -100,16 +100,16 @@
       ]
     },
     {
-      "description": "Hold torch on the 2.11 line (the pre-ROCm-10.1 sanctioned trio pin, issue #65): `torch >= 2.12` hits the ROCm/ROCm#6406 abnormally-high-CPU-after-first-GPU-operation bug on this stack. Stay on 2.11.x until a future ROCm release lands the fix -- then lift this cap and move the trio again (see the Dockerfile comment).",
+      "description": "Hold torch on the 2.12 line (ROCm 10.1, the first release with the ROCm/ROCm#6406 CPU-spin fix; AMD's whl-next has no 2.11 wheel for rocm10.1 and the Dockerfile follows AMD's wheel). Move to 2.13 / 2.14 only together with torchvision and triton after an A/B, see the Dockerfile comment.",
       "matchDepNames": [
         "pytorch/pytorch"
       ],
-      "allowedVersions": "2.11.x",
+      "allowedVersions": "2.12.x",
       "addLabels": [
         "pytorch-stack"
       ],
       "prBodyNotes": [
-        "Renovate proposes no newer torch than 2.11.x while the ROCm/ROCm#6406 CPU bug is unfixed. When the fix ships in a ROCm release, drop this rule and bump torch + triton + torchvision together."
+        "Renovate proposes no newer torch than 2.12.x. TORCH_AMD_ROCM and the wheel must exist on stable.repo.amd.com/rocm/whl-next for the base image's ROCm release; bump torch + triton + torchvision together."
       ]
     },
     {

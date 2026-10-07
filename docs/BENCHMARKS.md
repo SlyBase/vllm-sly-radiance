@@ -52,11 +52,54 @@ FG = both), one default BetterBench run per arm, second start each. Record per a
 tokens per update, step gap, conc 1/8, the KV pool from the log.
 
 **Step 3 — only for a winner: production conditions.** Repeat control vs winner on the production arguments
-(262k, thinking on, prefix caching on). It must hold the KV pool at 384,316 tokens (the FP8 drafter is heavier
+(262k, thinking on, prefix caching on). It must hold the KV pool at 436,906 tokens (1.0.0 and later; 384,316 before) (the FP8 drafter is heavier
 and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
 (recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
 
-## 0.4.0
+## 1.0.0
+
+### Reference run (2026-10-07, 300 W)
+
+1.0.0 first, then 0.7.0, one GPU window, firmware fan curve, BetterBench 0.4.0 default config (3 warmup + 20 passes per
+category, prefill 2 warmup + 8 runs per depth, concurrency 1–16 × 48 requests, T 0.7 / top_p 0.95 / top_k 20).
+Checkpoint: Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 (`slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ`) + `syvai/Qwen3.8-27B-DFlash2-W4A16`,
+k = 7, max-model-len 262144, fp8 KV, 8 sequences, chunk 2048. Each image with its own production arguments (1.0.0:
+`R4D_HYBRID`, util 0.98, `FULL_DECODE_ONLY`, `RADIANCE_MXFP4_WIDE_MAX_M=192`, `RADIANCE_ADAPTIVE_WIDTH=perseq`).
+Results on 2408: `/root/betterbench/results/vllm-1.0.0-full-20261007.json`, `vllm7-full-20261007.json`.
+
+| category | 1.0.0 decode t/s | tok/update | 0.7.0 decode t/s | tok/update |
+|---|---|---|---|---|
+| chat | 99.3 | 3.46 | 98.4 | 3.48 |
+| code | 148.7 | 4.90 | 149.6 | 4.87 |
+| file_edit | 179.9 | 5.82 | 177.0 | 5.73 |
+| json | 168.4 | 5.26 | 168.8 | 5.25 |
+| math | 172.0 | 5.72 | 169.5 | 5.77 |
+| prose | 84.6 | 2.75 | 84.7 | 2.79 |
+| reasoning | 105.7 | 3.33 | 110.8 | 3.33 |
+| summarization | 141.3 | 4.71 | 146.4 | 4.77 |
+| **weighted** | **135.8** | | **137.4** | |
+
+| prefill depth (prompt tokens) | 1.0.0 PP t/s | TTFT p50 | 0.7.0 PP t/s | TTFT p50 |
+|---|---|---|---|---|
+| 1,514 | 3,132 | 483 ms | 3,108 | 487 ms |
+| 5,918 | 3,136 | 1.89 s | 3,049 | 1.94 s |
+| 11,794 | 3,105 | 3.80 s | 2,946 | 4.00 s |
+| 23,543 | 2,949 | 7.98 s | 2,648 | 8.89 s |
+| 47,056 | 2,635 | 17.86 s | 2,164 | 21.74 s |
+
+| concurrency | 1.0.0 aggregate t/s | TTFT p50 | 0.7.0 aggregate t/s | TTFT p50 |
+|---|---|---|---|---|
+| 1 | 120.0 | 89 ms | 121.3 | 89 ms |
+| 2 | 212.8 | 134 ms | 219.1 | 133 ms |
+| 4 | 338.2 | 154 ms | 337.9 | 155 ms |
+| 8 | 460.8 | 197 ms | 445.6 | 224 ms |
+| 16 | 466.3 | 2.74 s | 449.0 | 3.14 s |
+
+KV pool 436,906 (1.0.0, warm compile cache; 430,433 on the first start after the compile) against 391,193 tokens.
+GSM8K 200 (210 W, same day): 0.84 against 0.83. The 0.7.0 arm reproduces the 2026-10-06 run (`vllm7-full-20261006c`:
+weighted 137.7, prefill 47k 2,167, c8 448.0) within 0.5 %. Reference for comparison, Radiance 1.1.1 at 300 W the same
+morning: weighted 146.7, prefill 47k 2,588, c8 / c16 470.5 / 470.1.
+
 
 ### Reference run (2026-09-25)
 

@@ -1431,6 +1431,67 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       return;
       // no scratch (alloc failed) -- fall through to the folded kernel, never produce nothing
     }
+    // WIDE decode band, M in (128, wide_max_m] (RADIANCE_MXFP4_WIDE_MAX_M, default 0 = dark, max 256).
+    // Radiance measured a 2.5x cliff just above the decode band (M=72..128 ~89 ms against 35 ms at
+    // M=64 per prefill step) because the only kernel left was the 256-row tile; its fix was the
+    // decode kernel in a wider form (DTM 9..16 here, BK=64 so LDS stays 27.6 KB, split 1/2/4) with a
+    // per-shape table. Here the folded kernel is the fallback at M > 128: it computes a full 256-row
+    // block for M=129 (49% of the rows are padding), the decode kernel only ceil(M/16)*16.
+    // Needs the fragment-order weight (dec_wperm), the plain MXFP4 weight (no wh plane) and the
+    // split-K scratch; anything else falls through. Which M actually win is measured per shape by
+    // sly/tests/lessons/A/bench_wide_cells.py -- WIDE_MAX_M is the knob that picks the edge.
+    static const int wide_max_m = [] {
+      const char *e = getenv("RADIANCE_MXFP4_WIDE_MAX_M");
+      int v = e ? atoi(e) : 0;
+      return v > 256 ? 256 : v;
+    }();
+    static const int wide_ks_forced = [] {         // sweep knob for the bench, 0 = table
+      const char *e = getenv("RADIANCE_MXFP4_WIDE_KS");
+      return e ? atoi(e) : 0;
+    }();
+    if (wide_max_m > 128 && M > 128 && M <= wide_max_m && !wh && dec_wperm && N <= DEC_MAX_N) {
+      int wks;
+      if (wide_ks_forced == 1 || wide_ks_forced == 2 || wide_ks_forced == 4) wks = wide_ks_forced;
+      else if (dec_nblk >= 48) wks = 1;                  // gate_up, qkvz, qkv: grid already full
+      else if (dec_nblk <= 8)  wks = DEC_KS;             // in_proj_ba: one n-block, widest split
+      else if (K >= 6144)      wks = (M <= 192) ? DEC_KS : 2;   // down / o_proj / out_proj
+      else                     wks = 1;
+      const bool wide_scratch = g_decode_partial && g_decode_cnt &&
+          (size_t)wks * M * N * sizeof(float) <= g_decode_partial_bytes;
+      if (wks == 1 || wide_scratch) {
+        float *P = g_decode_partial;
+        const dim3 dblock(DWN * 32);
+        const int tm = (M + DEC_MTILE - 1) / DEC_MTILE;          // 9..16
+#define RAD_WIDE_LAUNCH(KS_, TM_, NT_)                                                        \
+        hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, 64, KS_, TM_, true, true, NT_, \
+                                                            false>),                          \
+                           dim3(dec_nblk, 1, KS_), dblock, 0, (hipStream_t)stream,            \
+                           (const unsigned char *)a, (const unsigned char *)w,                \
+                           (const unsigned char *)ws, (const unsigned char *)wref,            \
+                           (const float *)as, P, g_decode_cnt, (__bf16 *)c, M, N, K, pb1,     \
+                           pb2, astride, (const unsigned char *)nullptr)
+#define RAD_WIDE_BY_TM(KS_, NT_)                                                              \
+        switch (tm) {                                                                         \
+          case 9:  RAD_WIDE_LAUNCH(KS_, 9, NT_);  break;                                      \
+          case 10: RAD_WIDE_LAUNCH(KS_, 10, NT_); break;                                      \
+          case 11: RAD_WIDE_LAUNCH(KS_, 11, NT_); break;                                      \
+          case 12: RAD_WIDE_LAUNCH(KS_, 12, NT_); break;                                      \
+          case 13: RAD_WIDE_LAUNCH(KS_, 13, NT_); break;                                      \
+          case 14: RAD_WIDE_LAUNCH(KS_, 14, NT_); break;                                      \
+          case 15: RAD_WIDE_LAUNCH(KS_, 15, NT_); break;                                      \
+          default: RAD_WIDE_LAUNCH(KS_, 16, NT_); break;                                      \
+        }
+#define RAD_WIDE_BY_KS(NT_)                                                                   \
+        if (wks == 1)      { RAD_WIDE_BY_TM(1, NT_); }                                        \
+        else if (wks == 2) { RAD_WIDE_BY_TM(2, NT_); }                                        \
+        else               { RAD_WIDE_BY_TM(4, NT_); }
+        if (dec_nt) { RAD_WIDE_BY_KS(true); } else { RAD_WIDE_BY_KS(false); }
+#undef RAD_WIDE_BY_KS
+#undef RAD_WIDE_BY_TM
+#undef RAD_WIDE_LAUNCH
+        return;
+      }
+    }
 #define RAD_FOLDED_E(TN_, WP_, EF_, E6_)                                                        \
     do {                                                                                        \
       constexpr int B_ = BNF_OF(TN_);                                                           \

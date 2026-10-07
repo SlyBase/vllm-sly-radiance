@@ -1,6 +1,6 @@
 # Changelog
 
-Every image version (`VERSION`, image tag `vllm-sly-radiance:<version>-rocm10.0`) has a section here.
+Every image version (`VERSION`, image tag `vllm-sly-radiance:<version>-rocm10.1`) has a section here.
 The section of a version is the body of its GitHub release: `ci/release_tag.sh` publishes it when the
 `v<version>` tag is cut, and `ci/check_consistency.py` fails a PR that bumps `VERSION` without one.
 Measurements are on one AMD Radeon AI PRO R9700 with `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` + the DFlash2
@@ -9,6 +9,71 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
+
+## [1.0.0] - 2026-10-08
+
+Longer prefills are faster, the KV pool is 11.5 % larger, concurrent decode is ~5 % faster, and the image moves to
+ROCm 10.1 with torch 2.12. All measured on one R9700 at 210 W with the production launch, A/B/A in one GPU window,
+second start.
+
+### Added
+- **`--attention-backend R4D_HYBRID`**: libr4d's paged prefill attention for prefill runs of 512 tokens or more
+  (`RADIANCE_R4D_PREFILL_MIN_Q`), AITER unified attention for everything else, so decode, graphs and KV pool stay as
+  they were. Prefill 2k / 8k / 32k / 64k **+2 / +3 / +13 / +23 %** (2375 / 2410 / 1976 / 1555 -> 2428 / 2506 / 2229 /
+  1919 tok/s). Plain `--attention-backend R4D` is not recommended: decode 60.9 instead of 34.9 ms per step.
+- **`RADIANCE_ADAPTIVE_WIDTH=perseq`**: per-request verify width (port of the Radiance engine's `adaptive_k`) on
+  varlen FULL decode graphs. 8 concurrent requests with arrivals **+4.7 %** (401.7 / 403.5 -> 421.4 tok/s); one stream is
+  untouched (bit-identical greedy output). Why ggz14's dynamic width lost and this one does not: TECHNICAL.md.
+- **`RADIANCE_MXFP4_WIDE_MAX_M=192`**: the split-K decode GEMM kernel for M 129..192 instead of the padded 256-row tile.
+  Time to first token of a 160-token prompt **-13.8 %** (109.6 -> 94.4 ms), c8 with arrivals +1.7 %. 192 is the edge:
+  the folded tile is faster again at 256.
+- Test packages of this work in `sly/tests/lessons/`.
+
+### Changed
+- **KV pool 391,193 -> 436,097 tokens (+11.5 %)** at 262k context: `--gpu-memory-utilization 0.98` with
+  `--compilation-config.cudagraph_mode FULL_DECODE_ONLY` (was 0.9655 with FULL_AND_PIECEWISE). CUDA graph memory 1.24 ->
+  0.22 GiB, peak activation 1.69 -> 0.65 GiB. Decode step, c8 and TTFT unchanged; 64k prefill runs without OOM. Util
+  0.98 alone gives 404,947.
+- **ROCm 10.1** (`rocm/dev-ubuntu-24.04:10.1.0-full`, HIP 7.16) and AMD's **torch 2.12.0+rocm10.1.0** (AMD ships no 2.11
+  for 10.1), torchvision 0.27.0; triton 3.6.0, aiter 0.1.22.post1, vLLM 0.30.0 unchanged. Image tag
+  `1.0.0-rocm10.1`. The torch >= 2.12 CPU spin that held torch back is fixed in ROCm 10.1. Performance is neutral (step
+  35.35 / 35.59 / 35.13 ms, prefill within 1-2 %). Fresh compile caches on first start; to stay on 10.0 see TECHNICAL.md.
+- README reference launch, options table and docs layout updated; the KV pool reference in AGENTS.md is now 436,906 (the full 1.0 launch, warm compile cache).
+- `tests-lessons/` moved to `sly/tests/lessons/`; the working notes are folded into TECHNICAL.md.
+
+### Removed
+- `NOTES-A/D/F/H.md` (content is in `docs/TECHNICAL.md`, section 1.0.0).
+
+### Credits
+- The adaptive verify width and the band findings (wide decode tile) come from the Radiance engine fork
+  ([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork slydlake/radiance); the prefill
+  kernel is libr4d.
+
+### Measured
+- Prefill (tok/s, control / R4D_HYBRID / control): 2k 2375 / 2428 / 2380, 8k 2410 / 2506 / 2450, 32k 1976 / 2229 / 1970,
+  64k 1555 / 1919 / 1554. Greedy step 35.12 / 35.05 / 35.14 ms, c8 arrivals 395.7 / 391.8 / 395.9 tok/s, short-prompt
+  greedy text identical, prompt NLL delta -0.0007.
+- KV pool 436,097 (util 0.98 + FULL_DECODE_ONLY); greedy 34.89 ms (control 34.88 / 36.68), c8 401.9 (control 401.7 /
+  414.4), TTFT 72 / 256 / 904 tokens unchanged, 64k prefill 1572.
+- Wide band (edge 256 in the server run): TTFT 160 tokens 109.6 / 109.4 -> 94.4 ms, other prompts within 0.6 % except 256
+  tokens (+9.7 %, hence the edge 192), c8 405.4 / 406.2 -> 412.8, greedy identical for prompts <= 160 tokens.
+- Adaptive width: c8 arrivals off 401.7, uniform 408.8, perseq 421.4, off2 403.5; c4 steady unchanged; 30 % of decisions
+  shortened, 4.15 verify rows saved per step; 8-way concurrent greedy diverges at near-ties (batch-shape numerics).
+- ROCm 10.1: greedy 35.35 / 35.59 / 35.13 ms, prefill 2k 2357 / 2344 / 2385, 8k 2432 / 2382 / 2401 tok/s, KV 385,934 on
+  the second start of the test run (fresh cache dirs), greedy text 4 of 8 identical (A/A: 8 of 8).
+- **Release candidate as shipped** (ROCm 10.1 image, all 1.0 flags) against 0.7.0, same window, 210 W, base1 / rc / base2:
+  KV pool 391,193 / **430,433** / 391,193 (+10 %; the varlen graphs of `perseq` and the 10.1 runtime take ~6k of the
+  436k from the util/graph change alone); greedy 34.84 / 35.04 / 35.06 ms; TTFT 160 tokens 103.8 / **93.1** / 106.3 ms;
+  prefill 8k / 32k / 64k 2666 / **2737** / 2556, 2128 / **2376** / 2083, 1645 / **2025** / 1627 tok/s (+5 / +13 / +24 %);
+  c8 arrivals 418.3 / 411.0 / 407.9 (neutral in the combination; the isolated +4.7 % of `perseq` does not show here);
+  multi-turn follow-up with a prefix hit 3.3–3.6 s on both.
+- GSM8K 200 (cot zero-shot, greedy, flexible-extract): 0.84 (0.7.0 in the same window: 0.83).
+- **BetterBench full at 300 W** (1.0.0 then 0.7.0, same window): weighted decode 135.8 / 137.4 tok/s (within noise);
+  prefill 1.5k / 6k / 12k / 24k / 47k 3132 / 3136 / 3105 / 2949 / 2635 against 3108 / 3049 / 2946 / 2648 / 2164 tok/s
+  (+1 / +3 / +5 / +11 / +22 %); concurrency 1 / 2 / 4 / 8 / 16 120 / 213 / 338 / 461 / 466 against 121 / 219 / 338 /
+  446 / 449 tok/s; TTFT 47k 17.9 s against 21.7 s; KV pool 436,906 against 391,193 tokens.
+- Not adopted (docs/NOT-ADOPTED.md): gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM state, draft refill
+  after a prefix hit, plain R4D backend.
 
 ## [0.7.0] - 2026-10-04
 

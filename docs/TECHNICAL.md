@@ -558,12 +558,127 @@ Launch: the production command with `-e RADIANCE_PAROQUANT=1` (or `RADIANCE_AUTO
 `RADIANCE_ESCHA=1`), `--model <checkpoint>` and **no** `--quantization` flag (the config is picked
 from the checkpoint).
 
+## 1.0.0: what the release adds, and the measurements behind it
+
+All numbers: 2026-10-07/08, 210 W, one R9700, production launch with the Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 target and
+DFlash2 k = 7, A/B/A in one GPU window, measured on the second start. Lessons ported from the Radiance engine fork
+([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork slydlake/radiance): the adaptive verify
+width and the M-band findings. The test packages are in `sly/tests/lessons/`.
+
+### R4D_HYBRID: libr4d prefill attention, AITER for everything else (`--attention-backend R4D_HYBRID`)
+
+`--attention-backend R4D` (libr4d for prefill and decode) prefills 64k +19 % faster, but decode costs 60.9 ms per step
+against 34.9 and c8 falls to 302 from ~402 tok/s; the constant ~25 ms (flat over all prompt categories, so not acceptance
+or context dependent) is the R4D backend's host side, not the decode kernel: it subclasses the Triton backend (different
+metadata builder, a 16-token kernel block, so manager page 880 and a 16384-column block table expanded 55x per step, no
+verify tune, bf16 instead of fp8 queries). The cause was not isolated further; the hybrid sidesteps it.
+
+`R4D_HYBRID` is `ROCM_AITER_UNIFIED_ATTN` (AITER's builder, layout, block size 896, graph class, verify tune) plus one
+routing rule: per step, runs of equal-length requests with q >= `RADIANCE_R4D_PREFILL_MIN_Q` (512) go to one libr4d paged
+prefill launch, the rest (decodes riding along with a chunk) to one AITER sub-batch. On a decode or verify step
+(`max_query_len < 512`) no plan is computed and `forward` is `super().forward`, so decode, graphs and KV pool are the
+control's by construction.
+
+- **KV layout.** libr4d wants 16-slot blocks but takes block and head strides as arguments. A 896-slot block `b` is read as
+  56 sub-blocks with `block_stride = 16*C` and kernel block id `b*(S0/(16*C)) + j`; the expanded table is built once per
+  step (first R4D layer, cached on the metadata, shared by the 16 attention layers), only on steps with a long run. Geometry
+  (stride(3) = 1, stride(2) = C, N % 16, S0 % (16*C)) is checked at the first call of each layer; a cache that fails it runs
+  AITER only and logs why once.
+- **Fallback to AITER for the whole step** on: no libr4d, geometry other than head_dim 256 / GQA 6 / decoder, sliding
+  window, alibi, sinks, soft cap, non-causal, fused output quantization, non-bf16 output, graph capture.
+- **Precision.** The AITER path already does QK^T in fp8 and P.V with fp8 P (the layer hands the kernel an fp8 q with
+  static scale 1.0; K/V tiles are cast to the q dtype), so the hybrid's f16-leg libr4d attention is the more accurate of the
+  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) stays off: with plain R4D it gave 64k 1918 tok/s
+  (+2 % over the f16 legs), not worth the accuracy cost.
+- **Measured** (tok/s, A/B/A control, hybrid, control): prefill 2k/8k/32k/64k C1 2375/2410/1976/1555, H
+  2428/2506/2229/1919, C2 2380/2450/1970/1554, i.e. +2/+3/+13/+23 %. Greedy step 35.12/35.05/35.14 ms, c8 arrivals
+  395.7/391.8/395.9 tok/s, short-prompt greedy text identical, prompt NLL delta -0.0007. Prompts that reach libr4d (one chunk
+  >= 512 tokens) can differ from the control late in the text (different rounding). Prefix-cache hits shorten q and may drop
+  a run below 512 (AITER, intended).
+- The new backend name changes the compile cache key: the first start compiles fresh, start twice.
+
+### Memory: util 0.98 + FULL_DECODE_ONLY
+
+`--compilation-config.cudagraph_mode FULL_DECODE_ONLY` captures only the FULL decode graphs, not the ~65-piece PIECEWISE
+set. CUDA graph memory 1.24 -> 0.22 GiB and the profiled peak activation 1.69 -> 0.65 GiB; with
+`--gpu-memory-utilization 0.98` the KV pool grows 391,193 -> **436,097 tokens (+11.5 %)** (util 0.98 alone: 404,947). Greedy
+34.89 ms (control 34.88 / 36.68), c8 401.9 (control 401.7 / 414.4), TTFT 72/256/904 tokens unchanged, 64k prefill 1572 with
+no OOM. The price: steps that are not a pure uniform decode batch (a prefill chunk, a mixed step) run eagerly instead of
+on piecewise graphs; at 210 W with 2048-token chunks this showed no TTFT or c8 difference. Keep the capture-size list.
+
+### MXFP4 wide decode band: `RADIANCE_MXFP4_WIDE_MAX_M=192`
+
+M in 1..128 is served by the split-K decode kernel; 129..512 fell to the folded 256-row tile (M = 129 computes 256 rows, up
+to 49 % padding). Radiance's `dec=1` finding transfers: `launch_impl()` now dispatches M in (128, WIDE_MAX_M] to the same
+decode kernel with 9..16 M fragments (`DWN=8, BK=64, TM=9..16`; TM16 = 225 VGPRs, 27.6 KB LDS, 0 spills). Split table: N
+blocks >= 48 -> 1 (gate_up, qkvz, qkv), <= 8 -> 4 (in_proj_ba), K >= 6144 -> 4 for M <= 192 else 2, else 1; a split that does
+not fit the existing 72 MiB scratch falls to the folded kernel (no VRAM added, KV pool unchanged). Needs `WPERM=1`, plain
+MXFP4 (no MXFP6 plane), N <= 36864. With split 2/4 fp32 partials sum in a different order (bf16 may differ by 1 ulp).
+
+Why 192 and not 256: kernel bench, GEMM sum per step, M160 -16.8 %, M192 -6.1 %, **M256 +11.3 %**: near 256 the folded tile
+is full and wins. Server A/B/A (run with 256): TTFT of a 160-token prompt 109.6/109.4 -> 94.4 ms (-13.8 %), other prompts
+within 0.6 % except 256 tokens, which got 9.7 % slower with the edge at 256 (the wide kernel loses to the full folded tile there); c8 arrivals 405.4/406.2 ->
+412.8 tok/s; greedy identical for prompts <= 160 tokens. Set 192 to keep the gain and drop the 256 loss.
+
+### Adaptive verify width: `RADIANCE_ADAPTIVE_WIDTH=perseq`
+
+The drafter emits all 7 tokens in one pass, so the verify width only decides how many target rows a step spends (about
+0.39 ms each: 33 ms at M 8, 55 ms at M 64) plus the drafter's context K/V rows, which mirror the target step. Requests with
+poor acceptance waste rows. Port of Radiance's `core/sched/adaptive_k`: maximise `sum_i E_i(k_i) / T(M)` with
+`E_i(k) = 1 + sum_{j<=k} q_i^j`, `T(M) = a + b*M` (`RADIANCE_AW_COST_A/B`, 29.9 / 0.393), widths from {1,3,5,7}, nothing
+shrunk below 32 unshrunk rows (single stream untouched), censored per-request acceptance estimates (decay 0.25, prior of 2
+pseudo-positions to the pool mean), total rows a multiple of 8. Lossless: the drafts stay 7 per request on the GPU and the
+worker verifies a prefix.
+
+**Why ggz14's `patch_dynwidth` lost (-3 % at conc 4/8/16) and this one wins.** V2's FULL graph dispatch needs a uniform decode
+batch (`get_uniform_decode_token_count`: `num_tokens == max_query_len * num_reqs`, no prefill row) and FULL descriptors are
+captured for exactly one query length. ggz14 capped each request to `ceil(EMA)+2`; one capped request makes the batch
+non-uniform, i.e. almost every step, and the step falls to PIECEWISE: ~65 pieces (16 attention + 48 GDN layers, with
+`unified_attention_with_output` and `qwen_gdn_attention_core` as splitting ops run eagerly in between). That costs about as
+much as the ~10 % of rows trimming saves (2-3 ms at c8). Upstream's `AdaptiveVerificationManager` is no way out (needs
+every builder `ALWAYS` plus the cpu-query-len flag; the GDN builder is `UNIFORM_BATCH`) and its static per-batch-size width
+only has graphs at `round_up(size, q)` token counts. This patch keeps the FULL graph for non-uniform batches: it captures
+**varlen FULL decode graphs** (capture sizes 16..64 tokens, 8 request slots, promised `max_query_len` 8) next to the uniform
+ones. Unified attention, `causal_conv1d_update`, the GDN recurrent kernels and the sampler read `query_start_loc` at run
+time; padded requests are zero-length rows with `NULL_BLOCK_ID` state (the case a partially filled graph already has). The
+uniform graph stays first in the candidate order, so full-width batches replay as before. A dispatch guard gives batches with
+a prefill row or a row without drafts `max_query_len=None`, so they never match a varlen graph. Capture uses the promised
+`max_query_len` in `mamba_hybrid.prepare_attn`. Under async scheduling every decode request shares one placeholder list; the
+patch copies it per request after the decision (ggz14's first patch trimmed in `update_draft_token_ids`, which async never
+calls). Observations lag one step, which the exponential estimate absorbs. `uniform` (one width per batch, tier graphs per
+(requests, width+1)) and `RADIANCE_AW_VARLEN_GRAPH=0` (per-request widths on PIECEWISE, the diagnosis arm) remain as modes.
+
+Measured, c8 with arrivals (tok/s): off 401.7, uniform 408.8, **perseq 421.4**, off2 403.5, i.e. +4.7 %; c4 steady unchanged;
+30 % of decisions shortened, 4.15 verify rows saved per step; single-stream greedy bit-identical. 8-way concurrent greedy
+diverges at near-ties, attributed to batch-shape numerics (different M changes GEMM rounding).
+GSM8K gate: pending. Diagnostics: `RADIANCE_AW_LOG_EVERY`, `RADIANCE_AW_GRAPH_STATS=1`. Not for data parallelism; the sync
+scheduler path is implemented but untested.
+
+### ROCm 10.1 base (-rocm10.1)
+
+`rocm/dev-ubuntu-24.04:10.1.0-full` (HIP 7.16, clang 24), AMD's `torch==2.12.0+rocm10.1.0` wheel (there is no 2.11 build for
+10.1), torchvision 0.27.0 compiled against it, triton 3.6.0 (PyPI) and aiter 0.1.22.post1 unchanged. torch 2.12.0 is the
+lowest AMD ships for 10.1 (2.13 with triton 3.7.1 is the combination that hung the GPU in 0.5.0-0.5.4). The torch >= 2.12
+CPU spin (ROCm/ROCm#6406, backoff in libhsa-runtime64's `AsyncEventsLoop`) is fixed in 10.1; Renovate's torch cap is 2.12.x.
+ROCm 10.1 ships amdsmi's Python package without setup.py: an `amdsmi_rocm.pth` puts `/opt/rocm/share/amd_smi` on sys.path
+and the build asserts the library loaded. The image grows by 0.34 GB (5.62 vs 5.28). To stay on 10.0: `--build-arg
+ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full TORCH_AMD_ROCM=10.0.0 TORCH_VERSION=2.11.0 TORCHVISION_VERSION=0.24.1`.
+Measured A/B/A (base1 / rc / base3): greedy 35.35 / 35.59 / 35.13 ms, prefill 2k 2357/2344/2385, 8k 2432/2382/2401 tok/s, KV
+385,934 on the rc's second start (391,193 base; the rc used fresh cache dirs and logged inductor cubin-reload warnings),
+greedy text 4 of 8 identical against 8 of 8 in an A/A: neutral within ~1-2 %. Production cache directories hold 10.0
+artefacts; mount fresh ones or accept the double start on rollout.
+
+### Measured and not merged
+
+See docs/NOT-ADOPTED.md, section *Own measurements, 1.0*: gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM
+state, draft refill after a prefix hit, plain R4D and `R4D_ATTN_FP8`.
+
 ## Build details
 
-- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
+- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
-- PyTorch 2.14.0, torchvision 0.29.0, Triton 3.8.0, aiter 0.1.22.post1, transformers 5.17.0, vLLM 0.30.0; libr4d pinned
+- PyTorch 2.12.0 (AMD's rocm10.1 wheel), torchvision 0.27.0, Triton 3.6.0, aiter 0.1.22.post1, transformers 5.18.0, vLLM 0.30.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.
