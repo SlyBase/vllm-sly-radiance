@@ -55,13 +55,13 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe348
 # part of ROCm 10.1 -- sly/tests/lessons/F/test.sh checks the idle CPU of the engine.
 ARG TORCH_VERSION=2.12.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TRITON_VERSION=3.6.0
+ARG TRITON_VERSION=3.8.0
 # sha256 of triton-${TRITON_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl on
 # PyPI (https://pypi.org/pypi/triton/<version>/json, digests.sha256). Bump together with
 # TRITON_VERSION: a stale hash fails the build at the download, it never installs the wrong file.
 ARG TRITON_SHA256=74caf5e34b66d9f3a429af689c1c7128daba1d8208df60e81106b115c00d6fca
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.27.0
+ARG TORCHVISION_VERSION=0.29.1
 # HELD at 0.1.22.post1 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
 # `aiter.ops.triton.unified_attention` (the kernel lives only at aiter.ops.triton.attention.
 # unified_attention now), and vLLM 0.30.0's rocm_aiter_unified_attn backend still imports the old
