@@ -1,0 +1,41 @@
+name: stale-issues
+
+# Inactive issues get a warning after 7 days and are closed 3 days later (10 days in total).
+# Any new comment or label change resets the clock and removes the `stale` label.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      debug_only:
+        description: dry run (log what would happen, change nothing)
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/stale@v10
+        with:
+          days-before-issue-stale: 7
+          days-before-issue-close: 3
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          stale-issue-label: stale
+          exempt-issue-labels: keep-open,pinned,security
+          exempt-all-issue-milestones: true
+          remove-stale-when-updated: true
+          operations-per-run: 100
+          debug-only: ${{ inputs.debug_only == true }}
+          stale-issue-message: >
+            This issue has had no activity for 7 days and is marked as stale.
+            It will be closed in 3 days (10 days of inactivity in total) unless
+            there is new activity. Comment here if it is still relevant.
+          close-issue-message: >
+            Closed after 10 days without activity. Reopen it or open a new issue
+            if the problem still exists.
