@@ -114,7 +114,7 @@ reproduction still has to be built before this can be filed; see kv-cache-known-
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, skip_if_upstream
 
 SP = Path(sysconfig.get_paths()["purelib"])
 TARGET = SP / "vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py"
@@ -156,6 +156,21 @@ apply(
     "radiance kill switch (RADIANCE_OFFLOAD_MIXED_HIT=0)",
     "offload decline mixed hit (kill switch)",
 )
+
+# --- vLLM >= 0.30 (image 0.4.0+): hunks 3 and 4 have no target --------------------------
+# update_state_after_alloc now scans for the first fresh block at or above the request's
+# local boundary (`first_fresh_gpu_block_idx`) instead of loading from each group's own block
+# count, so a lagging window group is never loaded from below start_chunk_idx -- the second
+# defect above cannot occur -- and the boundary assertion of hunk 4 is gone with it. The gap a
+# lagging drafter group keeps below the boundary only feeds draft proposals, which the target
+# verifies. Hunks 1-2 (the kill switch) still apply.
+if skip_if_upstream(
+    TARGET,
+    "first_fresh_gpu_block_idx",
+    "offload window-group lookback + boundary diagnostics",
+    "vLLM >= 0.30 loads from the local boundary (first_fresh_gpu_block_idx); nothing to fix",
+):
+    raise SystemExit(0)
 
 # --- hunk 3: confirm the chunks a lagging window group will actually load ------------
 apply(
