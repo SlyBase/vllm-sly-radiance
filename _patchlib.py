@@ -54,3 +54,17 @@ def apply_any(path, variants, sentinel, label):
             print(f"  OK    {label}" + (f" (shape {i + 1})" if i else ""))
             return
     raise SystemExit(f"  FAIL  {label}: no shape matched, counts {counts} ({path})")
+
+
+def skip_if_upstream(path, marker, label, reason):
+    """True, with a SKIP line, when `marker` is in `path`: the installed tree already carries what
+    the hunk would add, or restructured the code so the hunk has no target any more. The caller
+    then leaves the file alone. The marker is a string the newer tree has and the older one does
+    not (check both before choosing it), so the same patch keeps applying on the older image. A
+    SKIP is not a FAIL: the launcher's fatal patches exit 0 on it."""
+    if not path.exists():
+        raise SystemExit(f"  FAIL  {label}: {path} missing")
+    if marker in path.read_text():
+        print(f"  SKIP  {label}: {reason}")
+        return True
+    return False
