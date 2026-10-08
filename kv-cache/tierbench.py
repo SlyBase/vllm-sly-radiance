@@ -161,14 +161,21 @@ def budget_check():
         raise Abort("runtime cap of %ds exceeded" % RUNTIME_CAP_S)
 
 
+def json_headers():
+    """Request headers for the OpenAI endpoints. A server started with VLLM_API_KEY rejects
+    unauthenticated requests (/metrics stays open); TIERBENCH_API_KEY supplies the token."""
+    headers = {"Content-Type": "application/json"}
+    if os.environ.get("TIERBENCH_API_KEY"):
+        headers["Authorization"] = "Bearer " + os.environ["TIERBENCH_API_KEY"]
+    return headers
+
+
 def http(url, payload=None, timeout=30, raw=False):
     if payload is None:
         req = urllib.request.Request(url)
     else:
         req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
+            url, data=json.dumps(payload).encode(), headers=json_headers()
         )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         body = r.read().decode()
@@ -444,7 +451,7 @@ def chat(base, text, tag, max_tokens=MAX_TOKENS):
     req = urllib.request.Request(
         base + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=json_headers(),
     )
     t0 = time.time()
     ttft, usage, ntok = None, None, 0
