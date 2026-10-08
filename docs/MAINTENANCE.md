@@ -32,7 +32,7 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
    PR's vLLM, image build with CPU import smoke. If the patch dry run is red on a `stack` PR, job
    `reanchor-brief` POSTs the signed brief (once per head sha) to the Hermes route (see interfaces).
    Hermes pushes fixes to the PR branch, CI re-runs.
-3. **Night gate** (`accept-night.yml`, cron `0 2,3 * * *` UTC; proceeds only when the Berlin hour is 4):
+3. **Night gate** (`accept-night.yml`, cron `17 2,3 * * *` UTC; proceeds only when the Berlin hour is 4):
    picks the lowest open `stack` PR whose CI is fully green for the current head sha
    (`ci/night_pick.py`), runs `ci/accept/accept.py` with owner `accept-night` against the baseline of the
    current release. Budget: start by 04:10, `--deadline` 05:45 (no phase starts later; the release phase still

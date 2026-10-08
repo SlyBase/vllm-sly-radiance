@@ -16,7 +16,7 @@
 # a commit comment on main's head with the report; the same head is not retried.
 #
 # Time window. The GPU may be taken ONLY between 04:00 and 06:00 Europe/Berlin: it stops Radiance (the
-# production LLM, LXC 2413) and must give it back before 06:00. Two crons (02:00 and 03:00 UTC) cover
+# production LLM, LXC 2413) and must give it back before 06:00. Two crons (02:17 and 03:17 UTC, off the full hour: GitHub drops top-of-hour schedule events) cover
 # summer and winter time; the `plan` job proceeds only if the Berlin hour is 4. The budget inside the window:
 # acquire patience until ~04:10, accept.py --deadline 05:45 (no phase starts after it), TTL ends 05:50.
 # gpu-window enforces the same on its side: owner `accept-night` is refused outside 04:00-06:00 and its TTL
@@ -29,8 +29,8 @@ name: accept-night
 
 on:
   schedule:
-    - cron: "0 2 * * *"
-    - cron: "0 3 * * *"
+    - cron: "17 2 * * *"
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       pr:
