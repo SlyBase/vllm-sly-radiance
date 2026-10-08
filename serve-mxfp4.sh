@@ -901,7 +901,8 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 # the repo's _patchlib the same way the in-repo patches do. The 6 "always" patch gates are
 # set to the validated (exactness) values; mixed-hit and instrumentation are FATAL (required
 # for correct bit-identical serving), the rest are non-fatal (a missed hunk degrades, never
-# blocks serving).
+# blocks serving). On vLLM >= 0.30 (image 0.4.0+) several hunks report SKIP because upstream
+# carries them (kv-cache/README.md, "vLLM 0.30 and later"); a SKIP exits 0.
 # ---------------------------------------------------------------------------
 KVCACHE=${KVCACHE:-off}
 KVCACHE_RAM_GIB=${KVCACHE_RAM_GIB:-16}
@@ -915,10 +916,14 @@ case "$KVCACHE" in
   off|"")
     : ;;
   ram|disk)
+    # MAMBA_STORE_STRIDE and SWA_STORE_MAMBA_ALIGN only reach the 0.27.1 hunks; on vLLM >= 0.30
+    # those hunks are skipped (upstream retention does it) and the two knobs are inert.
     KVCACHE_ENV=(-e RADIANCE_OFFLOAD_MIXED_HIT=1 -e RADIANCE_OFFLOAD_EAGLE_GROUPS=1 \
       -e RADIANCE_MAMBA_STORE_STRIDE=4 -e RADIANCE_RECONCILE_REASK=1 \
       -e RADIANCE_SWA_STORE_MAMBA_ALIGN=1 -e RADIANCE_TOUCH_ALL_GROUPS=1 \
-      -e RADIANCE_TOUCH_POSITION_ORDER=1 -e RADIANCE_ALIGN_PROMPT_LAST_BLOCK=1)
+      -e RADIANCE_TOUCH_POSITION_ORDER=1 -e RADIANCE_ALIGN_PROMPT_LAST_BLOCK=1 \
+      -e RADIANCE_SWA_EAGLE_REPLAY_TAIL=1 \
+      -e RADIANCE_OFFLOAD_BOUNDARY_TRACE="${RADIANCE_OFFLOAD_BOUNDARY_TRACE:-0}")
     KVCACHE_TIER=(--kv-offloading-size "$KVCACHE_RAM_GIB" --kv-offloading-backend native)
     # vLLM leaves its RAM tier behind in /dev/shm when the container stops, and the next boot
     # then cannot fit its own. Remove regions no live process holds (fuser/lsof decide; with
@@ -943,6 +948,9 @@ case "$KVCACHE" in
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_reconcile_reask.py || echo "[kv-cache] WARNING: reconcile-reask did not apply"'
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_swa_align_touch.py || echo "[kv-cache] WARNING: swa-align/touch did not apply"'
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_sched_align_last_block.py || echo "[kv-cache] WARNING: align-last-block did not apply"'
+    # vLLM >= 0.30 only (SKIP before): the tier hit lands one turn back without it; trace is silent unless enabled
+    _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_swa_eagle_replay_tail.py || echo "[kv-cache] WARNING: eagle-replay-tail did not apply"'
+    _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_boundary_trace.py || echo "[kv-cache] WARNING: boundary-trace did not apply"'
     if [ "$KVCACHE" = disk ]; then
       # disk-only setup: mount the host fs at /kvcache, pin PYTHONHASHSEED (block filenames
       # are content hashes), wire the fs secondary tier.
