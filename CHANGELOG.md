@@ -10,6 +10,41 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.2.0] - 2026-10-07
+
+### Added
+- **Sharded MXFP4 checkpoints (low-RAM loading) + local source reuse.** `fp8_mtp.py`
+  (the one-time build behind `setup-mxfp4.sh`) now reads a source checkpoint in **either**
+  layout — AMD's single `model.safetensors` **or** the standard HF sharded layout
+  (`model.safetensors.index.json` + `model-0000X-of-0000Y.safetensors`) — and **writes sharded
+  output by default** (5 GiB shards; `RADIANCE_SHARD_GIB` to resize, `RADIANCE_SINGLE_FILE=1` to
+  restore the single-file output). A sharded checkpoint is what unblocks 16 GiB hosts: vLLM loads
+  it shard-by-shard (one shard mapped at a time), so the peak host RAM for the weight load is the
+  largest shard instead of the whole ~19 GiB model. The serve path (`serve-mxfp4.sh`) is already
+  layout-agnostic — it hands vLLM the checkpoint directory — so a sharded build serves with no
+  further change. Every copied body tensor is byte-identical to the source (verified), and the
+  fp8 MTP head is unchanged (same `F8_E4M3` dtype, per-channel scale, ~2 % rel err).
+- **`SRC_LOCAL` in `setup-mxfp4.sh`: reuse an already-downloaded source snapshot.** Point
+  `SRC_LOCAL` at a directory holding `model.safetensors` or `model.safetensors.index.json` (any
+  layout) and the ~19 GiB pull is skipped — machines that already have the weights via another
+  workflow no longer re-download them. The container mount now bind-mounts the source at `/src`
+  (was: the HF cache path), so a local directory anywhere on the host works, not just a snapshot
+  under `~/.cache/huggingface`.
+
+### Changed
+- `setup-mxfp4.sh` step 3 reports "source checkpoint" (was: "AMD's MXFP4 release"); the
+  reclaim-`~19 GiB` hint now only prints when a download actually happened (not for `SRC_LOCAL`).
+
+Measured: no kernel change, so decode/prefill/KV pool are unaffected. Engine memory with a
+16 GiB container cap, fresh boot per run, 4 runs: file-backed RSS of the engine 12.3-12.7 GiB
+(single file) vs 5.0-5.3 GiB (5 GiB shards), anonymous RSS 2.2 GiB in both, no OOM kills, load
+time unchanged (about 210-250 s to ready). The container cgroup still reaches its cap, and under
+real host pressure the single file swapped heavily; see docs/TECHNICAL.md. The change moves the one-time
+build and the serve-time weight load: a 16 GiB host loads a sharded checkpoint with peak RAM at one
+5 GiB shard instead of the full model (minutes vs. hours of swapping); a `SRC_LOCAL` snapshot skips
+the ~19 GiB pull. Copy fidelity is byte-exact (verified against a synthetic single-file **and**
+sharded source); the fp8 MTP head is numerically unchanged (~2 % rel err, MXFP4 was ~11.6 %).
+
 ## [1.1.1] - 2026-10-08
 
 ### Fixed
