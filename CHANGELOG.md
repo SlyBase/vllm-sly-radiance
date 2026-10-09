@@ -35,7 +35,11 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 - `setup-mxfp4.sh` step 3 reports "source checkpoint" (was: "AMD's MXFP4 release"); the
   reclaim-`~19 GiB` hint now only prints when a download actually happened (not for `SRC_LOCAL`).
 
-Measured: no kernel change, so decode/prefill/KV pool are unaffected. The change moves the one-time
+Measured: no kernel change, so decode/prefill/KV pool are unaffected. Engine memory with a
+16 GiB container cap, fresh boot per run, 4 runs: file-backed RSS of the engine 12.3-12.7 GiB
+(single file) vs 5.0-5.3 GiB (5 GiB shards), anonymous RSS 2.2 GiB in both, no OOM kills, load
+time unchanged (about 210-250 s to ready). The container cgroup still reaches its cap, and under
+real host pressure the single file swapped heavily; see docs/TECHNICAL.md. The change moves the one-time
 build and the serve-time weight load: a 16 GiB host loads a sharded checkpoint with peak RAM at one
 5 GiB shard instead of the full model (minutes vs. hours of swapping); a `SRC_LOCAL` snapshot skips
 the ~19 GiB pull. Copy fidelity is byte-exact (verified against a synthetic single-file **and**
