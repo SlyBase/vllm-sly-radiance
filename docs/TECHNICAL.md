@@ -709,3 +709,55 @@ and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what 
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.
 - The HIP kernel is a single-file pybind11 extension compiled with the image's own `hipcc` in the
   assemble stage; the patch scripts (`/opt/patches`) never reach the final image.
+
+## Sharded checkpoints: measured effect on host memory (PR #125, 1.2.0)
+
+Test host: Proxmox node with 29 GiB RAM and 8 GiB swap, LXC with the vLLM container
+(PR image `1.2.0-pr125`, production launch arguments, `--max-model-len 8192`). Two
+checkpoint layouts of the same weights (Quark-derived, 1695 tensors, 19.8 GB):
+
+- single file: one `model.safetensors`
+- sharded: 4 shards of at most 5 GiB, `model.safetensors.index.json`
+
+Each run started with the LXC freshly booted (page cache of the container empty), the
+container memory capped at 16 GiB (`--memory`), and the EngineCore process sampled once
+per second from `/proc/<pid>/status`.
+
+| Run | Other guests | Engine ready | File-backed RSS peak | Anonymous RSS peak | OOM kills |
+|---|---|---|---|---|---|
+| single, r1 | stopped | 251 s | 12.27 GiB | 2.17 GiB | 0 |
+| single, r2 | stopped | 211 s | 12.68 GiB | 2.17 GiB | 0 |
+| shards, r1 | stopped | 211 s | 5.30 GiB | 2.17 GiB | 0 |
+| shards, r2 | stopped | 222 s | 4.96 GiB | 2.17 GiB | 0 |
+| shards, r1 | running | 231 s | 5.25 GiB | 2.17 GiB | 0 |
+| shards, r2 | running | 212 s | 5.02 GiB | 2.17 GiB | 0 |
+
+Findings:
+
+- Sharding lowers the file-backed memory of the engine process from about 12.5 GiB to about
+  5 GiB. Anonymous memory is unchanged at about 2.2 GiB, so the change does not add memory.
+- Load time did not change measurably (about 210 to 250 s to ready in all runs).
+- The container cgroup still reached its 16 GiB limit in every run. Page cache fills free
+  memory, and sharding does not change that. The gain is in what the engine process maps,
+  not in what the container's cgroup counts.
+
+Host-pressure runs (the host had other guests running; the container had no or a 16 GiB limit):
+
+| Run | Host RAM available, minimum | Host swap | Pages swapped out / in | Memory pressure (PSI), peak | Engine ready |
+|---|---|---|---|---|---|
+| single, no container limit, other guests stopped | 8.8 GiB | 3.1 GiB before and during | about 15 MiB / 20 MiB | 2.4 % | 208 s |
+| single, 16 GiB limit, all guests running | 3.6 GiB | filled to 8 GiB | about 2.9 GiB / 1.6 GiB | 30.7 % | 241 s |
+
+Interpretation: with the host under real pressure, the single-file load swapped heavily
+even with the container capped at 16 GiB. The container limit does not protect against host
+pressure. The 16 GiB test with all guests running was done with the single file only; the
+shard variant under the same host pressure was not measured in the final series, so this
+document does not claim a crash-free result for shards on a fully loaded host.
+
+Limitations:
+
+- One host, one model, and one or two runs per configuration.
+- The sampling interval is one second and can miss short peaks.
+- The container's cgroup numbers include page cache; they show the limit being reached, not
+  the actual need.
+- No 16 GiB host was tested. The 16 GiB figure is a container cap on a 29 GiB host.
