@@ -714,7 +714,9 @@ and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what 
 
 Test host: Proxmox node with 29 GiB RAM and 8 GiB swap, LXC with the vLLM container
 (PR image `1.2.0-pr125`, production launch arguments, `--max-model-len 8192`). Two
-checkpoint layouts of the same weights (Quark-derived, 1695 tensors, 19.8 GB):
+checkpoint layouts of the same weights (the production `swift-heretic-gptq` checkpoint,
+compressed-tensors format, 1695 tensors, 19.8 GB; resharded and verified tensor by tensor
+against the source by SHA-256):
 
 - single file: one `model.safetensors`
 - sharded: 4 shards of at most 5 GiB, `model.safetensors.index.json`
@@ -745,8 +747,8 @@ Host-pressure runs (the host had other guests running; the container had no or a
 
 | Run | Host RAM available, minimum | Host swap | Pages swapped out / in | Memory pressure (PSI), peak | Engine ready |
 |---|---|---|---|---|---|
-| single, no container limit, other guests stopped | 8.8 GiB | 3.1 GiB before and during | about 15 MiB / 20 MiB | 2.4 % | 208 s |
-| single, 16 GiB limit, all guests running | 3.6 GiB | filled to 8 GiB | about 2.9 GiB / 1.6 GiB | 30.7 % | 241 s |
+| single, no container limit, vLLM and tts stopped, talosc3 and omv8 running | 8.8 GiB | 3.1 GiB before and during | about 15 MiB / 20 MiB | 2.4 % | 208 s |
+| single, LXC capped at 16 GiB, all other guests running (vllmci, radiance, talosc3, omv8) | 3.6 GiB | filled to 8 GiB | about 2.9 GiB / 1.6 GiB | 30.7 % | 241 s |
 
 Interpretation: with the host under real pressure, the single-file load swapped heavily
 even with the container capped at 16 GiB. The container limit does not protect against host
