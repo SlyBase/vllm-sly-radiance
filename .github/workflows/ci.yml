@@ -29,7 +29,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -56,7 +56,7 @@ jobs:
         run: docker buildx build --check .
 
   patch-dryrun:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -115,7 +115,7 @@ jobs:
   constraints:
     # constraints.txt must be exactly what pip resolves for the pinned vLLM (no missing, stale or
     # out-of-range pin): the guard that makes a Renovate bump of it mergeable without an image build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -181,7 +181,7 @@ jobs:
           exit 1
 
   consistency:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -204,7 +204,7 @@ jobs:
     # The Dockerfile's torch/triton/torchvision/aiter/transformers pins must be what the pinned vLLM
     # release and the ROCm base derive (ci/resolve_stack.py; deliberate deviations: ci/stack_overrides.json).
     # On a stack PR this is the "incompatible" check: no AMD wheel / unreadable vLLM pins = red = never merged.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -233,7 +233,7 @@ jobs:
       startsWith(github.head_ref, 'renovate/stack-') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       vars.AUTO_MAINTAIN != 'off'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       pull-requests: write
@@ -243,7 +243,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: patch-dryrun-logs
@@ -288,7 +288,7 @@ jobs:
     # aggregate status for the branch protection: one required check instead of five
     needs: [lint, patch-dryrun, constraints, consistency, resolve]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: all jobs succeeded?
         env:
