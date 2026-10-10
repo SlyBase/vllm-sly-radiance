@@ -66,7 +66,7 @@ env:
 jobs:
   plan:
     if: vars.AUTO_MAINTAIN != 'off'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       pull-requests: read
@@ -308,7 +308,7 @@ jobs:
     # merge + release; only for a pass with production healthy
     needs: [plan, gate]
     if: always() && needs.plan.outputs.kind != 'main' && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       actions: write
@@ -327,7 +327,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app_token.outputs.token }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: night-gate
           path: night
@@ -394,7 +394,7 @@ jobs:
     # unreleased main passed: Measured numbers + baseline through a PR (CHANGELOG.md and baselines only), then release
     needs: [plan, gate]
     if: always() && needs.plan.outputs.kind == 'main' && needs.plan.outputs.calibrate != 'true' && needs.gate.outputs.verdict == 'pass' && needs.gate.outputs.prod_ok == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       actions: write
@@ -411,7 +411,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app_token.outputs.token }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: night-gate
           path: night
@@ -474,7 +474,7 @@ jobs:
     # baseline calibration night: commit the recorded baseline (current release) to the PR branch, merge nothing
     needs: [plan, gate]
     if: always() && needs.plan.outputs.calibrate == 'true' && needs.gate.outputs.verdict != 'infra' && needs.gate.outputs.prod_ok == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -487,7 +487,7 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.ref }}
           token: ${{ steps.app_token.outputs.token }}
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: night-gate
           path: night
@@ -513,13 +513,13 @@ jobs:
   red:
     needs: [plan, gate]
     if: always() && needs.plan.outputs.calibrate != 'true' && (needs.gate.outputs.verdict == 'fail' || needs.gate.outputs.verdict == 'infra' || needs.gate.result == 'failure' || needs.gate.result == 'cancelled')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: write
       issues: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: night-gate
