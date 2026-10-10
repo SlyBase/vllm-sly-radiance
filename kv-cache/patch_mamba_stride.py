@@ -111,7 +111,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _patchlib import apply  # noqa: E402
+from _patchlib import apply, skip_if_upstream  # noqa: E402
 
 VLLM = Path(sys.prefix) / "lib" / f"python3.{sys.version_info.minor}" / "site-packages" / "vllm"
 if not VLLM.exists():
@@ -121,6 +121,23 @@ if not VLLM.exists():
 SCHED = VLLM / "distributed" / "kv_transfer" / "kv_connector" / "v1" / "offloading" / "scheduler.py"
 
 print("[radiance] R3.13 mamba store cadence")
+
+# vLLM >= 0.30 (image 0.4.0+) has this built in, and more of it. Mamba "align" groups no longer
+# go through _build_store_jobs at all (`requires_cow_source`): the KV cache manager hands the
+# connector one boundary state per retained checkpoint, and --prefix-cache-retention-interval
+# (default 0) retains only the replay boundary (prompt end) and shared-prefix junctions -- on
+# the GPU as well as in the tier. A positive value (a multiple of the block size) adds periodic
+# checkpoints, which is the stride, without this patch's dead zone: the prompt-end state is
+# always kept, so the next turn always finds its hit. RADIANCE_MAMBA_STORE_STRIDE is unused
+# on such a tree; nothing is written.
+if skip_if_upstream(
+    SCHED,
+    "requires_cow_source",
+    "R3.13 mamba store cadence",
+    "vLLM >= 0.30 stores Mamba states per retained checkpoint "
+    "(--prefix-cache-retention-interval, default 0 = replay boundary only)",
+):
+    sys.exit(0)
 
 # --- 1. the knob ------------------------------------------------------------------------
 apply(
