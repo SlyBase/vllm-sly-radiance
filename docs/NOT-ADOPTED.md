@@ -96,3 +96,15 @@ kernels — Transformers, stock vLLM and this image cannot load them.
 16-key tiles for long-prefill attention (+6.6 % attention), GDN gate read in place instead of copied, a GDN
 chunk-scan launch that fills the card in one round, and a fused GDN kernel for the speculative verify
 step (+1.5 % weighted decode, bit-exact to the old path).
+
+## TetraAttention: query quantization in the attention kernel's prologue (2026-10-10)
+
+Tried: the HIP kernel takes the bf16 query, rotates it (Walsh-Hadamard as a butterfly over the
+lane pair that holds a row's 256 dims), quantizes to int8 and parks the int4 planes -- one launch
+less per layer (the Triton `quantize_query`, 16 us graph-timed). Rejected: the prologue's 128 live
+floats push the kernel from 237 to 249 VGPRs, occupancy 6 -> 5 waves per SIMD, and the tile loop
+pays for that on every tile: +15-20 us per call at 19k context (1 sequence), +50 us at 4 sequences
+-- as much as or more than the launch it saves (graph-timed full path 150 vs 150 us at 1 sequence,
+561 vs 484 at 4). Scheduling barriers and staged loads removed the spills but not the occupancy
+loss. The un-rotation folded into the segment merge (`reduce_unrotate`) is kept: it costs nothing
+extra there. `sly/kv4/radiance_kv4h.hip` keeps the quantized query input (int4 by default, int8 as two planes).

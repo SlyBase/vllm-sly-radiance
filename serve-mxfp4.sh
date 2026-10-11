@@ -98,6 +98,9 @@ Everything is an environment variable; these are the ones worth knowing.
   ./gpu-detect.sh           print what was detected and which of these it would pick
 
   R4D_ATTN=1                R4D paged attention backend (0 = AITER unified attention)
+  KVCACHE_DTYPE=fp8         kv4 = 4-bit KV cache for the full-attention layers (TetraAttention,
+                            HIP int4-WMMA attention, ~1.75x the KV pool, KL vs bf16 at fp8's
+                            level; sly/kv4/README.md)
   FAST_DRAFT=1              int2 draft head with an exact rerank
   MIN_M=0                   M above which the W4A8 kernel takes over from aiter (0 = always)
   AUTO_R4D=1                build the pinned libr4d on first run (cached); 0 uses the image's
@@ -783,6 +786,27 @@ esac
 
 if [ "$R4D_ATTN" = "1" ]; then ATTN=R4D; else ATTN=ROCM_AITER_UNIFIED_ATTN; fi
 
+# KVCACHE_DTYPE: fp8 (default) or kv4. kv4 = the 4-bit KV cache of sly/kv4 for the full-attention
+# layers: vLLM's int4_per_token_head cache dtype and TetraAttention (backend TETRA, working name
+# KV4H; HIP int4/int8-WMMA attention, faster than the fp8 kernel at the verify and decode shapes),
+# the DFlash drafter on TetraAttention too (KV4_DRAFT_ATTN=TRITON_ATTN: vLLM's own int4 kernel made
+# fast by patch_int4_pth_rocm.py). ~1.75x the KV pool. Keep CHUNK >= 3456: the attention block is
+# 1664 tokens and a smaller budget prefills one block per step. An offload tier (KVCACHE=ram|disk)
+# written by an fp8 serve must not be reused.
+KVCACHE_DTYPE=${KVCACHE_DTYPE:-fp8}
+KV4_PRELUDE=""
+case "$KVCACHE_DTYPE" in
+  fp8) KV_DTYPE_FLAG=fp8 ;;
+  kv4)
+    KV_DTYPE_FLAG=int4_per_token_head
+    ATTN=TETRA; DRAFT_ATTN=${KV4_DRAFT_ATTN:-TETRA}   # the drafter's head-128 window attention runs on TetraAttention too; TRITON_ATTN = vLLM's int4 kernel (A/B)
+    KV4_PRELUDE+='    PYTHONPATH=/patches python3 /patches/sly/kv4/install_kv4.py'$'\n'
+    KV4_PRELUDE+='    PYTHONPATH=/patches python3 /patches/sly/kv4/patch_int4_pth_rocm.py || echo "[kv4] WARNING: drafter int4 patch did not apply"'$'\n'
+    [ "${KVCACHE:-off}" = off ] || echo "[radiance] WARNING: KVCACHE_DTYPE=kv4 with an offload tier: the tier must not hold blocks written by an fp8 serve (bytes are format-specific)" >&2
+    ;;
+  *) echo "KVCACHE_DTYPE must be fp8 or kv4 (got: $KVCACHE_DTYPE)." >&2; exit 1 ;;
+esac
+
 # Async scheduling overlaps the host's scheduling work with GPU execution, which is the standard
 # answer to a large launch gap. vLLM refuses it together with disable_padded_drafter_batch, so the
 # two are one switch here. The unpad lever is worth ~+50% single-stream on the 27B hybrids under
@@ -1070,6 +1094,12 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -e RADIANCE_GDN_PATHS="${RADIANCE_GDN_PATHS:-both}" \
   -e RADIANCE_GDN_NANTRACE="${RADIANCE_GDN_NANTRACE:-0}" \
   -e RADIANCE_MXFP4_KERNEL_N="${RADIANCE_MXFP4_KERNEL_N:-}" \
+  -e RADIANCE_KV4H_TILE="${RADIANCE_KV4H_TILE:-}" -e RADIANCE_KV4H_PREFILL_TILE="${RADIANCE_KV4H_PREFILL_TILE:-}" \
+  -e RADIANCE_KV4H_ROWTILES="${RADIANCE_KV4H_ROWTILES:-}" -e RADIANCE_KV4H_QPLANES="${RADIANCE_KV4H_QPLANES:-}" \
+  -e RADIANCE_KV4H_K_GROUP="${RADIANCE_KV4H_K_GROUP:-}" -e RADIANCE_KV4H_SEGMENTS="${RADIANCE_KV4H_SEGMENTS:-}" \
+  -e RADIANCE_KV4H_WINDOW_TPS="${RADIANCE_KV4H_WINDOW_TPS:-}" -e RADIANCE_KV4H_TUNE="${RADIANCE_KV4H_TUNE:-}" \
+  -e RADIANCE_KV4H_SCALE_STEPS="${RADIANCE_KV4H_SCALE_STEPS:-}" -e RADIANCE_KV4H_QMIN="${RADIANCE_KV4H_QMIN:-}" \
+  -e RADIANCE_KV4H_PREF="${RADIANCE_KV4H_PREF:-}" -e RADIANCE_KV4H_SCALE_CLIP="${RADIANCE_KV4H_SCALE_CLIP:-}" \
   -e RADIANCE_MXFP4_KERNEL_NK="${RADIANCE_MXFP4_KERNEL_NK:-}" \
   -e RADIANCE_MXFP4_CHECKALL="${RADIANCE_MXFP4_CHECKALL:-}" \
   -e RADIANCE_MXFP4_MHIST="${RADIANCE_MXFP4_MHIST:-0}" \
@@ -1119,7 +1149,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
     if [ "${RADIANCE_GDN_LAZY:-0}" = 1 ]; then python3 patch_gdn_lazy.py; fi   # TP=1 profile only; after the gdn builder patches it anchors on
     python3 patch_qwen3_thinkoff.py \
       || echo "[radiance] WARNING: thinkoff patch did not apply; thinking-off requests will return empty content"
-    '"${KVCACHE_PRELUDE}"'cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
+    '"${KV4_PRELUDE}${KVCACHE_PRELUDE}"'cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
     # radiance_drafthead.py is copied too so RADIANCE_DRAFT_RERANK can be swept without an
     # image rebuild. The repo copy was byte-identical to the 0.9.3 one before that knob existed.
     cp radiance_preamble.py /opt/radiance_preamble.py      # banner/preamble from the repo, not the baked copy
@@ -1145,7 +1175,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
     cd /
     exec /opt/radiance_entrypoint.sh "$@"' _ \
     "$CSNAP" --served-model-name ${SERVED_NAMES:-Qwen3.8 Qwen3.6 Qwen3.8-MXFP4} --host 0.0.0.0 --port "$PORT" \
-    --kv-cache-dtype fp8 --tensor-parallel-size "$TP" \
+    --kv-cache-dtype "$KV_DTYPE_FLAG" --tensor-parallel-size "$TP" \
     --gpu-memory-utilization "$GPU_UTIL" \
     ${KV_MEM:+--kv-cache-memory "$KV_MEM"} \
     ${KVCACHE_TIER[@]+"${KVCACHE_TIER[@]}"} \
