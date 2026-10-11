@@ -27,7 +27,8 @@ NO_BUMP_FILES = {".gitignore", ".dockerignore", ".hadolint.yaml", "renovate.json
 NO_BUMP_SUFFIXES = (".md",)
 # Offline measurement / check tools under sly/: COPYed into the assemble stage with the rest of
 # sly/, but never executed by a build step and not part of the final image (only /opt/vllm is).
-NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py")
+NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py",
+                "sly/tests/*.py")
 
 failures = []
 

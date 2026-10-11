@@ -6,7 +6,7 @@ Run it FIRST on a freshly started server (the prompts repeat across arms, not in
 import json, random, sys, urllib.request
 
 LENS = [72, 72, 110, 110, 160, 160, 200, 200, 256, 256, 400, 904]
-MODEL = "slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ"
+MODEL = "slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ"
 
 
 def run(url, out):

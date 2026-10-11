@@ -62,7 +62,7 @@ and will not unless something else gives) and GSM8K 200 against `ci/accept/basel
 
 1.0.0 first, then 0.7.0, one GPU window, firmware fan curve, BetterBench 0.4.0 default config (3 warmup + 20 passes per
 category, prefill 2 warmup + 8 runs per depth, concurrency 1–16 × 48 requests, T 0.7 / top_p 0.95 / top_k 20).
-Checkpoint: Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 (`slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ`) + `syvai/Qwen3.8-27B-DFlash2-W4A16`,
+Checkpoint: Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 (`slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ`) + `syvai/Qwen3.8-27B-DFlash2-W4A16`,
 k = 7, max-model-len 262144, fp8 KV, 8 sequences, chunk 2048. Each image with its own production arguments (1.0.0:
 `R4D_HYBRID`, util 0.98, `FULL_DECODE_ONLY`, `RADIANCE_MXFP4_WIDE_MAX_M=192`, `RADIANCE_ADAPTIVE_WIDTH=perseq`).
 Results on 2408: `/root/betterbench/results/vllm-1.0.0-full-20261007.json`, `vllm7-full-20261007.json`.
