@@ -582,7 +582,7 @@ FROM stack AS assemble
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
-     radiance_r4d_attn.py radiance_r4d_hybrid_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
+     radiance_r4d_attn.py radiance_r4d_hybrid_attn.py radiance_gdn.py radiance_gdn_lazy.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_lmhead_int2.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
@@ -701,7 +701,7 @@ RUN set -eu; cd /opt/patches; \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
-             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
+             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_gdn_lazy \
              sly/patch_quark_mxfp4 \
              sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \

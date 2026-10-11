@@ -10,6 +10,20 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.2.2] - 2026-10-11
+
+### Fixed
+- **The lazy GDN state snapshots (`RADIANCE_GDN_LAZY=1`) are shippable again.** Since the revert on
+  2026-09-17 the feature was dead in every image: `radiance_gdn_lazy.py` was missing from the COPY
+  allowlist and `patch_gdn_lazy` was not in the build loop, so the flag was a silent no-op. The
+  patch itself was also written against the pre-0.30 tree and broke in three places: `abstract.py`'s
+  `get_kv_cache_spec` (rebased onto `use_kda_recoverssm` / `num_speculative_tokens`), the shared-build
+  fast path (dropped: `patch_gdn_shared_build` is not in the loop, so the full build path is the only
+  one the image takes), and all nine `mamba_utils` hunks (rebased onto the 0.30 fused align kernels,
+  which gained the `TEMPORAL_TILES` constexpr). Every hunk now carries its own idempotency sentinel.
+  Default stays OFF — this only makes the path turnable on for the multi-turn correctness gate
+  (`kv-cache/turnbench.py`), it changes no production behaviour.
+
 ## [1.2.1] - 2026-10-10
 
 ### Fixed
