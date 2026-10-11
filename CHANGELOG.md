@@ -13,16 +13,20 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [1.2.2] - 2026-10-11
 
 ### Fixed
-- **The lazy GDN state snapshots (`RADIANCE_GDN_LAZY=1`) are shippable again.** Since the revert on
-  2026-09-17 the feature was dead in every image: `radiance_gdn_lazy.py` was missing from the COPY
-  allowlist and `patch_gdn_lazy` was not in the build loop, so the flag was a silent no-op. The
-  patch itself was also written against the pre-0.30 tree and broke in three places: `abstract.py`'s
+- **The lazy GDN state snapshots (`RADIANCE_GDN_LAZY=1`) are wired into the image again.** Since the
+  revert on 2026-09-17 the feature was dead in every image: `radiance_gdn_lazy.py` was missing from
+  the COPY allowlist and `patch_gdn_lazy` was not in the build loop, so the flag was a silent no-op.
+  The patch itself was also written against the pre-0.30 tree and broke in three places: `abstract.py`'s
   `get_kv_cache_spec` (rebased onto `use_kda_recoverssm` / `num_speculative_tokens`), the shared-build
   fast path (dropped: `patch_gdn_shared_build` is not in the loop, so the full build path is the only
   one the image takes), and all nine `mamba_utils` hunks (rebased onto the 0.30 fused align kernels,
   which gained the `TEMPORAL_TILES` constexpr). Every hunk now carries its own idempotency sentinel.
-  Default stays OFF — this only makes the path turnable on for the multi-turn correctness gate
-  (`kv-cache/turnbench.py`), it changes no production behaviour.
+  `radiance_gdn_lazy.py` was also written against the pre-0.30 `mamba_state_copy_funcs` (a flat
+  per-state tuple); 0.30 restructured it into a per-`MambaAttentionBackendEnum` dict, so the
+  `_Tables` lookup now indexes `copy_funcs[layer.mamba_type][state]` — the old code crashed with an
+  `IndexError` on the first GDN layer. **The multi-turn correctness gate (`kv-cache/turnbench.py`)
+  is not yet green on the GPU window; this release ships the wiring and the crash fix, with the
+  lazy path still default OFF, so it changes no production behaviour.**
 
 ## [1.2.1] - 2026-10-10
 
