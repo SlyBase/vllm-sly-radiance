@@ -2,13 +2,14 @@ diff --git a/build.sh b/build.sh
 index 5e67e65..91fce67 100755
 --- a/build.sh
 +++ b/build.sh
-@@ -42,6 +42,13 @@ UNITS=(
+@@ -42,6 +42,14 @@ UNITS=(
    "r4d_gdn_conv_w4_h128_bf16:"
    "r4d_gdn_kkt_solve_k128_c64_bf16:"
    "r4d_gdn_recurrent_update_k128_v128_bf16_fp32state:"
 +  "r4d_gdn_recurrent_update_k128_v128_bf16_bf16state:"
 +  "r4d_gdn_recurrent_update_k128_v128_bf16_f16state:"
 +  "r4d_gdn_lazy_update_k128_v128_bf16_fp32state:"
++  "r4d_gdn_lazy_update_k128_v128_bf16_bf16state:"
 +  "r4d_gdn_lazy_update_k128_v128_bf16_f16state:"
 +  "r4d_gdn_fused_update_w4k128v128_bf16:"
 +  "r4d_gdn_fused_update_w4k128v128_bf16_bf16state:"
@@ -58,7 +59,7 @@ index 7addfcd..fe765f5 100644
  int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* q, const void* k, const void* v, const void* a, const void* b,
          long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
-@@ -162,6 +193,59 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+@@ -162,6 +193,73 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* ssm_state_indices, long indices_stride, const void* num_accepted,
          const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
          int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
@@ -89,6 +90,13 @@ index 7addfcd..fe765f5 100644
 +        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
 +        int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
 +        void* stream);
++int r4d_gdn_lazy_update_k128_v128_bf16_bf16state(
++        const void* q, const void* k, const void* v, const void* a, const void* b,
++        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++        long state_slot_stride, long state_head_stride, void* o, const void* cu,
++        const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++        int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++        void* stream);
 +int r4d_gdn_lazy_update_k128_v128_bf16_f16state(
 +        const void* q, const void* k, const void* v, const void* a, const void* b,
 +        long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
@@ -107,6 +115,13 @@ index 7addfcd..fe765f5 100644
 +    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
 +    float scale, float softplus_thr, void* stream);
 +int r4d_gdn_lazy_materialize_k128_v128_bf16_f16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream);
++int r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state(
 +    const void* state_ptrs, const void* slot_strides, const void* group_idx,
 +    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
 +    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
@@ -1385,6 +1400,43 @@ index 0000000..ea2aaa2
 +#undef LZ_LAUNCH
 +  return (int)hipGetLastError();
 +}
+diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
+@@ -0,0 +1,31 @@
++// r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip -- lazy-snapshot GDN decode update, bf16state cache.
++// See r4d_gdn_lazy_update_k128_v128.h.
++#include "r4d_gdn_lazy_update_k128_v128.h"
++
++extern "C" int r4d_gdn_lazy_update_k128_v128_bf16_bf16state(
++    const void* q, const void* k, const void* v, const void* a, const void* b,
++    long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
++    long state_slot_stride, long state_head_stride, void* o, const void* cu,
++    const void* ssm_state_indices, long indices_stride, const void* num_accepted,
++    int N, int H, int Hg, int K, int V, int stash_col, float scale, float softplus_thr,
++    void* stream)
++{
++  return lz_launch<R4D_ST_BF16>(q, k, v, a, b, ab_stride, ab_is_bf16, A_log, dt_bias, state,
++                       state_slot_stride, state_head_stride, o, cu, ssm_state_indices,
++                       indices_stride, num_accepted, N, H, Hg, K, V, stash_col, scale,
++                       softplus_thr, stream);
++}
++
++extern "C" int r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state(
++    const void* state_ptrs, const void* slot_strides, const void* group_idx,
++    const void* alog_ptrs, const void* dtb_ptrs, const void* bt_ptrs, long bt_stride_req,
++    const void* idx_mapping, int mode, const void* state_idx, const void* src_col,
++    const void* token_bias, const void* num_accepted, const void* new_computed,
++    int block_size, int num_reqs, int n_states, int H, int Hg, int K, int V, long st_head,
++    float scale, float softplus_thr, void* stream)
++{
++  return lz_materialize_launch<R4D_ST_BF16>(state_ptrs, slot_strides, group_idx, alog_ptrs, dtb_ptrs,
++                                   bt_ptrs, bt_stride_req, idx_mapping, mode, state_idx, src_col,
++                                   token_bias, num_accepted, new_computed, block_size, num_reqs,
++                                   n_states, H, Hg, K, V, st_head, scale, softplus_thr, stream);
++}
 diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_f16state.hip
 new file mode 100644
 index 0000000..67701e0
@@ -2233,7 +2285,7 @@ index d373a98..ff2a5ac 100644
  }
  
  // =================================================================================================
-@@ -611,7 +686,26 @@ PYBIND11_MODULE(r4d, m) {
+@@ -611,7 +686,30 @@ PYBIND11_MODULE(r4d, m) {
    m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
    m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
    m.def("gdn_conv_update_w4_h128_bf16", &gdn_conv_update);
@@ -2254,10 +2306,14 @@ index d373a98..ff2a5ac 100644
 +        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_fp32state>);
 +  m.def("gdn_lazy_update_k128_v128_bf16_f16state",
 +        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_f16state>);
++  m.def("gdn_lazy_update_k128_v128_bf16_bf16state",
++        &gdn_lazy_update_impl<r4d_gdn_lazy_update_k128_v128_bf16_bf16state>);
 +  m.def("gdn_lazy_materialize_k128_v128_bf16_fp32state",
 +        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_fp32state>);
 +  m.def("gdn_lazy_materialize_k128_v128_bf16_f16state",
 +        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_f16state>);
++  m.def("gdn_lazy_materialize_k128_v128_bf16_bf16state",
++        &gdn_lazy_materialize_impl<r4d_gdn_lazy_materialize_k128_v128_bf16_bf16state>);
    m.def("gdn_gated_rmsnorm_h128_bf16", &gdn_gated_rmsnorm);
    {
      int hk = 0, hv = 0, c = 0;
@@ -2273,7 +2329,7 @@ diff --git a/r4d_registry.hip b/r4d_registry.hip
 index 22dccba..feafc2b 100644
 --- a/r4d_registry.hip
 +++ b/r4d_registry.hip
-@@ -66,6 +66,35 @@ static const R4DConstraint cGdnKktSolve[] = {
+@@ -66,6 +66,39 @@ static const R4DConstraint cGdnKktSolve[] = {
  };
  static const R4DConstraint cGdnRecurrentUpdate[] = {
      C_EQ("head_k", 128), C_EQ("head_v", 128),
@@ -2295,6 +2351,10 @@ index 22dccba..feafc2b 100644
 +    C_EQ("head_k", 128), C_EQ("head_v", 128),
 +    C_IN("state_dtype", "fp16"),
 +};
++static const R4DConstraint cGdnLazyUpdateBf16St[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128),
++    C_IN("state_dtype", "bf16"),
++};
 +static const R4DConstraint cGdnFusedUpdate[] = {
 +    C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128),
 +    C_IN("state_dtype", "fp32"),
@@ -2309,7 +2369,7 @@ index 22dccba..feafc2b 100644
  };
  static const R4DConstraint cGdnGatedRmsNorm[] = {
      C_EQ("channels", 128),
-@@ -176,12 +205,57 @@ static const R4DKernelInfo kKernels[] = {
+@@ -176,12 +205,64 @@ static const R4DKernelInfo kKernels[] = {
       "head_k 128, chunk 64, varlen; one gram per k head, applied to every v head of the group",
       "bf16 k and A out, fp32 beta / gate / gram / inverse",
       ROW(cGdnKktSolve)},
@@ -2364,6 +2424,13 @@ index 22dccba..feafc2b 100644
 +     "no fused row norm",
 +     "bf16 q/k/v and out, bf16/fp32 a,b; F16 state cache",
 +     ROW(cGdnLazyUpdateF16St)},
++    {"gdn_lazy_update_k128_v128_bf16_bf16state", "gdn", "gdn_lazy_update",
++     "gdn decode recurrent update with lazy snapshots: one base state per sequence, the previous "
++     "step's accepted candidates replayed from a stash instead of read from per-candidate slots",
++     "head_k 128, head_v 128, paged state; slot sidx[n,0] = base, sidx[n,stash_col] = stash; "
++     "no fused row norm",
++     "bf16 q/k/v and out, bf16/fp32 a,b; BF16 state cache",
++     ROW(cGdnLazyUpdateBf16St)},
      {"gdn_gated_rmsnorm_h128_bf16", "gdn", "gdn_gated_rmsnorm",
       "gated rms norm over a row: out = rms(x) . w . act(z), for the prefill path only",
       "128 channels per row, one wave per row; silu or sigmoid gate",

@@ -10,6 +10,18 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.0] - 2026-10-11
+
+### Added
+- **bf16-state variants of the lazy GDN kernels** (`gdn_lazy_update` and `gdn_lazy_materialize`,
+  `..._bf16_bf16state`). Production runs `--mamba-ssm-cache-dtype bfloat16`, but libr4d rx10 only
+  shipped fp32/f16-state variants — so `RADIANCE_GDN_LAZY=1` died at boot with "no materialize
+  kernel for a torch.bfloat16 state cache". The kernel bodies were already templated on the state
+  dtype (the bf16 load/store primitives exist from the eager kernels); this adds the missing
+  bf16state translation units, declarations, pybind bindings and registry rows. *Measured: pending
+  — the multi-turn gate (`kv-cache/turnbench.py`) has not run the lazy arm on the GPU window yet;
+  the lazy path stays default OFF.*
+
 ## [1.2.2] - 2026-10-11
 
 ### Fixed
