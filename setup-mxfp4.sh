@@ -33,9 +33,15 @@ Environment:
   HF_CACHE=~/.cache/huggingface where the source download lands
   IMAGE=...:0.9.3               container image to use
   RUNTIME=podman|docker         container runtime (auto-detected)
+  SRC_LOCAL=/path/to/snapshot   reuse an already-downloaded source snapshot (single-file or
+                                sharded) instead of pulling the ~19 GiB release
+  RADIANCE_SHARD_GIB=5          shard size of the built checkpoint (GiB); vLLM loads a sharded
+                                checkpoint shard-by-shard, so a low-RAM host peaks at one shard
+  RADIANCE_SINGLE_FILE=1        write one monolithic model.safetensors (the old behaviour)
 
 Disk: ~19 GiB for AMD's release, ~19 GiB for the checkpoint built from it, 2 GiB for the
-drafter and ~10 GiB for the image. The source download can be deleted afterwards.
+drafter and ~10 GiB for the image. The source download can be deleted afterwards (or skip it
+entirely with SRC_LOCAL).
 USAGE
       exit 0 ;;
     --yes|-y)      ASSUME_YES=1 ;;
@@ -126,15 +132,25 @@ print(p)
 }
 
 # ------------------------------------------------------------------ 3. source checkpoint
-step "3/6  AMD's MXFP4 release ($SRC_REPO)"
+step "3/6  source checkpoint"
+SRC_DOWNLOADED=0
 if [ -d "$SNAP" ] && [ -f "$SNAP/config.json" ]; then
   ok "skipped -- the built checkpoint already exists at $SNAP"
   SRC=""
+elif [ -n "${SRC_LOCAL:-}" ]; then
+  # A snapshot already on disk (any layout: single-file or sharded). Skips the ~19 GiB pull.
+  [ -d "$SRC_LOCAL" ] || die "SRC_LOCAL=$SRC_LOCAL is not a directory" \
+      "point SRC_LOCAL at a directory holding model.safetensors or model.safetensors.index.json"
+  { [ -f "$SRC_LOCAL/model.safetensors" ] || [ -f "$SRC_LOCAL/model.safetensors.index.json" ]; } \
+    || die "SRC_LOCAL ($SRC_LOCAL) has neither model.safetensors nor model.safetensors.index.json"
+  SRC="$SRC_LOCAL"
+  ok "using local source $SRC (skipping the ~19 GiB download)"
 else
   echo "  downloading ~19 GiB into $HF_CACHE (resumes if interrupted)"
   hf_get "$SRC_REPO" >/dev/null
   SRC=$(ls -d "$HF_CACHE"/hub/models--${SRC_REPO//\//--}/snapshots/*/ 2>/dev/null | head -1)
   [ -n "$SRC" ] || die "download finished but no snapshot directory under $HF_CACHE/hub"
+  SRC_DOWNLOADED=1
   ok "source snapshot: $SRC"
 fi
 
@@ -153,12 +169,12 @@ else
     "$MODELS"/*) CSNAP="/models/${SNAP#"$MODELS"/}" ;;
     *) die "SNAP ($SNAP) must live under MODELS ($MODELS)" ;;
   esac
-  CSRC="/root/.cache/huggingface/${SRC#"$HF_CACHE"/}"
+  CSRC="/src"   # the source snapshot is bind-mounted at /src, wherever it lives on the host
   if python3 -c "import torch" >/dev/null 2>&1; then
     python3 "$SCRIPT_DIR/fp8_mtp.py" "$SRC" "$SNAP"
   else
     "$RUNTIME" run --rm \
-      -v "$HF_CACHE":/root/.cache/huggingface \
+      -v "$SRC":/src:ro \
       -v "$MODELS":/models \
       -v "$SCRIPT_DIR":/repo:z \
       --entrypoint python3 "$IMAGE" /repo/fp8_mtp.py "$CSRC" "$CSNAP"
@@ -208,7 +224,7 @@ kernels and takes several extra minutes; later starts reuse that cache. Then:
 
 Every knob:  ./serve-mxfp4.sh --help
 EOF
-if [ -n "${SRC:-}" ]; then
+if [ "$SRC_DOWNLOADED" = 1 ]; then
   echo
   echo "You can reclaim ~19 GiB now -- the source download is no longer needed:"
   echo "    rm -rf $HF_CACHE/hub/models--${SRC_REPO//\//--}"

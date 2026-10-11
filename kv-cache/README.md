@@ -45,6 +45,70 @@ sudoedit /etc/systemd/system/kvcache-reap.service     # set KVCACHE_ROOT=<KVCACH
 sudo systemctl daemon-reload && sudo systemctl enable --now kvcache-reap.timer
 ```
 
+## vLLM 0.30 and later (image 0.4.0+)
+
+The patch set was written against vLLM 0.27.1. vLLM 0.30 rebuilt the offload scheduler and
+took over part of what the patches did, so on such an image a patch reports `SKIP` for the
+hunks that have no target any more and applies the rest. `SKIP` is not a failure; the
+launcher's fatal patches exit 0 on it. What each patch does there:
+
+| patch | on vLLM >= 0.30 | why |
+|---|---|---|
+| mixed-hit | kill switch applies; lookback + assertion **skipped** | `update_state_after_alloc` loads from the first fresh block at or above the request's local boundary, and the boundary assertion is gone -- the load never asks for chunks the lookup did not confirm |
+| eagle-groups | applies (new shape) | upstream annotates on every grouping path, but reaches the positional "last registered layer" rule only for DeepSeek V4 and otherwise treats *every* group as non-draft; the knob re-enables the rule, and the boot line `draft attention groups [8] detected` stays the self-check |
+| mamba-stride | **skipped** | Mamba "align" groups are stored per retained checkpoint through the manager's boundary hand-off, not per chunk; `--prefix-cache-retention-interval` (default 0) keeps only the replay boundary and shared-prefix junctions, on the GPU and in the tier. A positive multiple of the block size adds periodic checkpoints -- the stride, without the dead zone |
+| reconcile-reask | applies | the `hit_diverged` fallback is unchanged upstream and still never re-asks the tier |
+| swa-align / touch | swa-align **skipped**, touch-all applies | store reachability is judged on the absolute grid with an explicit store horizon (`reachable_block_mask`); `_touch` is unchanged upstream |
+| align-last-block | applies | `_mamba_block_aligned_split` is unchanged upstream |
+| eagle-replay-tail (new, 0.30+ only) | applies | with an eagle drafter the scheduler commits the Mamba boundary state one block before the aligned prompt end, but the drafter group's retained tail ends *at* the aligned end (plus the never-storable partial block), so the lookup finds no complete window there and falls back to the previous turn's junction. The patch keeps one more drafter block per reachable boundary (`RADIANCE_SWA_EAGLE_REPLAY_TAIL=1`, a superset of the stock mask) |
+| boundary-trace (new, 0.30+ only) | applies, silent | `RADIANCE_OFFLOAD_BOUNDARY_TRACE=1` logs every Mamba boundary-state hand-off and its fate (stored / dropped and why); diagnostic only |
+
+vLLM 0.31 (the pin on `main` since 1.1.0) differs again in three places, all carried: the
+annotator call on the uniform path is multi-line with `use_trailing_layer_fallback`
+(eagle-groups, third shape), `_touch` is gone because recency is tracked per request (touch-all
+skips), and `_make_boundary_key` takes the request context (boundary-trace, second shape).
+
+Each skip is decided by a marker string the newer tree has and the older one does not
+(`_patchlib.skip_if_upstream`), so the same files keep applying on a 0.27.1 image.
+`ci/patch_dryrun.sh` runs the ram-mode patch list against the pinned vLLM after the Dockerfile
+loop, so a vLLM bump that breaks an anchor fails `ci` instead of printing a WARNING at boot.
+`RADIANCE_MAMBA_STORE_STRIDE` and `RADIANCE_SWA_STORE_MAMBA_ALIGN` are read only by the
+skipped hunks and do nothing on 0.30+. `kvwatch.py` and `turnbench.py` read vLLM's stock
+metrics and work unchanged; set `TIERBENCH_API_KEY` when the server runs with `VLLM_API_KEY`.
+
+Knobs the two new patches add (the launcher sets them for `KVCACHE=ram|disk`):
+
+| knob | default | launcher | what |
+|---|---|---|---|
+| `RADIANCE_SWA_EAGLE_REPLAY_TAIL` | unset = upstream mask | `1` | one more sliding-window block per reachable boundary under eagle; without it the tier hit lands two turns back (table below) |
+| `RADIANCE_OFFLOAD_BOUNDARY_TRACE` | unset = silent | passed through, `0` | one INFO line per Mamba boundary-state hand-off; diagnostic |
+
+Measured 2026-10-08, one R9700, radiance 1.0.0 (vLLM 0.30.0), production launch + vision,
+`KVCACHE=ram` (16 GiB), turnbench 3 sessions x 7 turns, step 18k (~398k tokens together against a
+331k-token GPU pool, so turns 6-7 come back from the tier):
+
+| | tier hit lands at | tokens recomputed per tier turn | tier turn wall |
+|---|---|--:|--:|
+| 0.30 stock lookup (eagle group annotated) | prompt end of the turn *before* the previous one | 37-56k | 29-41 s |
+| + eagle-replay-tail | one block before the previous turn's prompt end (= where a GPU hit lands) | 20-21k | 17-20 s |
+| eagle group NOT annotated (upstream default) | 4-5 turns back | 39-91k | 32-59 s |
+
+Repeated on image 1.1.1 (vLLM 0.31.0, same launch, second start, KV pool 334,651): tier hits
+at 94,160 / 112,640 / 117,920 / 114,400, 19-21k tokens recomputed per tier turn, tier turn wall
+16.7-19.8 s against 19.6-22.1 s for the GPU-hit turns of the same run; cold twins of the tier turns
+first divergent token 63 / 19 / 2 / none, max |dlogprob| 0.13-0.18; HEALTH pass; no engine errors.
+
+The eagle annotation therefore stays on. Cold-twin comparison of the run with eagle-replay-tail
+(bf16 SSM cache, so not the bit-exact setting of the fp32 gate above): the four tier turns
+C6/A7/B7/C7 against their cold twins -- first divergent token 52 / none / 3 / none (A7 and C7
+token-identical), max |dlogprob| 0.24 / 0.33 / 0.06 / 0.16. The GPU-hit turns of the same run
+drift the same way (first divergent token 0-276, max |dlogprob| 0.04-0.43), and the run without
+the patch gave the same positions for the tier turns (52 / none / 3 / 1), i.e. the tier adds no
+drift of its own; bit-exactness cannot be shown on this build because the GPU path is not exact
+either. HEALTH passes in both runs: no empty replies, no loops, no cut-offs in either phase.
+Single-stream decode with the tier on is unchanged (code 127-137 tok/s, prose 59 tok/s, same
+prompts as without).
+
 ## What it does on this build
 
 Measured with `./serve-tp1.sh` defaults (fp16 ssm cache, MAXSEQS 3, 220k context, 248,235-token

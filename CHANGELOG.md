@@ -10,6 +10,83 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.2.1] - 2026-10-10
+
+### Fixed
+- **The KV-cache offload modes (`KVCACHE=ram|disk`) work again on vLLM 0.30, i.e. on every image since
+  0.4.0.** The six "always" patches were written against vLLM 0.27.1; four of them stopped part-way on
+  the 0.30 tree, which left an offload tier that stored but never served (0 external hits). vLLM 0.30
+  rebuilt the offload scheduler and carries part of the set itself: the load now starts at the local
+  boundary (mixed-hit lookback + assertion), Mamba states are stored per retained checkpoint and
+  `--prefix-cache-retention-interval` (default 0) keeps only the replay boundary and shared-prefix
+  junctions (mamba-stride), store reachability is judged on the absolute grid (swa-align). Those hunks now
+  report `SKIP` through the new `_patchlib.skip_if_upstream`; eagle-groups got a second anchor shape;
+  reconcile-reask, touch-all and align-last-block apply unchanged; vLLM 0.31 (the pin on `main` since
+  1.1.0: multi-line annotator call, no `_touch`, `_make_boundary_key` with request context) is carried
+  too. The 0.27.1 shapes still apply, and `ci/patch_dryrun.sh` now runs the ram-mode list against the
+  pinned vLLM so the next bump fails `ci` instead of a boot WARNING.
+- **Tier hits landed two turns back.** With the eagle drafter annotated, the scheduler commits the Mamba
+  boundary state one block before the aligned prompt end, while the drafter group's retained tail ended
+  at the aligned end, so the next turn's lookup found no complete window there and fell back to the
+  previous turn's junction (37-56k tokens recomputed per tier turn). `patch_swa_eagle_replay_tail.py`
+  keeps one more drafter block per reachable boundary (`RADIANCE_SWA_EAGLE_REPLAY_TAIL=1`, a superset of
+  the stock mask); the tier hit now lands where a GPU hit lands. Without the eagle annotation (upstream's
+  default for this model) the hit lands 4-5 turns back, so the annotation stays on.
+
+### Added
+- `kv-cache/patch_offload_boundary_trace.py`: `RADIANCE_OFFLOAD_BOUNDARY_TRACE=1` logs every Mamba
+  boundary-state hand-off and its fate (stored / dropped and why). Silent otherwise.
+- `TIERBENCH_API_KEY` for `tierbench.py`, `equivbench.py`, `turnbench.py` against a server started with
+  `VLLM_API_KEY`.
+- `kv-cache/README.md`, "vLLM 0.30 and later": what each patch does on the new tree and why.
+
+### Measured
+- turnbench, 3 sessions x 7 turns, step 18k (398k tokens against a 331k GPU pool), `KVCACHE=ram` 16 GiB,
+  production launch + vision, second start: tier hits C6/A7/B7/C7 at 94,080 / 112,896 / 117,376 / 113,792
+  tokens (one block before the previous prompt end) against 77,952 / 94,976 / 100,352 / 77,952; 20-21k
+  tokens recomputed per tier turn against 37-56k; tier turn wall 17-20 s against 29-41 s. Repeated on image
+  1.1.1 (vLLM 0.31.0): tier hits at 94,160 / 112,640 / 117,920 / 114,400, 19-21k recomputed, 16.7-19.8 s,
+  cold twins first divergent token 63 / 19 / 2 / none, max |dlogprob| 0.13-0.18. HEALTH pass on both images. Cold twins of the four tier turns (bf16 SSM cache): first divergent token 52 / none / 3 /
+  none, max |dlogprob| 0.24 / 0.33 / 0.06 / 0.16 -- the same positions as without the patch and the same
+  kind of drift as the GPU-hit turns of the run, so the tier adds none of its own; bit-exactness is not
+  shown on this build. Single-stream decode with the tier on is unchanged. Image binaries unchanged:
+  `kv-cache/` rides the `/patches` mount and is applied at container start.
+
+## [1.2.0] - 2026-10-07
+
+### Added
+- **Sharded MXFP4 checkpoints (low-RAM loading) + local source reuse.** `fp8_mtp.py`
+  (the one-time build behind `setup-mxfp4.sh`) now reads a source checkpoint in **either**
+  layout — AMD's single `model.safetensors` **or** the standard HF sharded layout
+  (`model.safetensors.index.json` + `model-0000X-of-0000Y.safetensors`) — and **writes sharded
+  output by default** (5 GiB shards; `RADIANCE_SHARD_GIB` to resize, `RADIANCE_SINGLE_FILE=1` to
+  restore the single-file output). A sharded checkpoint is what unblocks 16 GiB hosts: vLLM loads
+  it shard-by-shard (one shard mapped at a time), so the peak host RAM for the weight load is the
+  largest shard instead of the whole ~19 GiB model. The serve path (`serve-mxfp4.sh`) is already
+  layout-agnostic — it hands vLLM the checkpoint directory — so a sharded build serves with no
+  further change. Every copied body tensor is byte-identical to the source (verified), and the
+  fp8 MTP head is unchanged (same `F8_E4M3` dtype, per-channel scale, ~2 % rel err).
+- **`SRC_LOCAL` in `setup-mxfp4.sh`: reuse an already-downloaded source snapshot.** Point
+  `SRC_LOCAL` at a directory holding `model.safetensors` or `model.safetensors.index.json` (any
+  layout) and the ~19 GiB pull is skipped — machines that already have the weights via another
+  workflow no longer re-download them. The container mount now bind-mounts the source at `/src`
+  (was: the HF cache path), so a local directory anywhere on the host works, not just a snapshot
+  under `~/.cache/huggingface`.
+
+### Changed
+- `setup-mxfp4.sh` step 3 reports "source checkpoint" (was: "AMD's MXFP4 release"); the
+  reclaim-`~19 GiB` hint now only prints when a download actually happened (not for `SRC_LOCAL`).
+
+Measured: no kernel change, so decode/prefill/KV pool are unaffected. Engine memory with a
+16 GiB container cap, fresh boot per run, 4 runs: file-backed RSS of the engine 12.3-12.7 GiB
+(single file) vs 5.0-5.3 GiB (5 GiB shards), anonymous RSS 2.2 GiB in both, no OOM kills, load
+time unchanged (about 210-250 s to ready). The container cgroup still reaches its cap, and under
+real host pressure the single file swapped heavily; see docs/TECHNICAL.md. The change moves the one-time
+build and the serve-time weight load: a 16 GiB host loads a sharded checkpoint with peak RAM at one
+5 GiB shard instead of the full model (minutes vs. hours of swapping); a `SRC_LOCAL` snapshot skips
+the ~19 GiB pull. Copy fidelity is byte-exact (verified against a synthetic single-file **and**
+sharded source); the fp8 MTP head is numerically unchanged (~2 % rel err, MXFP4 was ~11.6 %).
+
 ## [1.1.1] - 2026-10-08
 
 ### Fixed

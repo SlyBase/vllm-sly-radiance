@@ -5,3 +5,8 @@ self-hosted-runner:
   labels:
     - rocm-build
     - gpu-accept
+    # ubuntu-26.04: current GitHub-hosted runner image (used in `runs-on:` across the workflows).
+    # Registered here because the pinned actionlint does not yet ship it in its built-in label list;
+    # actionlint treats this list as the set of known labels, which silences the "unknown label"
+    # false positive without weakening the check for genuinely unknown labels.
+    - ubuntu-26.04

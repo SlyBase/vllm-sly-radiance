@@ -66,7 +66,7 @@ import sysconfig
 from pathlib import Path
 
 sys.path.insert(0, "/patches")
-from _patchlib import apply  # noqa: E402
+from _patchlib import apply, skip_if_upstream  # noqa: E402
 
 VLLM = Path(os.environ.get("RADIANCE_VLLM_DIR", sysconfig.get_paths()["purelib"] + "/vllm"))
 OFFSCHED = VLLM / "distributed" / "kv_transfer" / "kv_connector" / "v1" / "offloading" / "scheduler.py"
@@ -183,10 +183,31 @@ def main() -> None:
     src = OFFSCHED.read_text() if OFFSCHED.exists() else ""
     if "\nimport os\n" not in src:
         raise SystemExit(f"  FAIL  swa-align/touch-all: {OFFSCHED} has no module-level 'import os'")
-    apply(OFFSCHED, MODFLAG_ANCHOR, MODFLAG_NEW, "_RADIANCE_SWA_GRID_ACTIVE = False", "swa-align: module flag")
-    apply(OFFSCHED, ALIGN_ANCHOR, ALIGN_NEW, "radiance swa-align: hits are ALSO", "swa-align: store alignment = Mamba grid")
-    apply(OFFSCHED, STORE_ANCHOR, STORE_NEW, "radiance swa-align: absolute grid, lookup-consistent", "swa-align: absolute-grid, lookup-consistent reachability")
-    apply(OFFSCHED, TOUCH_ANCHOR, TOUCH_NEW, "radiance touch-all:", "touch-all: refresh every group like attention")
+    # vLLM >= 0.30 (image 0.4.0+): hunk 1 is upstream. The store path judges reachability
+    # through `reachable_block_mask` on the absolute grid with an explicit store horizon (an
+    # active decode frontier is not a boundary), and --prefix-cache-retention-interval (default
+    # 0) keeps only the tails a hit can land on: the replay boundary and shared-prefix
+    # junctions. The Mamba grid is the full-attention chunk unless R3.13 strides it, and R3.13
+    # is skipped on the same tree, so raising the alignment would change nothing. Hunk 2
+    # (`_touch`) is unchanged upstream and still applies.
+    if not skip_if_upstream(
+        OFFSCHED,
+        "def _reachable_store_block_mask",
+        "swa-align",
+        "vLLM >= 0.30 judges store reachability on the absolute grid (reachable_block_mask)",
+    ):
+        apply(OFFSCHED, MODFLAG_ANCHOR, MODFLAG_NEW, "_RADIANCE_SWA_GRID_ACTIVE = False", "swa-align: module flag")
+        apply(OFFSCHED, ALIGN_ANCHOR, ALIGN_NEW, "radiance swa-align: hits are ALSO", "swa-align: store alignment = Mamba grid")
+        apply(OFFSCHED, STORE_ANCHOR, STORE_NEW, "radiance swa-align: absolute grid, lookup-consistent", "swa-align: absolute-grid, lookup-consistent reachability")
+    # vLLM >= 0.31: `_touch` is gone -- recency is tracked per request through the ReqContext
+    # (`set_offload_key_position`, the shape of upstream PR #51787 this hunk mirrored).
+    if not skip_if_upstream(
+        OFFSCHED,
+        "set_offload_key_position",
+        "touch-all",
+        "vLLM >= 0.31 tracks recency per request (no _touch; upstream PR #51787)",
+    ):
+        apply(OFFSCHED, TOUCH_ANCHOR, TOUCH_NEW, "radiance touch-all:", "touch-all: refresh every group like attention")
 
 
 if __name__ == "__main__":

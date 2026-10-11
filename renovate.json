@@ -5,6 +5,9 @@
   ],
   "dependencyDashboard": true,
   "dependencyDashboardTitle": "Dependency updates (vllm-sly-radiance)",
+  "dependencyDashboardLabels": [
+    "keep-open"
+  ],
   "labels": [
     "dependencies"
   ],

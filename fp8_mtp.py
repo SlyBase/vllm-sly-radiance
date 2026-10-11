@@ -26,17 +26,29 @@ vLLM's quark config supports this natively: `layer_quant_config` is matched with
 QuarkW8A8Fp8 wants weight fp8_e4m3 static per_channel + input_tensors fp8_e4m3 dynamic (so no
 input_scale is stored). Explicit layer names are used rather than a `*q_proj` glob, which would
 also match the body's 64 layers.
+
+Checkpoint layout. The source may be a single file (AMD ships the release as one ~19 GiB
+`model.safetensors`) or a sharded one (`model.safetensors.index.json` + `model-0000X-of-0000Y.safetensors`,
+the standard HF layout a re-sharded copy uses). The output is sharded by default -- HF's layout,
+5 GiB per shard, `RADIANCE_SHARD_GIB` to change, `RADIANCE_SINGLE_FILE=1` to write one file.
+Sharding is what matters on low-RAM hosts: vLLM loads a sharded checkpoint shard-by-shard
+(maps one shard at a time) instead of a single monolithic file, so the peak host RAM for the
+weight load is the largest shard, not the whole model -- the difference between a 16 GiB box
+loading in minutes and one swapping for hours. The serve path (serve-mxfp4.sh) hands vLLM the
+checkpoint directory and is layout-agnostic, so a sharded build serves with no further change.
 """
-import json, shutil, struct, sys, pathlib
+import json, os, shutil, struct, sys, pathlib
 
 # Checked before importing torch, so a bare invocation on a host without it still explains itself.
 if len(sys.argv) != 3:
     sys.exit(f"usage: {pathlib.Path(sys.argv[0]).name} <src-checkpoint> <dst-checkpoint>\n"
-             "  src  a Quark AWQ MXFP4 snapshot, e.g. the directory under\n"
-             "       ~/.cache/huggingface/hub/models--amd--Qwen3.8-27B-Quark-AWQ-MXFP4/snapshots/\n"
+             "  src  a Quark AWQ MXFP4 snapshot, single-file or sharded (model.safetensors.index.json),\n"
+             "       e.g. the directory under ~/.cache/huggingface/hub/models--amd--Qwen3.8-27B-Quark-AWQ-MXFP4/snapshots/\n"
              "  dst  where to write it, e.g. $MODELS/Qwen3.8-27B-MXFP4-mtpfp8\n"
              "\n"
-             "Needs torch. If the host has none, run it inside the image -- see the README.")
+             "Output is sharded by default (5 GiB shards; RADIANCE_SHARD_GIB to resize,\n"
+             "RADIANCE_SINGLE_FILE=1 to write one file). Needs torch. If the host has none,\n"
+             "run it inside the image -- see the README.")
 
 import torch
 
@@ -48,6 +60,9 @@ FP8_MAX = 448.0
 TDT = {"BF16": torch.bfloat16, "U8": torch.uint8, "F32": torch.float32}
 SDT = {torch.uint8: "U8", torch.float32: "F32", torch.bfloat16: "BF16",
        torch.float8_e4m3fn: "F8_E4M3"}
+# Default shard size for the output (bytes). Sharding is the low-RAM win: vLLM maps one shard at a time.
+SHARD_MAX = int(float(os.environ.get("RADIANCE_SHARD_GIB", "5")) * 1024**3)
+SINGLE_FILE = os.environ.get("RADIANCE_SINGLE_FILE") == "1"
 
 def spec(dtype, dynamic, qscheme, ch_axis):
     return {"block_size": None, "ch_axis": ch_axis, "dtype": dtype, "enable_buffer_reuse": False,
@@ -76,16 +91,84 @@ def load(p, hdr, base, name):
 def raw(t):
     return t.contiguous().view(torch.uint8).numpy().tobytes()
 
+def open_source(src):
+    """Map every source tensor to (file path, safetensors entry, file data base offset).
+
+    loc: tensor name -> (path, entry, base). A single-file source maps everything to
+    model.safetensors; a sharded one (model.safetensors.index.json) maps each tensor to its shard
+    via the weight_map. base is the file's 8-byte header padding, so tensor data sits at
+    base + entry["data_offsets"][0].
+    """
+    idx = src / "model.safetensors.index.json"
+    if idx.exists():
+        weight_map = json.loads(idx.read_text())["weight_map"]
+        hdrs = {}
+        loc = {}
+        for name, shard in weight_map.items():
+            p = src / shard
+            if p not in hdrs:
+                hdrs[p] = read_header(p)
+            loc[name] = (p, hdrs[p][0][name], hdrs[p][1])
+        return loc
+    p = src / "model.safetensors"
+    hdr, base = read_header(p)
+    return {k: (p, hdr[k], base) for k in hdr if k != "__metadata__"}
+
+def pack_shards(sizes, max_bytes):
+    """Greedy first-fit packing of an ordered [name, nbytes] list into shards of <= max_bytes.
+
+    Returns a list of shards, each a list of (name, nbytes). A tensor larger than max_bytes gets
+    its own shard (safetensors cannot split a tensor across files).
+    """
+    shards = []; cur = []; cur_bytes = 0
+    for name, nb in sizes:
+        if cur and cur_bytes + nb > max_bytes:
+            shards.append(cur); cur = []; cur_bytes = 0
+        cur.append((name, nb)); cur_bytes += nb
+    if cur:
+        shards.append(cur)
+    return shards
+
+def write_safetensors(outf, order, bytes_of, entries):
+    """Write one safetensors file: 8-byte length + JSON header (8-byte padded) + tensor data.
+
+    order: ordered tensor names. bytes_of(name) -> raw bytes for that tensor. entries: name ->
+    {dtype, shape} (data_offsets are filled here).
+    """
+    hdr, off = {}, 0
+    for name in order:
+        nb = len(bytes_of(name)) if isinstance(bytes_of(name), bytes) else entries[name]["_nb"]
+        hdr[name] = {k: entries[name][k] for k in ("dtype", "shape")}
+        hdr[name]["data_offsets"] = [off, off + nb]
+        off += nb
+    hdr["__metadata__"] = {"format": "pt"}
+    blob = json.dumps(hdr).encode()
+    blob += b" " * ((8 - (len(blob) % 8)) % 8)
+    with open(outf, "wb") as fout:
+        fout.write(struct.pack("<Q", len(blob))); fout.write(blob)
+        for name in order:
+            b = bytes_of(name)
+            if isinstance(b, bytes):
+                fout.write(b)
+            else:
+                # (path, data_start, nbytes): stream from source in 32 MiB chunks
+                sp, s0, left = b
+                with open(sp, "rb") as fin:
+                    fin.seek(s0)
+                    while left:
+                        c = fin.read(min(left, 32 << 20)); fout.write(c); left -= len(c)
+
 def main(src_dir, dst_dir):
     src, dst = pathlib.Path(src_dir), pathlib.Path(dst_dir)
     dst.mkdir(parents=True, exist_ok=True)
-    sf = src / "model.safetensors"
-    hdr, base = read_header(sf)
+    loc = open_source(src)
 
+    # Requantize the MTP head to fp8: per-channel weight + weight_scale, replacing each bf16 weight.
     new = {}
     print(f"{'tensor':34s} {'shape':>18} {'rel err':>9}   (MXFP4 was ~0.116)")
     for name in MTP:
-        w = load(sf, hdr, base, name + ".weight").float()
+        p, entry, base = loc[name + ".weight"]
+        w = load(p, read_header(p)[0], base, name + ".weight").float()
         amax = w.abs().amax(dim=1).clamp(min=1e-12)          # per output channel
         s = (amax / FP8_MAX).float()
         q = (w / s.unsqueeze(1)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
@@ -94,40 +177,58 @@ def main(src_dir, dst_dir):
         new[name + ".weight"] = q
         new[name + ".weight_scale"] = s
 
-    names = [k for k in hdr if k != "__metadata__"]
-    out_hdr, off, plan = {}, 0, []
-    for k in names:
-        if k in new:
-            t = new[k]; nb = t.numel() * t.element_size()
-            out_hdr[k] = {"dtype": SDT[t.dtype], "shape": list(t.shape),
-                          "data_offsets": [off, off + nb]}
-            plan.append(("new", k, nb)); off += nb
+    # Ordered output tensor list: source order, with each MTP .weight replaced by its fp8 weight +
+    # scale. Each entry carries its bytes provider (raw bytes for the quantized head, a stream
+    # spec for copied tensors) and its safetensors metadata.
+    order = []; entries = {}
+    def add(name, kind, nbytes):
+        order.append(name)
+        if kind == "new":
+            entries[name] = {"dtype": SDT[new[name].dtype], "shape": list(new[name].shape), "_nb": nbytes}
         else:
-            m = hdr[k]; nb = m["data_offsets"][1] - m["data_offsets"][0]
-            out_hdr[k] = {"dtype": m["dtype"], "shape": m["shape"],
-                          "data_offsets": [off, off + nb]}
-            plan.append(("copy", k, nb)); off += nb
-    for k, t in new.items():
-        if k not in out_hdr:
-            nb = t.numel() * t.element_size()
-            out_hdr[k] = {"dtype": SDT[t.dtype], "shape": list(t.shape),
-                          "data_offsets": [off, off + nb]}
-            plan.append(("new", k, nb)); off += nb
-    out_hdr["__metadata__"] = {"format": "pt"}
-    blob = json.dumps(out_hdr).encode()
-    blob += b" " * ((8 - (len(blob) % 8)) % 8)
-    outf = dst / "model.safetensors"
-    with open(sf, "rb") as fin, open(outf, "wb") as fout:
-        fout.write(struct.pack("<Q", len(blob))); fout.write(blob)
-        for kind, k, nb in plan:
-            if kind == "new":
-                fout.write(raw(new[k]))
-            else:
-                s0, e0 = hdr[k]["data_offsets"]
-                fin.seek(base + s0); left = e0 - s0
-                while left:
-                    c = fin.read(min(left, 32 << 20)); fout.write(c); left -= len(c)
-    print(f"\nwrote {outf} ({outf.stat().st_size / 2**30:.2f} GiB)")
+            _, entry, _ = loc[name]
+            entries[name] = {"dtype": entry["dtype"], "shape": entry["shape"], "_nb": nbytes}
+
+    for name in loc:
+        if name in new:
+            # A source tensor that gets transformed (an MTP .weight): emit its fp8 weight plus
+            # the weight_scale that only exists in `new` (the source had none).
+            add(name, "new", new[name].numel() * new[name].element_size())
+            scale_name = name + "_scale"
+            if scale_name in new:
+                add(scale_name, "new", new[scale_name].numel() * new[scale_name].element_size())
+        else:
+            _, entry, base = loc[name]
+            add(name, "copy", entry["data_offsets"][1] - entry["data_offsets"][0])
+
+    def bytes_of(name):
+        if name in new:
+            return raw(new[name])
+        p, entry, base = loc[name]
+        s0 = base + entry["data_offsets"][0]
+        return (p, s0, entry["data_offsets"][1] - entry["data_offsets"][0])
+
+    if SINGLE_FILE:
+        write_safetensors(dst / "model.safetensors", order, bytes_of, entries)
+        outf = dst / "model.safetensors"
+        print(f"\nwrote {outf} ({outf.stat().st_size / 2**30:.2f} GiB)")
+    else:
+        sizes = [(name, entries[name]["_nb"]) for name in order]
+        shards = pack_shards(sizes, SHARD_MAX)
+        nsh = len(shards); width = max(len(str(nsh)), 3)
+        weight_map = {}
+        for i, shard in enumerate(shards):
+            fname = f"model-{str(i + 1).zfill(width)}-of-{str(nsh).zfill(width)}.safetensors"
+            shard_order = [name for name, _ in shard]
+            write_safetensors(dst / fname, shard_order, bytes_of, entries)
+            for name in shard_order:
+                weight_map[name] = fname
+            print(f"  {fname} ({(dst / fname).stat().st_size / 2**30:.2f} GiB)")
+        total_size = sum(entries[n]["_nb"] for n in order)
+        (dst / "model.safetensors.index.json").write_text(json.dumps(
+            {"metadata": {"total_size": total_size}, "weight_map": weight_map}, indent=2))
+        print(f"\nwrote {nsh} shard(s), {total_size / 2**30:.2f} GiB total, "
+              f"index at {dst / 'model.safetensors.index.json'}")
 
     cfg = json.loads((src / "config.json").read_text())
     qc = cfg["quantization_config"]
