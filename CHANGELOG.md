@@ -10,6 +10,18 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.1] - 2026-10-12
+
+### Fixed
+- **The lazy GDN stash path no longer crashes without speculative decoding.** `RADIANCE_GDN_LAZY=1`
+  read the stash column (`block_table_tensor[:, 1]`) unconditionally in `gdn_attn.py`. That column
+  exists only when a drafter runs (`num_speculative_tokens > 0`); without DFlash the block table is
+  one column wide and the index raised `IndexError: index 1 is out of bounds` at boot. The stash
+  mechanism (column 2 / the stash block) is a speculative-decode concept, so it now activates only
+  when `num_speculative_tokens > 0`; the lazy materialize path (temporal states) is independent and
+  runs either way. *Measured: pending — the no-spec lazy arm crashes at boot before this fix and has
+  not re-run on the GPU window; the lazy path stays default OFF.*
+
 ## [1.3.0] - 2026-10-11
 
 ### Added
@@ -18,9 +30,10 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   shipped fp32/f16-state variants — so `RADIANCE_GDN_LAZY=1` died at boot with "no materialize
   kernel for a torch.bfloat16 state cache". The kernel bodies were already templated on the state
   dtype (the bf16 load/store primitives exist from the eager kernels); this adds the missing
-  bf16state translation units, declarations, pybind bindings and registry rows. *Measured: pending
-  — the multi-turn gate (`kv-cache/turnbench.py`) has not run the lazy arm on the GPU window yet;
-  the lazy path stays default OFF.*
+  bf16state translation units, declarations, pybind bindings and registry rows. *Measured: the lazy
+  arm boots and serves on the bf16 state cache (the multi-turn gate, `kv-cache/turnbench.py`, passes
+  HEALTH — no empty replies, no loops — with logprob drift on the same order as the eager control);
+  the no-spec lazy arm still crashed at boot (fixed in 1.3.1); the lazy path stays default OFF.*
 
 ## [1.2.2] - 2026-10-11
 

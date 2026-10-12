@@ -66,7 +66,7 @@ apply(G,
 '''        import os as _rl_os  # radiance lazy gdn width: 2 state columns (running, stash)
         self._rad_lazy = _rl_os.environ.get("RADIANCE_GDN_LAZY", "0") == "1"
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs, 2 if self._rad_lazy else self.num_spec + 1),
+            (self.decode_cudagraph_max_bs, 2 if (self._rad_lazy and self.num_spec > 0) else self.num_spec + 1),
 ''', SENT + " width", "gdn_attn: 2-wide spec-state buffer under lazy")
 # the full build path is the only path the shipped image takes: patch_gdn_shared_build is not in
 # the loop (ci/unused_patches.txt), so the shared-build fast path below never runs. The full path
@@ -76,7 +76,7 @@ apply(G,
             num_prefills=num_prefills,
 ''',
 '''        attn_metadata = GDNAttentionMetadata(
-            radiance_stash_indices=(block_table_tensor[:, 1] if self._rad_lazy else None),  # radiance lazy gdn full build path
+            radiance_stash_indices=(block_table_tensor[:, 1] if (self._rad_lazy and self.num_spec > 0) else None),  # radiance lazy gdn full build path
             num_prefills=num_prefills,
 ''', SENT + " full", "gdn_attn: stash indices on the full build path")
 
