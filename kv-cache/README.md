@@ -134,6 +134,16 @@ every later turn near 15 s. All 21 turns served cleanly in both modes.
 
 ## Exact resumes and checkpoint retention (opt-in, `KVCACHE_EXACT=1`)
 
+This is an improvement to the offload above, not a new cache. The tiers, connector, reaper and the
+existing patches are unchanged; `KVCACHE_EXACT=1` fixes two weaknesses of how they are used:
+
+1. **A cached turn is not guaranteed to equal a cold one.** The cached resume runs on a different
+   prefill chunk grid than a cold prefill would, so its numerics drift in the low bits. The canonical-chunk
+   patches make the two identical.
+2. **The tiers store checkpoints nobody resumes from.** GDN and drafter states are kept at every grid
+   chunk, but real agent turns only resume at the previous prompt's tip, the shared system prompt or a few
+   chunks below the tip. Retention keeps those, so the same RAM and disk hold more useful context.
+
 Off by default; needs `KVCACHE=ram` or `disk`. With it off, the generated serve command is
 byte-identical to before. With it on, `serve-mxfp4.sh` applies six more patches (all FATAL on a
 failed anchor, each inert with its env gate at 0) and sets the gates:
