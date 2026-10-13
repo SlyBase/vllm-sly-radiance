@@ -10,6 +10,76 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.2] - 2026-10-13
+
+### Fixed
+- **Lazy GDN without speculative decoding is deterministic again.** In 1.3.1, `RADIANCE_GDN_LAZY=1`
+  without a drafter gave different logprobs for the same cold request from the second request on
+  (eager: bit-identical). Cause: the pre-forward materialize (mode 0) zeroed the stash headers at
+  block-table column `dst_col + 1`. Without a drafter there is no stash block, so that column lies past
+  the request's blocks and can hold a stale id of a live block; the zeroing hit live GDN state.
+  Proven on the GPU window: masking that column made lazy bit-identical to eager.
+  - `radiance_gdn_lazy.temporal_enabled()`: the lazy temporal path (skip of vLLM's temporal copies +
+    materialize) runs only when the mamba groups own a stash block (`num_speculative_blocks > 0`).
+    Without a drafter vLLM's exact Triton copies run, as in eager.
+  - libr4d `gdn_lazy_materialize` (rx10 patch): new mode bit `LZ_MODE_STASH`. The kernel reads or
+    zeroes column `+1` only when the bit is set, so a wrong caller cannot hit a foreign block.
+  - CPU tests: `sly/tests/test_gdn_lazy_cpu.py`.
+
+### Measured
+- GPU window 2026-10-13, image `1.3.2-rocm10.1`, production argv, bf16 SSM state, fp8 KV:
+  - No spec, one cold 30,926-token chat request, 2 runs per arm: eager run 1 = run 2 (bit-identical);
+    lazy runs 1 and 2 = eager (tokens and logprobs bit-identical, 148 tokens). 1.3.1 lazy: run 2
+    diverged at token 0.
+  - Spec (DFlash2, 7 tokens), lazy, turnbench EXACT, 3 sessions x 7 turns up to 110k tokens:
+    HEALTH PASS, every cold turn exact, cached vs cold drift 16 of 18 GPU-path turns (eager 1.3.1 on
+    the same bench: 18 of 18). The cached-path drift is the known prefix-cache drift of eager too,
+    not a lazy defect.
+- The acceptance night gate has not run on 1.3.2; this release is cut by hand (`release.yml`).
+
+## [1.3.1] - 2026-10-12
+
+### Fixed
+- **The lazy GDN stash path no longer crashes without speculative decoding.** `RADIANCE_GDN_LAZY=1`
+  read the stash column (`block_table_tensor[:, 1]`) unconditionally in `gdn_attn.py`. That column
+  exists only when a drafter runs (`num_speculative_tokens > 0`); without DFlash the block table is
+  one column wide and the index raised `IndexError: index 1 is out of bounds` at boot. The stash
+  mechanism (column 2 / the stash block) is a speculative-decode concept, so it now activates only
+  when `num_speculative_tokens > 0`; the lazy materialize path (temporal states) is independent and
+  runs either way. *Measured: pending — the no-spec lazy arm crashes at boot before this fix and has
+  not re-run on the GPU window; the lazy path stays default OFF.*
+
+## [1.3.0] - 2026-10-11
+
+### Added
+- **bf16-state variants of the lazy GDN kernels** (`gdn_lazy_update` and `gdn_lazy_materialize`,
+  `..._bf16_bf16state`). Production runs `--mamba-ssm-cache-dtype bfloat16`, but libr4d rx10 only
+  shipped fp32/f16-state variants — so `RADIANCE_GDN_LAZY=1` died at boot with "no materialize
+  kernel for a torch.bfloat16 state cache". The kernel bodies were already templated on the state
+  dtype (the bf16 load/store primitives exist from the eager kernels); this adds the missing
+  bf16state translation units, declarations, pybind bindings and registry rows. *Measured: the lazy
+  arm boots and serves on the bf16 state cache (the multi-turn gate, `kv-cache/turnbench.py`, passes
+  HEALTH — no empty replies, no loops — with logprob drift on the same order as the eager control);
+  the no-spec lazy arm still crashed at boot (fixed in 1.3.1); the lazy path stays default OFF.*
+
+## [1.2.2] - 2026-10-11
+
+### Fixed
+- **The lazy GDN state snapshots (`RADIANCE_GDN_LAZY=1`) are wired into the image again.** Since the
+  revert on 2026-09-17 the feature was dead in every image: `radiance_gdn_lazy.py` was missing from
+  the COPY allowlist and `patch_gdn_lazy` was not in the build loop, so the flag was a silent no-op.
+  The patch itself was also written against the pre-0.30 tree and broke in three places: `abstract.py`'s
+  `get_kv_cache_spec` (rebased onto `use_kda_recoverssm` / `num_speculative_tokens`), the shared-build
+  fast path (dropped: `patch_gdn_shared_build` is not in the loop, so the full build path is the only
+  one the image takes), and all nine `mamba_utils` hunks (rebased onto the 0.30 fused align kernels,
+  which gained the `TEMPORAL_TILES` constexpr). Every hunk now carries its own idempotency sentinel.
+  `radiance_gdn_lazy.py` was also written against the pre-0.30 `mamba_state_copy_funcs` (a flat
+  per-state tuple); 0.30 restructured it into a per-`MambaAttentionBackendEnum` dict, so the
+  `_Tables` lookup now indexes `copy_funcs[layer.mamba_type][state]` — the old code crashed with an
+  `IndexError` on the first GDN layer. **The multi-turn correctness gate (`kv-cache/turnbench.py`)
+  is not yet green on the GPU window; this release ships the wiring and the crash fix, with the
+  lazy path still default OFF, so it changes no production behaviour.**
+
 ## [1.2.1] - 2026-10-10
 
 ### Fixed
