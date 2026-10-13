@@ -223,6 +223,22 @@ jobs:
         env:
           HEAD_REF: ${{ github.head_ref }}
 
+  cpu-tests:
+    # GPU-less unit tests under sly/tests (numpy / torch-cpu; GPU checks stay in the GPU-window scripts)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: pytest sly/tests
+        run: |
+          python3 -m pip install --quiet numpy pytest torch --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple
+          python3 -m pytest sly/tests -q
+
   reanchor-brief:
     # A stack PR whose sly patches no longer apply to the new vLLM: hand it to the owner's Hermes agent
     # (signed webhook, brief = rules + failing hunks, docs/MAINTENANCE.md). Hermes pushes fixes to the
@@ -285,8 +301,8 @@ jobs:
           The sly patches no longer apply to this stack (\`ci/patch_dryrun.sh\` is red). The Hermes re-anchor agent was called for head \`${HEAD_SHA:0:12}\`; it pushes fixes to this branch or comments \`needs human\`. See docs/MAINTENANCE.md."
 
   ci:
-    # aggregate status for the branch protection: one required check instead of five
-    needs: [lint, patch-dryrun, constraints, consistency, resolve]
+    # aggregate status for the branch protection: one required check instead of six
+    needs: [lint, patch-dryrun, constraints, consistency, resolve, cpu-tests]
     if: always()
     runs-on: ubuntu-26.04
     steps:
