@@ -108,6 +108,7 @@ Everything is an environment variable; these are the ones worth knowing.
   MXFP4_CUMODE=1            compile the MXFP4 GEMM .hip with -mcumode (A/B; output-identical)
   VLLM_NO_USAGE_STATS=1     vLLM usage telemetry (default off here); 0 re-enables it
   DRY_RUN=1                 print the container command instead of running it
+  STARTUP_CACHE=1           key the cache dir on image ID + arch, persist JIT caches, cache the .so (startup-cache/README.md)
   DETACH=1                  start in the background and return (logs: RUNTIME logs -f NAME)
   PREPARE_ONLY=1            do the one-time work (image, libr4d) and stop before serving
 
@@ -403,6 +404,18 @@ FP8S_TP1=${RADIANCE_FP8_STREAM_TP1:-1}
 if [ "$TP" = 1 ] && [ "$FP8S" = 1 ] && [ "$FP8S_TP1" = 1 ]; then CACHE="$CACHE-tp1s"; fi
 # Lazy GDN snapshots narrow the traced spec-state window from SPEC+1 to 2 columns: own key.
 if [ "$GDN_LAZY" = 1 ]; then CACHE="$CACHE-lz"; fi
+# STARTUP_CACHE=1 (default 0): key $CACHE on the image ID + GPU arch (a re-pulled tag or another card gets a
+# fresh dir instead of reusing stale graphs), persist the comgr / tvm-ffi / tilelang JIT caches that
+# otherwise die with the --rm container, compile radiance_mxfp4_fp8.so once per key, and prune stale
+# cache trees when the disk fills. See startup-cache/README.md. 0 = nothing added to the command.
+STARTUP_CACHE=${STARTUP_CACHE:-0}
+STARTUP_CACHE_RUN_ARGS=()
+if [ "$STARTUP_CACHE" = 1 ]; then
+  . "$SCRIPT_DIR/startup-cache/startup-cache.sh"
+  CACHE="$CACHE-$STARTUP_CACHE_KEY"
+  startup_cache_jit_mounts "$CACHE"
+  startup_cache_reap "$CACHE" "$HOME/.radiance-cache-w4a8-"
+fi
 # prompt_logprobs allocates a ~1-1.7 GiB prompt x vocab logits transient that vLLM does not reserve
 # for, and KV is sized to eat everything else -- 0.97 and even 0.92 OOM the engine on ppl.py. Use
 # GPU_UTIL=0.75 for perplexity work, 0.98 for throughput.
@@ -1083,6 +1096,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -v "${HF_CACHE:-$HOME/.cache/huggingface}":/root/.cache/huggingface \
   -v "$MODELS":/models \
   -v "$CACHE":/cache \
+  ${STARTUP_CACHE_RUN_ARGS[@]+"${STARTUP_CACHE_RUN_ARGS[@]}"} \
   -v "${PATCHES:-$SCRIPT_DIR}":/patches:z \
   ${KVCACHE_MOUNT[@]+"${KVCACHE_MOUNT[@]}"} \
   ${KVCACHE_ENV[@]+"${KVCACHE_ENV[@]}"} \
@@ -1128,8 +1142,14 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
        radiance_arnq.py radiance_tp3pad.py "$SP"/
     # MXFP4_CUMODE=1 builds the GEMM TU in CU mode (waves of a workgroup confined to one CU of the
     # WGP, LDS partitioned per CU) -- bit-identical output, an occupancy/LDS-placement A/B knob.
-    hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $([ "${MXFP4_CUMODE:-0}" = 1 ] && echo -mcumode) \
-      $(python3 -m pybind11 --includes) radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+    if [ -n "${LAUNCH_IMG_KEY:-}" ] && [ -f /startup-cache/hip-so-cache.sh ]; then
+      # STARTUP_CACHE=1: compiled once per (source, flags, arch, image); --offload-arch is appended there
+      bash /startup-cache/hip-so-cache.sh radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
+        -O3 -w -std=c++17 -fPIC -shared $([ "${MXFP4_CUMODE:-0}" = 1 ] && echo -mcumode) $(python3 -m pybind11 --includes)
+    else
+      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $([ "${MXFP4_CUMODE:-0}" = 1 ] && echo -mcumode) \
+        $(python3 -m pybind11 --includes) radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+    fi
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
     # rebuild, the Dockerfile supports the same substitution through R4D_REPO / R4D_VERSION.
