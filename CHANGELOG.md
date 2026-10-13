@@ -27,7 +27,15 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   - CPU tests: `sly/tests/test_gdn_lazy_cpu.py`.
 
 ### Measured
-- Night gate pending.
+- GPU window 2026-10-13, image `1.3.2-rocm10.1`, production argv, bf16 SSM state, fp8 KV:
+  - No spec, one cold 30,926-token chat request, 2 runs per arm: eager run 1 = run 2 (bit-identical);
+    lazy runs 1 and 2 = eager (tokens and logprobs bit-identical, 148 tokens). 1.3.1 lazy: run 2
+    diverged at token 0.
+  - Spec (DFlash2, 7 tokens), lazy, turnbench EXACT, 3 sessions x 7 turns up to 110k tokens:
+    HEALTH PASS, every cold turn exact, cached vs cold drift 16 of 18 GPU-path turns (eager 1.3.1 on
+    the same bench: 18 of 18). The cached-path drift is the known prefix-cache drift of eager too,
+    not a lazy defect.
+- The acceptance night gate has not run on 1.3.2; this release is cut by hand (`release.yml`).
 
 ## [1.3.1] - 2026-10-12
 
