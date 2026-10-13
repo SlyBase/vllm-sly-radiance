@@ -51,6 +51,12 @@ design reasons. Revisit an entry when its reason changes.
 | DFlash2-FP8 drafter (`tcclaviger/Qwen3.8-27B-DFlash2-FP8`) | Heavier than the W4A16 drafter, and stacks running it report fewer tokens per update than this image (code 4.71 vs 5.09). |
 | Qwen3.8-27B-PARO-MXFP6 | Two GPUs only. |
 
+**4-bit KV cache (KV-cache roadmap, 2026-10-13, steps M0 / S2 / S1):**
+
+| Item | Why not |
+|---|---|
+| 4-bit K/V cache (MXFP4 OCP/OAS block 32/16, token-wise INT4 group 256/64, each with and without Hadamard32) instead of the fp8 cache | Measured, gate G1 failed. Captured post-RoPE Q/K/V of all 16 attention layers of Swift-1.5 (5 prompts, 0.6k-131k context, `sly/kvq/reference.py` as oracle): the best token-local candidate (INT4, group 64, Hadamard32) gives an attention-output error of **2.8x the fp8 cache** (median over layers, max 4.0x); MXFP4-OAS+H32 3.5x (max 5.0x). The gate asked for <= 2x on every layer. The ratio is the format's resolution, not an outlier problem: on Gaussian data fp8 has 2.7 % and every 4-bit format 11 % relative noise, so no scale rule closes it. Keeping the last 896 positions in fp8 lowers the median to 1.6x but the worst layer stays at 3.2x and needs a second pool. The upside was real: decode attention is 33 / 39 % of the step at 2 / 3 x 128k, 3 x (128k + 16k output) preempts at the 439k pool, and a 4-bit spec would give 1.73-1.75x pool tokens (S2). Revisit with a format that is not token-local or with a much larger model-side quality budget (end-to-end GSM8K / needle, which this study did not run). Data: `radiance-benchmarks` windows `m0-210`, `m0b-210`, `s1-210`. |
+
 ## Paiton (Eliovp-BV/paiton-vllm-plugin, `models/Qwen3.8-MXFP4-DFlash2`)
 
 Reviewed 2026-09-27 against their 26 September 65K image. Paiton is a vLLM plugin whose speed comes
