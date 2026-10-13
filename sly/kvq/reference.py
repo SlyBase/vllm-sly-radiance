@@ -11,19 +11,30 @@ E2M1_EMAX = 2                      # largest E2M1 magnitude 6 = 1.5 * 2^2
 
 
 def _amax(x):
-    return float(np.max(np.abs(np.asarray(x, np.float64))))
+    """Block absmax over the last axis (float64)."""
+    return np.max(np.abs(np.asarray(x, np.float64)), -1)
+
+
+def _out(s):
+    """Scalar int for one block, uint8 array for [..., block]."""
+    return int(s) if np.ndim(s) == 0 else s.astype(np.uint8)
+
+
+def _ocp_bytes(amax):
+    # frexp: amax = m * 2^e, m in [0.5, 1) -> floor(log2 amax) = e - 1, exact (no log2 rounding)
+    e = np.frexp(amax)[1].astype(np.int64) - 1 - E2M1_EMAX
+    s = np.clip(e + E8M0_BIAS, 0, E8M0_MAX)
+    s = np.where(amax == 0.0, 0, s)
+    return np.where(np.isfinite(amax), s, E8M0_MAX)
 
 
 def e8m0_ocp(x):
-    """OCP shared scale byte of one block: floor(log2 amax) - emax(E2M1), biased, clamped to 0..254."""
-    amax = _amax(x)
-    if amax == 0.0 or not np.isfinite(amax):
-        return 0 if amax == 0.0 else E8M0_MAX
-    e = int(np.floor(np.log2(amax))) - E2M1_EMAX
-    return int(np.clip(e + E8M0_BIAS, 0, E8M0_MAX))
+    """OCP shared scale byte per block (last axis): floor(log2 amax) - emax(E2M1), biased, clamped to 0..254."""
+    return _out(_ocp_bytes(_amax(x)))
 
 
 E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], np.float32)   # magnitude of codes 0..7; bit 3 = sign
+E2M1_MID = (E2M1[:-1] + E2M1[1:]) / 2                                     # 0.25 0.75 1.25 1.75 2.5 3.5 5
 
 
 class MX:
@@ -36,21 +47,22 @@ class MX:
 def _e2m1_codes(v):
     """Round |v| to the nearest E2M1 magnitude, ties to the even code, saturate at 6; sign into bit 3."""
     a = np.minimum(np.abs(v), 6.0)
-    # exact tie test (float64): among the nearest magnitudes take the even code
-    d = np.abs(a[..., None].astype(np.float64) - E2M1)
-    nearest = d == d.min(-1, keepdims=True)
-    code = np.argmax(nearest * (1 + (np.arange(8) % 2 == 0)), -1)
+    # E2M1_MID[j] is the tie between codes j and j+1: left/right search differ only at an exact tie,
+    # then take the even one of j, j+1
+    lo = np.searchsorted(E2M1_MID, a, "left")
+    hi = np.searchsorted(E2M1_MID, a, "right")
+    code = np.where(lo == hi, lo, lo + (lo % 2))
     return (code | np.where(np.signbit(v) & (code > 0), 8, 0)).astype(np.uint8)
 
 
 def e8m0_oas(x):
     """Overflow-Aware Scaling (arXiv 2603.08713 s4.2): OCP maps amax to [4, 8); OAS maps it to (3.5, 7],
     i.e. takes the next larger exponent when amax / 2^e_ocp > 7 (saturation error larger than rounding error)."""
-    s = e8m0_ocp(x)
     amax = _amax(x)
-    if amax > 0.0 and np.isfinite(amax) and amax / 2.0 ** (s - E8M0_BIAS) > 7.0:
-        s = min(s + 1, E8M0_MAX)
-    return s
+    s = _ocp_bytes(amax)
+    with np.errstate(invalid="ignore", over="ignore"):
+        up = np.isfinite(amax) & (amax > 0.0) & (amax / np.exp2(s - E8M0_BIAS) > 7.0)
+    return _out(np.minimum(s + up, E8M0_MAX))
 
 
 SCALE_RULES = {"ocp": e8m0_ocp, "oas": e8m0_oas}
@@ -61,7 +73,7 @@ def quant_mxfp4(x, rule="ocp", block=32):
     if rule not in SCALE_RULES:
         raise ValueError(f"unknown kv format scale rule {rule!r}")
     g = x.reshape(*x.shape[:-1], -1, block)
-    scales = np.apply_along_axis(SCALE_RULES[rule], -1, g).astype(np.uint8)
+    scales = np.asarray(SCALE_RULES[rule](g), np.uint8)
     inv = np.exp2(E8M0_BIAS - scales.astype(np.float64))[..., None]
     codes = _e2m1_codes(g * inv).reshape(*x.shape[:-1], -1)
     payload = (codes[..., 0::2] | (codes[..., 1::2] << 4)).astype(np.uint8)

@@ -142,3 +142,14 @@ def test_attention_error_is_zero_for_lossless_and_matches_hand_value():
     assert R.attention_error(q, k, v, k, v) == 0.0
     # V scaled by 1.1 with K unchanged -> O scales by 1.1 exactly -> relative error 0.1
     assert abs(R.attention_error(q, k, v, k, 1.1 * v) - 0.1) < 1e-6
+
+
+@pytest.mark.parametrize("rule", ["ocp", "oas"])
+def test_scale_rules_are_vectorized_over_blocks(rule):
+    # the S1 study quantizes ~10^7 blocks; per-block Python calls are too slow
+    rng = np.random.default_rng(13)
+    g = (rng.standard_normal((50, 32)) * np.exp2(rng.integers(-12, 12, (50, 1)))).astype(np.float32)
+    g[3] = 0.0
+    g[4, 0] = 7.5 * 2.0 ** -5
+    f = R.SCALE_RULES[rule]
+    np.testing.assert_array_equal(f(g), [f(row) for row in g])
