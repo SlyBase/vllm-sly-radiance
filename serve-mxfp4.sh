@@ -907,6 +907,9 @@ if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || tr
 KVCACHE=${KVCACHE:-off}
 KVCACHE_RAM_GIB=${KVCACHE_RAM_GIB:-16}
 KVCACHE_DISK=${KVCACHE_DISK:-}
+# KVCACHE_EXACT=1 (default 0; needs KVCACHE=ram|disk): bit-exact cached resumes + checkpoint retention.
+# Adds 6 patches and their gates (kv-cache/README.md, "Exact resumes"). 0 = nothing added.
+KVCACHE_EXACT=${KVCACHE_EXACT:-0}
 KVCACHE_MOUNT=()
 KVCACHE_ENV=()
 KVCACHE_TIER=()
@@ -914,7 +917,8 @@ KVCACHE_PRELUDE=""
 _kvp() { KVCACHE_PRELUDE+="    $1"$'\n'; }   # one prelude line (4-space indented, newline-terminated)
 case "$KVCACHE" in
   off|"")
-    : ;;
+    [ "$KVCACHE_EXACT" = 0 ] || die "KVCACHE_EXACT=1 needs KVCACHE=ram or KVCACHE=disk."
+    ;;
   ram|disk)
     # MAMBA_STORE_STRIDE and SWA_STORE_MAMBA_ALIGN only reach the 0.27.1 hunks; on vLLM >= 0.30
     # those hunks are skipped (upstream retention does it) and the two knobs are inert.
@@ -948,6 +952,18 @@ case "$KVCACHE" in
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_reconcile_reask.py || echo "[kv-cache] WARNING: reconcile-reask did not apply"'
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_swa_align_touch.py || echo "[kv-cache] WARNING: swa-align/touch did not apply"'
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_sched_align_last_block.py || echo "[kv-cache] WARNING: align-last-block did not apply"'
+    if [ "$KVCACHE_EXACT" = 1 ]; then
+      # FATAL on failure (no `|| echo`): a partial apply would leave some caching paths uncapped.
+      # Order is a dependency: canonical-chunks first; receipts, mixed, retention and wait stand on it.
+      KVCACHE_ENV+=(-e RADIANCE_CANONICAL_CHUNKS=1 -e RADIANCE_CANON_RECEIPTS=1 -e RADIANCE_CANON_MIXED=1 \
+        -e RADIANCE_CANON_WAIT=1 -e RADIANCE_VRAM_RETENTION=1 -e RADIANCE_TIER_RETENTION=1)
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_sched_canonical_chunks.py'
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_canon_receipts.py'
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_canon_mixed.py'
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_vram_retention.py'
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_tier_retention.py'
+      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_canon_wait.py'
+    fi
     # vLLM >= 0.30 only (SKIP before): the tier hit lands one turn back without it; trace is silent unless enabled
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_swa_eagle_replay_tail.py || echo "[kv-cache] WARNING: eagle-replay-tail did not apply"'
     _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_boundary_trace.py || echo "[kv-cache] WARNING: boundary-trace did not apply"'
