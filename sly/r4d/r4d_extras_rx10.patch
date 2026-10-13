@@ -964,10 +964,10 @@ index 0000000..a07d43b
 +}
 diff --git a/r4d_gdn_lazy_update_k128_v128.h b/r4d_gdn_lazy_update_k128_v128.h
 new file mode 100644
-index 0000000..ea2aaa2
+index 0000000..c54458d
 --- /dev/null
 +++ b/r4d_gdn_lazy_update_k128_v128.h
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,439 @@
 +// r4d_gdn_lazy_update_k128_v128.h -- the GDN recurrent decode update with LAZY state snapshots.
 +//
 +// The eager kernel (r4d_gdn_recurrent_update_k128_v128.h) writes one full [V,K] state per
@@ -1013,6 +1013,7 @@ index 0000000..ea2aaa2
 +#define LZ_MAXVS         2
 +#define LZ_HEAD_BYTES (LZ_REGION * LZ_MAXVS)
 +#define LZ_HDR_MAGIC  0x4c5a5331u   // "LZS1"
++#define LZ_MODE_STASH 2              // materialize mode bit: the window has a stash column
 +#define LZ_CAND_BYTES 768
 +#define LZ_AB_OFF     64
 +#define LZ_CAND_OFF   128
@@ -1248,7 +1249,7 @@ index 0000000..ea2aaa2
 +
 +template <int STDT>
 +__global__ __launch_bounds__(LZ_THR)
-+void r4d_gdn_lazy_materialize_kernel(lz_tables tb, int mode,
++void r4d_gdn_lazy_materialize_kernel(lz_tables tb, int mode_flags,   // bit0 mode, bit1 LZ_MODE_STASH
 +                                     const int* __restrict__ state_idx,     // dst col (mode 0) / running col (mode 1)
 +                                     const int* __restrict__ src_col,       // mode 0
 +                                     const int* __restrict__ token_bias,    // mode 0
@@ -1258,6 +1259,11 @@ index 0000000..ea2aaa2
 +                                     float scale, float sp_thr)
 +{
 +  const int b = blockIdx.x, hv = blockIdx.y, si = blockIdx.z;
++  // LZ_MODE_STASH: column base/dst + 1 is the request's stash block. Only a drafter allocates it;
++  // without one that column lies past the request's blocks and can hold a stale id of a live
++  // block, so it is neither read nor zeroed (1.3.1: no-spec lazy runs were not deterministic).
++  const int mode = mode_flags & 1;
++  const bool stash_col = (mode_flags & LZ_MODE_STASH) != 0;
 +  const int req = tb.idx_mapping ? tb.idx_mapping[b] : b;
 +  if (req < 0) return;
 +  int base_col, dst_col, count;
@@ -1277,7 +1283,8 @@ index 0000000..ea2aaa2
 +    if (dst_col == base_col && count == 0) return;
 +  }
 +  const int* bt = (const int*)tb.bt_ptrs[tb.group_idx[si]] + (size_t)b * tb.bt_stride_req;
-+  const int base_slot = bt[base_col], stash_slot = bt[base_col + 1], dst_slot = bt[dst_col];
++  const int base_slot = bt[base_col], dst_slot = bt[dst_col];
++  const int stash_slot = stash_col ? bt[base_col + 1] : 0;
 +  // rx17 guard (from zzpanic/qwen3.6-vllm-gfx1201-launchers 6147726, libr4d-rx13 rx17): the stash
 +  // is needed only to replay candidates (count > 0). A multi-block prefill step moves the running
 +  // block by several columns, and on a request's first step after a prefix hit bt[base_col + 1] is
@@ -1333,7 +1340,7 @@ index 0000000..ea2aaa2
 +  __syncthreads();                       // every stash read of this head is done before dst is written
 +  gdn_state_store<STDT, LZ_HK>(state + (size_t)dst_slot * st_slot + (size_t)hv * st_head
 +                                     + (size_t)row * LZ_K + k0, h);
-+  if (mode == 0 && tid == 0) {
++  if (mode == 0 && stash_col && tid == 0) {
 +    // the block after the new running block is the new stash block: its header must not replay
 +    const int new_stash = bt[dst_col + 1];
 +    if (new_stash > 0) {

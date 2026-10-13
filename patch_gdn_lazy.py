@@ -8,7 +8,9 @@ Three source patches, every one of them inert unless the env knob is set at runt
      metadata carries the stash column for every row so a prefill can invalidate its stash.
   3. v1/worker/mamba_utils.py: the fused align copies skip TEMPORAL states (LAZY_TEMPORAL) and the
      lazy materialize kernel provides them (pre-forward migration after the Triton launch, post-step
-     checkpoint BEFORE it, because the Triton kernel resets num_accepted in place).
+     checkpoint BEFORE it, because the Triton kernel resets num_accepted in place). Only when the
+     mamba groups own a stash block (radiance_gdn_lazy.temporal_enabled): without a drafter the
+     stock Triton copies stay on (1.3.2; the stashless materialize broke determinism in 1.3.1).
 
 Idempotency: each hunk's replacement carries its own sentinel string (SENT + suffix) in a comment,
 so a second pass over an already-patched tree NOOPs every hunk. The sentinels are unique per hunk
@@ -169,6 +171,10 @@ apply(M,
         self._radiance_kv_cfg = kv_cache_config
         self._radiance_fwd_ctx = forward_context
         self._radiance_copy_funcs = mamba_state_copy_funcs
+        # lazy temporal path only with a stash block (a drafter); else vLLM's exact copies run
+        import radiance_gdn_lazy
+        self._radiance_lazy_temporal = radiance_gdn_lazy.temporal_enabled(
+            kv_cache_config, self.mamba_group_ids)
         # This only runs once per worker.
 ''', SENT + " tables", "mamba_utils: keep the forward context for the lazy tables")
 # V1 postprocess: not supported under lazy
@@ -201,9 +207,9 @@ apply(M,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
-            LAZY_TEMPORAL=_radiance_lazy(),
+            LAZY_TEMPORAL=self._radiance_lazy_temporal,
         )
-        if _radiance_lazy():  # radiance lazy gdn precopy: temporal migration = base + replay
+        if self._radiance_lazy_temporal:  # radiance lazy gdn precopy: temporal migration = base + replay
             import radiance_gdn_lazy
             radiance_gdn_lazy.materialize(self, 0, num_reqs, state_idx_gpu, src_col_gpu,
                                           token_bias_gpu, idx_mapping)
@@ -217,7 +223,7 @@ apply(M,
 ''',
 '''        if num_reqs == 0 or not self.is_initialized:
             return
-        if _radiance_lazy():  # radiance lazy gdn postalign: checkpoint = base + replay, BEFORE the reset
+        if self._radiance_lazy_temporal:  # radiance lazy gdn postalign: checkpoint = base + replay, BEFORE the reset
             import radiance_gdn_lazy
             radiance_gdn_lazy.materialize(self, 1, num_reqs, num_accepted_tokens_gpu,
                                           state_idx_gpu, new_num_computed_tokens_gpu, idx_mapping)
@@ -233,7 +239,7 @@ apply(M,
 '''            HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
             TEMPORAL_TILES=_TEMPORAL_TILES,
-            LAZY_TEMPORAL=_radiance_lazy(),  # radiance lazy gdn postalign-flag
+            LAZY_TEMPORAL=self._radiance_lazy_temporal,  # radiance lazy gdn postalign-flag
         )
 ''', SENT + " postalign-flag", "mamba_utils: LAZY_TEMPORAL on the align postprocess launch")
 apply(M,

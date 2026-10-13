@@ -10,6 +10,25 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.2] - 2026-10-13
+
+### Fixed
+- **Lazy GDN without speculative decoding is deterministic again.** In 1.3.1, `RADIANCE_GDN_LAZY=1`
+  without a drafter gave different logprobs for the same cold request from the second request on
+  (eager: bit-identical). Cause: the pre-forward materialize (mode 0) zeroed the stash headers at
+  block-table column `dst_col + 1`. Without a drafter there is no stash block, so that column lies past
+  the request's blocks and can hold a stale id of a live block; the zeroing hit live GDN state.
+  Proven on the GPU window: masking that column made lazy bit-identical to eager.
+  - `radiance_gdn_lazy.temporal_enabled()`: the lazy temporal path (skip of vLLM's temporal copies +
+    materialize) runs only when the mamba groups own a stash block (`num_speculative_blocks > 0`).
+    Without a drafter vLLM's exact Triton copies run, as in eager.
+  - libr4d `gdn_lazy_materialize` (rx10 patch): new mode bit `LZ_MODE_STASH`. The kernel reads or
+    zeroes column `+1` only when the bit is set, so a wrong caller cannot hit a foreign block.
+  - CPU tests: `sly/tests/test_gdn_lazy_cpu.py`.
+
+### Measured
+- Night gate pending.
+
 ## [1.3.1] - 2026-10-12
 
 ### Fixed

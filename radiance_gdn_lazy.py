@@ -23,6 +23,20 @@ import torch
 
 ENABLED = os.environ.get("RADIANCE_GDN_LAZY", "0") == "1"
 STASH_COL = 1                    # window column of the stash block (0 = running / base)
+MODE_STASH = 2                   # kernel mode bit: column dst/base + 1 is the request's stash block
+
+
+def temporal_enabled(kv_cache_config, mamba_group_ids):
+    """True when the lazy temporal path runs: knob set AND the mamba groups own a stash block.
+
+    Without a drafter there is no stash block (num_speculative_blocks == 0) and nothing to
+    replay. vLLM's own temporal copies are then exact, and the column after the running block
+    is not the request's: mode-0 header zeroing there hit stale block ids (1.3.1 no-spec
+    non-determinism). So the stock copies stay on."""
+    if not ENABLED:
+        return False
+    spec = kv_cache_config.kv_cache_groups[mamba_group_ids[0]].kv_cache_spec
+    return int(getattr(spec, "num_speculative_blocks", 0)) > 0
 
 
 def _log(msg):
@@ -73,8 +87,9 @@ class _Tables:
         if tag is None:
             raise RuntimeError(f"lazy GDN: no materialize kernel for a {self.dtype} state cache")
         self.fn = getattr(r4d, f"gdn_lazy_materialize_k128_v128_bf16_{tag}")
+        self.has_stash = temporal_enabled(kv_cache_config, ctx.mamba_group_ids)
         _log(f"materialize tables: {self.n} temporal states, H {self.H} Hg {self.Hg} "
-             f"st_head {self.st_head} state {self.dtype}")
+             f"st_head {self.st_head} state {self.dtype} stash {self.has_stash}")
 
 
 def materialize(ctx, mode, num_reqs, a, b, c, idx_mapping):
@@ -85,12 +100,13 @@ def materialize(ctx, mode, num_reqs, a, b, c, idx_mapping):
         tb = _Tables(ctx, ctx._radiance_kv_cfg, ctx._radiance_fwd_ctx)
         ctx._radiance_lazy_tables = tb
     im = idx_mapping.data_ptr() if idx_mapping is not None else 0
+    kmode = mode | (MODE_STASH if tb.has_stash else 0)
     if mode == 0:
         args = (a.data_ptr(), b.data_ptr(), c.data_ptr(), 0, 0)
     else:
         args = (b.data_ptr(), 0, 0, a.data_ptr(), c.data_ptr())
     tb.fn(tb.state_ptrs.data_ptr(), tb.slot_strides.data_ptr(), tb.group_idx.data_ptr(),
           tb.alog_ptrs.data_ptr(), tb.dtb_ptrs.data_ptr(), ctx.block_table_ptrs.data_ptr(),
-          int(ctx.block_table_stride_req), im, int(mode), *args, int(ctx.block_size),
+          int(ctx.block_table_stride_req), im, int(kmode), *args, int(ctx.block_size),
           int(num_reqs), tb.n, tb.H, tb.Hg, tb.K, tb.V, int(tb.st_head), tb.K ** -0.5, 20.0,
           torch.cuda.current_stream().cuda_stream)
