@@ -132,6 +132,58 @@ cache" is the same request replayed with a fresh cache salt. Brackets: tokens se
 A 16 GiB RAM tier carries the sessions until they outgrow it (turn 6 here); the disk tier keeps
 every later turn near 15 s. All 21 turns served cleanly in both modes.
 
+## Exact resumes and checkpoint retention (opt-in, `KVCACHE_EXACT=1`)
+
+This is an improvement to the offload above, not a new cache. The tiers, connector, reaper and the
+existing patches are unchanged; `KVCACHE_EXACT=1` fixes two weaknesses of how they are used:
+
+1. **A cached turn is not guaranteed to equal a cold one.** The cached resume runs on a different
+   prefill chunk grid than a cold prefill would, so its numerics drift in the low bits. The canonical-chunk
+   patches make the two identical.
+2. **The tiers store checkpoints nobody resumes from.** GDN and drafter states are kept at every grid
+   chunk, but real agent turns only resume at the previous prompt's tip, the shared system prompt or a few
+   chunks below the tip. Retention keeps those, so the same RAM and disk hold more useful context.
+
+Off by default; needs `KVCACHE=ram` or `disk`. With it off, the generated serve command is
+byte-identical to before. With it on, `serve-mxfp4.sh` applies six more patches (all FATAL on a
+failed anchor, each inert with its env gate at 0) and sets the gates:
+
+| patch | gate | what it does |
+|---|---|---|
+| `patch_sched_canonical_chunks.py` | `RADIANCE_CANONICAL_CHUNKS` | prefills on one fixed chunk grid from token 0, resumes only on that grid, caches (GPU and tier) only blocks computed in a full grid chunk |
+| `patch_canon_receipts.py` | `RADIANCE_CANON_RECEIPTS` | the drafter group keeps one receipt-only block past the canonical end, so a follow-up turn does not resume a whole chunk early |
+| `patch_canon_mixed.py` | `RADIANCE_CANON_MIXED` | a grid chunk that shares its step with other sequences' speculative decodes still counts as canonical |
+| `patch_canon_wait.py` | `RADIANCE_CANON_WAIT` | a canonical prefill cut short by another request's prefill waits a step (at most `RADIANCE_CANON_WAIT_MAX`, default 8) instead of running off-grid |
+| `patch_vram_retention.py` | `RADIANCE_VRAM_RETENTION` | GPU prefix cache keeps GDN/drafter checkpoints only at the resumable tip, the shared-prefix junction and the grid points up to `RADIANCE_VRAM_KEEP_PREFIX` (14,080) |
+| `patch_tier_retention.py` | `RADIANCE_TIER_RETENTION` | the RAM/disk tiers store drafter-window rows only at the tip, a geometric backoff below it (`RADIANCE_TIER_GEO_K`, 8), the system prompt and the junction |
+
+**Why.** A block's KV and recurrent state depend on the length of the prefill chunk it was computed
+in, not only on the tokens. Stock vLLM stops a chunk at a cache hit's shared-prefix junction, which a
+cold prefill never does, so a cached resume continues on a different chunk grid and differs from the
+cold run in the low bits. With the grid, a cached turn matches its cold twin token for token and
+logprob for logprob. Retention then stops storing checkpoints nobody resumes from.
+
+**Cost.** Prompts shorter than one grid chunk (the step budget floored to a block) are never served
+from the prefix cache. Exactness is for solo requests; under concurrency the batch shape changes the
+numerics for cold and cached requests alike.
+
+**Notes for vLLM 0.31.** `--prefix-cache-retention-interval` already defaults to 0 here, which is what
+the retention patches build on. Align-mode Mamba groups store through vLLM's copy-on-write hand-off
+rather than the loop `patch_tier_retention.py` hooks, so tier retention thins the drafter-window rows
+only; the filter fails open, so it can reduce what is stored but never changes what is computed.
+
+**Provenance and status.** Developed and measured on the author's vLLM 0.27.1/0.30 build, where
+`turnbench.py` was 21/21 exact against cold twins at fp16 and fp32 on both the RAM-only and disk builds,
+and a replay of real agent sessions served 56 -> 77 % (4 agents) and 69 -> 85 % (3 agents) of follow-up
+turns from cache at the same storage. Ported here to vLLM 0.31: `ci/patch_dryrun.sh` applies all of it
+against the pinned source (two passes, the second all NOOP). **Not yet run on the 1.3.x image on a
+GPU**; the gate is `turnbench.py` with an fp32 ssm cache:
+
+```bash
+KVCACHE=disk KVCACHE_DISK=/kvcache KVCACHE_EXACT=1 ./serve-mxfp4.sh
+python3 kv-cache/turnbench.py --yes
+```
+
 ## Correctness gate
 
 `turnbench.py` runs 3 sessions x 7 turns and compares every cached turn

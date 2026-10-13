@@ -10,6 +10,11 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.4] - 2026-10-13
+
+### Added
+- **`KVCACHE_EXACT=1` (default `0`; needs `KVCACHE=ram`/`disk`): bit-exact cached resumes + checkpoint retention.** Six new `kv-cache/` patches (canonical prefill chunks + checkpoint retention), applied at container start, all FATAL on a failed anchor and inert with their env gates at `0`. A prefix-hit prefill now runs on the same fixed chunk grid as a cold prefill (cached == uncached in the low bits), and the GPU/tier caches stop keeping GDN/drafter checkpoints at grid points nobody resumes from. Flag off: the generated serve command is byte-identical to before. Author's bench notes (not yet GPU-verified in this repo): follow-up turns served from cache 56 → 77 % (4 agents), 69 → 85 % (3 agents); a GPU A/B window is the release gate, not the merge gate.
+
 ## [1.3.3] - 2026-10-13
 
 ### Added
