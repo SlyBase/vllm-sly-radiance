@@ -10,6 +10,11 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.3.3] - 2026-10-13
+
+### Added
+- **`STARTUP_CACHE=1` (default `0`): faster boots, self-invalidating build caches.** `serve-mxfp4.sh` now keys its cache dir on image **ID** + GPU arch (a re-pulled tag or another card gets a fresh dir instead of reusing stale graphs), persists the comgr / tvm-ffi / tilelang JIT caches across `--rm` boots, compiles `radiance_mxfp4_fp8.so` once per (source, flags, arch, image ID), and prunes stale cache trees when the disk passes 65 %. A miss is always safe (the slow path rebuilds). Measured (one R9700, approximate): comgr+tvm-ffi+tilelang 189 s → 151 s per boot; the `.so` ~30 s. Flag off: the generated command is unchanged.
+
 ## [1.3.2] - 2026-10-13
 
 ### Fixed

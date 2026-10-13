@@ -1,3 +1,4 @@
+#!/bin/bash
 # startup-cache/startup-cache.sh -- build-cache identity, JIT-cache mounts and stale-tree pruning, for any launcher.
 #
 # SOURCE it once, after IMAGE is set and before anything is built or keyed:
