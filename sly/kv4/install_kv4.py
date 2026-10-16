@@ -57,7 +57,7 @@ apply(REG,
 
 # build TetraAttention's HIP kernel now (hipcc, ~20 s) so the engine's first forward does not wait for it;
 # the launcher imports torch / aiter, hence a subprocess from the installed copies
-if os.environ.get("RADIANCE_KV4H_PREBUILD", "1") != "0":
+if os.environ.get("RADIANCE_KV4H_PREBUILD", "1") != "0" and os.path.exists("/dev/kfd"):  # no GPU at image build
     # the format's default (query planes, K group) with both row-tile counts: the tune table picks
     # row_tiles 2 for decode and 4 for verify / prefill
     r = subprocess.run([sys.executable, "-c", "import radiance_kv4h_kernel as K; [K._ext(row_tiles=r) for r in (2, 4)]; "
