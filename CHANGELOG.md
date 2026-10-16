@@ -10,6 +10,13 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.4.0] - 2026-10-16
+
+### Added
+- **Tuned int4 W4A16 MoE config for the R9700** (`moe-configs/E=256,N=512,device_name=AMD_Radeon_R9700,dtype=int4_w4a16.json`, 256 experts, N 512, group 128 — MiniCPM-V 4.7 / Qwen3.5-MoE-A3B shape). The image only shipped fp8 configs, so int4 MoE ran the default tiles. *Measured:* 1.2-1.7x per MoE call, ~+8 % end-to-end decode (MiniCPM-V 4.7, 210 W).
+- **docs/MINICPM-V47.md**: serving recipe for MiniCPM-V 4.7 + DSpark on one R9700 (MXFP4 at load for the bf16 linears and the drafter, k = 8, `--attention-backend ROCM_AITER_UNIFIED_ATTN`), and its dead ends in docs/NOT-ADOPTED.md. *Measured:* BetterBench `--decode` 169.4 tok/s at 210 W (reproduced 169.4 / 169.3; Qwen3.8 + DFlash2 production 132.4 in the same window); the attention backend alone 146.8 -> 169.4; GSM8K 200 0.835 (bf16 base 0.85).
+- **MiniCPM-V 4.7 model support (`RADIANCE_MINICPMV4_7=1`, default `0`).** Backport of vllm-project/vllm#58674 (merged 2026-10-11, after the 0.31.0 pin) so `openbmb/MiniCPM-V-4.7-35B-A3B` loads and serves: `sly/patch_minicpmv4_7.py` ships the `minicpmv4_7.py` model file, the `minicpmv4_6.py` refactor (+272/−63) that 4.7's `super()` chain depends on, and the registry entry. The PR's parser/reasoning/chat-template files are not carried (only reached by a tool-calling/reasoning request, not by load/serve). Gated: default off leaves the Qwen3.8 production image byte-identical. The model file reads `config.json` directly (no `MiniCPMV4_7Config` import), so it loads on the image's transformers 5.17; only the HF `AutoProcessor` for `model_type: minicpmv4_7` needs `transformers>=5.18` (raise the pin, `pip install -U transformers` in the container before serving — the pin is metadata, not an import guard). GDN geometry (head_k/head_v 128/128, conv 4), full-attention geometry (head_dim 256, 2 KV heads) and MoE (256 experts / 8 active) match the R4D kernels. *Measured:* import of `MiniCPMV4_7ForConditionalGeneration` + the 4.6 refactor verified clean in a throwaway container (bind-mount of the two patched files, no GPU); end-to-end serving on the R9700 is the release gate, not the merge gate.
+
 ## [1.3.4] - 2026-10-13
 
 ### Added

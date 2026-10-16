@@ -255,6 +255,7 @@ reduces re-prefill latency for long sessions; it does **not** raise `--max-model
 | `RADIANCE_PAROQUANT=1`, `RADIANCE_AUTOROUND=1`, `RADIANCE_ESCHA=1` (no `--quantization`) | ParoQuant, AutoRound, escha checkpoints |
 | `QUANT=mxfp6 ./serve.sh` / `./setup.sh --mxfp6` | ParoQuant MXFP6 (W6A8); needs TP>=2 (upstream-validated), one R9700 is TP=1 |
 | `--tensor-parallel-size 2/3/4/8`, `RADIANCE_TP_PAD=3`, `RADIANCE_AR_*` | several cards — see [docs/MULTI-GPU.md](docs/MULTI-GPU.md) |
+| `RADIANCE_MINICPMV4_7=1` + `--attention-backend ROCM_AITER_UNIFIED_ATTN` | MiniCPM-V 4.7 35B-A3B with its DSpark drafter: 169.4 tok/s decode at 210 W (Qwen3.8 production 132.4) — full arguments in [docs/MINICPM-V47.md](docs/MINICPM-V47.md) |
 
 ## Repository
 
