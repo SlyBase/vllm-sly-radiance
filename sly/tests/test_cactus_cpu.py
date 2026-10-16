@@ -80,7 +80,14 @@ def test_patch_structure():
     src = sys.argv[1] if len(sys.argv) > 1 else None
     if src is None:
         cand = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "rejection_sampler_utils.py"
-        assert cand.exists(), "no pinned source: pass the file path as argv[1]"
+        if not cand.exists():
+            # The CI cpu-tests job has no pinned tree; ci/patch_dryrun.sh covers apply + idempotence.
+            try:
+                import pytest
+                pytest.skip("pinned vLLM source not available (ci/patch_dryrun.sh covers it)")
+            except ImportError:
+                print("SKIP cactus patch structure: no pinned source (pass the file as argv[1])")
+            return
         src = cand
     s = _run_patch_on(Path(src))
     ast.parse(s)  # the patched file must parse
