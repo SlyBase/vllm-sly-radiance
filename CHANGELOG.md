@@ -10,6 +10,50 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.5.0] - 2026-10-16
+
+### Added
+- **TetraAttention: a 4-bit KV cache for the full-attention layers (`KVCACHE_DTYPE=kv4`, opt-in; fp8
+  stays the default).** The 16 attention layers' K and V are Walsh-Hadamard rotated and stored as
+  signed int4 codes with one e4m3 scale per token (272 bytes per head and token instead of fp8's 512).
+  Their attention runs on a new HIP kernel (`sly/kv4/radiance_kv4h.hip`, backend `TETRA`, working name
+  `KV4H` kept as an alias) that feeds the stored nibbles straight into `v_wmma_i32_16x16x32_iu4` (S = K
+  Q^T with an int4 query) and `v_wmma_i32_16x16x16_iu8` (P as uint8 against each tile's max, V's nibble
+  as 16 v in int8): no unpacking, no zero point. The DFlash drafter's head-128 sliding-window, non-causal
+  attention runs on it too. The modules, the backend registry entries and the int4 drafter patch are baked into the image
+  (`sly/kv4/install_kv4.py` and `sly/kv4/patch_int4_pth_rocm.py` are in the Dockerfile patch loop;
+  the kernel is built on first use); nothing changes with `KVCACHE_DTYPE=fp8`. Every launch / format parameter
+  is a knob (`RADIANCE_KV4H_*`, launch arguments, `sly/bench_kv4_attn.py` flags, `sly/kv4/tune_kv4h.py`
+  sweep with a knob table). The Triton implementation (`KV4`) and a fake-quant backend (`KV4FAKE`) stay
+  as reference / A/B paths.
+- `sly/kv4/kl_score.py`, `kl_compare.py`: accuracy of a KV format against a bf16 KV cache
+  (teacher-forced top-20 logprobs, KL / top-1 / perplexity per context bin); `sly/kv4/decode_delta.py`:
+  the pure decode rate by the 150/450-token difference.
+
+Measured (one R9700; engine A/Bs in one GPU window, fp8 = R4D_HYBRID):
+- KV pool **593k tokens instead of 342k** (~1.75x; a full 262k context needs 4.25 GiB of KV instead of 8).
+- Accuracy against a bf16 KV cache, 5 texts x 120k tokens: KL **0.0126** (fp8 0.0123), top-1 agreement
+  95.3 % (95.6 %), perplexity +0.54 % (+0.06 %), flat from 4k to 128k; GSM8K-200 0.80 (0.79); needle at
+  97k found at 10 / 50 / 90 %.
+- Decode, ms per step at an 18k prefix: 1 stream **33.5 vs 35.0**, 4 streams **41.9-48.1 vs 45.7-46.8**.
+- Cold prefill with `--max-num-batched-tokens 3456` (3328-token chunks): 8k / 24k / 85k **2.27 / 7.47 /
+  36.7 s vs 2.34 / 7.72 / 38.0 s**. Keep the budget >= 2 x 1664 plus the draft slots: with half-size
+  cells vLLM sets the attention block to 1664 tokens (fp8: 880), and a smaller budget prefills one
+  block per step.
+- Trade-offs: slightly less precision (above); prefix-cache hits at 1664-token granularity (a turn
+  recomputes up to 1,663 tokens instead of 879); an offload tier written by an fp8 serve must not be
+  reused by a kv4 one (the bytes are format-specific).
+- Re-measured on 1.5.0 against an fp8 control in one GPU window (engine A/B, 262k context): KV pool
+  **747,492 vs 439,031 tokens** (+70 %), cold prefill 8k / 32k / 64k **+6 / +7 / +8 %** (the fp8 control ran
+  with the same 3456-token chunk; with the production chunk of 2048 the gap is about 3 points wider),
+  1-stream decode 34.2 vs 35.1 ms per step, BetterBench conc 1 / 2 / 4 / 8 within run-to-run noise,
+  GSM8K-200 0.855 vs 0.845. Against a bf16 KV cache (5 texts x 120k tokens): KL 0.0208 (fp8 0.0245),
+  top-1 agreement 94.5 % (94.4 %), true-token NLL +0.0057 (fp8 +0.0004), i.e. about +0.5 % perplexity. Two
+  224k-token requests at once fit without preemption; 20 minutes of mixed load: 542 requests, no error.
+  Also run with `KVCACHE=ram` and `KVCACHE=ram KVCACHE_EXACT=1` (2 GiB tier): multi-turn follow-up is
+  token-identical to a cold run. Not tested: the disk tier, kv4 on other cards than the R9700.
+
+
 ## [1.4.0] - 2026-10-16
 
 ### Added
