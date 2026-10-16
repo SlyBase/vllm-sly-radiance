@@ -2,8 +2,8 @@
 """Install the KV4 backend into a running image: copy the modules next to the other radiance_*.py
 in site-packages and add the KV4 member to vLLM's attention backend registry.
 
-Run at container start from the /patches mount (qwen38-vllm.sh, serve-mxfp4.sh with
-KVCACHE_DTYPE=kv4) until the Dockerfile carries the modules. Idempotent: the copy is a plain
+Runs in the Dockerfile patch loop at image build (the kernel prebuild is skipped without /dev/kfd and
+happens on first use), and still works from the /patches mount (serve-mxfp4.sh with KVCACHE_DTYPE=kv4). Idempotent: the copy is a plain
 overwrite, the registry edit is anchored and skipped when present.
 """
 import os

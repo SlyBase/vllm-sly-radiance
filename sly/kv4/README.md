@@ -9,7 +9,7 @@ cache**: ~1.75x the KV pool for slightly less precision, at equal or better spee
 KVCACHE_DTYPE=kv4 ./serve-mxfp4.sh     # = --kv-cache-dtype int4_per_token_head --attention-backend TETRA
 ```
 
-`install_kv4.py` runs in the container prelude. It copies the modules into site-packages, registers
+`install_kv4.py` runs in the Dockerfile patch loop (and still in the launcher's container prelude). It copies the modules into site-packages, registers
 the backends and prebuilds the kernel with the image's hipcc (~20 s). The DFlash drafter's attention
 runs on TetraAttention too. The working name was KV4H, and it survives in three places:
 - the files (`radiance_kv4h_*`);

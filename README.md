@@ -289,6 +289,7 @@ This image stands on other people's work:
 - **Radiance engine fork** ([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork
   slydlake/radiance) — the `adaptive_k` verify-width policy behind `RADIANCE_ADAPTIVE_WIDTH` and the M-band findings
   (wide decode tile) behind `RADIANCE_MXFP4_WIDE_MAX_M`, ported to vLLM's graph model.
+- **[extfs](https://github.com/extfs)** (Tom Hillbrunner) — TetraAttention (`KVCACHE_DTYPE=kv4`, `sly/kv4/`): the 4-bit KV cache with the int4/int8 WMMA attention kernel, its tests and accuracy harness (PR #135, taken wholesale; the image wiring, a 1.4.0 rebase and the re-measurement are ours).
 - **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.
