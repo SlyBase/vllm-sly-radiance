@@ -102,3 +102,30 @@ kernels — Transformers, stock vLLM and this image cannot load them.
 16-key tiles for long-prefill attention (+6.6 % attention), GDN gate read in place instead of copied, a GDN
 chunk-scan launch that fills the card in one round, and a fused GDN kernel for the speculative verify
 step (+1.5 % weighted decode, bit-exact to the old path).
+
+## MiniCPM-V 4.7 (2026-10)
+
+Measured with the arguments in [MINICPM-V47.md](MINICPM-V47.md), 210 W, BetterBench `--decode` or probe step time.
+
+| Item | Why not |
+|---|---|
+| Drafter attention on AITER (`"attention_backend":"ROCM_AITER_UNIFIED_ATTN"` in `--speculative-config`) | Does not start: `ValueError ... not valid for this configuration ... non-causal attention not supported` (DSpark drafts with non-causal attention). |
+| k = 10 / 12 after the AITER switch | Probe step 26.2 / 27.5 ms vs 24.7 ms at k = 8; BB k = 12 158.2 vs 169.4 (tokens per step 4.65 vs 4.24, only math gains). |
+| `GPU_MAX_HW_QUEUES=2` | Step 55.4 vs 30.2 ms. |
+| `--no-async-scheduling`, `HIP_FORCE_DEV_KERNARG=1` | No effect (30.2 / 30.3 vs 30.2 ms). |
+| `--attention-backend TRITON_ATTN` | 26.5 ms, AITER 24.7 ms. |
+| `enable_adaptive_verification` (DSpark confidence head) | Refuses the GDN attention backend at startup. |
+| CUDA-graph sizes aligned to k+1 (`[9,18,...]`) | Slower than `[8,16,32,...]`. |
+| Same AITER flag for Qwen3.8 production | Production already runs `R4D_HYBRID`; AITER 34.96 vs 35.00 ms at equal acceptance. |
+
+## TetraAttention: query quantization in the attention kernel's prologue (2026-10-10)
+
+Tried: the HIP kernel takes the bf16 query, rotates it (Walsh-Hadamard as a butterfly over the
+lane pair that holds a row's 256 dims), quantizes to int8 and parks the int4 planes -- one launch
+less per layer (the Triton `quantize_query`, 16 us graph-timed). Rejected: the prologue's 128 live
+floats push the kernel from 237 to 249 VGPRs, occupancy 6 -> 5 waves per SIMD, and the tile loop
+pays for that on every tile: +15-20 us per call at 19k context (1 sequence), +50 us at 4 sequences
+-- as much as or more than the launch it saves (graph-timed full path 150 vs 150 us at 1 sequence,
+561 vs 484 at 4). Scheduling barriers and staged loads removed the spills but not the occupancy
+loss. The un-rotation folded into the segment merge (`reduce_unrotate`) is kept: it costs nothing
+extra there. `sly/kv4/radiance_kv4h.hip` keeps the quantized query input (int4 by default, int8 as two planes).

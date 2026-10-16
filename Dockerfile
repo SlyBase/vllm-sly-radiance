@@ -708,7 +708,9 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width \
-             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
+             sly/patch_minicpmv4_7 \
+             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha \
+             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \

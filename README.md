@@ -237,8 +237,20 @@ mounted, patched or passed to the engine.
 | `KVCACHE` | `off` | `off` (default) = stock behaviour; `ram` = GPU → RAM tier in `/dev/shm` + the 6 behavioural patches; `disk` = GPU → RAM → disk + the full 15-patch instrumented set |
 | `KVCACHE_RAM_GIB` | `16` | size of the RAM tier (GiB); needs `/dev/shm` big enough |
 | `KVCACHE_DISK` | — | host path of a dedicated filesystem for the disk tier (`KVCACHE=disk` only); the disk tier also wants `kvcache-reap.sh` (see `kv-cache/README.md`) to keep the fs below 70 % |
-| `STARTUP_CACHE` | `0` | `1` = `serve-mxfp4.sh` keys its cache dir on image ID + GPU arch, persists the comgr / tvm-ffi / tilelang JIT caches across `--rm` boots, compiles `radiance_mxfp4_fp8.so` once per key and prunes stale cache trees when the disk passes 65 %; see `startup-cache/README.md` |
-| `KVCACHE_EXACT` | `0` | `1` (needs `KVCACHE=ram`/`disk`) = bit-exact cached resumes via canonical prefill chunks + checkpoint retention; six extra patches, see `kv-cache/README.md` → "Exact resumes". Prompts shorter than one grid chunk are then never prefix-cached |
+| `STARTUP_CACHE` | `1` | **Recommended: on.** `serve-mxfp4.sh` keys its cache dir on image ID + GPU arch, persists the comgr / tvm-ffi / tilelang JIT caches across `--rm` boots, compiles `radiance_mxfp4_fp8.so` once per key and prunes stale cache trees when the disk passes 65 %. A miss is always safe (the slow path rebuilds); saves ~68 s per boot. See `startup-cache/README.md` |
+| `KVCACHE_EXACT` | `0` | `1` (needs `KVCACHE=ram`/`disk`) = bit-exact cached resumes via canonical prefill chunks + checkpoint retention; six extra patches, see `kv-cache/README.md` → "Exact resumes". **Recommended with `KVCACHE=ram`/`disk` for multi-turn / long-context agents** (retention raises follow-up turns served from cache 56→77 % / 69→85 %; a cached turn becomes bit-identical to a cold one for greedy eval/A-B). **Keep `0` for short prompts** (< one 3520-token grid chunk): they are then never prefix-cached |
+
+### 4-bit KV cache (opt-in, off by default): TetraAttention
+
+`KVCACHE_DTYPE=kv4` stores the 16 full-attention layers' K/V as Hadamard-rotated 4-bit codes with one
+e4m3 scale per token (272 bytes per head and token instead of 512) and runs their attention on
+TetraAttention (backend `TETRA`), a HIP kernel that feeds the stored nibbles straight into the card's
+int4 / int8 matrix instructions (`sly/kv4/README.md`). The DFlash drafter's head-128 window
+attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the pages line up).
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79). Decode 4-5 % faster per step at 1 and 4 streams (same-window A/B), prefill 3-4 % faster with `CHUNK` >= 3456 (the attention block is 1664 tokens, fp8: 880, so a turn recomputes up to 1,663 tokens on a prefix hit). Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
 
 The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
 the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).
@@ -255,6 +267,7 @@ reduces re-prefill latency for long sessions; it does **not** raise `--max-model
 | `RADIANCE_PAROQUANT=1`, `RADIANCE_AUTOROUND=1`, `RADIANCE_ESCHA=1` (no `--quantization`) | ParoQuant, AutoRound, escha checkpoints |
 | `QUANT=mxfp6 ./serve.sh` / `./setup.sh --mxfp6` | ParoQuant MXFP6 (W6A8); needs TP>=2 (upstream-validated), one R9700 is TP=1 |
 | `--tensor-parallel-size 2/3/4/8`, `RADIANCE_TP_PAD=3`, `RADIANCE_AR_*` | several cards — see [docs/MULTI-GPU.md](docs/MULTI-GPU.md) |
+| `RADIANCE_MINICPMV4_7=1` + `--attention-backend ROCM_AITER_UNIFIED_ATTN` | MiniCPM-V 4.7 35B-A3B with its DSpark drafter: 169.4 tok/s decode at 210 W (Qwen3.8 production 132.4) — full arguments in [docs/MINICPM-V47.md](docs/MINICPM-V47.md) |
 
 ## Repository
 
@@ -276,6 +289,7 @@ This image stands on other people's work:
 - **Radiance engine fork** ([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork
   slydlake/radiance) — the `adaptive_k` verify-width policy behind `RADIANCE_ADAPTIVE_WIDTH` and the M-band findings
   (wide decode tile) behind `RADIANCE_MXFP4_WIDE_MAX_M`, ported to vLLM's graph model.
+- **[extfs](https://github.com/extfs)** (Tom Hillbrunner) — TetraAttention (`KVCACHE_DTYPE=kv4`, `sly/kv4/`): the 4-bit KV cache with the int4/int8 WMMA attention kernel, its tests and accuracy harness (PR #135, taken wholesale; the image wiring, a 1.4.0 rebase and the re-measurement are ours).
 - **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.
