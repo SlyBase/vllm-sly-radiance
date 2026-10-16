@@ -10,6 +10,18 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.5.1] - 2026-10-16
+
+### Added
+- **Cactus acceptance transform for speculative decoding (`RADIANCE_CACTUS_DELTA`, default 0 =
+  bit-exact stock).** `sly/patch_cactus.py` raises the V2 rejection kernel's acceptance threshold
+  from the target probability q_n to h_n = clamp(q_n + sqrt(2*delta*q_n*(1-q_n)), 0, 1)
+  (Cactus, arxiv 2604.04987), trading a bounded KL budget for a higher acceptance rate. Only the
+  non-greedy Leviathan branch is touched; greedy, synthetic-rate and block-verification paths stay
+  untouched, and delta=0 keeps the stock comparison bit-exact (the exp/log round-trip is guarded).
+  CPU-tested in `sly/tests/test_cactus_cpu.py`; the GPU A/B (acceptance, tokens/step, GSM8K) runs
+  through the accept gate with the env set on the gate unit.
+
 ## [1.5.0] - 2026-10-16
 
 ### Added
