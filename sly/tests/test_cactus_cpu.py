@@ -77,7 +77,8 @@ def _run_patch_on(src: Path) -> str:
 
 
 def test_patch_structure():
-    src = sys.argv[1] if len(sys.argv) > 1 else None
+    # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
+    src = sys.argv[1] if len(sys.argv) > 1 and Path(sys.argv[1]).is_file() else None
     if src is None:
         cand = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "rejection_sampler_utils.py"
         if not cand.exists():
