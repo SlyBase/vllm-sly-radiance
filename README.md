@@ -240,6 +240,18 @@ mounted, patched or passed to the engine.
 | `STARTUP_CACHE` | `1` | **Recommended: on.** `serve-mxfp4.sh` keys its cache dir on image ID + GPU arch, persists the comgr / tvm-ffi / tilelang JIT caches across `--rm` boots, compiles `radiance_mxfp4_fp8.so` once per key and prunes stale cache trees when the disk passes 65 %. A miss is always safe (the slow path rebuilds); saves ~68 s per boot. See `startup-cache/README.md` |
 | `KVCACHE_EXACT` | `0` | `1` (needs `KVCACHE=ram`/`disk`) = bit-exact cached resumes via canonical prefill chunks + checkpoint retention; six extra patches, see `kv-cache/README.md` → "Exact resumes". **Recommended with `KVCACHE=ram`/`disk` for multi-turn / long-context agents** (retention raises follow-up turns served from cache 56→77 % / 69→85 %; a cached turn becomes bit-identical to a cold one for greedy eval/A-B). **Keep `0` for short prompts** (< one 3520-token grid chunk): they are then never prefix-cached |
 
+### 4-bit KV cache (opt-in, off by default): TetraAttention
+
+`KVCACHE_DTYPE=kv4` stores the 16 full-attention layers' K/V as Hadamard-rotated 4-bit codes with one
+e4m3 scale per token (272 bytes per head and token instead of 512) and runs their attention on
+TetraAttention (backend `TETRA`), a HIP kernel that feeds the stored nibbles straight into the card's
+int4 / int8 matrix instructions (`sly/kv4/README.md`). The DFlash drafter's head-128 window
+attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the pages line up).
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79). Decode 4-5 % faster per step at 1 and 4 streams (same-window A/B), prefill 3-4 % faster with `CHUNK` >= 3456 (the attention block is 1664 tokens, fp8: 880, so a turn recomputes up to 1,663 tokens on a prefix hit). Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
+
 The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
 the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).
 The disk tier additionally needs its own filesystem plus a host systemd reaper (your step, not the
