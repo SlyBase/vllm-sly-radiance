@@ -154,6 +154,13 @@ arm_sed() {
     OT) # O + T4
         [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "OT needs O_DIR" >&2; return 1; }
         echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro -e RADIANCE_MXFP4_TILED_OPROJ=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 |" ;;
+    OTA) # OT + chunk 4096
+        [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "OTA needs O_DIR" >&2; return 1; }
+        echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro -e RADIANCE_MXFP4_TILED_OPROJ=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 |" ;;
+    OTR) # OT + R4D_ATTN_FP8=3 (numerics change, report only)
+        [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "OTR needs O_DIR" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro -e RADIANCE_MXFP4_TILED_OPROJ=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 -e R4D_ATTN_FP8=3 |" ;;
     R5) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e R4D_ATTN_FP8=3 /" ;;
     K)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
         echo "s/--kv-cache-dtype fp8/--kv-cache-dtype int4_per_token_head/"
