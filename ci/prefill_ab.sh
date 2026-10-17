@@ -33,6 +33,12 @@
 # vLLM reads compressed-tensors from the checkpoint's config.json, and an extra explicit flag would
 # be a launch delta against production (and against the measured baselines).
 #
+# Build the K2 object CPU-only inside the release image (no GPU device needed, ~3 min):
+#   docker run --rm -v /root/k2:/k2 --entrypoint bash vllm-sly-radiance:<tag> -c \
+#     'hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=gfx1201 -DRADIANCE_GROUPM=16 \
+#        $(python -m pybind11 --includes) /k2/radiance_mxfp4_fp8.hip -o /k2/radiance_mxfp4_fp8.so'
+# with sly/mxfp4/radiance_mxfp4_fp8.hip of this branch copied to /root/k2 first; then K2_SO=/root/k2/radiance_mxfp4_fp8.so.
+#
 # Arms (default order: C A B M T0 K C2; SHORT: C K2 R5 C2; C2 = control again, drift check):
 #   C   control, production 1.5.1 (262k, chunk 2048)
 #   A   chunk 4096 at 262k
