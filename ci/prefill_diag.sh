@@ -48,6 +48,9 @@ DRY=${DRY:-0}
 SKIP_CELLS=${SKIP_CELLS:-0}
 SKIP_TRACE=${SKIP_TRACE:-0}
 BENCH=${BENCH:-$HERE/bench_prefill_cells.py}
+# EXTRA_CELLS: extra docker args for the cells container only (e.g. bind-mount a branch-built .so / python glue
+# over the image copies, plus -e knobs), so the cells test the branch kernels, not the shipped ones.
+EXTRA_CELLS=${EXTRA_CELLS:-}
 SPLIT=${SPLIT:-$HERE/prefill_trace_split.py}
 
 mkdir -p "$OUT" && cd "$OUT" || exit 1

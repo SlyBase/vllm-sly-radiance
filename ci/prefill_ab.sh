@@ -68,6 +68,7 @@ DEPTHS=${DEPTHS:-[2000,16000,21500,64000]}
 SHORT=${SHORT:-0}
 QUANT_FLAG=${QUANT_FLAG:-}
 K2_SO=${K2_SO:-}
+O_DIR=${O_DIR:-}
 SP=${SP:-/opt/vllm/lib/python3.12/site-packages}   # site-packages inside the image
 if [ "$SHORT" = 1 ]; then
   DEPTHS=${DEPTHS_SHORT:-[2000,21500,64000]}        # ~1.5k / 16k / 47k real prompt tokens
@@ -141,6 +142,13 @@ arm_sed() {
     T0) echo "s/RADIANCE_MXFP4_A_TILED_MIN_M=513/RADIANCE_MXFP4_A_TILED_MIN_M=0/" ;;
     K2) [ -r "$K2_SO" ] || { echo "K2 needs K2_SO=<radiance_mxfp4_fp8.so built with -DRADIANCE_GROUPM=16>" >&2; return 1; }
         echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $K2_SO:$SP/radiance_mxfp4_fp8.so:ro |" ;;
+    O)  # tiled gdn_norm_quant (out_proj producer): .so built from this branch + patched python glue,
+        # both bind-mounted over the image (O_DIR holds radiance_mxfp4_fp8.so and radiance_fused_norm.py)
+        [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "O needs O_DIR=<dir with radiance_mxfp4_fp8.so + radiance_fused_norm.py>" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro -e RADIANCE_MXFP4_TILED_OPROJ=1 |" ;;
+    O0) # control for O: same mounts, knob off (proves the new .so alone changes nothing)
+        [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "O0 needs O_DIR" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro |" ;;
     R5) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e R4D_ATTN_FP8=3 /" ;;
     K)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
         echo "s/--kv-cache-dtype fp8/--kv-cache-dtype int4_per_token_head/"
