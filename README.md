@@ -25,6 +25,32 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1
 
 ## Performance
 
+**Reference run of image 1.5.1** on 2026-10-17, 300 W (firmware fan curve), production arguments, BetterBench
+0.4.0 default config (same method as the 1.0.0 run below, but a different GPU window and day), Cactus delta 0.5
+(the image default). Two arms: the fp8 KV cache with `R4D_HYBRID`, and the 4-bit KV cache (`KVCACHE_DTYPE=kv4`,
+backend `TETRA`). The 1.0.0 column is the reference run below.
+
+| | **1.5.1 fp8 KV** | **1.5.1 KV4** | 1.0.0 | Δ fp8 | Δ KV4 |
+|---|---|---|---|---|---|
+| **Decode, single stream** (weighted) | **149.6 tok/s** | 145.2 tok/s | 135.8 tok/s | **+10.2 %** | +6.9 % |
+| update gap p50 / p99 | 34.6 / 35.7 ms | 34.8 / 35.9 ms | 34.4 / 35.2 ms | ± 0 | ± 0 |
+| tokens per update: code / reasoning / prose | 5.71 / 4.08 / 3.45 | 5.56 / 4.22 / 3.26 | 5.07 / 3.57 / 2.88 | +13 / +14 / +20 % | +10 / +18 / +13 % |
+| tokens per update: json / file_edit / summarization | 5.83 / 6.16 / 5.45 | 5.71 / 6.07 / 5.17 | 5.60 / 5.98 / 4.79 | +4 / +3 / +14 % | +2 / +2 / +8 % |
+| **Prefill** 1.5k / 6k / 12k / 24k / 47k prompt tokens | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,065 / 2,977 / 2,913 / 2,757 / 2,440 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | −3 / −3 / −4 / −6 / **−8 %** | −2 / −5 / −6 / −7 / **−7 %** |
+| time to first token, 47k tokens | 19.4 s | 19.3 s | 17.9 s | +8 % | +8 % |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | 115\* / 237 / 373 / **503 / 507** tok/s | **134** / 243 / 373 / 483 / 506 | 120 / 213 / 338 / 461 / 466 | −4\* / +12 / +10 / **+9 / +9 %** | +11 / +14 / +10 / +5 / +8 % |
+| KV pool (262k context) | 439,031 tokens | **767,557 tokens** | 436,906 | +0.5 % | **+76 %** |
+| GSM8K 200 | not measured | not measured | 0.84 | | |
+
+\* The fp8 concurrency-1 figure (115 tok/s) is a low outlier: its first requests ran cold (TTFT p99 2.7 s). The
+KV4 arm, run first on a warm card, shows 134. Read concurrency 1 as ~120-135, not as a regression.
+
+What that means: the gain over 1.0.0 is acceptance (Cactus), not speed. The step time is unchanged, tokens per
+update rise by 2-20 %, and decode and concurrency 2-16 follow. KV4 gives up about 3 % decode against fp8 and
+gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that run was taken in another window
+and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
+The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
+
 **Reference run of image 1.0.0** on 2026-10-07 against 0.7.0 in the same GPU window (1.0.0 first, then 0.7.0), 300 W
 (firmware fan curve), Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 + DFlash2 k = 7, production arguments of each image, BetterBench
 0.4.0 default config (3 warmup + 20 passes per category, prefill 8 runs per depth, concurrency 1–16 × 48 requests,
@@ -273,12 +299,12 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
 | `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
-1.0.0 image at the same power, delta 0.5 gives **+2.6 to +19.7 % tokens per update** (prose +19.7, code +12.9,
-summarization +10.5, reasoning +9.1, json +4.1, file_edit +2.6), **149.6 vs 137.4 t/s weighted (+8.9 %)** and
-+8 to +13 % aggregate at concurrency 2 to 8. The step time is unchanged (34.4 vs 34.2 ms), so the gain is
-acceptance, not speed. With the 4-bit KV cache the weighted figure is 145.2 t/s (KV4 costs about 3 % decode
-against fp8 and gives 1.75x the KV pool). An earlier same-image A/B at 210 W (delta 0 vs 0.5, fp8) showed
-+0.0835 acceptance rate and +0.585 tokens per step.
+1.0.0 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,
+summarization +14, code +13, json +4, file_edit +3), **149.6 vs 135.8 t/s weighted (+10.2 %)** and +9 to +12 %
+aggregate at concurrency 2 to 16. The step time is unchanged (34.6 vs 34.4 ms), so the gain is acceptance, not
+speed. With the 4-bit KV cache the weighted figure is 145.2 t/s (+6.9 %; KV4 costs about 3 % decode against fp8
+and gives 1.75x the KV pool). An earlier same-image A/B at 210 W (delta 0 vs 0.5, fp8) showed +0.0835 acceptance
+rate and +0.585 tokens per step.
 
 What this does not show yet: the 300 W comparison above crosses image versions (1.0.0 vs 1.5.1); a same-image
 delta 0 control at 300 W and an accuracy check (GSM8K at delta 0.5 vs 0) are still open. **Recommendation:**
