@@ -61,8 +61,9 @@ log() { echo "$(date -u +%T) $*" | tee -a run.log; echo "$*" > status.txt; }
 # run CMD...: DRY=1 prints, otherwise executes
 run() { if [ "$DRY" = 1 ]; then echo "DRY: $*"; else "$@"; fi; }
 
+OWN=0   # 1 only after the preflight passed: never wipe the live production shm on an abort
 cleanup() {
-  [ "$DRY" = 1 ] || { docker rm -f "$NAME" >/dev/null 2>&1; docker rm -f "$NAME-cells" >/dev/null 2>&1; rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*; }
+  [ "$DRY" = 1 ] || { docker rm -f "$NAME" >/dev/null 2>&1; docker rm -f "$NAME-cells" >/dev/null 2>&1; [ "$OWN" = 1 ] && rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*; }
   kill "${SPID:-}" 2>/dev/null
   touch "$OUT/DONE"
 }
@@ -71,9 +72,10 @@ trap cleanup EXIT
 # --- preflight ---------------------------------------------------------------------------------
 VRAM=$(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | sort -n | tail -1)
 log "preflight: vram_used=${VRAM:-unreadable} B, DRY=$DRY"
-if [ "$DRY" != 1 ] && { [ -z "$VRAM" ] || [ "$VRAM" -ge 100000000 ]; }; then
+if [ "$DRY" != 1 ] && { [ -z "$VRAM" ] || [ "$VRAM" -ge 500000000 ]; }; then
   log "ABORT: card not free (vram_used >= 100 MB or unreadable); production must be stopped by the caller"; exit 1
 fi
+OWN=1
 HWMON=
 for h in /sys/class/drm/card*/device/hwmon/hwmon*; do [ -r "$h/power1_cap" ] && HWMON=$h; done
 [ -n "$HWMON" ] && log "power cap $(( $(cat "$HWMON/power1_cap") / 1000000 )) W (read only)"
@@ -119,7 +121,7 @@ if [ "$SKIP_CELLS" != 1 ]; then
   # shellcheck disable=SC2086
   run docker run --rm --name "$NAME-cells" $DEVFLAGS --ipc=host $ENVFLAGS \
       -e RADIANCE_MXFP4_A_TILED_MIN_M=0 -e HIP_VISIBLE_DEVICES=0 $EXTRA_CELLS \
-      -v "$BENCH":/w/bench_prefill_cells.py:ro -v "$OUT":/out --entrypoint python3 "$IMG" \
+      -v "$BENCH":/w/bench_prefill_cells.py:ro -v "$(dirname "$BENCH")/tile_layout.py":/w/tile_layout.py:ro -v "$OUT":/out --entrypoint python3 "$IMG" \
       /w/bench_prefill_cells.py --check --csv /out/prefill_cells.csv > cells.log 2>&1 \
     || log "cells: non-zero exit (see cells.log; WRONG cells = weights/WPERM mismatch)"
   [ "$DRY" = 1 ] && cat cells.log
@@ -132,7 +134,7 @@ if [ "$SKIP_TRACE" != 1 ]; then
   # delta: -d instead of --rm, own name, trace mount, rocprofv3 entrypoint + wrapper args, max-model-len
   sed -e "s|--rm --name vllm7-mxfp4|-d --name $NAME --entrypoint rocprofv3 -v $TRACE:/trace|" \
       -e "s|--max-model-len [0-9]*|--max-model-len $MAXLEN|" \
-      -e "s|^\(  vllm-sly-radiance:[^ ]* \\\\\)\$|\1\n  --kernel-trace --stats -f csv json -d /trace -o p -- /opt/radiance_entrypoint.sh \\\\|" \
+      -e "s|^\(  vllm-sly-radiance:[^ ]* \\\\\)\$|\1\n  --kernel-trace --stats -f csv json -d /trace -- /opt/radiance_entrypoint.sh \\\\|" \
       launch_prod.txt > cmd_trace.txt
   diff <(tr -s ' \\\n' '\n\n\n' < launch_prod.txt) <(tr -s ' \\\n' '\n\n\n' < cmd_trace.txt) > cmd_trace.diff
   grep -q 'rocprofv3' cmd_trace.txt && grep -q -- '-- /opt/radiance_entrypoint.sh' cmd_trace.txt \

@@ -31,8 +31,8 @@ from collections import defaultdict
 CLASSES = [
     ("GEMM", r"gemm|w4a8|mxfp4|wvsplitk|hgemm|matmul|Cijk_"),
     ("attention", r"unified_attention|r4d|paged|flash_attn|fmha|flash_fwd|attn_fwd"),
+    ("norm-quant", r"norm_quant|rms|quant|silu|layernorm|layer_norm"),
     ("GDN", r"gdn|chunk|conv1d|delta|recurrent|linear_attn"),
-    ("norm-quant", r"rms|quant|silu|layernorm|layer_norm"),
 ]
 CLASS_ORDER = [c for c, _ in CLASSES] + ["other"]
 _RX = [(c, re.compile(p, re.I)) for c, p in CLASSES]
@@ -182,6 +182,8 @@ def main(argv=None):
     labels = a.labels.split(",")
     if len(sel) < a.segments or len(labels) < len(sel):
         sys.exit(f"need {a.segments} bursts and labels, have {len(sel)} bursts / {len(labels)} labels")
+    if any(len(x) < 50 for x in sel):
+        sys.exit(f"suspicious burst sizes {[len(x) for x in sel]} (a shutdown burst may have shifted the labels)")
     fw = {k: int(v) for k, v in (p.split("=") for p in a.forwards.split(",") if p)}
     res = {}
     for lab, b in zip(labels, sel):
