@@ -118,7 +118,7 @@ if [ "$SKIP_CELLS" != 1 ]; then
   run docker rm -f "$NAME-cells"
   # shellcheck disable=SC2086
   run docker run --rm --name "$NAME-cells" $DEVFLAGS --ipc=host $ENVFLAGS \
-      -e RADIANCE_MXFP4_A_TILED_MIN_M=0 -e HIP_VISIBLE_DEVICES=0 \
+      -e RADIANCE_MXFP4_A_TILED_MIN_M=0 -e HIP_VISIBLE_DEVICES=0 $EXTRA_CELLS \
       -v "$BENCH":/w/bench_prefill_cells.py:ro -v "$OUT":/out --entrypoint python3 "$IMG" \
       /w/bench_prefill_cells.py --check --csv /out/prefill_cells.csv > cells.log 2>&1 \
     || log "cells: non-zero exit (see cells.log; WRONG cells = weights/WPERM mismatch)"
