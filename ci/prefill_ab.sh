@@ -212,6 +212,23 @@ sys.argv = ['bb', 'run', '--endpoint', 'http://127.0.0.1:$PORT/v1', '--model', '
             '--note', 'arm=$arm', '--note', 'power=${CAP_W}W', '--note', 'window=prefill-ab']
 main()
 " > "$OUT/$arm.bb.log" 2>&1 ) || log "$arm: BetterBench exit non-zero (see $arm.bb.log)"
+  if [ "$SHORT" = 1 ]; then   # decode guard: 3 sequential 256-token requests, not a BetterBench decode run
+    log "$arm: decode sample"
+    python3 - "$PORT" "$MODEL" > "$arm.decode.txt" 2>&1 <<'PY'
+import json, sys, time, urllib.request
+port, model = sys.argv[1:3]
+for i in range(4):   # first request is a warmup and is not reported as a rate
+    body = json.dumps({"model": model, "max_tokens": 256, "temperature": 0, "ignore_eos": True,
+                       "messages": [{"role": "user", "content": "Write a long story about a lighthouse keeper."}],
+                       "chat_template_kwargs": {"enable_thinking": False}}).encode()
+    t0 = time.time()
+    r = json.load(urllib.request.urlopen(urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions", body, {"Content-Type": "application/json"}), timeout=300))
+    dt = time.time() - t0
+    n = r["usage"]["completion_tokens"]
+    print(f"run{i} {'warmup' if i == 0 else 'sample'} tokens={n} s={dt:.2f} tps={n / dt:.1f}")
+PY
+  fi
   docker logs "$NAME" > "$arm.server.log" 2>&1
   docker rm -f "$NAME" >/dev/null 2>&1
   rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*
