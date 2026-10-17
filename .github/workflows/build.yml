@@ -159,9 +159,15 @@ jobs:
           TORCH_FROM: ${{ steps.torch.outputs.from }}
         run: |
           set -o pipefail
+          # MAX_JOBS=2: 4 OOM-killed the vllm-wheel stage on 2026-10-17 (24 GB
+          # LXC cgroup; a hipcc unit peaks well past 6 GB RSS). 2 keeps any OOM
+          # contained in the cgroup instead of taking the runner (and the host)
+          # down. The Dockerfile ARG default stays 4 for manual builds on an
+          # idle box.
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
             ${TORCH_FROM:+--build-arg "TORCH_FROM=${TORCH_FROM}"} \
+            --build-arg "MAX_JOBS=2" \
             --build-arg "RADIANCE_VERSION=${VER}" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
