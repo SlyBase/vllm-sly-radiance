@@ -4,7 +4,7 @@
 Cactus (arxiv 2604.04987) raises the verifier's acceptance threshold for the drafted
 token from the target probability q_n to h_n = clamp(q_n + sqrt(2*delta*q_n*(1-q_n)),
 0, 1), trading a bounded KL budget (delta) for a higher acceptance rate. delta=0 is
-the identity, so the image is bit-exact stock without the env set.
+the identity, so RADIANCE_CACTUS_DELTA=0 is bit-exact stock (the image default is 0.5).
 
 The vLLM 0.31 kernel does the acceptance test in the Leviathan branch of
 _rejection_kernel: `target_logprob > tl.log(u) + draft_logprob`, i.e. accept iff
@@ -13,9 +13,10 @@ the stock comparison bit-exact at delta=0 (an exp/log round-trip is not guarante
 bit-identical in fp32). Greedy requests keep their own branch (argmax agreement);
 synthetic-rate and block-verification modes are untouched.
 
-RADIANCE_CACTUS_DELTA   divergence budget (default 0 = unchanged). One module-level
-                        read; the value is a per-process compile constant of the
-                        Triton kernel, so it cannot change mid-serve.
+RADIANCE_CACTUS_DELTA   divergence budget (default 0.5; set 0 for the bit-exact stock
+                        comparison). One module-level read; the value is a per-process
+                        compile constant of the Triton kernel, so it cannot change
+                        mid-serve.
 
 Only the V2 model runner path is patched: vLLM 0.31 defaults ROCm Qwen3.8 + dflash
 to the V2 runner (vllm/config/vllm.py), and the V1 sample/rejection_sampler.py is a
@@ -41,7 +42,7 @@ apply(TARGET,
       "import os\n\nimport torch\n\nfrom vllm.triton_utils import tl, tldevice, triton\n"
       "\n"
       "# radiance cactus: env knob (sly/patch_cactus.py)\n"
-      "CACTUS_DELTA = float(os.environ.get(\"RADIANCE_CACTUS_DELTA\", \"0\"))\n",
+      "CACTUS_DELTA = float(os.environ.get(\"RADIANCE_CACTUS_DELTA\", \"0.5\"))\n",
       "RADIANCE_CACTUS_DELTA",
       "cactus: import + env read")
 

@@ -17,6 +17,7 @@ import ast
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -76,6 +77,15 @@ def _run_patch_on(src: Path) -> str:
         return target.read_text()
 
 
+def test_default_delta_is_half():
+    # Release default: delta=0.5 when the env is unset; an explicit RADIANCE_CACTUS_DELTA=0
+    # must still select the bit-exact stock path (kernel guard `cactus_delta == 0.0`).
+    src = PATCH.read_text()
+    m = re.search(r'environ\.get\(\\?"RADIANCE_CACTUS_DELTA\\?",\s*\\?"([0-9.]+)\\?"\)', src)
+    assert m, "env read with default not found"
+    assert m.group(1) == "0.5", f"default must be 0.5, got {m.group(1)}"
+
+
 def test_patch_structure():
     # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
     src = sys.argv[1] if len(sys.argv) > 1 and Path(sys.argv[1]).is_file() else None
@@ -97,10 +107,12 @@ def test_patch_structure():
     # the Leviathan branch must compare against the Cactus threshold, not the raw target logprob
     assert "h_n" in s and "cactus_delta" in s, "transform / delta threading missing"
     assert s.count("RADIANCE_CACTUS_DELTA") == 1, "env read must happen once, module-level"
+    assert '"RADIANCE_CACTUS_DELTA", "0.5"' in s, "patched file must default to 0.5"
 
 
 if __name__ == "__main__":
     test_math_properties()
     test_acceptance_rate_increases()
+    test_default_delta_is_half()
     test_patch_structure()
     print("cactus CPU tests OK")
