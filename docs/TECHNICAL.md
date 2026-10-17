@@ -698,6 +698,42 @@ What the CPU dry run cannot show, for the GPU window: 0.31 moves the DFlash cont
 also wraps `profile_run` (KV pool size); `GDNAttentionMetadataBuilder` gained `update_block_table` / `uniform_spec_sequence_length`
 and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what `patch_adaptive_width` did by hand, now redundant).
 
+## Nucleus Speculative Decoding: `RADIANCE_NSD=1` (1.6.0, opt-in, unmeasured)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) relaxes the verifier for sampled (non-greedy) requests.
+A draft token x is accepted if the standard test passes (`u <= min(1, p(x)/q(x))`) **or** x is in the target
+nucleus S_theta(p): the mass of the tokens with a strictly higher target logit than x is <= theta (default 0.95).
+The residual distribution on a rejection and the bonus token are unchanged, so the only change is *more
+acceptances*; the paper bounds the single-step deviation from p by the mass the rule moves onto x.
+
+Where: `rejection_sample` in `vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py` (V2 runner, the path
+production runs; the Cactus rule of PR #153 hooks the same Leviathan branch, which is why the two exclude each
+other). Its `target_logits` argument is already the sampled distribution (temperature, min-p, top-k, top-p applied
+by `Sampler.apply_sampling_params`), so p is what the paper needs. A token the sampler removed has logit -inf and
+is never in the nucleus. The repo's lookup draft (point-mass q) and the probabilistic DFlash2 draft take the same
+branch; greedy rows, synthetic rates and block verification do not.
+
+How, without sorting the vocabulary: the nucleus test needs `sum(p_j for logit_j > logit_x)`. Per request and
+vocab block (8192 logits, the stock stats kernel's block) `_nsd_nucleus_mass_kernel` loads the draft token's logit,
+the global logsumexp (from the stock per-block max/sumexp) and streams the block once:
+`sum(where(l > l_x, exp(l - lse), 0))`. `_rejection_kernel` adds the blocks' partials of the step and ORs
+`mass <= theta` into `accepted`. One extra read of the target logits per draft row, a small fp32 scratch of
+`[num_logits, num_blocks]`, no atomics, no LDS beyond Triton's reduction.
+Fixed shapes and no host sync, so FULL_DECODE_ONLY capture is unaffected (unverified on the GPU: the kernel ran
+only in the Triton interpreter). `USE_NSD` is a `constexpr`: with `RADIANCE_NSD=0` the second kernel is never
+launched and the compiled rejection kernel is the stock one (checked bit for bit in the Triton interpreter,
+`sly/tests/nsd_kernel_check.py`).
+
+Knobs: `RADIANCE_NSD` (0|1), `RADIANCE_NSD_THETA` in [0, 1); one module-level read each, so a per-process constant.
+Both NSD and `RADIANCE_CACTUS_DELTA` set -> `RuntimeError` at import: the paper's bound does not cover a union.
+
+Checks (CPU, no GPU): the streaming form against the reference's mask form over vocab sizes of 1 and 3 blocks,
+temperatures 0.6 to 1.7, top-k 0/7/40 and theta 0 to 0.99; theta edges and logit ties; the point-mass
+output distribution in closed form; the patched Triton kernel in the Triton interpreter against a float64
+reimplementation (accepted counts, greedy rows equal stock). Not done: any GPU run, any acceptance or
+quality number. Test plan for the A/B: baseline vs. theta 0.95 vs. theta 0.90 vs. Cactus (delta 1.0), same GPU
+window, control first and repeated last, GSM8K 200 next to BetterBench (AGENTS.md, Measuring).
+
 ## Build details
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the

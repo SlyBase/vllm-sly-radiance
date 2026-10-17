@@ -10,6 +10,32 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.6.0] - 2026-10-17
+
+### Added
+- **Nucleus Speculative Decoding as an opt-in acceptance rule (`RADIANCE_NSD=1`, `RADIANCE_NSD_THETA`,
+  default off).** `sly/patch_nsd.py` extends the V2 rejection kernel's non-greedy branch (Leviathan test)
+  with NSD (arxiv 2610.07822): a draft token is also accepted when it lies in the target nucleus, i.e. the
+  probability mass of the tokens with a strictly higher target logit is <= theta (default 0.95). The
+  residual distribution and the bonus token are unchanged. The mass comes from one extra streaming pass
+  over the logits (per-block partial sums, no sort of the vocabulary), computed on the same
+  post-temperature / top-k / top-p logits that are sampled; the kernel stays graph-safe (no host sync,
+  fixed shapes). With the knob off nothing is launched and the kernel compiles as stock (`USE_NSD`
+  constexpr). Greedy rows, synthetic-rate mode and block verification are untouched.
+- NSD and the Cactus rule (`RADIANCE_CACTUS_DELTA`) are mutually exclusive: setting both fails at import.
+  The paper's single-step bound does not cover a union of the two.
+- CPU tests `sly/tests/test_nsd_cpu.py` (rule math against the reference implementation, theta edges and
+  ties, temperature / top-k, point-mass draft, patch idempotence and order) and
+  `sly/tests/nsd_kernel_check.py` (the patched Triton kernel in the Triton interpreter: off == stock bit
+  for bit, on == a float64 reference).
+
+### Changed
+- Nothing for existing setups: with `RADIANCE_NSD` unset the image behaves like 1.5.0.
+
+**Measured:** not measured yet. The image is built for a BetterBench A/B (baseline vs. NSD theta 0.95 and
+0.90 vs. Cactus); acceptance, tokens/step, decode tok/s and GSM8K are open. The paper's numbers are the
+authors' own and unreplicated.
+
 ## [1.5.0] - 2026-10-16
 
 ### Added
