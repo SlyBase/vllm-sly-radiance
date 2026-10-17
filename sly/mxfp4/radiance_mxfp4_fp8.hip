@@ -1787,14 +1787,16 @@ static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, in
 // multiple of 16 and N a multiple of 128, every 16-lane segment is either fully active or fully
 // idle in each pass. x: [M, N] contiguous bf16; z: [M, N] bf16 with row stride zs (a column
 // slice of the fused qkvz projection, no copy); w: [128] bf16 shared by all heads.
-template <int ART>
+template <int ART, bool TILED = false>
 __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
     const __bf16 *__restrict__ x, const __bf16 *__restrict__ z, long zs,
     const __bf16 *__restrict__ w, unsigned char *__restrict__ q, float *__restrict__ scale,
     int N, float eps) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
-  x += (long)row * N; z += (long)row * zs; q += (long)row * N;
+  x += (long)row * N; z += (long)row * zs;
+  if (!TILED) q += (long)row * N;
+  const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in add_rms_quant
   constexpr int MAXG = 5;                       // N <= ART*8*5 = 10240 (3072 in this model)
   const int NV = N >> 3;                        // 8-element groups; 16 per head
   float sv[MAXG][8];
@@ -1851,18 +1853,25 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
       float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
       hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
     }
-    ((uint2 *)q)[g] = make_uint2(lo, hi);
+    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
+    else ((uint2 *)q)[g] = make_uint2(lo, hi);
   }
 }
 
 static void launch_gdn_norm_quant(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
-                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream) {
+                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream,
+                                  int tiled) {
   if (N > 40 * ARNQ_T || (N & 127))
     throw std::runtime_error("radiance_gdn_norm_quant: N must be a multiple of 128 and <= 10240");
   if (zs & 7) throw std::runtime_error("radiance_gdn_norm_quant: z row stride must be 8-aligned");
-  hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
-                     (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
-                     (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+  if (tiled)  // N % 128 == 0 already implies the fragment layout's N % 16 == 0
+    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T, true>), dim3(M), dim3(ARNQ_T), 0,
+                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
+                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+  else
+    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
+                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
+                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
 }
 
 static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintptr_t q,
@@ -1962,7 +1971,9 @@ PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
         py::arg("gu"), py::arg("q"), py::arg("scale"), py::arg("M"), py::arg("N"),
         py::arg("stream"), py::arg("tiled") = 0);
   m.def("launch_gdn_norm_quant", &launch_gdn_norm_quant,
-        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)");
+        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)",
+        py::arg("x"), py::arg("z"), py::arg("zs"), py::arg("w"), py::arg("q"), py::arg("scale"),
+        py::arg("M"), py::arg("N"), py::arg("eps"), py::arg("stream"), py::arg("tiled") = 0);
   m.def("launch_add_rms_quant", &launch_add_rms_quant,
         "fused residual-add + Gemma rmsnorm + per-token e4m3 quant, one WG per row",
         py::arg("y"), py::arg("res"), py::arg("w"), py::arg("q"), py::arg("scale"),

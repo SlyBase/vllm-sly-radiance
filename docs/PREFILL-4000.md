@@ -36,8 +36,8 @@ i.e. **~3,300 tok/s — not 4,000**. The remaining ~24 % is in the prefill kerne
    |---|---|---|---|
    | gate_up | 34,816×5,120 | 47 % | `add_rms_quant` (from M=513) |
    | qkvz / qkv | 16,384/14,336×5,120 | 17 % | `add_rms_quant` (from M=513) |
-   | down | 5,120×17,408 | 23 % | **none** — `silu_mul_quant`'s N ≤ 18,432 limit excludes the 34,816-wide gate_up strip |
-   | o_proj / out_proj | 5,120×6,144 | 16 % | **none** — `gdn_norm_quant` has no tiled variant |
+   | down | 5,120×17,408 | 23 % | `silu_mul_quant` (from M=513): its N is the 17,408 half of the 34,816-wide gate_up row, inside the N ≤ 18,432 limit — no gap (corrected; verify with `bench_prefill_cells.py --check`) |
+   | o_proj / out_proj | 5,120×6,144 | 16 % | tiled `gdn_norm_quant` behind `RADIANCE_MXFP4_TILED_OPROJ=1` (default 0, GPU-window pending) |
 
    A tiled `down` (a MAXG-16 silu producer or a second-stage producer) and a tiled
    `gdn_norm_quant` would extend the +11–13 % tile gain to the remaining 36 % of GEMM FLOPs —

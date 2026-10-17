@@ -18,12 +18,12 @@ and the tiled arm's output must match it.
 
 Shape-specific notes (production wiring, radiance_fused_norm.py):
   - qkvz/qkv/gate_up (K=5120): add_rms_quant wired, tiled in production from M=513.
-  - o_proj/out_proj (K=6144): gdn_norm_quant has no tiled variant, production stays row-major;
-    measured tiled here anyway (K=6144 fits the add_rms K<=10240 limit) to show what a tiled
-    producer would buy.
-  - down (K=17408): NO tiled producer exists (add_rms K<=10240, and silu_mul_quant's N<=18432
-    excludes down's 34816-wide gate_up strip at TP=1). Tiled arm skipped; that gap is itself a
-    finding -- a MAXG-16 silu or a second-stage producer is the only way to tile down.
+  - o_proj/out_proj (K=6144): produced by the REAL gdn_norm_quant (x, z = [M, 6144]); the tiled
+    arm needs the tiled variant, which production only arms with RADIANCE_MXFP4_TILED_OPROJ=1
+    (default 0). The bench forces it for the tiled arm, so the measurement does not depend on it.
+  - down (K=17408): produced by the REAL silu_mul_quant on a [M, 2*17408] gate_up (the kernel's
+    N is the 17408 half, inside its N<=18432 limit; the 34816 is the input row width). Tiled in
+    production from M=513 already; the arm measures what that buys.
 
 Weights rotate over >= --rotate-mb distinct copies per shape so the 64 MB infinity cache never
 serves a weight repeat (as in bench_decode_cells.py). A stays cache-resident in both arms; W
@@ -40,7 +40,7 @@ timings mean anything. If cells report WRONG, your env perms weights inconsisten
 W construction (see RADIANCE_MXFP4_WPERM) -- match whatever your bench_decode_cells runs use.
 
   RADIANCE_MXFP4=1 RADIANCE_MXFP4_W4A8=1 RADIANCE_MXFP4_W4A8_MIN_M=0 \
-  RADIANCE_MXFP4_DECODE_MAX_M=128 RADIANCE_MXFP4_A_TILED_MIN_M=0 RADIANCE_FUSED_NORM_QUANT=1 \
+  RADIANCE_MXFP4_DECODE_MAX_M=128 RADIANCE_MXFP4_A_TILED_MIN_M=0 RADIANCE_FUSED_NORM_QUANT=1 RADIANCE_MXFP4_TILED_OPROJ=1 \
   python3 bench_prefill_cells.py --csv /out/prefill_cells.csv --check \
       [--ms 96,128,160,192,256,320,384,512,576,768,1024,1536,2048,3072,4096,6144,8192] \
       [--iters 100] [--reps 3] [--rotate-mb 256]
@@ -51,6 +51,8 @@ import os
 import sys
 
 import torch
+
+from tile_layout import untile
 
 # (name, N, K): the six per-layer GEMMs of Qwen3.8-27B at TP=1 that reach the W4A8 kernel.
 # Same set as bench_decode_cells.py. TILED_OK = shapes the add_rms producer can tile:
@@ -63,16 +65,43 @@ SHAPES = [
     ("out_proj", 5120, 6144),
     ("down",     5120, 17408),
 ]
-TILED_OK = {"gate_up", "qkvz", "qkv", "o_proj", "out_proj"}
-# Production tile wiring: add_rms-quant consumers only. down/o_proj/out_proj stay row-major.
-PROD_TILED = {"gate_up", "qkvz", "qkv"}
+TILED_OK = {"gate_up", "qkvz", "qkv", "o_proj", "out_proj", "down"}
+# Production tile wiring: add_rms-quant consumers + down (silu_mul_quant); o_proj/out_proj only
+# with RADIANCE_MXFP4_TILED_OPROJ=1 (default off).
+PROD_TILED = {"gate_up", "qkvz", "qkv", "down"}
+PRODUCER = {"o_proj": "gdn", "out_proj": "gdn", "down": "silu"}  # default: add_rms
 PROD_AT_MIN_M = 513  # RADIANCE_MXFP4_A_TILED_MIN_M in the README quickstart
 
 
-def produce(fn, y, res, wgt, eps):
-    """One add_rms_quant call; the tiled flag is whatever radiance_fused_norm decides now."""
-    q, s, _ = fn(y, res, wgt, eps)
-    return q, s
+def make_producer(name, M, K, dev):
+    """Return a zero-arg callable running the real producer for this shape -> (q, scale).
+    The tiled flag is whatever radiance_fused_norm decides at call time."""
+    kind = PRODUCER.get(name, "add_rms")
+    bf = torch.bfloat16
+    if kind == "silu":      # down: gate_up [M, 2K] -> silu(gate)*up, N = K
+        gu = torch.randn(M, 2 * K, device=dev, dtype=bf)
+        return lambda: torch.ops.radiance.silu_mul_quant(gu)
+    if kind == "gdn":       # o_proj/out_proj: per-head gated norm, 128-wide heads
+        x = (torch.randn(M, K, device=dev) * 0.05).to(bf)
+        z = torch.randn(M, K, device=dev, dtype=bf)
+        wg = torch.ones(128, device=dev, dtype=bf)
+        return lambda: torch.ops.radiance.gdn_norm_quant(x, z, wg, 1e-6)
+    y = torch.randn(M, K, device=dev, dtype=bf)
+    res = torch.randn(M, K, device=dev, dtype=bf)
+    wgt = torch.ones(K, device=dev, dtype=bf)
+    return lambda: torch.ops.radiance.add_rms_quant(y, res, wgt, 1e-6)[:2]
+
+
+class force_tiled:
+    """Make the producers emit the tiled layout for the calls inside the block."""
+    def __enter__(self):
+        import radiance_fused_norm as F
+        self.F, self.saved = F, (F._rmx_tiled_wanted, F._rmx_tiled_register, F.TILED_OPROJ)
+        F._rmx_tiled_wanted = lambda M_: True
+        F._rmx_tiled_register = lambda *a_: None   # None when A_TILED_MIN_M=0; the bench calls _ext.launch_at directly
+        F.TILED_OPROJ = True
+    def __exit__(self, *e):
+        self.F._rmx_tiled_wanted, self.F._rmx_tiled_register, self.F.TILED_OPROJ = self.saved
 
 
 def time_arm(call, copies, iters, reps, check=None):
@@ -123,22 +152,14 @@ def main(a):
         print(f"== {name}: N={N} K={K} ({copies} weight copies, {wbytes >> 20} MB each)",
               file=sys.stderr)
         for M in ms:
-            y = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
-            res = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
-            wgt = torch.ones(K, device=dev, dtype=torch.bfloat16)
             out = torch.empty(M, N, device=dev, dtype=torch.bfloat16)
-            fn = torch.ops.radiance.add_rms_quant
+            produce = make_producer(name, M, K, dev)
             # row-major arm: producer unforced (RADIANCE_MXFP4_A_TILED_MIN_M=0 -> row-major)
-            q_rm, s_rm = produce(fn, y, res, wgt, 1e-6)
-            # tiled arm: force the producer's tiled decision for this call, then restore
-            saved = F._rmx_tiled_wanted
-            F._rmx_tiled_wanted = lambda M_: True
-            try:
-                q_at = s_at = None
-                if name in TILED_OK:
-                    q_at, s_at = produce(fn, y, res, wgt, 1e-6)
-            finally:
-                F._rmx_tiled_wanted = saved
+            q_rm, s_rm = produce()
+            q_at = s_at = None
+            if name in TILED_OK:    # tiled arm: same inputs, tiled decision forced for this call
+                with force_tiled():
+                    q_at, s_at = produce()
 
             def rm_call(i):
                 R._ext.launch(q_rm.data_ptr(), W[i].data_ptr(), WS[i].data_ptr(),
@@ -159,6 +180,14 @@ def main(a):
                               file=sys.stderr)
                         sys.exit(2)
 
+            if a.check and q_at is not None:
+                # tiled == row-major BYTE-for-byte (same math, only the store index differs)
+                st = torch.empty(0, dtype=torch.uint8, device=dev).set_(
+                    q_at.untyped_storage(), 0, ((M + 15) // 16 * 16 * K,))
+                if not (torch.equal(untile(st, M, K), q_rm.view(torch.uint8))
+                        and torch.equal(s_at, s_rm)):
+                    print(f"WRONG {name} M={M} producer: tiled q/scale != row-major", file=sys.stderr)
+                    sys.exit(2)
             us_rm = time_arm(rm_call, copies, a.iters, a.reps, check=ref is not None
                              and rm_check or None)
             rows.append((name, N, K, M, "rowmajor", us_rm, wbytes, wbytes + M * K + M * N * 2))
@@ -186,7 +215,7 @@ def main(a):
                              wbytes + M * K + M * N * 2))
             # out / q_* / s_* stay referenced by the closures above (rm_call, at_call),
             # so they free when the closures die at the end of this iteration
-            del y, res, wgt
+            del produce
         W = WS = WR = None
         torch.cuda.empty_cache()
 
@@ -200,7 +229,7 @@ def main(a):
 
     cell = {(r[0], r[3], r[4]): r[5] for r in rows}
     print(f"{'shape':9s} {'M':>5s}  {'rowmajor':>9s} {'atiled':>9s} {'delta':>7s}  "
-          "prod choice (A_TILED_MIN_M=513, wired producers only)")
+          "prod choice (A_TILED_MIN_M=513; o_proj tiled only with TILED_OPROJ=1)")
     for name, N, K in SHAPES:
         for M in ms:
             rm = cell.get((name, M, "rowmajor"))
@@ -210,7 +239,7 @@ def main(a):
             if name in PROD_TILED:
                 prod = f"{'atiled' if M >= PROD_AT_MIN_M else 'rowmajor'}"
             else:
-                prod = "rowmajor" + ("" if name in TILED_OK else "  (no tiled producer)")
+                prod = "rowmajor  (tiled needs RADIANCE_MXFP4_TILED_OPROJ=1)"
             if at is None:
                 print(f"{name:9s} {M:5d}  {rm:9.1f} {'n/a':>9s} {'-':>7s}  {prod}")
             else:
@@ -220,7 +249,7 @@ def main(a):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ms", default="96,128,160,192,256,320,384,512,576,768,1024,1536,"
+    ap.add_argument("--ms", default="96,128,160,192,256,320,384,512,513,576,768,1024,1536,"
                                     "2048,3072,4096,6144,8192")
     ap.add_argument("--iters", type=int, default=100)
     ap.add_argument("--reps", type=int, default=3)
