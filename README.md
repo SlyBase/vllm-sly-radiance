@@ -259,6 +259,34 @@ image's). Measured (one R9700, TP=1, `KVCACHE_RAM_GIB=16`, 110k-token agent sess
 request drops from **38.8 s** (no cache) to **~13 s** (RAM tier) — see `kv-cache/README.md`. This
 reduces re-prefill latency for long sessions; it does **not** raise `--max-model-len`.
 
+### Cactus acceptance transform (on by default, delta 0.5)
+
+Speculative decoding accepts a drafted token with probability min(1, q/p). Cactus
+([arxiv 2604.04987](https://arxiv.org/abs/2604.04987)) raises the target probability q to
+h = clamp(q + sqrt(2*delta*q*(1-q)), 0, 1) in that test. More drafted tokens are accepted per step, and the
+divergence from the target distribution stays bounded by the budget `delta`. Only sampled requests
+(temperature > 0) change; greedy requests, synthetic-rate and block-verification modes are untouched.
+Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
+
+Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
+1.0.0 image at the same power, delta 0.5 gives **+2.6 to +19.7 % tokens per update** (prose +19.7, code +12.9,
+summarization +10.5, reasoning +9.1, json +4.1, file_edit +2.6), **149.6 vs 137.4 t/s weighted (+8.9 %)** and
++8 to +13 % aggregate at concurrency 2 to 8. The step time is unchanged (34.4 vs 34.2 ms), so the gain is
+acceptance, not speed. With the 4-bit KV cache the weighted figure is 145.2 t/s (KV4 costs about 3 % decode
+against fp8 and gives 1.75x the KV pool). An earlier same-image A/B at 210 W (delta 0 vs 0.5, fp8) showed
++0.0835 acceptance rate and +0.585 tokens per step.
+
+What this does not show yet: the 300 W comparison above crosses image versions (1.0.0 vs 1.5.1); a same-image
+delta 0 control at 300 W and an accuracy check (GSM8K at delta 0.5 vs 0) are still open. **Recommendation:**
+keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the goal. Set
+`RADIANCE_CACTUS_DELTA=0` when you need output that is statistically identical to the target model (evals,
+distribution-sensitive sampling, reproducing published numbers). Do not raise it above 0.5 without measuring
+quality on your own prompts.
+
 ### Other checkpoints and GPUs
 
 | Switch | For |
