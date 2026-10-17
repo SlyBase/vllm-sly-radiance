@@ -149,6 +149,11 @@ arm_sed() {
     O0) # control for O: same mounts, knob off (proves the new .so alone changes nothing)
         [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "O0 needs O_DIR" >&2; return 1; }
         echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro |" ;;
+    T4) # TN4 tile from M>=513 instead of 2048 (env only; cell bench: +3..5% GEMM at M 513..1536, equal at >=2048)
+        echo "s/-e RADIANCE_MXFP4_A_TILED_MIN_M=513 /-e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
+    OT) # O + T4
+        [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "OT needs O_DIR" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro -e RADIANCE_MXFP4_TILED_OPROJ=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 |" ;;
     R5) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e R4D_ATTN_FP8=3 /" ;;
     K)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
         echo "s/--kv-cache-dtype fp8/--kv-cache-dtype int4_per_token_head/"
