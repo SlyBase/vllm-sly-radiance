@@ -223,6 +223,15 @@ run_arm() {
   if [ "$SHORT" = 1 ] && ! grep -Eq '43[0-9],[0-9]{3} tokens' "$arm.kvlog"; then
     log "$arm: KV pool off the 436-439k reference (cold cache or arm delta; read the kvlog)"
   fi
+  if [ "${GSM:-0}" = 1 ]; then   # accuracy pass: GSM8K-200 instead of the prefill sweep (needs /root/gsm8k_any.sh)
+    log "$arm: gsm8k-200"
+    CONC=16 /root/gsm8k_any.sh "prefillab-$arm-$$" "http://127.0.0.1:$PORT/v1" "$MODEL" > "$arm.gsm8k.out" 2>&1
+    cp "/root/out/gsm8k-prefillab-$arm-$$.log" "$arm.gsm8k.log" 2>/dev/null
+    docker logs "$NAME" > "$arm.server.log" 2>&1; docker rm -f "$NAME" >/dev/null 2>&1
+    rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*; sleep 10
+    log "$arm: stopped, vram_used=$(cat "$(dirname "$HWMON")/../mem_info_vram_used" 2>/dev/null)"
+    return 0
+  fi
   log "$arm: BetterBench prefill sweep $DEPTHS"
   ( cd "$BB_DIR" && PYTHONPATH="$BB_DIR" python3 -u -c "
 import sys
