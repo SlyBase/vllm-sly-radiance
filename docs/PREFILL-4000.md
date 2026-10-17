@@ -1,8 +1,8 @@
 # Prefill 4,000 tok/s: spike analysis and GPU-window plan
 
-Status: **unmeasured** — no GPU was reachable while this was written (2026-10-17).
-Every number marked *measured* comes from the reference runs in [README.md](../README.md) and
-[BENCHMARKS.md](BENCHMARKS.md); the arms below are the open measurement steps.
+Status: **measured once at 210 W** (2026-10-17, section "Result of the first A/B window" below).
+The 300 W window the plan asks for is still open. Every other number marked *measured* comes from
+the reference runs in [README.md](../README.md) and [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Goal and baseline
 
@@ -79,10 +79,67 @@ CHANGELOG per AGENTS.md. If no arm gets above ~3,300, the gain is in the kernels
 - `sly/bench_decode_attn.py` (2D prefill/extend mode) — attention cells at the 1,536-q_len shape.
 - GDN prefill: the `sly/gdn/` HIP kernels against the Paiton gap at 2k.
 
+## Result of the first A/B window (2026-10-17, 210 W)
+
+Conditions: image `vllm-sly-radiance:1.5.1-rocm10.1`, production unit `docker-vllm7.service`
+(profile `swift-mxfp4`, `/root/swift-heretic-gptq`) with exactly one delta per arm, **210 W cap**
+(the owner kept the production cap; the plan asks for 300 W), BetterBench prefill-only sweep
+(2 warmup + 8 runs per depth, unique prompts, no prefix cache). Arms ran C A B M T0 K C2 in one
+window, 15:15–16:39 UTC. BetterBench depths are targets at ~4 chars per token; the server reports
+the real prompt tokens, which are ~25 % lower. Columns are real prompt tokens, median tok/s:
+
+| Arm | 1.5k | 11.8k | 15.8k | 47k | KV pool (warm start) |
+|---|--:|--:|--:|--:|--:|
+| C   control (262k, chunk 2048)        | 2,605 | 2,483 | 2,379 | 1,990 | 439,031 |
+| A   chunk 4096 @ 262k                 | 2,585 | 2,627 | 2,457 | 2,084 | 423,463 |
+| B   chunk 4096 @ 131k                 | 2,580 | 2,630 | 2,455 | 2,072 | 384,597 (131k context) |
+| M   `R4D_PREFILL_MIN_Q=256`           | 2,562 | 2,360 | 2,285 | 1,940 | 439,031 |
+| T0  `A_TILED_MIN_M=0`                 | 2,283 | 2,176 | 2,094 | 1,775 | 439,031 |
+| K   KV4 (TETRA) + chunk 4096          | 2,576 | 2,611 | 2,556 | 2,115 | 739,967 |
+| C2  control again                     | 2,525 | 2,407 | 2,319 | 1,942 | 439,031 |
+
+Change against C (same window; the conclusions below were also checked against the mean of C and C2):
+
+| Arm | 1.5k | 11.8k | 15.8k | 47k |
+|---|--:|--:|--:|--:|
+| A  | −0.8 % | +5.8 % | +3.3 % | +4.7 % |
+| B  | −1.0 % | +5.9 % | +3.2 % | +4.1 % |
+| M  | −1.7 % | −5.0 % | −4.0 % | −2.5 % |
+| T0 | −12.4 % | −12.4 % | −12.0 % | −10.8 % |
+| K  | −1.1 % | +5.2 % | +7.4 % | +6.3 % |
+
+What the numbers say:
+
+- **4,000 tok/s is not reached.** The best 1.5k value is the control, 2,605 tok/s at 210 W. No arm
+  moved the 1.5k prefill outside the window drift; the lever audit above (chunking never triggers
+  for a 1.5k prompt) holds. The gap to 4,000 is +54 % at 210 W; at 300 W the plan expects ~3,000
+  for C, i.e. the gap there is the +32 % named at the top. That 300 W window is not measured.
+- **Window drift: C2 is 3.1 % below C at 1.5k (2.4–3.1 % at the other depths).** The plan's own
+  rule discards a window above 3 %. Read the table as one-directional drift (the card warms up;
+  junction peaked at 90 °C, power stayed at the 210 W cap): effects below ~3 % (A, B and K at 1.5k,
+  M at 1.5k) are noise. Effects of +4 … +8 % at 11.8k–47k (A, B, K) and −10 … −12 % (T0) are larger
+  than the drift, and they hold against the C/C2 mean as well. One window, one sample per arm:
+  repeat before changing any recommendation.
+- **A and B (chunk 4096) help long prompts only**: +4 … +6 % at 11.8k–47k, nothing at 1.5k.
+  The KV pool drops 439,031 → 423,463 tokens (−3.5 %) at 262k context, and B gives 384,597
+  tokens at 131k context. The plan's estimate of −7 % came from a 131k comparison; at 262k it is −3.5 %.
+- **K (KV4 + chunk 4096)** gives the same +5 … +7 % on long prompts and a 739,967-token pool
+  (1.69× C). It is not faster than A at 1.5k and 11.8k; at 15.8k and 47k it is +4 % / +1 % over A.
+- **M (`R4D_PREFILL_MIN_Q=256`) does not help prefill**: −2.5 … −5 % against C, mostly inside the
+  drift for 1.5k; its target (TTFT of prompts below 512 tokens) was not measured here.
+- **T0 (`A_TILED_MIN_M=0`) is 11–12 % slower than 513**, consistent with the +11–13 % that the tiled
+  path brings at M ≥ 513 (0.3.0). With 0 the tiled path also serves small M, which is slower.
+  Keep 513.
+
+Open: 300 W window; repeat C/A/K in an ABBA order; TTFT for prompts below 512 tokens (arm M).
+
+Raw files: `summary.tsv`, per-arm BetterBench JSON, launch-line diff and KV log; they live in the GPU
+window directory `/root/prefill-ab-20261017` on the 2408 host (copy in the agent scratch space).
+
 ## What this spike deliberately did not do
 
-- No image change, no `VERSION` bump: every config lever is already on in production, and
-  changing the recommended launch without a same-window A/B would trade the KV pool (−7 %)
-  for a gain that does not reach the 4,000 target.
+- No image change, no `VERSION` bump: every config lever is already on in production. The first
+  window (above) shows chunk 4096 trading 3.5 % KV pool for +4 … +6 % on long prompts only, and
+  none of it reaches the 4,000 target.
 - No kernel edits: the tiled `down` / `gdn_norm_quant` producers are HIP work that needs the
   `bench_prefill_cells.py --check` gate and the GPU window before it can be claimed.

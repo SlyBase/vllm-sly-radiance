@@ -1,128 +1,201 @@
 #!/usr/bin/env bash
-# ci/prefill_ab.sh — prefill A/B for the 4,000 tok/s goal (docs/PREFILL-4000.md).
+# ci/prefill_ab.sh - prefill A/B for the 4,000 tok/s goal (docs/PREFILL-4000.md).
 #
-# Runs the production arguments (README quickstart) with one knob changed per arm,
-# each arm twice (first start compiles, the second is measured — AGENTS.md), and
-# one full BetterBench run per arm (the prefill phase of the full run, which reads
-# ~5 % lower than a prefill-only sweep — compare within one window).
+# Runs ON the GPU host (LXC 2408) inside an acquired gpu-window with production stopped.
+# The launch line is NOT hand-written: it is cut out of the production unit
+# (docker-vllm7.service = profile swift-mxfp4, checkpoint /root/swift-heretic-gptq,
+# compressed-tensors / mxfp4-pack-quantized, no --quantization flag) and only the arm's
+# delta is applied with sed. A diff of the token streams is stored per arm, so the delta
+# is auditable. Same approach as the README 1.5.1 reference run.
 #
-# Protocol (AGENTS.md): 300 W with the firmware fan curve, control arm first AND
-# repeated last, only compare arms of the same window. The script does NOT touch
-# the power cap: it reads it and warns. Set 300 W before, restore 210 W / 2,800 rpm
-# after (LACT, on explicit order only).
+# Per arm: start (twice for non-control arms: the first start compiles fresh and shows a
+# smaller KV pool), read "GPU KV cache size", then a BetterBench prefill-only sweep
+# (target depths 2000 / 16000 / 21500 / 64000 = ~1.5k / 11.8k / 16k / 47k real prompt tokens, 2 warmup + 8 runs each, unique prompts, no prefix cache).
+# A prefill-only sweep reads ~5 % higher than the prefill phase of a full run (BENCHMARKS.md),
+# so compare arms only inside one window, against arm C of the same window.
 #
-# Usage on the GPU host (BetterBench installed per docs/BENCHMARKS.md):
-#   IMAGE=ghcr.io/slybase/vllm-sly-radiance:1.5.1-rocm10.1 \
-#   OUT=/root/betterbench/prefill-ab-$(date +%Y%m%d) ./ci/prefill_ab.sh
+# The script never touches the power cap; it records it (the production cap is 210 W).
 #
-# Arms (order fixed: C A B M T0 K C):
-#   C   control, production 1.5.1 (262k, chunk 2048)          — first and last
-#   A   chunk 4096 at 262k                                     — +3.5..4.8 % (8k-64k, measured 131k)
-#   B   chunk 4096 at 131k (the README "less context" option)  — same, pool -7 %
-#   M   RADIANCE_R4D_PREFILL_MIN_Q=256                         — short-prompt TTFT probe
-#   T0  RADIANCE_MXFP4_A_TILED_MIN_M=0                         — re-verify the +11-13 % tiled prefill
-#   K   KVCACHE_DTYPE=kv4 + chunk 4096                         — TETRA, +3-4 % prefill at chunk >= 3456
+# Usage:
+#   OUT=/root/prefill-ab-$(date +%Y%m%d) ci/prefill_ab.sh              # all arms
+#   ARMS="C A" OUT=... ci/prefill_ab.sh                                 # subset
 #
-# Output per arm: $OUT/<arm>.json (BetterBench), $OUT/<arm>.kvlog (KV pool lines).
-# Every number produced here is a measurement; the plan marks what is still open.
+# Arms (default order: C A B M T0 K C2; C2 = control again, drift check):
+#   C   control, production 1.5.1 (262k, chunk 2048)
+#   A   chunk 4096 at 262k
+#   B   chunk 4096 at 131k (the README "less context" option)
+#   M   RADIANCE_R4D_PREFILL_MIN_Q=256
+#   T0  RADIANCE_MXFP4_A_TILED_MIN_M=0
+#   K   4-bit KV (int4_per_token_head, TETRA target + drafter attention) + chunk 4096
+#   C2  control again
+#
+# Output in $OUT: <arm>.prefill.json (BetterBench), <arm>.kvlog, <arm>.diff (launch delta),
+# <arm>.server.log, hw.csv (power / temps / fan every 15 s), summary.tsv, status.txt, DONE.
 
-set -euo pipefail
+set -uo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IMAGE=${IMAGE:-ghcr.io/slybase/vllm-sly-radiance:1.5.1-rocm10.1}
-PORT=${PORT:-8000}
-OUT=${OUT:-/root/betterbench/prefill-ab-$(date +%Y%m%d)}
-BB_CONFIG=${BB_CONFIG:-$ROOT/ci/accept/configs/full.json}  # identical to betterbench config/default.json
-MODEL=amd/Qwen3.8-27B-Quark-AWQ-MXFP4
-DRAFTER=syvai/Qwen3.8-27B-DFlash2-W4A16
+UNIT=${UNIT:-/etc/systemd/system/docker-vllm7.service}
+BB_DIR=${BB_DIR:-/root/betterbench}
+OUT=${OUT:-/root/prefill-ab-$(date +%Y%m%d)}
 NAME=${NAME:-prefill-ab}
-STARTUP_TIMEOUT_S=${STARTUP_TIMEOUT_S:-1800}
+PORT=${PORT:-8000}
+MODEL=${MODEL:-slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ}   # first --served-model-name of the unit
+# BetterBench depths are TARGETS at ~4 chars/token; the server reports real prompt tokens, which come
+# out ~25 % lower (2000 -> ~1.5k, 21500 -> ~16k, 64000 -> ~47k; 16000 -> 11.8k is the README "16k" row).
+DEPTHS=${DEPTHS:-[2000,16000,21500,64000]}
+ARMS=${ARMS:-C A B M T0 K C2}
+STARTUP_TIMEOUT_S=${STARTUP_TIMEOUT_S:-1500}
 
 mkdir -p "$OUT"
+cd "$OUT" || exit 1
+OUT=$(pwd)
 
-# --- power: read-only check, the operator owns the cap ------------------------
-cap_mw=0
-for f in /sys/class/hwmon/hwmon*/power1_max; do
-  [ -r "$f" ] && cap_mw=$(cat "$f" 2>/dev/null || echo 0) && break
+log() { echo "$(date -u +%T) $*" | tee -a run.log; echo "$*" > status.txt; }
+
+# --- read-only hardware facts -------------------------------------------------
+HWMON=
+for h in /sys/class/drm/card*/device/hwmon/hwmon*; do
+  [ -r "$h/power1_cap" ] && HWMON=$h
 done
-if [ "$cap_mw" -lt 300000 ]; then
-  echo "WARNING: power cap ${cap_mw} mW (< 300 W). A/B requires 300 W + firmware fan curve;" >&2
-  echo "         210 W costs ~20 % prefill, so results at the current cap are not comparable." >&2
-  echo "         Set the cap (LACT) before running, restore 210 W / 2,800 rpm afterwards." >&2
-fi
+[ -n "$HWMON" ] || { echo "no GPU hwmon found" >&2; exit 1; }
+CAP_W=$(( $(cat "$HWMON/power1_cap") / 1000000 ))
+log "power cap ${CAP_W} W (read only; not changed by this script)"
 
-# --- one arm: two starts (warm), one full BetterBench run ---------------------
-# run_arm NAME MAXLEN CHUNK EXTRA_ENV...
-run_arm() {
-  local name=$1 max_len=$2 chunk=$3; shift 3
-  local env_args=()
-  env_args=(-e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=2 \
-    -e RADIANCE_MXFP4=1 -e RADIANCE_MXFP4_W4A8=1 -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
-    -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 \
-    -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
-    -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
-    -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
-    "$@")
-  local serve_args=(
-    --model "$MODEL" --quantization quark
-    --max-model-len "$max_len" --gpu-memory-utilization 0.98
-    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16
-    --speculative-config.method dflash --speculative-config.model "$DRAFTER"
-    --speculative-config.num_speculative_tokens 7 \
-    --speculative-config.draft_sample_method probabilistic \
-    --speculative-config.attention_backend TRITON_ATTN
-    --attention-backend R4D_HYBRID
-    --max-num-seqs 8 --max-num-batched-tokens "$chunk"
-    --compilation-config.cudagraph_mode FULL_DECODE_ONLY \
-    --compilation-config.cudagraph_capture_sizes '[8,16,24,32,40,48,56,64]'
-    --enable-prefix-caching --skip-mm-profiling --enable-mm-embeds
-    --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0
-    --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
-    --chat-template /opt/qwen-fixed.jinja
-    --default-chat-template-kwargs '{"reasoning_effort": "medium"}'
-    --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}')
-
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
-  for start in 1 2; do  # first start compiles; the second is the one measured
-    echo "== $name: start $start/2 ($max_len / chunk $chunk)"
-    docker run -d --name "$NAME" --network=host --ipc=host \
-      --device /dev/kfd --device /dev/dri \
-      --security-opt seccomp=unconfined \
-      -v ~/.cache/huggingface:/root/.cache/huggingface \
-      -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton -v aiter-cache:/root/.aiter \
-      "${env_args[@]}" "$IMAGE" "${serve_args[@]}" >/dev/null
-    local t0=$SECONDS
-    until curl -sf "localhost:$PORT/health" >/dev/null 2>&1; do
-      if [ $((SECONDS - t0)) -gt "$STARTUP_TIMEOUT_S" ]; then
-        docker logs --tail 50 "$NAME" >&2
-        docker rm -f "$NAME" >/dev/null
-        echo "FAIL: $name did not become healthy in ${STARTUP_TIMEOUT_S} s" >&2
-        exit 1
-      fi
-      sleep 10
-    done
-    if [ "$start" = 1 ]; then
-      echo "== $name: warm restart (first start compiled)"
-      docker stop "$NAME" >/dev/null
-      docker rm "$NAME" >/dev/null
-    fi
+sample() {
+  while :; do
+    echo "$(date -u +%T),$(cat "$HWMON/power1_average"),$(cat "$HWMON"/temp[123]_input | tr '\n' ','),$(cat "$HWMON/fan1_input")" >> hw.csv
+    sleep 15
   done
-  docker logs "$NAME" 2>/dev/null | grep -iE "kv cache|gpu blocks|available" > "$OUT/$name.kvlog" || true
-  echo "== $name: BetterBench (full run, prefill phase is the read)"
-  bb run --endpoint "http://localhost:$PORT/v1" --model "$MODEL" \
-    --config "$BB_CONFIG" --concurrency --no-html --out "$OUT/$name.json" \
-    --note arm="$name" --note image="$IMAGE" --note max_len="$max_len" --note chunk="$chunk"
-  docker rm -f "$NAME" >/dev/null
 }
 
-# control first and last: only arms of the same window are comparable
-run_arm C  262144 2048
-run_arm A  262144 4096
-run_arm B  131072 4096
-run_arm M  262144 2048 -e RADIANCE_R4D_PREFILL_MIN_Q=256
-run_arm T0 262144 2048 -e RADIANCE_MXFP4_A_TILED_MIN_M=0
-run_arm K  262144 4096 -e KVCACHE_DTYPE=kv4
-run_arm C2 262144 2048
+cleanup() {
+  kill "${SPID:-}" 2>/dev/null
+  docker rm -f "$NAME" >/dev/null 2>&1
+  rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*
+  touch "$OUT/DONE"
+}
+trap cleanup EXIT
 
-echo "== done: $OUT"
-echo "   prefill tok/s per depth: jq '.prefill // .runs' in each $OUT/*.json"
+# --- bench config: only the prefill depths differ from BetterBench's default -
+python3 - "$BB_DIR/config/default.json" "$DEPTHS" > bb_cfg.json <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg["prefill_depths"] = json.loads(sys.argv[2])
+print(json.dumps(cfg))
+PY
+
+# --- production launch line from the unit ------------------------------------
+# From "ExecStart=" up to and including "--enable-prefix-caching" (the last flag of the unit).
+awk '/^ExecStart=/{f=1} f{print} /--enable-prefix-caching/{if(f) exit}' "$UNIT" \
+  | sed 's/^ExecStart=//' > launch_prod.txt
+grep -q -- '--model /models/swift-mxfp4' launch_prod.txt || { log "unit is not the swift-mxfp4 profile"; exit 1; }
+if grep -q -- '--quantization' launch_prod.txt; then log "unit carries --quantization; refusing"; exit 1; fi
+
+# arm_sed ARM -> sed expressions (one per line) that turn the production line into the arm's
+arm_sed() {
+  case $1 in
+    C|C2) ;;
+    A)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/" ;;
+    B)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
+        echo "s/--max-model-len 262144/--max-model-len 131072/" ;;
+    M)  echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_R4D_PREFILL_MIN_Q=256 /" ;;
+    T0) echo "s/RADIANCE_MXFP4_A_TILED_MIN_M=513/RADIANCE_MXFP4_A_TILED_MIN_M=0/" ;;
+    K)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
+        echo "s/--kv-cache-dtype fp8/--kv-cache-dtype int4_per_token_head/"
+        echo "s/--attention-backend R4D_HYBRID/--attention-backend TETRA/"
+        echo "s/--speculative-config.attention_backend TRITON_ATTN/--speculative-config.attention_backend TETRA/" ;;
+    *)  return 1 ;;
+  esac
+}
+
+wait_healthy() {  # 0 = healthy, 1 = container died or timeout
+  local t0=$SECONDS
+  until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; do
+    [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ] || return 1
+    [ $((SECONDS - t0)) -gt "$STARTUP_TIMEOUT_S" ] && return 1
+    sleep 5
+  done
+}
+
+start_arm() {  # start_arm ARM -> container healthy
+  local arm=$1 exprs=() e
+  while IFS= read -r e; do [ -n "$e" ] && exprs+=(-e "$e"); done < <(arm_sed "$arm")
+  # -d instead of --rm and our own name: a crashed candidate keeps its log
+  sed -e "s/--rm --name vllm7-mxfp4/-d --name $NAME/" "${exprs[@]}" launch_prod.txt > "cmd_$arm.txt"
+  diff <(tr -s ' \\\n' '\n\n\n' < launch_prod.txt) <(tr -s ' \\\n' '\n\n\n' < "cmd_$arm.txt") > "$arm.diff"
+  docker rm -f "$NAME" >/dev/null 2>&1
+  rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*
+  bash "cmd_$arm.txt" >/dev/null 2>&1 || { log "$arm: docker run failed"; return 1; }
+  if ! wait_healthy; then
+    docker logs "$NAME" > "$arm.server.log" 2>&1
+    log "$arm: container died or no /health"; return 1
+  fi
+}
+
+kv_line() { docker logs "$NAME" 2>&1 | grep -m1 "GPU KV cache size" | sed 's/.*GPU KV cache size/GPU KV cache size/'; }
+
+run_arm() {
+  local arm=$1 starts=2 n kv
+  case $arm in C|C2) starts=1 ;; esac   # control: the production compile cache is warm
+  for n in $(seq 1 "$starts"); do
+    log "$arm: start $n/$starts"
+    start_arm "$arm" || return 1
+    log "$arm: healthy, $(kv_line)"
+    if [ "$n" -lt "$starts" ]; then
+      docker rm -f "$NAME" >/dev/null 2>&1; sleep 5
+    fi
+  done
+  # A control pool off the 436-439k reference means a cold cache: one more start.
+  case $arm in C|C2)
+    # (capture first: `kv_line | grep -q` dies of SIGPIPE under pipefail and always reads "off")
+    kv=$(kv_line)
+    if ! grep -Eq '43[0-9],[0-9]{3} tokens' <<<"$kv"; then
+      log "$arm: KV pool off the 436-439k reference (cold cache?), second start"
+      docker rm -f "$NAME" >/dev/null 2>&1; sleep 5
+      start_arm "$arm" || return 1
+      log "$arm: healthy, $(kv_line)"
+    fi ;;
+  esac
+  kv_line > "$arm.kvlog"
+  log "$arm: BetterBench prefill sweep $DEPTHS"
+  ( cd "$BB_DIR" && PYTHONPATH="$BB_DIR" python3 -u -c "
+import sys
+from betterbench.cli import main
+sys.argv = ['bb', 'run', '--endpoint', 'http://127.0.0.1:$PORT/v1', '--model', '$MODEL',
+            '--prefill', '--config', '$OUT/bb_cfg.json', '--out', '$OUT/$arm.prefill.json', '--no-html',
+            '--note', 'arm=$arm', '--note', 'power=${CAP_W}W', '--note', 'window=prefill-ab']
+main()
+" > "$OUT/$arm.bb.log" 2>&1 ) || log "$arm: BetterBench exit non-zero (see $arm.bb.log)"
+  docker logs "$NAME" > "$arm.server.log" 2>&1
+  docker rm -f "$NAME" >/dev/null 2>&1
+  rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/sem.mp-*
+  sleep 10
+  log "$arm: stopped, vram_used=$(cat "$(dirname "$HWMON")/../mem_info_vram_used" 2>/dev/null)"
+}
+
+sample & SPID=$!
+for arm in $ARMS; do
+  arm_sed "$arm" >/dev/null || { log "unknown arm $arm"; continue; }
+  run_arm "$arm" || log "$arm: FAILED"
+done
+
+# summary: median prefill tok/s per depth and arm
+python3 - "$OUT" $ARMS > summary.tsv <<'PY'
+import json, os, statistics, sys
+out, arms = sys.argv[1], sys.argv[2:]
+print("arm\tdepth_target\tprompt_tokens\tn\tpp_tps_median\tpp_tps_min\tpp_tps_max\tttft_ms_median")
+for a in arms:
+    p = os.path.join(out, a + ".prefill.json")
+    if not os.path.exists(p):
+        print(f"{a}\tNO RESULT")
+        continue
+    for row in json.load(open(p)).get("prefill", []):
+        pp = row.get("pp_tps") or []
+        if not pp:
+            print(f"{a}\t{row.get('target_depth')}\t-\t0\t-\t-\t-\t-")
+            continue
+        pt = row.get("prompt_tokens") or [0]
+        print(f"{a}\t{row['target_depth']}\t{int(statistics.median(pt))}\t{len(pp)}\t"
+              f"{statistics.median(pp):.0f}\t{min(pp):.0f}\t{max(pp):.0f}\t{statistics.median(row['ttft_ms']):.0f}")
+PY
+log "ALL ARMS FINISHED"
