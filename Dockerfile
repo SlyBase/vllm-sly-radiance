@@ -537,7 +537,12 @@ print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ +
 # "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
 # fine -- torch's import is what actually pulls the runtime into the process.
 COPY sly/mxfp4/radiance_mxfp4_fp8.hip /opt/kernels/
+# RADIANCE_GROUPM (K2, default 0 = off): M-band raster grouping of the folded and A-tiled prefill GEMMs.
+# 0 adds no compiler flag, so the default build is the same object as before. See the macro
+# RAD_RASTER_GROUP in radiance_mxfp4_fp8.hip. Opt-in test builds only, pending a measured gain.
+ARG RADIANCE_GROUPM=0
 RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $([ "${RADIANCE_GROUPM}" != "0" ] && echo "-DRADIANCE_GROUPM=${RADIANCE_GROUPM}") \
       $(python -m pybind11 --includes) \
       /opt/kernels/radiance_mxfp4_fp8.hip -o /out/radiance_mxfp4_fp8.so \
  && PYTHONPATH=/out python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"

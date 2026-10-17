@@ -194,6 +194,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
+| `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
 | `RADIANCE_LMHEAD_INT4` | `1` | int4 vocabulary head (656 MB instead of 2.5 GB per call; GSM8K unchanged). `RADIANCE_LMHEAD_FP8=1` is the more exact fallback |
 | `RADIANCE_LMHEAD_INT2` | `1` (with greedy decoding) | the 2-bit greedy vocabulary head: 2-bit coarse pass + bf16 top-16 re-rank, ≈7.5× less head traffic per decode step than int4; greedy-only (declines under sampling, byte-identical default otherwise) |

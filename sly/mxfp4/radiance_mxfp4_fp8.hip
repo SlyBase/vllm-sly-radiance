@@ -260,6 +260,35 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 #define NTHREADS (NWAVE * 32)
 #define BMF (WM * TM * 16)
 #define BNF_OF(tn) (WN * (tn) * 16)
+
+// K2: M-band raster grouping of the folded and A-tiled prefill GEMMs (build option, default off).
+// The plain grid is N-fastest: blocks dispatch in flattened-id order, so a long run of consecutive
+// blocks shares one activation band and streams the whole weight; once the weight is bigger than the
+// 64 MB MALL (gate_up: 89 MB, down: 45 MB) every M band re-reads it from DRAM. With
+// -DRADIANCE_GROUPM=G the blocks are re-numbered in groups of G activation bands, M-fastest inside
+// a group: the G blocks that share a weight tile are resident together, so the weight is read once
+// per group. The map is a bijection over the grid (the last group may be shorter), so every output
+// tile is still computed exactly once with the same arithmetic. Same idea as kGroupM in libr4d's
+// fp8a8 GEMM. RAD_TILE_ORIGIN declares m0 / n0 (needs BMF and BNF_T in scope). Without the define it
+// expands to the one statement the kernels always had, token for token, so the default object code
+// does not move.
+#if defined(RADIANCE_GROUPM) && RADIANCE_GROUPM > 0
+#define RAD_TILE_ORIGIN                                                                       \
+  unsigned rad_bx = blockIdx.x, rad_by = blockIdx.y;                                          \
+  if (gridDim.y > 1) {                                                                        \
+    const unsigned gm_full = (unsigned)RADIANCE_GROUPM < gridDim.y ? (unsigned)RADIANCE_GROUPM \
+                                                                    : gridDim.y;              \
+    const unsigned per = gm_full * gridDim.x;                                                 \
+    const unsigned lin = blockIdx.y * gridDim.x + blockIdx.x;                                 \
+    const unsigned first = (lin / per) * gm_full, r = lin % per;                              \
+    const unsigned gm = min(gridDim.y - first, gm_full);                                      \
+    rad_by = first + r % gm;                                                                  \
+    rad_bx = r / gm;                                                                          \
+  }                                                                                           \
+  const int m0 = rad_by * BMF, n0 = rad_bx * BNF_T
+#else
+#define RAD_TILE_ORIGIN const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T
+#endif
 #define BNF BNF_OF(2)
 
 // TN is templated because the winner depends on M. Widening the N tile (TN=4 -> BNF=128) amortises
@@ -288,7 +317,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
   constexpr int BNF_T = WN * TN * 16;
-  const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T;
+  RAD_TILE_ORIGIN;
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.
@@ -604,7 +633,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
-  const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T;
+  RAD_TILE_ORIGIN;
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.

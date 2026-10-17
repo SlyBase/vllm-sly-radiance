@@ -10,6 +10,29 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.5.2] - 2026-10-17
+
+### Added
+- **Build option `RADIANCE_GROUPM` (default `0` = off): M-band raster grouping for the W4A8 prefill
+  GEMM.** `docker build --build-arg RADIANCE_GROUPM=16` compiles `radiance_mxfp4_fp8.so` with
+  `-DRADIANCE_GROUPM=16`; the folded and the A-tiled prefill kernels then number their blocks in
+  groups of 16 activation bands, so the blocks that share a weight tile are resident together and
+  the weight is read once per group instead of once per band (the same idea as `kGroupM` in libr4d's
+  fp8a8 GEMM). The map is a bijection over the grid: every output tile is computed once with the
+  same arithmetic. Test builds only; it is not in the release image until a GPU window shows a gain.
+- `ci/prefill_ab.sh`: `SHORT=1` screening mode (one start per arm, three depths, three runs, no decode
+  phase), arms `K2` (this option, via a bind-mounted `.so`) and `R5` (`R4D_ATTN_FP8=3`), and an
+  optional `QUANT_FLAG` for `--quantization`.
+
+### Changed
+- Nothing for the default image: with the option off the macro expands to the statement the kernels
+  always had. *Verified:* device assembly (`--offload-device-only -S`, gfx1201) of the old and the new
+  source is identical after normalising the `__hip_cuid` symbol, which hipcc randomises per compile
+  (two compiles of the same source differ in 18 lines for that reason alone).
+
+*Measured:* nothing yet. K2 is built and compiled (the `GROUPM=16` object differs from the default),
+not run on a GPU.
+
 ## [1.5.1] - 2026-10-16
 
 ### Added

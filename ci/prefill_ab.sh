@@ -19,14 +19,30 @@
 # Usage:
 #   OUT=/root/prefill-ab-$(date +%Y%m%d) ci/prefill_ab.sh              # all arms
 #   ARMS="C A" OUT=... ci/prefill_ab.sh                                 # subset
+#   SHORT=1 K2_SO=/root/k2-compile/c/radiance_mxfp4_fp8.so OUT=... ci/prefill_ab.sh
+#                                                                       # short screening (below)
 #
-# Arms (default order: C A B M T0 K C2; C2 = control again, drift check):
+# SHORT=1 (screening mode): one start per arm (the compile cache must be warm, so the KV pool is
+# only logged, never re-started for), prefill sweep only (no decode phase) at ~1.5k / 16k / 47k
+# real prompt tokens, 3 runs per depth after 1 warmup, default arms ABBA = C K2 R5 C2. A gain below
+# 5 % in this mode is unconfirmed until a full run (default mode) repeats it.
+# Arms K2 and R5 are only valid with the 210 W / 300 W cap held constant across the window.
+#
+# QUANT_FLAG="compressed-tensors" adds `--quantization compressed-tensors` to EVERY arm. The default
+# is empty because the production unit (homelab swift-mxfp4 profile) has no --quantization flag:
+# vLLM reads compressed-tensors from the checkpoint's config.json, and an extra explicit flag would
+# be a launch delta against production (and against the measured baselines).
+#
+# Arms (default order: C A B M T0 K C2; SHORT: C K2 R5 C2; C2 = control again, drift check):
 #   C   control, production 1.5.1 (262k, chunk 2048)
 #   A   chunk 4096 at 262k
 #   B   chunk 4096 at 131k (the README "less context" option)
 #   M   RADIANCE_R4D_PREFILL_MIN_Q=256
 #   T0  RADIANCE_MXFP4_A_TILED_MIN_M=0
 #   K   4-bit KV (int4_per_token_head, TETRA target + drafter attention) + chunk 4096
+#   K2  libr4d-style M-band raster grouping of the W4A8 prefill GEMM (RADIANCE_GROUPM=16 build of
+#       radiance_mxfp4_fp8.so, bind-mounted over the image's .so; K2_SO=<path of that .so>)
+#   R5  R4D_ATTN_FP8=3 (8-bit QK and PV legs of the libr4d prefill attention, R4D_HYBRID)
 #   C2  control again
 #
 # Output in $OUT: <arm>.prefill.json (BetterBench), <arm>.kvlog, <arm>.diff (launch delta),
@@ -43,7 +59,18 @@ MODEL=${MODEL:-slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ}   # first --served-mode
 # BetterBench depths are TARGETS at ~4 chars/token; the server reports real prompt tokens, which come
 # out ~25 % lower (2000 -> ~1.5k, 21500 -> ~16k, 64000 -> ~47k; 16000 -> 11.8k is the README "16k" row).
 DEPTHS=${DEPTHS:-[2000,16000,21500,64000]}
-ARMS=${ARMS:-C A B M T0 K C2}
+SHORT=${SHORT:-0}
+QUANT_FLAG=${QUANT_FLAG:-}
+K2_SO=${K2_SO:-}
+SP=${SP:-/opt/vllm/lib/python3.12/site-packages}   # site-packages inside the image
+if [ "$SHORT" = 1 ]; then
+  DEPTHS=${DEPTHS_SHORT:-[2000,21500,64000]}        # ~1.5k / 16k / 47k real prompt tokens
+  RUNS=${RUNS:-3}; WARMUP=${WARMUP:-1}
+  ARMS=${ARMS:-C K2 R5 C2}
+else
+  RUNS=${RUNS:-8}; WARMUP=${WARMUP:-2}
+  ARMS=${ARMS:-C A B M T0 K C2}
+fi
 STARTUP_TIMEOUT_S=${STARTUP_TIMEOUT_S:-1500}
 
 mkdir -p "$OUT"
@@ -76,11 +103,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- bench config: only the prefill depths differ from BetterBench's default -
-python3 - "$BB_DIR/config/default.json" "$DEPTHS" > bb_cfg.json <<'PY'
+# --- bench config: only the prefill depths and run counts differ from BetterBench's default -
+python3 - "$BB_DIR/config/default.json" "$DEPTHS" "$RUNS" "$WARMUP" > bb_cfg.json <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 cfg["prefill_depths"] = json.loads(sys.argv[2])
+cfg["prefill_runs"] = int(sys.argv[3])
+cfg["prefill_warmup"] = int(sys.argv[4])
 print(json.dumps(cfg))
 PY
 
@@ -90,6 +119,10 @@ awk '/^ExecStart=/{f=1} f{print} /--enable-prefix-caching/{if(f) exit}' "$UNIT" 
   | sed 's/^ExecStart=//' > launch_prod.txt
 grep -q -- '--model /models/swift-mxfp4' launch_prod.txt || { log "unit is not the swift-mxfp4 profile"; exit 1; }
 if grep -q -- '--quantization' launch_prod.txt; then log "unit carries --quantization; refusing"; exit 1; fi
+if [ -n "$QUANT_FLAG" ]; then   # applied to every arm, so it never confounds an A/B
+  sed -i "s|^  --model /models/swift-mxfp4 |  --quantization $QUANT_FLAG --model /models/swift-mxfp4 |" launch_prod.txt
+  grep -q -- "--quantization $QUANT_FLAG" launch_prod.txt || { log "could not insert --quantization"; exit 1; }
+fi
 
 # arm_sed ARM -> sed expressions (one per line) that turn the production line into the arm's
 arm_sed() {
@@ -100,6 +133,9 @@ arm_sed() {
         echo "s/--max-model-len 262144/--max-model-len 131072/" ;;
     M)  echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_R4D_PREFILL_MIN_Q=256 /" ;;
     T0) echo "s/RADIANCE_MXFP4_A_TILED_MIN_M=513/RADIANCE_MXFP4_A_TILED_MIN_M=0/" ;;
+    K2) [ -r "$K2_SO" ] || { echo "K2 needs K2_SO=<radiance_mxfp4_fp8.so built with -DRADIANCE_GROUPM=16>" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $K2_SO:$SP/radiance_mxfp4_fp8.so:ro |" ;;
+    R5) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e R4D_ATTN_FP8=3 /" ;;
     K)  echo "s/--max-num-batched-tokens 2048/--max-num-batched-tokens 4096/"
         echo "s/--kv-cache-dtype fp8/--kv-cache-dtype int4_per_token_head/"
         echo "s/--attention-backend R4D_HYBRID/--attention-backend TETRA/"
@@ -137,6 +173,7 @@ kv_line() { docker logs "$NAME" 2>&1 | grep -m1 "GPU KV cache size" | sed 's/.*G
 run_arm() {
   local arm=$1 starts=2 n kv
   case $arm in C|C2) starts=1 ;; esac   # control: the production compile cache is warm
+  [ "$SHORT" = 1 ] && starts=1          # screening: one start per arm
   for n in $(seq 1 "$starts"); do
     log "$arm: start $n/$starts"
     start_arm "$arm" || return 1
@@ -146,7 +183,7 @@ run_arm() {
     fi
   done
   # A control pool off the 436-439k reference means a cold cache: one more start.
-  case $arm in C|C2)
+  [ "$SHORT" != 1 ] && case $arm in C|C2)
     # (capture first: `kv_line | grep -q` dies of SIGPIPE under pipefail and always reads "off")
     kv=$(kv_line)
     if ! grep -Eq '43[0-9],[0-9]{3} tokens' <<<"$kv"; then
@@ -157,6 +194,9 @@ run_arm() {
     fi ;;
   esac
   kv_line > "$arm.kvlog"
+  if [ "$SHORT" = 1 ] && ! grep -Eq '43[0-9],[0-9]{3} tokens' "$arm.kvlog"; then
+    log "$arm: KV pool off the 436-439k reference (cold cache or arm delta; read the kvlog)"
+  fi
   log "$arm: BetterBench prefill sweep $DEPTHS"
   ( cd "$BB_DIR" && PYTHONPATH="$BB_DIR" python3 -u -c "
 import sys
