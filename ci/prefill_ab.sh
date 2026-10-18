@@ -160,6 +160,15 @@ arm_sed() {
         if [ "$1" = G ]; then
           echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 /"
         fi ;;
+    SK|GS|GT) # merged build (NQ_REG + SKIPPAD, all default off): SK = SKIP_PAD only, GS = NQ_REG + SKIP_PAD,
+        # GT = GS + TN4_MIN_M=513. Same .so as G/G0 (G_DIR), only env differs.
+        [ -r "$G_DIR/radiance_mxfp4_fp8.so" ] || { echo "$1 needs G_DIR=<dir with radiance_mxfp4_fp8.so>" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $G_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro |"
+        case $1 in
+          SK) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 /" ;;
+          GS) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 /" ;;
+          GT) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
+        esac ;;
     T4) # TN4 tile from M>=513 instead of 2048 (env only; cell bench: +3..5% GEMM at M 513..1536, equal at >=2048)
         echo "s/-e RADIANCE_MXFP4_A_TILED_MIN_M=513 /-e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
     OT) # O + T4
