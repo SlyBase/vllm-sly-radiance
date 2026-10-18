@@ -159,6 +159,32 @@ def permute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
                   .view(N, K // 2))
 
 
+def psw_pack_w(wp: "torch.Tensor", mode: int = 2) -> "torch.Tensor":
+    """Fragment-order weights (permute_w) -> the A-tiled kernel's PSW nibble layout, same shape.
+
+    Per 32-bit lane word with elements e0..e7 (fragment order: byte b = e[2b] | e[2b+1] << 4):
+      mode 1: byte b = e[b] | e[b+4] << 4
+      mode 2: byte b = mag(e[b]) | sign(e[(b+3)%4+4]) << 3 | mag(e[b+4]) << 4 | sign(e[b]) << 7
+    A byte permutation of the same bits (in place at load = no extra memory). Only the A-tiled
+    kernel reads it (set_at_psw); every other consumer of the weight must be PSW-aware too.
+    """
+    w = wp.reshape(-1, 4).to(torch.int32)
+    e = torch.stack([w & 15, w >> 4], -1).reshape(-1, 8)        # e[0..7]
+    lo, hi = e[:, 0:4], e[:, 4:8]
+    if mode == 1:
+        out = lo | (hi << 4)
+    else:
+        out = (lo & 7) | ((hi.roll(1, 1) >> 3) << 3) | ((hi & 7) << 4) | ((lo >> 3) << 7)
+    return out.to(torch.uint8).reshape(wp.shape).contiguous()
+
+
+def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
+    """[K/32, N] e8m0 block scales -> 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset the
+    PSW kernel adds to its LDS table base. Same shape and dtype (uint8); Wref stays as is."""
+    d = (wref.to(torch.int32)[None, :] - weight_scale.to(torch.int32)).clamp(0, 15)
+    return (d * 8).to(torch.uint8).contiguous()
+
+
 def unpermute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
     """Inverse of permute_w: fragment order -> the checkpoint's [N, K/2].
 

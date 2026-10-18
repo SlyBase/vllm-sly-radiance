@@ -623,7 +623,16 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
 // M-block is mostly padding: M=880 (1024 rows, 2 of the last block's 4 M-waves dead) measured
 // 0.89-0.90x time on gate_up and down (checkpoint weights, 210 W, 2 ABBA pairs each), and nothing
 // at M=1514/1760/4096, which have no all-padding wave.
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool SKIPPAD = false>
+// PSW (set_at_psw, default 0 = off; WPERM e4m3 only): preshuffled nibbles + pre-folded
+// scale. Same logical weights, same e4m3 bytes in sW, so the output is bit-identical; the weights
+// must be repacked at load (psw_pack_w / psw_fold_ws in radiance_mxfp4.py, same bytes, no extra
+// memory). Ws holds 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset, so the per-slot
+// sub/clamp/shift vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
+//   PSW=1: byte b = e[b] | e[b+4] << 4 (no interleave perms; 8 VALU per 8 weights).
+//   PSW=2: byte b bits 0-2 mag(e[b]), 7 sign(e[b]), 4-6 mag(e[b+4]), 3 sign(e[(b+3)%4 + 4]);
+//          rotr(w, 4) then carries e[b+4] with its sign at bit 7 (7 VALU per 8 weights).
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool SKIPPAD = false,
+          int PSW = 0>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -781,6 +790,17 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       for (int it = 0; it < NW; ++it)
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
+          if constexpr (PSW != 0) {
+            const uint2_t t = *(const uint2_t *)((const unsigned char *)sMag + ((wsv[it] >> (8 * q)) & 0xFF));
+            const unsigned int wq = pk[it][q];
+            const unsigned int hi = PSW == 1 ? wq >> 4 : __builtin_amdgcn_alignbit(wq, wq, 4);
+            const unsigned int be = __builtin_amdgcn_perm(t[1], t[0], wq & 0x07070707u)
+                                  | (PSW == 1 ? (wq & 0x08080808u) << 4 : wq & 0x80808080u);
+            const unsigned int bo = __builtin_amdgcn_perm(t[1], t[0], hi & 0x07070707u)
+                                  | (PSW == 1 ? wq : hi) & 0x80808080u;
+            *(uint2_t *)(&sW[(wrow[it] + q) * LWSTR + wcol[it]]) = uint2_t{be, bo};
+            continue;
+          }
           int d = (int)((wref[it] >> (8 * q)) & 0xFF) - (int)((wsv[it] >> (8 * q)) & 0xFF);
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const uint2_t t = *(const uint2_t *)&sMag[d * 2];
@@ -1923,6 +1943,13 @@ static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintpt
 // GEMM on a fragment-tiled activation (see radiance_mxfp4_fp8_gemm_atiled). The caller decides
 // the layout per tensor (radiance_mxfp4.py a_tiled_*); this only dispatches. Prefill-class M
 // only: the decode kernel reads row-major A, so the Python side never tiles below its band.
+// PSW layout of the A-tiled kernel (0/1/2, default 0 = off). Runtime knob set_at_psw only, no env
+// var: the caller must own the matching weight layout (psw_pack_w / psw_fold_ws), and the decode
+// and row-major-A kernels do not read PSW weights, so production cannot switch it on by env.
+static int g_at_psw = 0;
+static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e ? atoi(e) : 0; }();
+static void set_at_psw(int v) { g_at_psw = v; }
+static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
 static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                            uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
                            uintptr_t stream, uintptr_t wh = 0) {
@@ -1939,11 +1966,12 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT_TMS(TN_, WP_, E6_, TM_, SP_)                                                           \
+#define RAD_AT_TMS(TN_, WP_, E6_, TM_, SP_) RAD_AT_X(TN_, WP_, E6_, TM_, SP_, 0)
+#define RAD_AT_X(TN_, WP_, E6_, TM_, SP_, PSW_)                                                     \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
@@ -1955,7 +1983,18 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
   // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
   static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
   static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
-  static const bool skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e && atoi(e) != 0; }();
+  const bool skip_pad = g_at_skip_pad != 0;
+  if (g_at_psw != 0) {   // weights repacked at load: every A-tiled call must take a PSW kernel
+    if (!wperm || wh) throw std::runtime_error("radiance_mxfp4_fp8: AT_PSW needs WPERM e4m3 weights");
+    const bool tn4 = M >= tn4_min_m && N >= BNF_OF(4);
+    const bool sp = skip_pad && (M & (WM * TM * 16 - 1)) != 0;
+#define RAD_AT_P(PSW_) do {                                                                     \
+      if (tn4) { if (sp) RAD_AT_X(4, true, false, TM, true, PSW_); else RAD_AT_X(4, true, false, TM, false, PSW_); } \
+      else     { if (sp) RAD_AT_X(2, true, false, TM, true, PSW_); else RAD_AT_X(2, true, false, TM, false, PSW_); } \
+    } while (0)
+    if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
+#undef RAD_AT_P
+  } else
   if (M <= tms_max_m && M < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
       if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
@@ -1975,6 +2014,7 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
 #undef RAD_AT
 #undef RAD_AT_TM
 #undef RAD_AT_TMS
+#undef RAD_AT_X
 }
 static void launch_at(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                       uintptr_t c, int M, int N, int K, uintptr_t stream) {
@@ -1993,6 +2033,8 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
+  m.def("set_at_psw", &set_at_psw, "select the A-tiled PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_skip_pad", &set_at_skip_pad, "bench: toggle SKIPPAD in-process (default from RADIANCE_MXFP4_AT_SKIP_PAD)");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");
   m.def("launch_at_p", &launch_at_p, "fragment-tiled A variant of launch_p");
