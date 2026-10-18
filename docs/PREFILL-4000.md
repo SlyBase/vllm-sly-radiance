@@ -223,6 +223,11 @@ p1/p2 split): 0 WRONG. Resources: <= 207 VGPR and 0 spills on every prefill inst
 for SKIPPAD, +/-0 for PSW); the 12 default instantiations compile to byte-identical bodies
 (`__hip_cuid` normalised).
 
+SKIPPAD across M follows the dead-wave fraction of the last 256-row block (4 waves of 64 rows):
+M=700 -> 0.958-0.963 (1 wave dead), 880 -> 0.902-0.909 (2 of 4), 1100 -> 0.920-0.922, 1760 ->
+0.996-1.007 (no dead wave), 2000 -> 0.998-1.003, 4096 -> 1.00 (not dispatched). So the knob pays
+exactly where a wave is pure padding and costs at most 0.7 % elsewhere (branch only).
+
 Reading: with GEMM at 74.3 % of the 1.5k prefill, SKIPPAD/PSW/both are worth **+0.7-1.0 %** at
 M >= 1514 (where the last M-block is only partly padding) and **+7-8 %** for chunks whose M lands at
 880. PSW's clock drops 1.3-1.9 % at the fixed cap while time drops 1-2 % -- at 210 W the kernel is
