@@ -616,27 +616,30 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
+// WNT: waves along N (default WN = 2). WNT=4 is the opt-in big tile (16 waves, 512 threads, BMF x 2*BNF_T):
+// the W tile is shared by twice the waves. K order per output is unchanged, so results are bit-identical.
 // OVL (WPERM, !E6 only): software-pipelined W stream. sW is double-buffered; the global loads of slab
 // k+1 are issued before the WMMAs of slab k and its dequant + LDS store runs after them, so one
 // barrier per slab replaces two. Same arithmetic per output (bit-identical); default off.
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool OVL = false>
-__global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool OVL = false, int WNT = WN>
+__global__ __launch_bounds__(WM * WNT * 32) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
     const float *__restrict__ As, __bf16 *__restrict__ C, int M, int N, int K,
     int pb1, int pb2, long astride, const unsigned char *__restrict__ WH = nullptr) {
+  constexpr int NTH = WM * WNT * 32;
   constexpr int NS = LBK / 16;
   constexpr int LWSTR = LBK + PAD;
-  constexpr int BNF_T = WN * TN * 16;
-  constexpr int NIT = BNF_T * LBK / 2 / (NTHREADS * 8);   // row-major W staging iterations per slab
-  static_assert(NIT >= 1 && NIT * NTHREADS * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
+  constexpr int BNF_T = WNT * TN * 16;
+  constexpr int NIT = BNF_T * LBK / 2 / (NTH * 8);   // row-major W staging iterations per slab
+  static_assert(NIT >= 1 && NIT * NTH * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
   static_assert(!OVL || (WPERM && !E6), "OVL needs the WPERM e4m3 path");
   __shared__ unsigned char sW[(OVL ? 2 : 1) * BNF_T * LWSTR];
   __shared__ unsigned int sMag[32];   // kMag, 128 B: ds_load keeps the lookup off the loadcnt chain
   __shared__ unsigned int sTab[7 * 4];
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
-  const int wm = wave / WN, wn = wave % WN;
+  const int wm = wave / WNT, wn = wave % WNT;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
   RAD_TILE_ORIGIN_BM(WM * TMT * 16);
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
@@ -678,15 +681,15 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   //   (N % 16 == 0 under WPERM) so the vector read stays aligned and every gc + q is in bounds.
   constexpr int KSTEPS_T = LBK / 16, NTILES_T = BNF_T / 16;
   constexpr int TOT_SLOTS = NTILES_T * KSTEPS_T * 32;
-  constexpr int WSLOTS = (TOT_SLOTS >= NTHREADS * 4) ? 4 : 2;
-  constexpr int NITW = TOT_SLOTS / (NTHREADS * WSLOTS);
-  static_assert(!WPERM || NITW * NTHREADS * WSLOTS == TOT_SLOTS, "WPERM slot groups must tile");
+  constexpr int WSLOTS = (TOT_SLOTS >= NTH * 4) ? 4 : 2;
+  constexpr int NITW = TOT_SLOTS / (NTH * WSLOTS);
+  static_assert(!WPERM || NITW * NTH * WSLOTS == TOT_SLOTS, "WPERM slot groups must tile");
   constexpr int NW = WPERM ? NITW : NIT;
   int wrow[NW], wcol[NW], wrc[NW], wkst[NW], wlanec[NW];
 #pragma unroll
   for (int it = 0; it < NW; ++it) {
     if constexpr (WPERM) {
-      const int sl = it * NTHREADS * WSLOTS + tid * WSLOTS;
+      const int sl = it * NTH * WSLOTS + tid * WSLOTS;
       const int lane_ = sl & 31, rest = sl >> 5;
       const int kst = rest % KSTEPS_T, ntl = rest / KSTEPS_T;
       wrow[it] = ntl * 16 + (lane_ & 15);
@@ -696,7 +699,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       wlanec[it] = (lane_ & 16) | (wrc[it] & 15);
       wkst[it] = kst;
     } else {
-      const int idx = it * NTHREADS * 8 + tid * 8;
+      const int idx = it * NTH * 8 + tid * 8;
       wrow[it] = idx / (LBK / 2); wcol[it] = idx % (LBK / 2);
       wrc[it] = wrow[it] < N - 1 - n0 ? wrow[it] : N - 1 - n0;
       wkst[it] = 0; wlanec[it] = 0;
@@ -2002,17 +2005,17 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     const char *e = getenv("RADIANCE_MXFP4_WPERM");
     return e && atoi(e) != 0;
   }();
-  dim3 fblock(NTHREADS);
-#define RAD_AT_TMO(TN_, WP_, E6_, TM_, OVL_)                                                                 \
+#define RAD_AT_TMW(TN_, WP_, E6_, TM_, OVL_, WNT_)                                                           \
   do {                                                                                          \
-    constexpr int B_ = BNF_OF(TN_);                                                             \
+    constexpr int B_ = (WNT_) * (TN_) * 16;                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, (OVL_ && WP_ && !E6_)>), \
-                       fgrid, fblock, 0,                                                        \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, (OVL_ && WP_ && !E6_), WNT_>), \
+                       fgrid, dim3(WM * (WNT_) * 32), 0,                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
                        (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
+#define RAD_AT_TMO(TN_, WP_, E6_, TM_, OVL_) RAD_AT_TMW(TN_, WP_, E6_, TM_, OVL_, WN)
 #define RAD_AT_TM(TN_, WP_, E6_, TM_) RAD_AT_TMO(TN_, WP_, E6_, TM_, false)
   // RADIANCE_MXFP4_AT_OVL=1: software-pipelined W stream (WPERM e4m3 path only, full-tile TM). Default off.
   static const bool ovl = [] { const char *e = getenv("RADIANCE_MXFP4_AT_OVL"); return e && atoi(e) != 0; }();
@@ -2021,6 +2024,13 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
   // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
   static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
   static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
+  // RADIANCE_MXFP4_AT_BIG=1 (default off): 16-wave tile (WM=4 x WNT=4), TM=4 -> 256 x (4*TN*16) per block.
+  // 1 -> TN=2 (256x128, LBK 128), 2 -> TN=4 (256x256, LBK 64). Opt-in, WPERM e4m3 path only, bit-identical.
+  static const int big = [] { const char *e = getenv("RADIANCE_MXFP4_AT_BIG"); return e ? atoi(e) : 0; }();
+  if (big && wperm && !wh && N >= (big == 2 ? 256 : 128) && (pb1 >= N || pb1 % (big == 2 ? 256 : 128) == 0) &&
+      (pb2 >= N || pb2 % (big == 2 ? 256 : 128) == 0)) {
+    if (big == 2) RAD_AT_TMW(4, true, false, TM, false, 4); else RAD_AT_TMW(2, true, false, TM, false, 4);
+  } else
   if (M <= tms_max_m && M < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
       if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
@@ -2035,6 +2045,7 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
   }
 #undef RAD_AT
 #undef RAD_AT_TM
+#undef RAD_AT_TMW
 }
 static void launch_at(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                       uintptr_t c, int M, int N, int K, uintptr_t stream) {
