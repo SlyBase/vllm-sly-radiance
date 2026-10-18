@@ -616,7 +616,23 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM>
+// SKIPPAD (RADIANCE_MXFP4_AT_SKIP_PAD=1, default off): a wave whose TMT M-fragments all lie past
+// M -- pure tile padding -- still stages its share of W and meets every barrier, but skips its A
+// loads, LDS fragment reads and WMMAs. Wave-uniform test, one scalar branch per slab, same output
+// bytes (those accumulators only ever reach rows the epilogue drops). It pays where the last
+// M-block is mostly padding: M=880 (1024 rows, 2 of the last block's 4 M-waves dead) measured
+// 0.89-0.90x time on gate_up and down (checkpoint weights, 210 W, 2 ABBA pairs each), and nothing
+// at M=1514/1760/4096, which have no all-padding wave.
+// PSW (set_at_psw, default 0 = off; WPERM e4m3 only): preshuffled nibbles + pre-folded
+// scale. Same logical weights, same e4m3 bytes in sW, so the output is bit-identical; the weights
+// must be repacked at load (psw_pack_w / psw_fold_ws in radiance_mxfp4.py, same bytes, no extra
+// memory). Ws holds 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset, so the per-slot
+// sub/clamp/shift vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
+//   PSW=1: byte b = e[b] | e[b+4] << 4 (no interleave perms; 8 VALU per 8 weights).
+//   PSW=2: byte b bits 0-2 mag(e[b]), 7 sign(e[b]), 4-6 mag(e[b+4]), 3 sign(e[(b+3)%4 + 4]);
+//          rotr(w, 4) then carries e[b+4] with its sign at bit 7 (7 VALU per 8 weights).
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool SKIPPAD = false,
+          int PSW = 0>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -715,14 +731,17 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
 #pragma unroll
       for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
 
+  const bool mlive = !SKIPPAD || (m0 >> 4) + wm * TMT < Mt;
   for (int k0 = 0; k0 < K; k0 += LBK) {
     // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
     int2_t af[TMT][NS];
+    if (mlive) {
 #pragma unroll
-    for (int i = 0; i < TMT; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
-      for (int st = 0; st < NS; ++st)
-        af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+        for (int st = 0; st < NS; ++st)
+          af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+    }
 
     // ---- W tile -> LDS, folded to e4m3 (kMag[d] via v_perm, see the folded kernel) ----
     uint4_t pk[NW]; unsigned int wsv[NW];
@@ -771,6 +790,17 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       for (int it = 0; it < NW; ++it)
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
+          if constexpr (PSW != 0) {
+            const uint2_t t = *(const uint2_t *)((const unsigned char *)sMag + ((wsv[it] >> (8 * q)) & 0xFF));
+            const unsigned int wq = pk[it][q];
+            const unsigned int hi = PSW == 1 ? wq >> 4 : __builtin_amdgcn_alignbit(wq, wq, 4);
+            const unsigned int be = __builtin_amdgcn_perm(t[1], t[0], wq & 0x07070707u)
+                                  | (PSW == 1 ? (wq & 0x08080808u) << 4 : wq & 0x80808080u);
+            const unsigned int bo = __builtin_amdgcn_perm(t[1], t[0], hi & 0x07070707u)
+                                  | (PSW == 1 ? wq : hi) & 0x80808080u;
+            *(uint2_t *)(&sW[(wrow[it] + q) * LWSTR + wcol[it]]) = uint2_t{be, bo};
+            continue;
+          }
           int d = (int)((wref[it] >> (8 * q)) & 0xFF) - (int)((wsv[it] >> (8 * q)) & 0xFF);
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const uint2_t t = *(const uint2_t *)&sMag[d * 2];
@@ -809,6 +839,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     }
     radiance_lds_barrier();
 
+    if (mlive)
 #pragma unroll
     for (int step = 0; step < NS; ++step) {
       const int kk = step * 16 + kb8;
@@ -1990,6 +2021,13 @@ static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintpt
 // GEMM on a fragment-tiled activation (see radiance_mxfp4_fp8_gemm_atiled). The caller decides
 // the layout per tensor (radiance_mxfp4.py a_tiled_*); this only dispatches. Prefill-class M
 // only: the decode kernel reads row-major A, so the Python side never tiles below its band.
+// PSW layout of the A-tiled kernel (0/1/2, default 0 = off). Runtime knob set_at_psw only, no env
+// var: the caller must own the matching weight layout (psw_pack_w / psw_fold_ws), and the decode
+// and row-major-A kernels do not read PSW weights, so production cannot switch it on by env.
+static int g_at_psw = 0;
+static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e ? atoi(e) : 0; }();
+static void set_at_psw(int v) { g_at_psw = v; }
+static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
 // tn_m: the M that picks the tile variant (TN / short-M tile). Equal to M except for the pieces of an
 // M-split launch (launch_at_impl below), which keep the variant of the full M.
 static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
@@ -2008,27 +2046,45 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT_TM(TN_, WP_, E6_, TM_)                                                                 \
+#define RAD_AT_TMS(TN_, WP_, E6_, TM_, SP_) RAD_AT_X(TN_, WP_, E6_, TM_, SP_, 0)
+#define RAD_AT_X(TN_, WP_, E6_, TM_, SP_, PSW_)                                                     \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
                        (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
+#define RAD_AT_TM(TN_, WP_, E6_, TM_) RAD_AT_TMS(TN_, WP_, E6_, TM_, false)
 #define RAD_AT(TN_, WP_, E6_) RAD_AT_TM(TN_, WP_, E6_, TM)
   // Opt-in short-M tile: M <= RADIANCE_MXFP4_AT_TMS_MAX_M (default 0 = off) at TN=2 uses TM=RADIANCE_MXFP4_AT_TMS
   // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
   static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
   static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
+  const bool skip_pad = g_at_skip_pad != 0;
+  if (g_at_psw != 0) {   // weights repacked at load: every A-tiled call must take a PSW kernel
+    if (!wperm || wh) throw std::runtime_error("radiance_mxfp4_fp8: AT_PSW needs WPERM e4m3 weights");
+    const bool tn4 = tn_m >= tn4_min_m && N >= BNF_OF(4);
+    const bool sp = skip_pad && (M & (WM * TM * 16 - 1)) != 0;
+#define RAD_AT_P(PSW_) do {                                                                     \
+      if (tn4) { if (sp) RAD_AT_X(4, true, false, TM, true, PSW_); else RAD_AT_X(4, true, false, TM, false, PSW_); } \
+      else     { if (sp) RAD_AT_X(2, true, false, TM, true, PSW_); else RAD_AT_X(2, true, false, TM, false, PSW_); } \
+    } while (0)
+    if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
+#undef RAD_AT_P
+  } else
   if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
       if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
     } else {
       if (wh) RAD_AT_TM(2, true, true, 3); else if (wperm) RAD_AT_TM(2, true, false, 3); else RAD_AT_TM(2, false, false, 3);
     }
+  } else
+  if (skip_pad && wperm && !wh && (M & (WM * TM * 16 - 1)) != 0) {   // MXFP4 fragment-order only
+    if (tn_m >= tn4_min_m && N >= BNF_OF(4)) RAD_AT_TMS(4, true, false, TM, true);
+    else                                     RAD_AT_TMS(2, true, false, TM, true);
   } else
   if (tn_m >= tn4_min_m && N >= BNF_OF(4)) {
     if (wh) RAD_AT(4, true, true); else if (wperm) RAD_AT(4, true, false); else RAD_AT(4, false, false);
@@ -2037,6 +2093,8 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
   }
 #undef RAD_AT
 #undef RAD_AT_TM
+#undef RAD_AT_TMS
+#undef RAD_AT_X
 }
 // RADIANCE_MXFP4_AT_MSPLIT=<rows> (default 0 = off): an A-tiled GEMM with M > rows runs as several
 // launches of at most `rows` rows (rounded down to whole 256-row tiles = the tallest row tile). Every kernel that
@@ -2086,6 +2144,8 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
+  m.def("set_at_psw", &set_at_psw, "select the A-tiled PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_skip_pad", &set_at_skip_pad, "bench: toggle SKIPPAD in-process (default from RADIANCE_MXFP4_AT_SKIP_PAD)");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");
   m.def("launch_at_p", &launch_at_p, "fragment-tiled A variant of launch_p");

@@ -191,3 +191,52 @@ What the numbers say:
 
 New knobs (all default off, default path unchanged): `RADIANCE_MXFP4_TILED_OPROJ`, `RADIANCE_MXFP4_AT_TMS`,
 `RADIANCE_MXFP4_AT_TMS_MAX_M`. Existing: `RADIANCE_MXFP4_TN4_MIN_M`.
+
+## Verified floor knobs: SKIPPAD and the PSW weight layout (cell bench, 210 W)
+
+Two further A-tiled GEMM changes, both **default off**, both **bit-identical** to the current kernel
+(sha256 DIGEST of the bf16 output), and both measured only in the cell bench so far. Full report,
+raw logs and the 300 W night script: `research/paiton-vs-sly/prefill-night/floor/` (REPORT.md,
+night300.sh). Gate: `ci/bench_at_psw.py`, layout self-check `ci/test_at_psw_layout.py`.
+
+- **SKIPPAD** (`RADIANCE_MXFP4_AT_SKIP_PAD=1`, commit 48c5fa1): a wave whose M-fragments all lie past
+  M is pure tile padding; it still stages W and meets every barrier but skips its A loads, LDS reads
+  and WMMAs. Only dispatched for WPERM e4m3 with a non-zero padding remainder.
+- **PSW weight layout** (`set_at_psw`, no env var, commit c843649): preshuffled nibbles + pre-folded
+  per-row scale, moved out of the K loop into the load. Same 32 bits, so bit-identical. Removes
+  20-25 of the 225 loop instructions (TN2; 190 -> 165/170 for TN4).
+
+| cell (210 W, ABBA) | SKIPPAD | PSW (mode 2) | both |
+|---|--:|--:|--:|
+| gate_up M=880 | 0.902-0.906 | 0.990-0.991 | 0.893 |
+| down M=880 | 0.903-0.909 | 0.986 | 0.886-0.888 |
+| gate_up M=1514 | -- | 0.989-0.990 | 0.987 |
+| down M=1514 | -- | 0.980-0.982 | 0.990-0.992 |
+| gate_up M=1760 | 0.996-0.997 | 0.982-0.985 | 0.987 |
+| down M=1760 | 1.002-1.007 | 0.978-0.981 | 0.988-0.991 |
+| gate_up M=4096 | 1.00 (no dispatch) | 0.986-0.987 | -- |
+| down M=4096 | 1.00 (no dispatch) | 0.978-0.981 | -- |
+
+Ratio = variant time / control time, median of 2-4 ABBA pairs per cell; board power 209.5 W in every
+leg. 384 DIGEST/PDIGEST comparisons (gate_up/down/qkvz, M 513-4096, TN2 and TN4 paths, merged-linear
+p1/p2 split): 0 WRONG. Resources: <= 207 VGPR and 0 spills on every prefill instantiation (+4 VGPR
+for SKIPPAD, +/-0 for PSW); the 12 default instantiations compile to byte-identical bodies
+(`__hip_cuid` normalised).
+
+SKIPPAD across M follows the dead-wave fraction of the last 256-row block (4 waves of 64 rows):
+M=700 -> 0.958-0.963 (1 wave dead), 880 -> 0.902-0.909 (2 of 4), 1100 -> 0.920-0.922, 1760 ->
+0.996-1.007 (no dead wave), 2000 -> 0.998-1.003, 4096 -> 1.00 (not dispatched). So the knob pays
+exactly where a wave is pure padding and costs at most 0.7 % elsewhere (branch only).
+
+Reading: with GEMM at 74.3 % of the 1.5k prefill, SKIPPAD/PSW/both are worth **+0.7-1.0 %** at
+M >= 1514 (where the last M-block is only partly padding) and **+7-8 %** for chunks whose M lands at
+880. PSW's clock drops 1.3-1.9 % at the fixed cap while time drops 1-2 % -- at 210 W the kernel is
+energy-bound, so the win is the 20-25 fewer issued instructions, not the clock.
+
+**PSW is not loader-ready.** The weight bytes are global to every consumer: the decode kernel reads
+the same `layer.weight` and needs the same PSW nibble unpack (plus the same `set_at_psw` gate) before
+a production start is possible; the pack itself would be in place at load (same shape/dtype, no extra
+memory) and `weight_scale` becomes `8 * clamp(Wref - Ws, 0, 15)`. See REPORT.md section 6.
+
+Not measured: 300 W, any server A/B, TTFT, GSM8K. The night script for the 300 W server A/B exists
+and has not been run.
