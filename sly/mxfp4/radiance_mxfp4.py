@@ -210,9 +210,10 @@ def psw_pack_w(wp: "torch.Tensor", mode: int = 2) -> "torch.Tensor":
 
 def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
     """psw_pack_w(mode 2) IN PLACE, a row band at a time: a row of [N, K/2] holds whole lane words,
-    so the band split is exact, and the int32 transient stays ~16x one band (default 16 MiB of
-    weight per band) instead of 16x the layer."""
-    step = rows or max(16, (1 << 24) // max(1, w.shape[1]))
+    so the band split is exact, and the int32 transient stays ~16x one band (default 1 MiB of
+    weight per band, ~16 MiB transient -- below the full-layer copy permute_w already makes, so the
+    pack adds no allocator segment that could shrink the KV pool)."""
+    step = rows or max(16, (1 << 20) // max(1, w.shape[1]))
     for a in range(0, w.shape[0], step):
         w[a:a + step].copy_(psw_pack_w(w[a:a + step], 2))
 
