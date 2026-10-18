@@ -170,7 +170,7 @@ arm_sed() {
           GS) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 /" ;;
           GT) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
         esac ;;
-    P0|P0b|P0c|P1|P1b|P1c) # PSW through the loader: .so + radiance_mxfp4.py of exp/psw bind-mounted (PSW_DIR), GT knobs on
+    P0|P0b|P0c|P0d|P1|P1b|P1c|P1d) # PSW through the loader: .so + radiance_mxfp4.py of exp/psw bind-mounted (PSW_DIR), GT knobs on
         # in all three; P1 adds RADIANCE_MXFP4_AT_PSW=2 (weights repacked in place at load). P0b = control again.
         [ -r "$PSW_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$PSW_DIR/radiance_mxfp4.py" ] || { echo "$1 needs PSW_DIR=<dir with radiance_mxfp4_fp8.so + radiance_mxfp4.py>" >&2; return 1; }
         echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $PSW_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $PSW_DIR/radiance_mxfp4.py:$SP/radiance_mxfp4.py:ro |"
