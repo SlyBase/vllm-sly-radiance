@@ -28,8 +28,9 @@ g = random.Random(7)
 prompts = {
     "p0": [g.randrange(1000, 120000) for _ in range(600)],
     "p1": [g.randrange(1000, 120000) for _ in range(2000)],
-    "p2": tok.apply_chat_template([{"role": "user", "content": "Write a long story about a lighthouse keeper."}],
-                                  tokenize=True, add_generation_prompt=True, enable_thinking=False),
+    "p2": tok.encode(tok.apply_chat_template([{"role": "user", "content": "Write a long story about a lighthouse keeper."}],
+                                             tokenize=False, add_generation_prompt=True, enable_thinking=False),
+                     add_special_tokens=False),
 }
 shas = []
 n_req = 0
