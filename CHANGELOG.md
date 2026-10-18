@@ -20,6 +20,16 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   the weight is read once per group instead of once per band (the same idea as `kGroupM` in libr4d's
   fp8a8 GEMM). The map is a bijection over the grid: every output tile is computed once with the
   same arithmetic. Test builds only; it is not in the release image until a GPU window shows a gain.
+- **Opt-in fragment-tiled `gdn_norm_quant` (`RADIANCE_MXFP4_TILED_OPROJ=1`, default `0`).** The GDN
+  out_proj producer writes the same fragment layout as `add_rms_quant`/`silu_mul_quant`, so the out_proj
+  GEMM (16 % of the prefill GEMM FLOPs) takes the A-tiled kernel from `A_TILED_MIN_M` upward. Cell bench: tiled
+  output is byte-identical to row-major, GEMM +10..16 % on o_proj/out_proj. `down` already used a tiled
+  producer (N = 17,408 is below the 18,432 limit).
+- **Opt-in short-M tile (`RADIANCE_MXFP4_AT_TMS=2|3`, `RADIANCE_MXFP4_AT_TMS_MAX_M`, default off).** Smaller
+  A-tiled row tile for M <= the given value; helps only M ~ 513..576 (padding), slower above.
+- `sly/mxfp4/bench_prefill_cells.py`: times the real producers, checks tiled == row-major byte for byte, prints
+  an output digest. New `ci/prefill_diag.sh` / `ci/prefill_trace_split.py` (rocprofv3 time split) and
+  `ci/prefill_ab.sh` arms `O`, `O0`, `T4`, `OT`, `OTA`, `OTR`, `GSM=1`.
 - `ci/prefill_ab.sh`: `SHORT=1` screening mode (one start per arm, three depths, three runs, no decode
   phase), arms `K2` (this option, via a bind-mounted `.so`) and `R5` (`R4D_ATTN_FP8=3`), and an
   optional `QUANT_FLAG` for `--quantization`.
@@ -30,8 +40,10 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   source is identical after normalising the `__hip_cuid` symbol, which hipcc randomises per compile
   (two compiles of the same source differ in 18 lines for that reason alone).
 
-*Measured:* nothing yet. K2 is built and compiled (the `GROUPM=16` object differs from the default),
-not run on a GPU.
+*Measured (one R9700, prefill-only sweep, same-window control; details in docs/PREFILL-4000.md):* at 300 W
+the 1.5k prefill goes 3,318 -> 3,426 tok/s (+3.3 %) with `TILED_OPROJ=1` + `TN4_MIN_M=513`, 3,427 with chunk
+4096 added (+6 % at 16k, +7 % at 47k, KV pool -3.5 %). 4,000 tok/s is not reached. K2 (`GROUPM`) gave nothing
+beyond drift. All knobs default off; the default path is unchanged.
 
 ## [1.5.1] - 2026-10-16
 
