@@ -143,3 +143,51 @@ window directory `/root/prefill-ab-20261017` on the 2408 host (copy in the agent
   none of it reaches the 4,000 target.
 - No kernel edits: the tiled `down` / `gdn_norm_quant` producers are HIP work that needs the
   `bench_prefill_cells.py --check` gate and the GPU window before it can be claimed.
+
+## Result of the night windows (2026-10-18, 210 W and 300 W)
+
+Same harness as above (`ci/prefill_ab.sh`, SHORT mode: prefill-only sweep, 1 warmup + 3 runs, one start per
+arm, median tok/s at real prompt tokens). Arms are built from this branch and bind-mounted over the 1.5.1
+image (`O_DIR`): O = tiled `gdn_norm_quant` (`RADIANCE_MXFP4_TILED_OPROJ=1`), T4 = `RADIANCE_MXFP4_TN4_MIN_M=513`,
+OT = O + T4, OTA = OT + chunk 4096, OTR = OT + `R4D_ATTN_FP8=3` (changes numerics, report only). Control C and C2
+bracket each window; compare only inside one window.
+
+**300 W (fan released, junction <= 72 C, power held at 300-302 W), window 1:**
+
+| Arm | 1.5k | 15.8k | 47k | KV pool |
+|---|--:|--:|--:|--:|
+| C   control | 3,318 | 3,201 | 2,639 | 439,031 |
+| OT  | 3,426 (+3.3 %) | 3,303 (+3.2 %) | 2,710 (+2.7 %) | 437,836 |
+| OTA | 3,427 (+3.3 %) | 3,405 (+6.4 %) | 2,823 (+7.0 %) | 423,463 |
+| OTR | 3,444 (+3.8 %) | 3,417 (+6.7 %) | 2,960 (+12.2 %) | 439,031 |
+| C2  | 3,305 (-0.4 %) | 3,197 | 2,614 (-0.9 %) | 437,836 |
+
+Window 2 repeats OTA (3,421 / 3,405 / 2,814) and OT (3,423 / 3,177 / 2,635; the 15.8k and 47k OT runs contain one
+slow run each, min 1,998 and 2,626, so read them as noise), C2 3,300 / 3,195 / 2,543.
+
+**210 W (5 windows, same arms):** OT +4.5 % at 1.5k and +6 % at 47k; OTA +9 % at 47k; OTR +15 % at 47k.
+Decode sample (4 x 256 tokens) is unchanged for every arm (63.4 tok/s). GSM8K-200 (C / OTA / OTR) is 0.845 for all
+three (flexible-extract; strict-match is 0 because of the answer format).
+
+What the numbers say:
+
+- **4,000 tok/s is not reached.** Best 1.5k value is OTR at 3,444 tok/s at 300 W (86 % of the goal);
+  without the numerics-changing arm 3,426. The measured config and the one GEMM change give +3-4 % at 1.5k.
+- The tiled producer for `o_proj`/`out_proj` is correct (0 WRONG, tiled == row-major byte-exact in the cell bench) and
+  its cell gain is +10-16 % on those two shapes (16 % of GEMM FLOPs), end to end it is small (about +2 %).
+- `down` already uses the tiled producer (`silu_mul_quant` gets N = 17,408, below the 18,432 limit); the earlier
+  "36 % of FLOPs without tiled producer" statement is wrong, the real gap is 16 %.
+- `TN4_MIN_M=513` gives +3-5 % GEMM at M 513..1536 and -1..-2 % at >= 2048 (cell bench); the end-to-end gain is
+  about +2-3 % at 1.5k.
+- Chunk 4096 (OTA) adds +3 % at 15.8k and +4 % at 47k and costs 3.5 % KV pool, nothing at 1.5k.
+- Cell-bench GEMM efficiency is 158 TF/s at M = 1,536 and 171 TF/s at M = 4,096. Ablations show the floor of
+  WMMA + LDS reads + barrier is 259-281 TF/s; the W stream (global load -> dequant -> LDS store -> barrier) overlaps
+  poorly with the WMMA. A cheaper dequant alone is worth at most about 5 %. The lever is more overlap
+  (producer/consumer waves, double-buffered LDS), which is real kernel work.
+- Smaller row tiles (TM = 2/3, `RADIANCE_MXFP4_AT_TMS`) are slower at M >= 768; TM = 3 helps only M ~ 513..576
+  (+17..28 %, padding effect). Default off.
+- Not comparable with the README 3,024: that is a full-run prefill phase; the sweep here reads about 5 % higher
+  and the 300 W control in the same window is 3,318.
+
+New knobs (all default off, default path unchanged): `RADIANCE_MXFP4_TILED_OPROJ`, `RADIANCE_MXFP4_AT_TMS`,
+`RADIANCE_MXFP4_AT_TMS_MAX_M`. Existing: `RADIANCE_MXFP4_TN4_MIN_M`.
