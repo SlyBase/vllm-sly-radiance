@@ -11,6 +11,8 @@ Refusal: with set_at_psw(2) a launch without wref (per-block path) must throw.
 env: MS (override M list), SHAPES, LAYER (12), ATTN_LAYER (3).
 """
 import hashlib, json, os, sys
+# production GT knobs: TN4 from 513 (read by the .so at its first launch) and SKIPPAD (set below)
+os.environ.setdefault("RADIANCE_MXFP4_TN4_MIN_M", "513")
 import torch
 sys.path.insert(0, "/w")
 import radiance_mxfp4 as R
@@ -24,7 +26,8 @@ assert E.psw_reader_mode() >= 2, "this .so has no PSW decode reader"
 CK = "/ck"; PFX = "model.language_model."
 IDX = json.load(open(f"{CK}/model.safetensors.index.json"))["weight_map"]
 L = int(os.environ.get("LAYER", "12")); LA = int(os.environ.get("ATTN_LAYER", "3"))
-MS = [int(x) for x in os.environ.get("MS", ",".join(map(str, list(range(1, 65)) + [72, 96, 128, 136, 160, 192, 256, 400, 512, 880, 1514, 1760]))).split(",")]
+MS = [int(x) for x in os.environ.get("MS", ",".join(map(str, list(range(1, 129)) + [129, 136, 144, 152, 160, 168, 176, 184, 192, 193, 200, 256, 400, 512, 513, 700, 880, 1100, 1514, 1760, 2048]))).split(",")]
+E.set_at_skip_pad(int(os.environ.get("SKIP_PAD", "1")))
 SH = {"gate_up": (L, "mlp", ["gate_proj", "up_proj"]), "down": (L, "mlp", ["down_proj"]),
       "qkvz": (L, "linear_attn", ["in_proj_qkv", "in_proj_z"]), "ba": (L, "linear_attn", ["in_proj_a", "in_proj_b"]),
       "out_proj": (L, "linear_attn", ["out_proj"]), "qkv": (LA, "self_attn", ["q_proj", "k_proj", "v_proj"]),
@@ -78,8 +81,8 @@ for name in SHAPES:
         for pname, a in paths:
             fn = getattr(E, pname)
             res = {}
-            for v, Wt, St in ((0, W0, st), (2, W2, S2)):
-                E.set_at_psw(v)
+            for v, Wt, St in ((0, W0, st), (2, W2, S2), (3, W2, S2)):   # 3 = PSW again (determinism)
+                E.set_at_psw(2 if v == 3 else v)
                 out.fill_(0)
                 fn(a.data_ptr(), Wt.data_ptr(), St.data_ptr(), ref.data_ptr(), xs.data_ptr(), out.data_ptr(), M, N, K, stream)
                 torch.cuda.synchronize(); res[v] = h(out)
@@ -89,17 +92,17 @@ for name in SHAPES:
                     rel = ((out[:rows].float() - r_).norm() / r_.norm().clamp_min(1e-9)).item()
                     print(f"REF {name} {pname} M={M} rel={rel:.5f}" + (" WRONG" if rel > 0.02 else ""), flush=True)
             E.set_at_psw(0)
-            ok = res[0] == res[2]
+            ok = res[0] == res[2] == res[3]
             nsame += ok; nwrong += not ok
-            print(f"DIGEST {name} {pname} M={M} v0={res[0]} v2={res[2]} {'SAME' if ok else 'WRONG'}", flush=True)
+            print(f"DIGEST {name} {pname} M={M} v0={res[0]} v2={res[2]} v2b={res[3]} {'SAME' if ok else 'WRONG'}", flush=True)
     del w, s, W0, W2, S2; torch.cuda.empty_cache()
 
 # refusal: the per-block path (wref = 0) has no PSW reader and must throw while PSW is set
 E.set_at_psw(2)
 try:
     E.launch(0, 0, 0, 0, 0, 0, 1, 16, 128, stream)   # throws before any launch
-    print("REFUSE perblock NOT RAISED WRONG", flush=True); nwrong += 1
+    print("REFUSE perblock NOT RAISED BAD", flush=True); nwrong += 1
 except Exception as e:
     print(f"REFUSE perblock raised ok: {str(e)[:90]}", flush=True)
 E.set_at_psw(0)
-print(f"TOTAL SAME={nsame} WRONG={nwrong}", flush=True)
+print(f"TOTAL SAME={nsame} BAD={nwrong}", flush=True)
