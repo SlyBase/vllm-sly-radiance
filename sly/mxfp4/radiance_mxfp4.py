@@ -99,6 +99,36 @@ if WIDE_MAX_M:
         _why.append("RADIANCE_MXFP4_DECODE_MAX_M < 128 (bands would not be contiguous)")
     sys.stderr.write(f"[radiance.mxfp4] wide decode band M in (128, {min(WIDE_MAX_M, 256)}]"
                      + (f" INACTIVE: {'; '.join(_why)}\n" if _why else " ON\n"))
+# PSW weight layout in production (RADIANCE_MXFP4_AT_PSW=2, default 0 = off). At load every
+# layer our kernel serves is repacked IN PLACE (psw_pack_w mode 2 on the fragment-order bytes,
+# psw_fold_ws on the [K/32, N] scale; same shapes, same storage, zero extra memory) and the .so is
+# switched with set_at_psw(2), after which every MXFP4 e4m3 kernel (A-tiled, folded, decode, wide
+# decode) unpacks the same bytes. Bit-identical output by construction. Refused -- never silently
+# wrong -- wherever a reader of layer.weight / weight_scale has no PSW unpack: the r4d decode
+# kernel, the Python reference / debug paths, the per-block path, NT decode loads, an .so without
+# the decode reader. Mode 1 exists for the A-tiled cell bench only.
+AT_PSW = int(os.environ.get("RADIANCE_MXFP4_AT_PSW", "0"))
+if AT_PSW:
+    _why = []
+    if AT_PSW != 2:
+        _why.append("only mode 2 has a decode reader")
+    if not WPERM:
+        _why.append("needs RADIANCE_MXFP4_WPERM=1")
+    if os.environ.get("RADIANCE_MXFP4_DECODE_NT", "0") not in ("", "0"):
+        _why.append("RADIANCE_MXFP4_DECODE_NT has no PSW variant")
+    if MIN_M > 0:
+        _why.append("RADIANCE_MXFP4_W4A8_MIN_M > 0 hands small M to aiter, which reads the checkpoint bytes")
+    for _k in ("RADIANCE_MXFP4_R4D_DECODE_MAX_M", "RADIANCE_MXFP4_DEBUG", "RADIANCE_MXFP4_CHECKALL",
+               "RADIANCE_MXFP4_REFLINEAR", "RADIANCE_MXFP4_SHADOW", "RADIANCE_MXFP4_PERBLOCK_NK"):
+        if os.environ.get(_k, "0").strip() not in ("", "0"):
+            _why.append(f"{_k} reads the checkpoint byte layout")
+    if _why:
+        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW refused: " + "; ".join(_why))
+    sys.stderr.write("[radiance.mxfp4] weight layout: PSW mode 2 (RADIANCE_MXFP4_AT_PSW=2), "
+                     "repacked in place at load\n")
+_psw_on = [False]
+
+
 if WPERM:
     # Announce it: this launcher only forwards env vars it declares with -e, and a silently
     # unforwarded flag reads as "the change did nothing" rather than as a mistake. A whole
@@ -176,6 +206,15 @@ def psw_pack_w(wp: "torch.Tensor", mode: int = 2) -> "torch.Tensor":
     else:
         out = (lo & 7) | ((hi.roll(1, 1) >> 3) << 3) | ((hi & 7) << 4) | ((lo >> 3) << 7)
     return out.to(torch.uint8).reshape(wp.shape).contiguous()
+
+
+def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
+    """psw_pack_w(mode 2) IN PLACE, a row band at a time: a row of [N, K/2] holds whole lane words,
+    so the band split is exact, and the int32 transient stays ~16x one band (default 16 MiB of
+    weight per band) instead of 16x the layer."""
+    step = rows or max(16, (1 << 24) // max(1, w.shape[1]))
+    for a in range(0, w.shape[0], step):
+        w[a:a + step].copy_(psw_pack_w(w[a:a + step], 2))
 
 
 def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
@@ -946,6 +985,18 @@ def _make_kernel_class():
                 # 384,316, prod unit, 2026-09-23). The permuted copy is a transient of one
                 # layer's size, freed before the next layer.
                 layer.weight.data.copy_(permute_w(layer.weight.data, N_, K))
+                if AT_PSW:
+                    if _ext is None or getattr(_ext, "psw_reader_mode", lambda: 0)() < 2:
+                        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW=2 needs a "
+                                           "radiance_mxfp4_fp8.so whose decode kernel reads PSW")
+                    if perblock:
+                        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW: the per-block "
+                                           "path has no PSW reader")
+                    psw_pack_w_(layer.weight.data)
+                    layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
+                    if not _psw_on[0]:
+                        _psw_on[0] = True
+                        _ext.set_at_psw(2)
             layer.radiance_w4a8_ok = bool(ok)   # record only; never read in the forward
 
         def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,

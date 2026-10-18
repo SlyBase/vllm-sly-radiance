@@ -460,6 +460,8 @@ class ParoQuantMXFP4LinearMethod(LinearMethodBase):
         layer.pq_output_partition_sizes = list(output_partition_sizes)
 
     def process_weights_after_loading(self, layer) -> None:
+        if _mx.AT_PSW:   # this loader does not repack to PSW; the .so would read its bytes as PSW
+            raise RuntimeError("paroquant_mxfp4: RADIANCE_MXFP4_AT_PSW is not supported here")
         device = layer.weight.device
         N, K = layer.weight.shape[0], layer.weight.shape[1] * 2
         krot = self.quant_config.krot
@@ -577,6 +579,8 @@ class ParoQuantMXFP6LinearMethod(ParoQuantMXFP4LinearMethod):
             input_dim=1, output_dim=0, weight_loader=extra_weight_attrs.get("weight_loader")))
 
     def process_weights_after_loading(self, layer) -> None:
+        if _mx.AT_PSW:   # MXFP6 has no PSW reader (the launcher throws on a wh plane under PSW)
+            raise RuntimeError("paroquant_mxfp6: RADIANCE_MXFP4_AT_PSW is not supported here")
         N, K = layer.weight.shape[0], layer.weight_scale.shape[1] * MXBLOCK
         if not _mx.WPERM:
             raise RuntimeError("paroquant_mxfp6 needs RADIANCE_MXFP4_WPERM=1 (the kernel reads fragment order only)")
