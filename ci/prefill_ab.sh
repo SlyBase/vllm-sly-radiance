@@ -49,6 +49,10 @@
 #   K2  libr4d-style M-band raster grouping of the W4A8 prefill GEMM (RADIANCE_GROUPM=16 build of
 #       radiance_mxfp4_fp8.so, bind-mounted over the image's .so; K2_SO=<path of that .so>)
 #   R5  R4D_ATTN_FP8=3 (8-bit QK and PV legs of the libr4d prefill attention, R4D_HYBRID)
+#   G   RADIANCE_FUSED_NQ_REG=1, .so from this branch bind-mounted over the image (G_DIR=<dir with
+#       radiance_mxfp4_fp8.so>): register-resident row slice in silu_mul_quant / add_rms_quant /
+#       gdn_norm_quant (docs/PREFILL-4000-NONGEMM.md)
+#   G0  control for G: same .so, knob off (proves the new .so alone changes nothing)
 #   C2  control again
 #
 # Output in $OUT: <arm>.prefill.json (BetterBench), <arm>.kvlog, <arm>.diff (launch delta),
@@ -69,6 +73,7 @@ SHORT=${SHORT:-0}
 QUANT_FLAG=${QUANT_FLAG:-}
 K2_SO=${K2_SO:-}
 O_DIR=${O_DIR:-}
+G_DIR=${G_DIR:-}
 SP=${SP:-/opt/vllm/lib/python3.12/site-packages}   # site-packages inside the image
 if [ "$SHORT" = 1 ]; then
   DEPTHS=${DEPTHS_SHORT:-[2000,21500,64000]}        # ~1.5k / 16k / 47k real prompt tokens
@@ -149,6 +154,12 @@ arm_sed() {
     O0) # control for O: same mounts, knob off (proves the new .so alone changes nothing)
         [ -r "$O_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$O_DIR/radiance_fused_norm.py" ] || { echo "O0 needs O_DIR" >&2; return 1; }
         echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $O_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $O_DIR/radiance_fused_norm.py:$SP/radiance_fused_norm.py:ro |" ;;
+    G|G0) # NQ_REG producers (register-resident row slice): same .so for both arms, knob on only for G
+        [ -r "$G_DIR/radiance_mxfp4_fp8.so" ] || { echo "G needs G_DIR=<dir with radiance_mxfp4_fp8.so>" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $G_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro |"
+        if [ "$1" = G ]; then
+          echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 /"
+        fi ;;
     T4) # TN4 tile from M>=513 instead of 2048 (env only; cell bench: +3..5% GEMM at M 513..1536, equal at >=2048)
         echo "s/-e RADIANCE_MXFP4_A_TILED_MIN_M=513 /-e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
     OT) # O + T4
