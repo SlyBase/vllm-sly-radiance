@@ -273,7 +273,7 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 // expands to the one statement the kernels always had, token for token, so the default object code
 // does not move.
 #if defined(RADIANCE_GROUPM) && RADIANCE_GROUPM > 0
-#define RAD_TILE_ORIGIN                                                                       \
+#define RAD_TILE_ORIGIN_BM(BM_)                                                               \
   unsigned rad_bx = blockIdx.x, rad_by = blockIdx.y;                                          \
   if (gridDim.y > 1) {                                                                        \
     const unsigned gm_full = (unsigned)RADIANCE_GROUPM < gridDim.y ? (unsigned)RADIANCE_GROUPM \
@@ -285,10 +285,11 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
     rad_by = first + r % gm;                                                                  \
     rad_bx = r / gm;                                                                          \
   }                                                                                           \
-  const int m0 = rad_by * BMF, n0 = rad_bx * BNF_T
+  const int m0 = rad_by * (BM_), n0 = rad_bx * BNF_T
 #else
-#define RAD_TILE_ORIGIN const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T
+#define RAD_TILE_ORIGIN_BM(BM_) const int m0 = blockIdx.y * (BM_), n0 = blockIdx.x * BNF_T
 #endif
+#define RAD_TILE_ORIGIN RAD_TILE_ORIGIN_BM(BMF)
 #define BNF BNF_OF(2)
 
 // TN is templated because the winner depends on M. Widening the N tile (TN=4 -> BNF=128) amortises
@@ -615,7 +616,7 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false>
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -633,7 +634,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
-  RAD_TILE_ORIGIN;
+  RAD_TILE_ORIGIN_BM(WM * TMT * 16);
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.
@@ -653,10 +654,10 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   // unsigned 32-bit offset so the loads take the SADDR form (max offset < 2^31 for all prod).
   // Tile-granular clamp, never predicate: rows of a clamped tile only reach accumulators the
   // epilogue drops.
-  const unsigned char *abase[TM];
+  const unsigned char *abase[TMT];
 #pragma unroll
-  for (int i = 0; i < TM; ++i) {
-    int mt = (m0 >> 4) + wm * TM + i; mt = mt < Mt - 1 ? mt : Mt - 1;
+  for (int i = 0; i < TMT; ++i) {
+    int mt = (m0 >> 4) + wm * TMT + i; mt = mt < Mt - 1 ? mt : Mt - 1;
     abase[i] = AT + (size_t)__builtin_amdgcn_readfirstlane(mt * ksteps_g * 256);
   }
   const unsigned int aoff = lane * 8;
@@ -706,9 +707,9 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     } else wref[it] = Wref[n0 + wrc[it]];
   }
 
-  floatx8 acc[TM][TN];
+  floatx8 acc[TMT][TN];
 #pragma unroll
-  for (int i = 0; i < TM; ++i)
+  for (int i = 0; i < TMT; ++i)
 #pragma unroll
     for (int j = 0; j < TN; ++j)
 #pragma unroll
@@ -716,9 +717,9 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
 
   for (int k0 = 0; k0 < K; k0 += LBK) {
     // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
-    int2_t af[TM][NS];
+    int2_t af[TMT][NS];
 #pragma unroll
-    for (int i = 0; i < TM; ++i)
+    for (int i = 0; i < TMT; ++i)
 #pragma unroll
       for (int st = 0; st < NS; ++st)
         af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
@@ -819,7 +820,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       }
       __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
-      for (int i = 0; i < TM; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j)
           acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i][step], wf[j], acc[i][j]);
@@ -835,13 +836,13 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     rf[j] = (n < N) ? __int_as_float((int)Wref[n] << 23) : 0.f;
   }
   {
-    __bf16 *__restrict__ Cb = C + (size_t)(m0 + wm * TM * 16) * N;
-    const float *__restrict__ Asb = As + m0 + wm * TM * 16;
-    const bool full = (m0 + wm * TM * 16 + (TM - 1) * 16 + kb8 + 7 < M) &&
+    __bf16 *__restrict__ Cb = C + (size_t)(m0 + wm * TMT * 16) * N;
+    const float *__restrict__ Asb = As + m0 + wm * TMT * 16;
+    const bool full = (m0 + wm * TMT * 16 + (TMT - 1) * 16 + kb8 + 7 < M) &&
                       (n0 + wn * TN * 16 + (TN - 1) * 16 + col < N);
     if (full) {
 #pragma unroll
-      for (int i = 0; i < TM; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j)
 #pragma unroll
@@ -854,12 +855,12 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     }
   }
 #pragma unroll
-  for (int i = 0; i < TM; ++i)
+  for (int i = 0; i < TMT; ++i)
 #pragma unroll
     for (int j = 0; j < TN; ++j)
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        const int m = m0 + wm * TM * 16 + i * 16 + kb8 + e;
+        const int m = m0 + wm * TMT * 16 + i * 16 + kb8 + e;
         const int n = n0 + wn * TN * 16 + j * 16 + col;
         if (m < M && n < N) C[(size_t)m * N + n] = (__bf16)(acc[i][j][e] * rf[j] * As[m]);
       }
@@ -1927,22 +1928,35 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT(TN_, WP_, E6_)                                                                   \
+#define RAD_AT_TM(TN_, WP_, E6_, TM_)                                                                 \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
-    dim3 fgrid((N + B_ - 1) / B_, (M + BMF - 1) / BMF);                                         \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_>), \
+    dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
                        (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
+#define RAD_AT(TN_, WP_, E6_) RAD_AT_TM(TN_, WP_, E6_, TM)
+  // Opt-in short-M tile: M <= RADIANCE_MXFP4_AT_TMS_MAX_M (default 0 = off) at TN=2 uses TM=RADIANCE_MXFP4_AT_TMS
+  // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
+  static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
+  static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
+  if (M <= tms_max_m && M < tn4_min_m && (tms == 2 || tms == 3)) {
+    if (tms == 2) {
+      if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
+    } else {
+      if (wh) RAD_AT_TM(2, true, true, 3); else if (wperm) RAD_AT_TM(2, true, false, 3); else RAD_AT_TM(2, false, false, 3);
+    }
+  } else
   if (M >= tn4_min_m && N >= BNF_OF(4)) {
     if (wh) RAD_AT(4, true, true); else if (wperm) RAD_AT(4, true, false); else RAD_AT(4, false, false);
   } else {
     if (wh) RAD_AT(2, true, true); else if (wperm) RAD_AT(2, true, false); else RAD_AT(2, false, false);
   }
 #undef RAD_AT
+#undef RAD_AT_TM
 }
 static void launch_at(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                       uintptr_t c, int M, int N, int K, uintptr_t stream) {

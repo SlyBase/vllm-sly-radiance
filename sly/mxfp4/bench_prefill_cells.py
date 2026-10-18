@@ -203,6 +203,11 @@ def main(a):
                     def at_check():
                         at_call(0)
                         torch.cuda.synchronize()
+                        # byte-identity across env arms: compare these lines between runs
+                        import hashlib
+                        print(f"DIGEST {name} M={M} "
+                              + hashlib.sha256(out.view(torch.int16).cpu().numpy().tobytes()).hexdigest()[:16],
+                              file=sys.stderr)
                         rel = ((out.float() - ref).norm() / ref.norm().clamp_min(1e-9)).item()
                         if rel > 0.02 or not torch.isfinite(out.float()).all():
                             print(f"WRONG {name} M={M} arm=atiled rel={rel:.4f}",
