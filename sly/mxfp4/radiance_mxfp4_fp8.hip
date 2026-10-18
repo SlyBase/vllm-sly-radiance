@@ -616,7 +616,10 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM>
+// OVL (WPERM, !E6 only): software-pipelined W stream. sW is double-buffered; the global loads of slab
+// k+1 are issued before the WMMAs of slab k and its dequant + LDS store runs after them, so one
+// barrier per slab replaces two. Same arithmetic per output (bit-identical); default off.
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool OVL = false>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -627,7 +630,8 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   constexpr int BNF_T = WN * TN * 16;
   constexpr int NIT = BNF_T * LBK / 2 / (NTHREADS * 8);   // row-major W staging iterations per slab
   static_assert(NIT >= 1 && NIT * NTHREADS * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
-  __shared__ unsigned char sW[BNF_T * LWSTR];
+  static_assert(!OVL || (WPERM && !E6), "OVL needs the WPERM e4m3 path");
+  __shared__ unsigned char sW[(OVL ? 2 : 1) * BNF_T * LWSTR];
   __shared__ unsigned int sMag[32];   // kMag, 128 B: ds_load keeps the lookup off the loadcnt chain
   __shared__ unsigned int sTab[7 * 4];
 
@@ -715,6 +719,77 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
 #pragma unroll
       for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
 
+  if constexpr (OVL) {
+    const unsigned int *__restrict__ Wp = (const unsigned int *)W;
+    uint4_t pk[NW]; unsigned int wsv[NW];
+    auto ldw = [&](int kk0) {
+      const int kstep0 = kk0 / 16;
+#pragma unroll
+      for (int it = 0; it < NW; ++it) {
+        const unsigned int *src = &Wp[((size_t)(wrc[it] >> 4) * ksteps_g + kstep0 + wkst[it]) * 32 + wlanec[it]];
+        if constexpr (WSLOTS == 4) pk[it] = *(const uint4_t *)src;
+        else { const uint2_t v = *(const uint2_t *)src; pk[it] = uint4_t{v[0], v[1], 0u, 0u}; }
+        const int blk = (kk0 + wkst[it] * 16) / 32;
+        if constexpr (WSLOTS == 4) wsv[it] = *(const unsigned int *)(Ws + (size_t)blk * N + wrc[it]);
+        else                       wsv[it] = *(const unsigned short *)(Ws + (size_t)blk * N + wrc[it]);
+      }
+    };
+    auto stw = [&](unsigned char *dst) {
+#pragma unroll
+      for (int it = 0; it < NW; ++it)
+#pragma unroll
+        for (int q = 0; q < WSLOTS; ++q) {
+          int d = (int)((wref[it] >> (8 * q)) & 0xFF) - (int)((wsv[it] >> (8 * q)) & 0xFF);
+          d = d < 0 ? 0 : (d > 15 ? 15 : d);
+          const uint2_t t = *(const uint2_t *)&sMag[d * 2];
+          const unsigned int wq = pk[it][q];
+          const unsigned int ev = wq & 0x0F0F0F0Fu;
+          const unsigned int od = (wq >> 4) & 0x0F0F0F0Fu;
+          const unsigned int be = __builtin_amdgcn_perm(t[1], t[0], ev & 0x07070707u)
+                                | ((ev & 0x08080808u) << 4);
+          const unsigned int bo = __builtin_amdgcn_perm(t[1], t[0], od & 0x07070707u)
+                                | ((od & 0x08080808u) << 4);
+          *(uint2_t *)(&dst[(wrow[it] + q) * LWSTR + wcol[it]]) =
+              uint2_t{__builtin_amdgcn_perm(bo, be, 0x05010400u),
+                      __builtin_amdgcn_perm(bo, be, 0x07030602u)};
+        }
+    };
+    ldw(0); stw(sW);
+    radiance_lds_barrier();
+    int cur = 0;
+    for (int k0 = 0; k0 < K; k0 += LBK) {
+      int2_t af[TMT][NS];
+#pragma unroll
+      for (int i = 0; i < TMT; ++i)
+#pragma unroll
+        for (int st = 0; st < NS; ++st)
+          af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+      // Last slab re-loads itself (harmless, keeps the control flow uniform and branch-free).
+      ldw(k0 + LBK < K ? k0 + LBK : k0);
+      __builtin_amdgcn_sched_barrier(0);
+      const unsigned char *sWc = sW + cur * (BNF_T * LWSTR);
+#pragma unroll
+      for (int step = 0; step < NS; ++step) {
+        const int kk = step * 16 + kb8;
+        int2_t wf[TN];
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+          const unsigned char *p = &sWc[(wn * TN * 16 + j * 16 + col) * LWSTR + kk];
+          wf[j][0] = *(const int *)p; wf[j][1] = *(const int *)(p + 4);
+        }
+        __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+        for (int i = 0; i < TMT; ++i)
+#pragma unroll
+          for (int j = 0; j < TN; ++j)
+            acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i][step], wf[j], acc[i][j]);
+      }
+      __builtin_amdgcn_sched_barrier(0);
+      stw(sW + (cur ^ 1) * (BNF_T * LWSTR));
+      radiance_lds_barrier();
+      cur ^= 1;
+    }
+  } else
   for (int k0 = 0; k0 < K; k0 += LBK) {
     // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
     int2_t af[TMT][NS];
@@ -1928,17 +2003,20 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT_TM(TN_, WP_, E6_, TM_)                                                                 \
+#define RAD_AT_TMO(TN_, WP_, E6_, TM_, OVL_)                                                                 \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, (OVL_ && WP_ && !E6_)>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
                        (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
-#define RAD_AT(TN_, WP_, E6_) RAD_AT_TM(TN_, WP_, E6_, TM)
+#define RAD_AT_TM(TN_, WP_, E6_, TM_) RAD_AT_TMO(TN_, WP_, E6_, TM_, false)
+  // RADIANCE_MXFP4_AT_OVL=1: software-pipelined W stream (WPERM e4m3 path only, full-tile TM). Default off.
+  static const bool ovl = [] { const char *e = getenv("RADIANCE_MXFP4_AT_OVL"); return e && atoi(e) != 0; }();
+#define RAD_AT(TN_, WP_, E6_) do { if (ovl && (WP_) && !(E6_)) RAD_AT_TMO(TN_, WP_, E6_, TM, true); else RAD_AT_TMO(TN_, WP_, E6_, TM, false); } while (0)
   // Opt-in short-M tile: M <= RADIANCE_MXFP4_AT_TMS_MAX_M (default 0 = off) at TN=2 uses TM=RADIANCE_MXFP4_AT_TMS
   // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
   static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
