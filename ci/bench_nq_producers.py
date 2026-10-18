@@ -19,6 +19,9 @@ ap.add_argument("--ms", default="880,1514,1760,4096")
 ap.add_argument("--reps", type=int, default=50)
 ap.add_argument("--tiled", type=int, default=1)
 ap.add_argument("--random", action="store_true", help="uniform random bf16 instead of the dump")
+ap.add_argument("--a", default="0:0", help="arm A = nq_reg:nq_art (default stock)")
+ap.add_argument("--b", default="1:0", help="arm B = nq_reg:nq_art (default NQ_REG)")
+ap.add_argument("--kinds", default="silu_mul_quant,add_rms_quant,gdn_norm_quant")
 a = ap.parse_args()
 dev = "cuda"
 st = torch.cuda.current_stream().cuda_stream
@@ -102,8 +105,19 @@ def cell(kind, M):
     return None
 
 
+ARMS = [tuple(int(v) for v in x.split(":")) for x in (a.a, a.b)]
+
+
+def set_arm(i):
+    ext.set_nq_reg(ARMS[i][0])
+    if hasattr(ext, "set_nq_art"):
+        ext.set_nq_art(ARMS[i][1])
+    elif ARMS[i][1]:
+        raise SystemExit("this .so has no set_nq_art")
+
+
 def timed(run, outs, reg):
-    ext.set_nq_reg(reg)
+    set_arm(reg)
     for i in range(3):
         run(i, outs)
     ev = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(a.reps)]
@@ -116,8 +130,9 @@ def timed(run, outs, reg):
 
 
 print(f"# data={'random' if a.random else 'real dump'} tiled={a.tiled} reps={a.reps}")
+print(f"# arm A={a.a} arm B={a.b} (nq_reg:nq_art)")
 print("kernel M | stock_us REG_us (ABBA medians) | ratio | stock GB/s REG GB/s | DIGEST equal")
-for kind in ("silu_mul_quant", "add_rms_quant", "gdn_norm_quant"):
+for kind in a.kinds.split(","):
     for M in [int(x) for x in a.ms.split(",")]:
         c = cell(kind, M)
         if c is None:
@@ -130,7 +145,7 @@ for kind in ("silu_mul_quant", "add_rms_quant", "gdn_norm_quant"):
         dig = []
         for reg in (0, 1):
             o2 = [torch.zeros_like(t) for t in outs]  # tiled pad rows stay 0
-            ext.set_nq_reg(reg)
+            set_arm(reg)
             run(0, o2)
             torch.cuda.synchronize()
             h = hashlib.sha256()
@@ -142,4 +157,5 @@ for kind in ("silu_mul_quant", "add_rms_quant", "gdn_norm_quant"):
               f"{'/'.join(f'{x:.1f}' for x in res[1])}) | {t0 / t1:.3f}x | {nbytes / t0 / 1e3:.0f} "
               f"{nbytes / t1 / 1e3:.0f} | DIGEST {dig[0]} {dig[1]} {'EQUAL' if dig[0] == dig[1] else 'WRONG'}",
               flush=True)
+set_arm(0)
 ext.set_nq_reg(0)

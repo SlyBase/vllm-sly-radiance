@@ -4,7 +4,7 @@ Same harness as ci/prefill_torch_profile.py (production argv, VLLM_ENABLE_V1_MUL
 are switched between requests with the extension's set_nq_reg() hook (RADIANCE_FUSED_NQ_REG), so both
 arms share clocks, compile cache and memory layout. Needs a radiance_mxfp4_fp8.so that has set_nq_reg.
 
-Env: GEN=1 (greedy 128-token decode smoke, GENSHA line), ARMS (comma list, one `nq_reg:msplit_rows` per arm digit, default 0:0,1:0), OUT, LENS (default 1514,2048,15800), ORDER (arm per measured request, default 01100110 = ABBA ABBA,
+Env: GEN=1 (greedy 128-token decode smoke, GENSHA line), ARMS (comma list, one `nq_reg:msplit_rows[:nq_art]` per arm digit, default 0:0,1:0), OUT, LENS (default 1514,2048,15800), ORDER (arm per measured request, default 01100110 = ABBA ABBA,
 used for the plain and for the profiled requests), NPROF (profiled requests per length, default 4, taken
 from the head of ORDER), CHECK=1 (before timing, over CHECK_LENS (default 1514,2048,3520 = chunks 1514 / 880+1168 / 2x1760): every eager producer call with M > 64 is relaunched on
 its real inputs into private buffers with REG=0 and REG=1 and the q / scale / residual bytes compared ->
@@ -46,11 +46,13 @@ def set_arm(arm):
     ext.set_nq_reg(ARMS[arm][0])
     if hasattr(ext, "set_at_msplit"):  # experimental M-split build only
         ext.set_at_msplit(ARMS[arm][1])
+    if hasattr(ext, "set_nq_art"):  # optional third field: RADIANCE_FUSED_NQ_ART
+        ext.set_nq_art(ARMS[arm][2] if len(ARMS[arm]) > 2 else 0)
 
 
 set_arm(0)
 stats, dumped = {}, set()
-MS_CHECK = max(r for _, r in ARMS)
+MS_CHECK = max(a[1] for a in ARMS)
 
 
 class _Dev:
@@ -70,12 +72,14 @@ def compare(name, M, launch, sizes, inputs):
     if torch.cuda.is_current_stream_capturing():
         return
     outs = []
-    for reg in (0, 1):
+    for arm in (0, len(ARMS) - 1):  # stock arm vs the last arm (nq_reg / nq_art as configured)
         bufs = [torch.zeros(n, dtype=torch.uint8, device="cuda") for n in sizes]  # tiled pad rows stay 0
-        ext.set_nq_reg(reg)
+        ext.set_nq_reg(ARMS[arm][0])
+        if hasattr(ext, "set_nq_art"):
+            ext.set_nq_art(ARMS[arm][2] if len(ARMS[arm]) > 2 else 0)
         launch([b.data_ptr() for b in bufs])
         outs.append(bufs)
-    ext.set_nq_reg(0)
+    set_arm(0)
     torch.cuda.synchronize()
     st = stats.setdefault((name, M), {"calls": 0, "diff": 0, "sha": hashlib.sha256()})
     st["calls"] += 1

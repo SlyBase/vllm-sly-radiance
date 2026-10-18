@@ -1801,8 +1801,29 @@ static void launch_silu_mul_quant_t(uintptr_t gu, uintptr_t q, uintptr_t scale, 
                        (hipStream_t)stream, (const __bf16 *)gu, (unsigned char *)q,
                        (float *)scale, N);
 }
+// RADIANCE_FUSED_NQ_ART=128|512|1024 (default 0 = the launcher's choice; only with NQ_REG): workgroup size of the
+// silu_mul_quant / gdn_norm_quant producers. Both reduce only a max across the workgroup (gdn's sum of squares is
+// per 16-lane head segment, independent of ART), and max is exact in any order, so any ART is bit-identical.
+// add_rms_quant is excluded: its row sum of squares would change association order with ART.
+static int nq_art_v = [] { const char *e = getenv("RADIANCE_FUSED_NQ_ART"); return e ? atoi(e) : 0; }();
+static void set_nq_art(int v) { nq_art_v = v; }
+template <int ART>
+static void launch_silu_reg_art(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N, uintptr_t stream,
+                                int tiled) {
+  if (tiled)
+    hipLaunchKernelGGL((radiance_silu_mul_quant<ART, true, true>), dim3(M), dim3(ART), 0, (hipStream_t)stream,
+                       (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
+  else
+    hipLaunchKernelGGL((radiance_silu_mul_quant<ART, false, true>), dim3(M), dim3(ART), 0, (hipStream_t)stream,
+                       (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
+}
 static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N,
                                   uintptr_t stream, int tiled) {
+  if (nq_reg() && nq_art_v && !(N > 72 * ARNQ_T || (N & 7) || (tiled && (N & 15)))) {
+    if (nq_art_v == 128) return launch_silu_reg_art<128>(gu, q, scale, M, N, stream, tiled);
+    if (nq_art_v == 512) return launch_silu_reg_art<512>(gu, q, scale, M, N, stream, tiled);
+    if (nq_art_v == 1024) return launch_silu_reg_art<1024>(gu, q, scale, M, N, stream, tiled);
+  }
   if (nq_reg()) launch_silu_mul_quant_t<true>(gu, q, scale, M, N, stream, tiled);
   else launch_silu_mul_quant_t<false>(gu, q, scale, M, N, stream, tiled);
 }
@@ -1907,6 +1928,20 @@ static void launch_gdn_norm_quant_t(uintptr_t x, uintptr_t z, long zs, uintptr_t
 static void launch_gdn_norm_quant(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
                                   uintptr_t scale, int M, int N, double eps, uintptr_t stream,
                                   int tiled) {
+  if (nq_reg() && (nq_art_v == 128 || nq_art_v == 512 || nq_art_v == 1024) && !(N > 40 * ARNQ_T || (N & 127) || (zs & 7))) {
+#define RAD_GNQ(A_)                                                                                   \
+    do {                                                                                              \
+      if (tiled) hipLaunchKernelGGL((radiance_gdn_norm_quant<A_, true, true>), dim3(M), dim3(A_), 0,    \
+                                    (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,      \
+                                    (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps); \
+      else hipLaunchKernelGGL((radiance_gdn_norm_quant<A_, false, true>), dim3(M), dim3(A_), 0,         \
+                              (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,            \
+                              (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);    \
+    } while (0)
+    if (nq_art_v == 128) RAD_GNQ(128); else if (nq_art_v == 512) RAD_GNQ(512); else RAD_GNQ(1024);
+#undef RAD_GNQ
+    return;
+  }
   if (nq_reg()) launch_gdn_norm_quant_t<true>(x, z, zs, w, q, scale, M, N, eps, stream, tiled);
   else launch_gdn_norm_quant_t<false>(x, z, zs, w, q, scale, M, N, eps, stream, tiled);
 }
@@ -2062,6 +2097,7 @@ PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
         py::arg("stream"), py::arg("tiled") = 0);
   m.def("set_at_msplit", &set_at_msplit, "A/B hook: override RADIANCE_MXFP4_AT_MSPLIT in this process");
   m.def("set_nq_reg", &set_nq_reg, "A/B hook: override RADIANCE_FUSED_NQ_REG in this process");
+  m.def("set_nq_art", &set_nq_art, "A/B hook: override RADIANCE_FUSED_NQ_ART in this process");
   m.def("launch_gdn_norm_quant", &launch_gdn_norm_quant,
         "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)",
         py::arg("x"), py::arg("z"), py::arg("zs"), py::arg("w"), py::arg("q"), py::arg("scale"),
