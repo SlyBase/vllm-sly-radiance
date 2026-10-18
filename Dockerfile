@@ -18,7 +18,8 @@
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
 # stack: torch 2.13.0 (AMD wheel, +rocm10.1.0), triton 3.8.0 (AMD wheel, git669b31ac), torchvision 0.28.0
-# (AMD wheel), aiter v0.1.23, vLLM v0.31.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
+# (AMD wheel) -- the trio vLLM 0.31's ROCm base builds, unchanged at the 0.32.0 bump -- aiter v0.1.24.post1,
+# vLLM v0.32.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
 # ROCM_BASE below is what the homelab's production image is built from; 10.0 needs --build-arg ROCM_BASE and TORCH_AMD_ROCM / TORCH_VERSION=2.11.0 / TORCHVISION_VERSION=0.24.1 / TRITON_BUILD=git4cff872c.rocm10.0.0 and a torch that AMD ships for 10.0).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
 ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
@@ -68,17 +69,14 @@ ARG TRITON_BUILD=git669b31ac.rocm10.1.0
 ARG TRITON_SHA256=2f745c62aebb33167bfb6d586f569fbea67f8fc5181b03798b91a6b9187a625e
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TORCHVISION_VERSION=0.28.0
-# HELD below 0.1.24 (renovate.json allowedVersions): aiter 0.1.24 dropped the module alias
-# `aiter.ops.triton.unified_attention` (the kernel lives only at aiter.ops.triton.attention.
-# unified_attention now), and vLLM's rocm_aiter_unified_attn backend still imports the old path
-# (0.30.0 and 0.31.0 alike) -> EngineCore dies in qwen3_5.py make_layers with ModuleNotFoundError. That
-# was the 0.4.6 and 0.6.0 gate crash. 0.1.23 is what vLLM 0.31.0's ROCm base pins and still has the alias
-# (aiter/ops/triton/__init__.py maps it to attention.unified_attention). Lift the hold together with a
-# vLLM that imports the new path (or a patch).
+# The 0.1.23 hold is lifted at the 0.32.0 bump: vLLM 0.32.0's AITER_BRANCH is v0.1.24.post1 and
+# vLLM still imports aiter.ops.triton.unified_attention, whose alias IS back in 0.1.24.post1
+# (aiter/ops/triton/__init__.py: "unified_attention": "attention.unified_attention", checked in
+# the v0.1.24.post1 tree). rocm_aiter_unified_attn stays usable, so nothing holds the pin here.
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.23
+ARG AITER_VERSION=0.1.24.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.31.0
+ARG VLLM_VERSION=0.32.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
@@ -88,6 +86,11 @@ ARG VLLM_VERSION=0.31.0
 # vLLM 0.31.0 caps transformers at < 5.18.0 (requirements/common.txt: >= 5.10.4, < 5.18.0), so 1.1.0
 # goes from 5.18.0 back to 5.17.0, the newest release it allows (pip would otherwise fail the
 # resolution). 5.17.0 is the version of the 0.29.0 stack and of the 0.6.x accept run.
+# vLLM 0.32.0 widens the cap to >= 5.16.1, < 5.20.0, so 1.6.0 takes 5.19.0, the newest release the
+# range allows. NOTE (0.27.1-line comment above): the Gemma-4 head_dim story was re-verified as
+# designed-away only up to 5.17.0 -- 5.19.0 is inferred safe the same way (shape, not a passing
+# load test). 0.32.0 also takes MiniCPM-V 4.7 (#58674) natively, which needs transformers >= 5.18
+# for its AutoProcessor, so the newer pin and the native model go together.
 # BUMPED to 5.17.0 for the vLLM 0.29.0 stack. NOT independently re-verified against a live Gemma-4
 # checkpoint load (no GPU in this environment) -- static check only: the exact
 # `AmbiguousGlobalPerLayerAttributeError` class name is absent from configuration_utils.py and
@@ -95,9 +98,10 @@ ARG VLLM_VERSION=0.31.0
 # (`per_layer_config` / HeterogeneousConfigMixin) reads as a broader rewrite of that mechanism, not
 # merely a patch on top of 5.15.0's -- consistent with the bug having been designed away rather than
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
-# first time a Gemma-4 checkpoint is actually served on this image.
+# first time a Gemma-4 checkpoint is actually served on this image. Same-inference caveat for
+# 5.19.0 (see the 0.32.0 note above): still no live Gemma-4 load test.
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.17.0
+ARG TRANSFORMERS_VERSION=5.19.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
@@ -682,6 +686,10 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # single_type_kv_cache_manager.py: _remove_blocks_in_range skips null gaps) and
 # sly/patch_rocm_load_max_split.py (Worker._scoped_allocator_max_split now gates on is_cuda_alike() and
 # also wraps profile_run).
+# DROPPED at the 0.32.0 bump, native upstream: sly/patch_minicpmv4_7.py (vllm#58674 is in v0.32.0:
+# registry entry, minicpmv4_7.py + the minicpmv4_6.py refactor; the patch SKIPs natively, so
+# RADIANCE_MINICPMV4_7=1 on a 0.32 image cannot overwrite upstream's newer files with the
+# 0.31-era copies it ships).
 # patch_tp3_pad (ggz14) installs the three radiance_tp3pad.py hooks for TP=3 via zero-weight dummy
 # heads; every hook returns immediately unless RADIANCE_TP_PAD=3, so TP 1/2 serves are unchanged.
 # sly/patch_ar_knobs.py makes the TP=2 all-reduce size gate (RADIANCE_AR_MAX_KB) and the 6-bit
@@ -708,7 +716,6 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width \
-             sly/patch_minicpmv4_7 \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \

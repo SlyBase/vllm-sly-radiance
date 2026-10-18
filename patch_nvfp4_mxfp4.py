@@ -23,6 +23,27 @@ from _patchlib import apply
 SP = Path(sysconfig.get_paths()["purelib"])
 CT = SP / "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py"
 
+# vLLM 0.32.0 adds a _is_mxfp4_w4a8_fp8 branch between the NVFP4 return and the _is_mxfp4
+# check; the hook stays anchored to the stock NVFP4 return (before it, identically to 0.31).
+# Both shapes are kept: the launchers patch the shipped 0.31 image at container start.
+NV_ANCHOR_032 = (
+    "            return CompressedTensorsW4A4Fp4()\n"
+    "\n"
+    "        if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):\n"
+)
+NV_NEW_032 = (
+    "            # --- radiance (patch_nvfp4_mxfp4.py): NVFP4 -> MXFP4 at load on gfx12x ---\n"
+    "            import os as _radiance_os\n"
+    "            if _radiance_os.environ.get(\"RADIANCE_NVFP4_MXFP4\", \"0\") == \"1\":\n"
+    "                import radiance_nvfp4 as _radiance_nvfp4\n"
+    "\n"
+    "                _radiance_cls = _radiance_nvfp4.scheme_class()\n"
+    "                if _radiance_cls is not None:\n"
+    "                    return _radiance_cls()\n"
+    "            return CompressedTensorsW4A4Fp4()\n"
+    "\n"
+    "        if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):\n"
+)
 NV_ANCHOR = (
     "            return CompressedTensorsW4A4Fp4()\n"
     "\n"
@@ -96,8 +117,10 @@ BF16_NEW = (
 
 
 def main():
-    apply(CT, NV_ANCHOR, NV_NEW, "NVFP4 -> MXFP4 at load on gfx12x",
-          "nvfp4: NVFP4 branch -> radiance requant scheme")
+    from _patchlib import apply_any
+    apply_any(CT, [(NV_ANCHOR_032, NV_NEW_032), (NV_ANCHOR, NV_NEW)],
+              "NVFP4 -> MXFP4 at load on gfx12x",
+              "nvfp4: NVFP4 branch -> radiance requant scheme")
     apply(CT, A16_ANCHOR, A16_NEW, "NVFP4A16 -> MXFP4 at load on gfx12x",
           "nvfp4: NVFP4A16 (weight-only) branch -> radiance requant scheme")
     apply(CT, BF16_ANCHOR, BF16_NEW, "optional bf16 -> MXFP4 for unmatched linears",

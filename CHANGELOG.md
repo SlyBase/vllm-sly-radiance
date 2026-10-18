@@ -10,6 +10,50 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.6.0] - 2026-10-18
+
+Stack bump to vLLM 0.32.0 (released 2026-10-18). torch / triton / torchvision are unchanged: 0.32.0's own
+`docker/Dockerfile.rocm_base` pins the same release/2.13 trio as 0.31.0, so everything below is what the
+release itself moves.
+
+### Added
+- **Upstream 4-bit KV cache for ROCm (`--kv-cache-dtype ultraquant_4bit`, vllm#57057) is now available**
+  to serve, on top of the repo's own TetraAttention (`KVCACHE_DTYPE=kv4`). UltraQuant is AMD's 4-bit KV
+  format (Hadamard rotation, one power-of-two scale per 32 channels, about 2x the density of FP8;
+  released with "ROCm gains the 4-bit ultraquant_4bit KV cache"), documented on MI355X. **Not yet measured
+  on the R9700** and not yet A/B'd against fp8 or TETRA; `fp8` stays the default and `kv4` stays the
+  measured 4-bit option until the gate says otherwise. The image needs no change: it is vLLM's own KV
+  dtype, gated to the launch only.
+- MiniCPM-V 4.7 support (`RADIANCE_MINICPMV4_7`) is native in 0.32.0 (vllm#58674): `sly/patch_minicpmv4_7.py`
+  leaves the Dockerfile patch loop into `ci/unused_patches.txt`, and the patch now SKIPs on a tree that
+  already carries the model instead of overwriting 0.32's newer files with its 0.31-era copies.
+- The 0.31.0-era aiter hold is lifted: vLLM 0.32.0 pins AITER v0.1.24.post1, whose
+  `aiter/ops/triton/__init__.py` carries the `unified_attention` alias again (verified in the
+  v0.1.24.post1 tree), so `ROCM_AITER_UNIFIED_ATTN` stays usable at the new pin.
+
+### Changed
+- **vLLM 0.31.0 -> 0.32.0.** Every `sly/` patch re-anchored with identical behaviour (details in
+  `sly/README.md` and the patch files): `patch_skinny_gemm` (0.32 added a `VLLM_BATCH_INVARIANT`
+  early-return; the hook now sits after it, so a determinism serve keeps the deterministic GEMM),
+  `patch_gdn_metadata` (0.32 removed the "all rows drafted nothing" early-out from the spec-mask block -
+  the numpy fast path keeps that; and the pure-spec-block index slice is upstream now, so the 0.32 shape
+  keeps only the cached arange/empty), `patch_gdn_lazy` (abstract.py's RecoverSSM guard renamed to
+  `use_replayssm`; the `bt_row_idx` locals moved into `_copy_mamba_state_block`, both skip hooks
+  re-anchored to the call sites), `patch_w4a16_tiles` (the stock W4A16 kernel takes `stride_bn`, the
+  launcher gained stride asserts, the skinny limit grew 1.2x and moved into `pack_skinny_int4`; for the
+  LAYOUT 0 path the stride is carried, the tiled layout is addressed absolutely as before),
+  `patch_nvfp4_mxfp4` (a `_is_mxfp4_w4a8_fp8` branch moved between the NVFP4 return and the MXFP4
+  check), `patch_cactus` (the rejection kernel gained `watermarking_skip_mask`; `cactus_delta` anchors on
+  the new tail). One behaviour note: **MRV2 is now the default model runner on ROCm** (#56360) and cascade
+  attention was removed upstream - the production launch used neither.
+- aiter 0.1.23 -> 0.1.24.post1 (vLLM 0.32.0's AITER_BRANCH, exactly).
+- transformers 5.17.0 -> 5.19.0 (newest inside 0.32.0's `>=5.16.1,<5.20.0`; also removes the old
+  MiniCPM-V AutoProcessor caveat, which needed `>=5.18`). PyPI dependency set regenerated
+  (`constraints.txt`, 78 changed pins) by `ci/resolve_stack.py`; python stays 3.12 (0.32 dropped 3.10).
+
+### Measured
+- Night gate pending.
+
 ## [1.5.1] - 2026-10-16
 
 ### Added

@@ -19,13 +19,27 @@ so a second pass over an already-patched tree NOOPs every hunk. The sentinels ar
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"]) / "vllm"
 SENT = "radiance lazy gdn"
 
 # ---- 1. spec blocks -------------------------------------------------------------------------
-apply(SP / "model_executor/layers/mamba/abstract.py",
+# Re-anchored for vLLM 0.32.0: the RecoverSSM guard became `use_replayssm` (the new ReplaySSM
+# Mamba2 decode kernel; `use_kda_recoverssm` stays as the separate Kimi-K3 KDA flag). The helper
+# guard is renamed with the same shape so the lazy block count tracks whatever the stock count
+# tracks on the pinned version.
+apply_any(SP / "model_executor/layers/mamba/abstract.py",
+[(
+'''            num_speculative_blocks=(
+                0
+                if vllm_config.cache_config.use_replayssm
+                else vllm_config.num_speculative_tokens
+            ),
+''',
+'''            num_speculative_blocks=_radiance_lazy_spec_blocks(self, vllm_config),  # radiance lazy gdn
+'''
+), (
 '''            num_speculative_blocks=(
                 0
                 if vllm_config.cache_config.use_kda_recoverssm
@@ -33,14 +47,15 @@ apply(SP / "model_executor/layers/mamba/abstract.py",
             ),
 ''',
 '''            num_speculative_blocks=_radiance_lazy_spec_blocks(self, vllm_config),  # radiance lazy gdn
-''', SENT, "abstract.get_kv_cache_spec: one stash block under RADIANCE_GDN_LAZY")
+'''
+)], SENT, "abstract.get_kv_cache_spec: one stash block under RADIANCE_GDN_LAZY")
 apply(SP / "model_executor/layers/mamba/abstract.py",
 '''class MambaBase(AttentionLayerBase):''',
 '''def _radiance_lazy_spec_blocks(layer, vllm_config):
     """radiance lazy gdn helper: a lazy cache keeps one stash block per request instead of one block
     per draft token (radiance_gdn_lazy.py). GDN layers only; everything else keeps the stock count."""
     import os as _os
-    if vllm_config.cache_config.use_kda_recoverssm:
+    if vllm_config.cache_config.use_replayssm:
         return 0
     n = vllm_config.num_speculative_tokens
     if n > 0 and _os.environ.get("RADIANCE_GDN_LAZY", "0") == "1" \\
@@ -111,7 +126,32 @@ apply(M,
     LAZY_TEMPORAL: tl.constexpr = False,  # radiance lazy gdn post-sig: temporal states are materialised elsewhere
 ):
 ''', SENT + " post-sig", "mamba_utils: LAZY_TEMPORAL on the postprocess kernel")
-apply(M,
+# Re-anchored for vLLM 0.32.0: the kernels no longer compute a local `bt_row_idx` (the
+# idx-mapping resolves straight into `req_idx` before the decision logic, and the call sites pass
+# it directly). The skip sits directly before each kernel's _copy_mamba_state_block call, as on
+# 0.30/0.31; the old anchors stay for the launchers patching older images.
+apply_any(M,
+[
+(
+'''    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_block_idx,
+        dest_block_idx,
+        accept_token_bias,
+''',
+'''    if LAZY_TEMPORAL:  # radiance lazy gdn post-skip
+        if tl.load(state_conv_widths_ptr + state_idx) == 0:
+            return
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_block_idx,
+        dest_block_idx,
+        accept_token_bias,
+'''
+),
+(
 '''    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
     _copy_mamba_state_block(
 ''',
@@ -120,7 +160,9 @@ apply(M,
             return
     bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
     _copy_mamba_state_block(
-''', SENT + " post-skip", "mamba_utils: postprocess skips temporal states under lazy")
+'''
+)
+], SENT + " post-skip", "mamba_utils: postprocess skips temporal states under lazy")
 apply(M,
 '''    CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
@@ -139,7 +181,32 @@ apply(M,
 ):
     """Pre-copy mamba "align" state across block boundaries.
 ''', SENT + " pre-sig", "mamba_utils: LAZY_TEMPORAL on the precopy kernel")
-apply(M,
+# vLLM 0.32.0: the precopy passes `req_idx` where 0.30/0.31 passed `batch_idx` (see post-skip
+# note); old shape kept for the launchers.
+apply_any(M,
+[
+(
+'''    token_bias = tl.load(token_bias_ptr + req_idx)
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_col,
+        dst_col,
+        token_bias,
+''',
+'''    if LAZY_TEMPORAL:  # radiance lazy gdn pre-skip
+        if tl.load(state_conv_widths_ptr + state_idx) == 0:
+            return
+    token_bias = tl.load(token_bias_ptr + req_idx)
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_col,
+        dst_col,
+        token_bias,
+'''
+),
+(
 '''    token_bias = tl.load(token_bias_ptr + req_idx)
     _copy_mamba_state_block(
         state_idx,
@@ -158,7 +225,9 @@ apply(M,
         src_col,
         dst_col,
         token_bias,
-''', SENT + " pre-skip", "mamba_utils: precopy skips temporal states under lazy")
+'''
+)
+], SENT + " pre-skip", "mamba_utils: precopy skips temporal states under lazy")
 # remember what the tables need (initialize_from_forward_context owns the copy-funcs / ctx)
 apply(M,
 '''        if self.is_initialized:

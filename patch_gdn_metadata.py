@@ -272,9 +272,113 @@ LENS_NEW_031 = LENS_NEW_029.replace(_CUT, _UNIFORM_031 + _CUT, 1)
 assert LENS_OLD_031 != LENS_OLD_029 and LENS_NEW_031 != LENS_NEW_029
 
 
+# --- vLLM 0.32 shape --------------------------------------------------------------------------
+# 0.32 REMOVES the 0.29/0.31 "or the draft tokens all sum to zero" branch from the spec-mask
+# early-out: a batch whose rows all drafted nothing stays on the speculative path, because that
+# is the only path that applies each row's accepted-token offset to the recurrent state (upstream
+# comment in gdn_attn.py). The numpy fast path keeps exactly that: it fast-paths only the
+# mask + count, never the "run the spec path or not" decision.
+MASK_OLD_032 = """        spec_sequence_masks_cpu: torch.Tensor | None = None
+        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
+            spec_sequence_masks = None
+            num_spec_decodes = 0
+        else:
+            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            # A batch whose rows all drafted nothing still has to run the
+            # speculative path: that is the only path that applies each row's
+            # accepted-token offset to the recurrent state.
+            if num_spec_decodes == 0:
+                num_spec_decodes = 0
+                spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
+            else:
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )"""
+
+MASK_NEW_032 = """        spec_sequence_masks_cpu: torch.Tensor | None = None
+        # --- RADIANCE (patch_gdn_metadata.py): one numpy pass over the same buffer
+        # instead of mask / sum / item, reused below for the request-count bookkeeping
+        # instead of building the mask a second time. vLLM 0.32.0 removed the 0.29/0.31
+        # "or the draft tokens all sum to zero" check: an all-zero draft batch stays on
+        # the speculative path (the accepted-token offset reaches the recurrent state
+        # only there), so this fast path rewrites the mask + count only and keeps
+        # upstream's decision unchanged.
+        _r_np = _RADIANCE_GDN_META and num_decode_draft_tokens_cpu is not None
+        _ndt_np = num_decode_draft_tokens_cpu.numpy() if _r_np else None
+        _mask_np = None if _ndt_np is None else _ndt_np >= 0
+        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
+            spec_sequence_masks = None
+            num_spec_decodes = 0
+        else:
+            if _r_np:
+                spec_sequence_masks_cpu = torch.from_numpy(_mask_np)
+                num_spec_decodes = int(_mask_np.sum())
+            else:
+                spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            # A batch whose rows all drafted nothing still has to run the
+            # speculative path: that is the only path that applies each row's
+            # accepted-token offset to the recurrent state.
+            if num_spec_decodes == 0:
+                num_spec_decodes = 0
+                spec_sequence_masks = None
+                spec_sequence_masks_cpu = None
+            else:
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )"""
+
+# --- vLLM 0.32 shape --------------------------------------------------------------------------
+# 0.32 takes over the gather->slice shortcut natively: in the all-spec-decode branch the index
+# is now `block_table_tensor[:num_spec_decodes, ...]` ("Padded sequences trail the spec decodes,
+# so slice them off rather than gather with the host mask") -- the same idea our guarded slice
+# implemented. The 0.32 shape therefore replaces only the per-step arange / empty(0) with the
+# cached builders and keeps upstream's slice text verbatim; the guarded slice shape below stays
+# for the launchers patching older images.
+IDX_OLD_032 = """                spec_token_indx = torch.arange(
+                    spec_token_size,
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                non_spec_token_indx = torch.empty(
+                    0, dtype=torch.int32, device=query_start_loc.device
+                )
+                # Padded sequences trail the spec decodes, so slice them off
+                # rather than gather with the host mask (an H2D copy + a kernel).
+                spec_state_indices_tensor = block_table_tensor[
+                    :num_spec_decodes, : self.num_spec + 1
+                ]"""
+
+IDX_NEW_032 = """                if _RADIANCE_GDN_META:
+                    # --- RADIANCE: both of these depend only on their length and are
+                    # read once, by the copy_ into the persistent buffers below.
+                    spec_token_indx = _radiance_arange(
+                        self, spec_token_size, query_start_loc.device
+                    )
+                    non_spec_token_indx = _radiance_empty_idx(
+                        self, query_start_loc.device
+                    )
+                else:
+                    spec_token_indx = torch.arange(
+                        spec_token_size,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    non_spec_token_indx = torch.empty(
+                        0, dtype=torch.int32, device=query_start_loc.device
+                    )
+                # Padded sequences trail the spec decodes, so slice them off
+                # rather than gather with the host mask (an H2D copy + a kernel).
+                spec_state_indices_tensor = block_table_tensor[
+                    :num_spec_decodes, : self.num_spec + 1
+                ]"""
+
 apply(F, PREAMBLE_OLD, PREAMBLE_NEW, "_RADIANCE_GDN_META", "gdn metadata: helpers")
-apply_any(F, [(MASK_OLD, MASK_NEW), (MASK_OLD_029, MASK_NEW_029)],
+apply_any(F, [(MASK_OLD_032, MASK_NEW_032), (MASK_OLD, MASK_NEW), (MASK_OLD_029, MASK_NEW_029)],
           "one numpy pass over the same buffer", "gdn metadata: spec mask")
 apply_any(F, [(LENS_OLD, LENS_NEW), (LENS_OLD_029, LENS_NEW_029), (LENS_OLD_031, LENS_NEW_031)],
           "same integers, one numpy pass", "gdn metadata: request counts")
-apply(F, IDX_OLD, IDX_NEW, "read once, by the copy_", "gdn metadata: index tensors")
+apply_any(F, [(IDX_OLD_032, IDX_NEW_032), (IDX_OLD, IDX_NEW)],
+          "read once, by the copy_", "gdn metadata: index tensors")

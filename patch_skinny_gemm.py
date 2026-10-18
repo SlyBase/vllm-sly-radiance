@@ -16,21 +16,15 @@ from _patchlib import apply
 SP = Path(sysconfig.get_paths()["purelib"])
 UTIL = SP / "vllm/model_executor/layers/utils.py"
 
+# Re-anchored for vLLM 0.32.0: rocm_unquantized_gemm_impl gained a VLLM_BATCH_INVARIANT
+# early-return at the top of the body. The hook anchors on the platform import (unique in
+# 0.31.0 and 0.32.0 alike) and sits after the batch-invariant branch: a determinism mode the
+# user opts into keeps upstream's deterministic GEMM; the default path runs the hook first,
+# exactly as on 0.31.0.
 ANCHOR = (
-    "def rocm_unquantized_gemm_impl(\n"
-    "    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None\n"
-    ") -> torch.Tensor:\n"
     "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250\n"
 )
 NEW = (
-    "try:\n"
-    "    import radiance_gemm as _radiance_gemm\n"
-    "except Exception:\n"
-    "    _radiance_gemm = None\n"
-    "\n"
-    "def rocm_unquantized_gemm_impl(\n"
-    "    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None\n"
-    ") -> torch.Tensor:\n"
     "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250\n"
     "    # --- RADIANCE skinny GEMM kernel (patch_skinny_gemm.py) ---\n"
     "    if (_radiance_gemm is not None and _radiance_gemm.ENABLED and bias is None\n"
@@ -40,6 +34,10 @@ NEW = (
     "        if _out is not None:\n"
     "            return _out\n"
 )
+try:
+    import radiance_gemm as _radiance_gemm
+except Exception:
+    _radiance_gemm = None
 
 
 def main():
