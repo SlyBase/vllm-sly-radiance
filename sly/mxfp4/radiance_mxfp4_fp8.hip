@@ -1074,6 +1074,7 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
           if constexpr (PSW != 0) {
             const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + Ws[(size_t)blk * N + gc + q]);
             *(uint2_t *)(&sW[(r + q) * DWSTR + kloc]) = psw2_unpack8(wq_dec(wv, q), t[0], t[1]);
+            if constexpr (DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
             continue;
           }
           int d = (int)Wref[gc + q] - (int)Ws[(size_t)blk * N + gc + q];
@@ -1105,6 +1106,10 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
       }
       const unsigned char *pw = &sW[(wave * 16 + col) * DWSTR + kk];
       wf[0] = *(const int *)pw; wf[1] = *(const int *)(pw + 4);
+      // PSW instantiations only: without the fence LLVM hoists every k-step's fragment loads
+      // above the first WMMA at DTM >= 6, BK=128 (TM=8: 133 -> 254 VGPRs, occupancy 6 -> 5); elsewhere
+      // the fence costs registers (TM=8 BK=64 +4), so it is limited to those cells.
+      if constexpr (PSW != 0 && DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
       for (int i = 0; i < DTM; ++i)
         acc[i] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i], wf, acc[i]);
