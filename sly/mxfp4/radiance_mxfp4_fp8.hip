@@ -616,7 +616,14 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
-template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM>
+// SKIPPAD (RADIANCE_MXFP4_AT_SKIP_PAD=1, default off): a wave whose TMT M-fragments all lie past
+// M -- pure tile padding -- still stages its share of W and meets every barrier, but skips its A
+// loads, LDS fragment reads and WMMAs. Wave-uniform test, one scalar branch per slab, same output
+// bytes (those accumulators only ever reach rows the epilogue drops). It pays where the last
+// M-block is mostly padding: M=880 (1024 rows, 2 of the last block's 4 M-waves dead) measured
+// 0.89-0.90x time on gate_up and down (checkpoint weights, 210 W, 2 ABBA pairs each), and nothing
+// at M=1514/1760/4096, which have no all-padding wave.
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool SKIPPAD = false>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -715,14 +722,17 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
 #pragma unroll
       for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
 
+  const bool mlive = !SKIPPAD || (m0 >> 4) + wm * TMT < Mt;
   for (int k0 = 0; k0 < K; k0 += LBK) {
     // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
     int2_t af[TMT][NS];
+    if (mlive) {
 #pragma unroll
-    for (int i = 0; i < TMT; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
-      for (int st = 0; st < NS; ++st)
-        af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+        for (int st = 0; st < NS; ++st)
+          af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+    }
 
     // ---- W tile -> LDS, folded to e4m3 (kMag[d] via v_perm, see the folded kernel) ----
     uint4_t pk[NW]; unsigned int wsv[NW];
@@ -809,6 +819,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     }
     radiance_lds_barrier();
 
+    if (mlive)
 #pragma unroll
     for (int step = 0; step < NS; ++step) {
       const int kk = step * 16 + kb8;
@@ -1928,27 +1939,33 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT_TM(TN_, WP_, E6_, TM_)                                                                 \
+#define RAD_AT_TMS(TN_, WP_, E6_, TM_, SP_)                                                           \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
                        (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
+#define RAD_AT_TM(TN_, WP_, E6_, TM_) RAD_AT_TMS(TN_, WP_, E6_, TM_, false)
 #define RAD_AT(TN_, WP_, E6_) RAD_AT_TM(TN_, WP_, E6_, TM)
   // Opt-in short-M tile: M <= RADIANCE_MXFP4_AT_TMS_MAX_M (default 0 = off) at TN=2 uses TM=RADIANCE_MXFP4_AT_TMS
   // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
   static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
   static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
+  static const bool skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e && atoi(e) != 0; }();
   if (M <= tms_max_m && M < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
       if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
     } else {
       if (wh) RAD_AT_TM(2, true, true, 3); else if (wperm) RAD_AT_TM(2, true, false, 3); else RAD_AT_TM(2, false, false, 3);
     }
+  } else
+  if (skip_pad && wperm && !wh && (M & (WM * TM * 16 - 1)) != 0) {   // MXFP4 fragment-order only
+    if (M >= tn4_min_m && N >= BNF_OF(4)) RAD_AT_TMS(4, true, false, TM, true);
+    else                                  RAD_AT_TMS(2, true, false, TM, true);
   } else
   if (M >= tn4_min_m && N >= BNF_OF(4)) {
     if (wh) RAD_AT(4, true, true); else if (wperm) RAD_AT(4, true, false); else RAD_AT(4, false, false);
@@ -1957,6 +1974,7 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
   }
 #undef RAD_AT
 #undef RAD_AT_TM
+#undef RAD_AT_TMS
 }
 static void launch_at(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                       uintptr_t c, int M, int N, int K, uintptr_t stream) {
