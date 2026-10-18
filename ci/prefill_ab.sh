@@ -74,6 +74,7 @@ QUANT_FLAG=${QUANT_FLAG:-}
 K2_SO=${K2_SO:-}
 O_DIR=${O_DIR:-}
 G_DIR=${G_DIR:-}
+PSW_DIR=${PSW_DIR:-}
 SP=${SP:-/opt/vllm/lib/python3.12/site-packages}   # site-packages inside the image
 if [ "$SHORT" = 1 ]; then
   DEPTHS=${DEPTHS_SHORT:-[2000,21500,64000]}        # ~1.5k / 16k / 47k real prompt tokens
