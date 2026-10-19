@@ -68,6 +68,12 @@ release itself moves.
   start on the drafter's `fc` combine projection (M-skinny -> tiled store). The guard keeps the assert
   for 2-D weights only; the 4-D tile blocks stay checked by the patched `numel` equality. Found on the
   first live UltraQuant start, fixed in-patch and verified by patch dry run (151 hunks, pass 2 all NOOP).
+- `patch_skinny_gemm`: restore the module-level `import radiance_gemm` that the 0.32 re-anchor of
+  `patch_skinny_gemm.py` dropped. The 0.31 shape inserted the import by rewriting the
+  `def rocm_unquantized_gemm_impl` anchor; the 0.32 body-only re-anchor shipped the hook text without
+  the import, so the first indunitized-GEMM call (inside the compiled dflash2 candidate-selector
+  graph at profile time) died with `NameError: _radiance_gemm is not defined`. The import is a second
+  idempotent hunk now (anchored on the def signature, unique in 0.31 and 0.32 trees).
 
 ### Measured
 - Night gate pending.
