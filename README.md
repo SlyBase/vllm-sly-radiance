@@ -100,8 +100,12 @@ hf download amd/Qwen3.8-27B-Quark-AWQ-MXFP4
 hf download syvai/Qwen3.8-27B-DFlash2-W4A16
 
 # 2. serve (OpenAI-compatible API on :8000)
+# --group-add takes the numeric GIDs of the host's GPU groups (do not use the "video"/"render"
+# names: docker resolves them against the container's group file, and the ROCm base image
+# carries no "render" entry). Check yours with `getent group video render` — on Ubuntu 24.04
+# these are 44 and 109; you must be a member of both (`sudo usermod -aG video,render $USER`).
 docker run -d --name vllm --restart unless-stopped \
-  --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
+  --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 109 \
   --security-opt seccomp=unconfined --ipc=host -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton -v aiter-cache:/root/.aiter \
@@ -277,7 +281,13 @@ ultraquant_4bit` (vllm#57057): Hadamard rotation plus one power-of-two scale per
 one e4m3 scale per token, with the attention kernel shipped by vLLM/AMD rather than this repo's HIP
 kernel (AMD documented it on MI355X). It has **not been measured on the R9700**; until the gate or an
 A/B says otherwise, `KVCACHE_DTYPE=kv4` (TetraAttention) remains the measured 4-bit option here and
-`fp8` stays the default.
+`fp8` stays the default. Two serve notes: it is incompatible with `FlashAttention >= 3` (0.32 downgrades
+the KV stack's own flash-attn setting, a logged warning), and with DFlash drafting it needs
+**`--kv-cache-dtype-skip-layers sliding_window`** added to the launch - the run-wide dtype reaches the
+drafter's per-layer backend selection and the sliding-window / non-causal drafter geometry has no
+backend that accepts `ultraquant_4bit`, so the drafter keeps its own dtype via this skip list (the 16
+full-attention layers still go UltraQuant; expect the pool near 820k tokens, 1.9x fp8's 436,906, per the
+272-vs-512 bytes-per-token math - unmeasured).
 
 The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
 the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).

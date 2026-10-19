@@ -30,6 +30,13 @@ release itself moves.
 - The 0.31.0-era aiter hold is lifted: vLLM 0.32.0 pins AITER v0.1.24.post1, whose
   `aiter/ops/triton/__init__.py` carries the `unified_attention` alias again (verified in the
   v0.1.24.post1 tree), so `ROCM_AITER_UNIFIED_ATTN` stays usable at the new pin.
+- Serving `ultraquant_4bit` together with DFlash drafting needs
+  **`--kv-cache-dtype-skip-layers sliding_window`**: the run-wide KV dtype also reaches the
+  drafter's per-layer backend selection, and the head-128 sliding-window / non-causal DFlash drafter
+  geometry has no backend that accepts `ultraquant_4bit` (the crash is a loud backend-selection
+  failure at engine init). This is upstream's own escape hatch (the same list TurboQuant uses for its
+  dense-model boundary layers, which is empty for hybrids), so the 16 full-attention layers still take
+  the UltraQuant backend while the drafter keeps `TRITON_ATTN` on its `auto` (bf16) window cache.
 
 ### Changed
 - **vLLM 0.31.0 -> 0.32.0.** Every `sly/` patch re-anchored with identical behaviour (details in
@@ -40,7 +47,8 @@ release itself moves.
   keeps only the cached arange/empty), `patch_gdn_lazy` (abstract.py's RecoverSSM guard renamed to
   `use_replayssm`; the `bt_row_idx` locals moved into `_copy_mamba_state_block`, both skip hooks
   re-anchored to the call sites), `patch_w4a16_tiles` (the stock W4A16 kernel takes `stride_bn`, the
-  launcher gained stride asserts, the skinny limit grew 1.2x and moved into `pack_skinny_int4`; for the
+  launcher gained stride asserts - the 0.32 `stride(1)` one guarded for tiled weights, see Fixed - the
+  skinny limit grew 1.2x and moved into `pack_skinny_int4`; for the
   LAYOUT 0 path the stride is carried, the tiled layout is addressed absolutely as before),
   `patch_nvfp4_mxfp4` (a `_is_mxfp4_w4a8_fp8` branch moved between the NVFP4 return and the MXFP4
   check), `patch_cactus` (the rejection kernel gained `watermarking_skip_mask`; `cactus_delta` anchors on
@@ -50,6 +58,16 @@ release itself moves.
 - transformers 5.17.0 -> 5.19.0 (newest inside 0.32.0's `>=5.16.1,<5.20.0`; also removes the old
   MiniCPM-V AutoProcessor caveat, which needed `>=5.18`). PyPI dependency set regenerated
   (`constraints.txt`, 78 changed pins) by `ci/resolve_stack.py`; python stays 3.12 (0.32 dropped 3.10).
+
+### Fixed
+- `sly/patch_w4a16_tiles`: guard `rdna_hybrid_w4a16`'s new 0.32 stride assert for tiled weights.
+  0.32 added `assert b_q.stride(1) == 1` ("Weight rows must be contiguous") to
+  `triton_w4a16_skinny_fmt_gemm`; the assert means innermost-contiguity and is written for 2-D
+  weights. On a 4-D `radiance_w4a16_tile` weight stride(1) is the block stride (the tile addressing
+  computes its indices and never reads `stride_bn`), so the assert fired at the first 1.6.0 UltraQuant
+  start on the drafter's `fc` combine projection (M-skinny -> tiled store). The guard keeps the assert
+  for 2-D weights only; the 4-D tile blocks stay checked by the patched `numel` equality. Found on the
+  first live UltraQuant start, fixed in-patch and verified by patch dry run (151 hunks, pass 2 all NOOP).
 
 ### Measured
 - Night gate pending.

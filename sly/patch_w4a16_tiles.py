@@ -1028,6 +1028,34 @@ apply(F,
       '        LAYOUT=layout,\n        num_warps=num_warps,\n        **extra_kwargs,',
       'rdna_hybrid_w4a16: stock launch passes LAYOUT')
 
+# --- 6b. 0.32 stride asserts vs tiled weights (found at the first 1.6.0 UltraQuant start) ---
+# vLLM 0.32.0 added `b_q.stride(1) == 1` / "Weight rows must be contiguous" to
+# triton_w4a16_skinny_fmt_gemm. The assert means innermost-contiguity and is written for 2-D
+# weights; on a 4-D radiance_w4a16_tile weight stride(1) is the block stride != 1, and the LAYOUT
+# 1 addressing computes its indices instead of reading stride_bn -- so the assert fires exactly
+# when the tile store is in play (drafter `fc` projection, M-skinny). Pre-0.32 trees carry no
+# stride asserts; the second shape only attaches a comment, so a cross-version launch replay
+# on the previous image stays green instead of failing on a tree that was already fine.
+apply_any(F,
+      [
+      (
+      '    assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n',
+      '    # radiance: 4-D tiled weights are block-addressed (LAYOUT 1 computes the indices;\n'
+      '    # stride_bn is never read). stride(1) is the innermost-contiguity check and only\n'
+      '    # applies to 2-D weights; for the tile blocks K8 numel equality is asserted below.\n'
+      '    if b_q.dim() == 2:\n'
+      '        assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n'
+      ),
+      (
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    # radiance: this tree has no 0.32-style stride asserts; a 4-D tiled weight runs the\n'
+      '    # same index-addressed kernel here without a stride(1) guard.\n'
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      ),
+      ],
+      '# radiance: 4-D tiled weights are block-addressed',
+      'rdna_hybrid_w4a16: 0.32 stride assert tolerates tiled weights')
+
 # --- 7. apply op: tiled weights have N = 16 * dim 0 and never take the HIP skinny path ---
 # vLLM 0.32.0: the skinny limit is now MEDIUM_SKINNY_LIMIT_ELEMENTS (1.2x the LDS elements,
 # see _pad_activation_rows); was LDS_CAPACITY_ELEMENTS. `w_q.dim() == 2` keeps the HIP
