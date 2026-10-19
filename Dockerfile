@@ -698,12 +698,16 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # (unsloth/Qwen3.8-27B-NVFP4) by requantizing every linear to MXFP4 at load (radiance_nvfp4.py) and
 # handing it to the same W4A8 kernel plugin the Quark checkpoint runs on. Inert unless
 # RADIANCE_NVFP4_MXFP4=1; it only touches compressed-tensors scheme selection, never QuarkConfig.
-# sly/patch_ultraquant_gqa.py fixes `_ultraquant_continuation_prefill`'s SDPA fallback (0.32's
-# `ultraquant_4bit` kv dtype): it grew K/V per query head with tensor.expand(), which only
-# works when Hk == 1 -- Qwen3.8 (24 q / 4 kv heads) died on the second chunk of a chunked
-# prefill on flash-attn-less RDNA builds. Uses torch SDPA's enable_gqa (the same plumbing the
-# first-chunk SDPA call in that file already uses); no 6x K/V materialization. Found live
-# 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
+# sly/patch_ultraquant_gqa.py rebuilds `_ultraquant_continuation_prefill`'s non-sinks tail
+# (0.32's `ultraquant_4bit` kv dtype): upstream's flash-attn-less fallback passed
+# Hk!=Hq K/V at Hq heads to torch SDPA via tensor.expand() (Qwen3.8, 24 q / 4 kv heads:
+# "expanded size 24 must match existing size 4"), and with enable_gqa it OOMs instead --
+# torch then routes grouped-query SDPA through the math backend, which materializes the
+# Hq x cache_len score tensor (746 MiB/layer at ~40k cached_len) while the pool holds
+# 0 B free (lowering --gpu-memory-utilization does not help). The fallback now calls
+# vLLM's Triton unified kernel (same dense call shape as the sinks/head_dim>256 branch
+# in the same function: GQA-native, online-softmax tiles); the FA2 varlen branch stays
+# for flash-attn-present builds. Found live 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory

@@ -74,16 +74,20 @@ release itself moves.
   the import, so the first indunitized-GEMM call (inside the compiled dflash2 candidate-selector
   graph at profile time) died with `NameError: _radiance_gemm is not defined`. The import is a second
   idempotent hunk now (anchored on the def signature, unique in 0.31 and 0.32 trees).
-- `sly/patch_ultraquant_gqa` (new): `_ultraquant_continuation_prefill`'s SDPA fallback assumed
-  Hk == 1 — it grew K/V to the 24 query heads with `tensor.expand()`, which only works from a
-  singleton dim, so a Qwen3.8 continuation chunk (24 q / 4 kv heads, flash-attn-less RDNA build)
-  killed the engine mid-request with "expanded size of the tensor (24) must match the existing
-  size (4)". The serve had come fully up (graphs captured, startup complete, first chunk of a
-  10k-token prompt prefilled fine through the `enable_gqa` dense path); the crash hit the second
-  2048-token chunk, which routes through the continuation prefill. The fix replaces expand with
-  torch SDPA's `enable_gqa=Hq > Hk` — the same plumbing the same file's first-chunk call already
-  uses and that ran live — and avoids materializing K/V 6x on the workspace buffers. Found live
-  2026-10-19, fixed and scratch-verified against the in-image source (apply + NOOP + ast).
+- `sly/patch_ultraquant_gqa` (new): rebuilds `_ultraquant_continuation_prefill`'s flash-attn-less
+  fallback. Two live failures on the same request shape (chunked prefill, >2048-token prompts,
+  24 q / 4 kv GQA): upstream passed the 4-head K/V to torch SDPA at the 24 query heads via
+  `tensor.expand()` — expand only grows singleton dims, so the engine died with "expanded size
+  of the tensor (24) must match the existing size (4)"; and SDPA's `enable_gqa` fixed the shape
+  but then OOM-killed the engine on a long cached_len, because without flash-attn torch routes
+  grouped-query SDPA through the math backend, which materializes the `Hq × cache_len` score
+  tensor (746 MiB for one layer of a ~40k-token prompt) while the KV pool holds 0 B free —
+  `--gpu-memory-utilization` changes do not help (the pool is sized to the util either way).
+  The fallback now calls vLLM's Triton unified kernel (the same dense call shape as the
+  sinks/head_dim>256 branch in the same function: GQA-native, online-softmax tiles, which is
+  what `TRITON_ATTN` runs for these layers anyway); the FA2 varlen branch stays for
+  flash-attn-present builds. Found live 2026-10-19, fixed and scratch-verified against the
+  in-image source (apply + NOOP + ast).
 
 ### Measured
 - Night gate pending.
