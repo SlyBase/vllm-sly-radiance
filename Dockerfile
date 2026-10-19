@@ -698,6 +698,12 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # (unsloth/Qwen3.8-27B-NVFP4) by requantizing every linear to MXFP4 at load (radiance_nvfp4.py) and
 # handing it to the same W4A8 kernel plugin the Quark checkpoint runs on. Inert unless
 # RADIANCE_NVFP4_MXFP4=1; it only touches compressed-tensors scheme selection, never QuarkConfig.
+# sly/patch_ultraquant_gqa.py fixes `_ultraquant_continuation_prefill`'s SDPA fallback (0.32's
+# `ultraquant_4bit` kv dtype): it grew K/V per query head with tensor.expand(), which only
+# works when Hk == 1 -- Qwen3.8 (24 q / 4 kv heads) died on the second chunk of a chunked
+# prefill on flash-attn-less RDNA builds. Uses torch SDPA's enable_gqa (the same plumbing the
+# first-chunk SDPA call in that file already uses); no 6x K/V materialization. Found live
+# 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -714,7 +720,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
+             sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
