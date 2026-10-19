@@ -99,7 +99,16 @@ release itself moves.
   workspace growth is permitted — the workspace is only locked during graph capture).
 
 ### Measured
-- Night gate pending.
+- Live on the R9700 (2026-10-19, three 1.6.0 candidates serving the same probe set): **`ultraquant_4bit`
+  without speculative decoding at 200k/0.87: 698,181 KV tokens (3.49x concurrency)** vs **fp8 in the same
+  window: 310,038 (1.55x)** — 2.25x the pool, matching the 272-vs-512 bytes-per-token ratio; correct probe
+  answers at both temperatures, 38k-token prefill ~1.1 ms/token, two engine crashes fixed along the way
+  (continuation-prefill GQA/OOM, per-layer concat buffers). **UltraQuant with DFlash drafting degenerates
+  into token loops from the first verify step** (fp8 + drafter and UltraQuant + no-drafter are both
+  correct in the same probe set; drafter acceptance stays a healthy ~69 %, so the drafter is consistent
+  with the corrupted verify logits — the fault is in 0.32's UltraQuant padded-spec
+  verify geometry, not the drafter), so UltraQuant serves without a drafter until upstream fixes it.
+  Night gate (full BetterBench / GSM8K-200 numbers) pending.
 
 ## [1.5.1] - 2026-10-16
 

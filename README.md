@@ -279,15 +279,21 @@ attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the p
 From vLLM 0.32.0 (image 1.6.0) there is also a **native** ROCm 4-bit KV cache, `--kv-cache-dtype
 ultraquant_4bit` (vllm#57057): Hadamard rotation plus one power-of-two scale per 32 channels instead of
 one e4m3 scale per token, with the attention kernel shipped by vLLM/AMD rather than this repo's HIP
-kernel (AMD documented it on MI355X). It has **not been measured on the R9700**; until the gate or an
-A/B says otherwise, `KVCACHE_DTYPE=kv4` (TetraAttention) remains the measured 4-bit option here and
-`fp8` stays the default. Two serve notes: it is incompatible with `FlashAttention >= 3` (0.32 downgrades
-the KV stack's own flash-attn setting, a logged warning), and with DFlash drafting it needs
-**`--kv-cache-dtype-skip-layers sliding_window`** added to the launch - the run-wide dtype reaches the
-drafter's per-layer backend selection and the sliding-window / non-causal drafter geometry has no
-backend that accepts `ultraquant_4bit`, so the drafter keeps its own dtype via this skip list (the 16
-full-attention layers still go UltraQuant; expect the pool near 820k tokens, 1.9x fp8's 436,906, per the
-272-vs-512 bytes-per-token math - unmeasured).
+kernel (AMD documented it on MI355X). It is incompatible with `FlashAttention >= 3` (0.32 downgrades
+the KV stack's own flash-attn setting, a logged warning). Measured live on the R9700 (0.87 edt,
+200k context, single request): **DFlash drafting is incompatible on this geometry** — with the
+drafter on, decode degenerates into token loops from the first verify step (fp8 with the drafter and
+UltraQuant without the drafter are both correct against the same probe; the difference is the
+multi-token verify path inside 0.32's UltraQuant KV geometry, file upstream). So until upstream or a
+later version fixes it, serve `ultraquant_4bit` **without** speculative decoding — measured live:
+**698,181 KV tokens / 3.49x concurrency at 200k** vs fp8's 310,038 / 1.55x in the same window
+(2.25x the pool), correct answers on both probe temperatures, and a 38k-token prefill at
+~1.1 ms/token through the chunked continuation path (Triton fallback; FlyDSL is ineligible at
+head_size 256). Known serve landmines this repo already patches or handles (`sly/patch_ultraquant_gqa.py`
+via the loop fix and the shared-workspace hunks, documented in sly/README.md): the 0.32
+continuation-prefill fallback killed the engine on any >2048-token prompt (GQA shape error, then a
+746 MiB score materialization in torch's math-SDPA), and upstream also cached 512-MiB-per-layer
+worst-case concat buffers (16 GiB across 16 layers at 262k).
 
 The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
 the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).
