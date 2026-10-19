@@ -707,7 +707,13 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # 0 B free (lowering --gpu-memory-utilization does not help). The fallback now calls
 # vLLM's Triton unified kernel (same dense call shape as the sinks/head_dim>256 branch
 # in the same function: GQA-native, online-softmax tiles); the FA2 varlen branch stays
-# for flash-attn-present builds. Found live 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
+# for flash-attn-present builds. Hunk 2 drops the per-layer worst-case k_full/v_full
+# concat buffers underneath (block_table capacity = 128 x 2048 tokens at 262k -> 512 MiB
+# per side cached on every full-attention layer, 16 GiB worst case; the follow-up OOM
+# after the SDPA one, live 2026-10-19): both concats now come from the shared workspace
+# manager (same call as the dequant K/V targets -> four adjacent partitions of one
+# scratch), 8 B/token instead of per-layer dead weight.
+# Found live 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory

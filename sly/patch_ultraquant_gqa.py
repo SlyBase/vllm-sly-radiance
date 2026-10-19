@@ -37,6 +37,11 @@ flash-attn varlen branch is kept for flash-attn-present builds (MI3xx), where
 FA2 still beats the Triton kernel. The `expand` SDPA fallback is gone entirely:
 0.31 never had this code path (ultraquant_4bit is new in 0.32), so there is no
 old shape to preserve.
+
+Hunk 2 removes the per-layer worst-case `k_full_buf`/`v_full_buf` concat
+buffers underneath it (512 MiB per side per full-attention layer: 16 GiB worst
+case, found as the next follow-up OOM live); both concats now come from the
+shared workspace manager in the same call as the dequant K/V targets.
 """
 
 import sysconfig
@@ -201,3 +206,85 @@ apply(F,
         return out.to(qdtype)''',
        'RADIANCE FIX (continuation SDPA fallback: GQA shape + OOM)',
        'ultraquant continuation fallback: Triton unified attention')
+
+# --- hunk 2: the per-layer worst-case concat buffers OOM at request time ---
+# "Layer-cached prefix+chunk concatenation, grown once to worst case": cap =
+# block_table capacity = 128 x 2048 tokens at the 262k setting -> 512 MiB per
+# side, cached on EVERY full-attention layer (16 layers -> 16 GiB worst case),
+# with a 512 MiB first-touch alloc at request time while the pool holds the
+# GPU at 0 B free. Found live 2026-10-19 in the follow-up crash after hunk 1
+# (torch.OutOfMemoryError trying 512 MiB at `k_full_buf = torch.empty(cap,
+# Hk, D, ...)`). Upstream already has the right mechanism two lines above:
+# the dequant K/V targets come from the *shared* workspace manager. Allocate
+# the concats from the same manager, in the same call as the dequant targets
+# so the four views are adjacent partitions of one scratch tensor (no
+# overlap); the manager keeps the high-water mark across layers and requests,
+# so a long context pays once, not per layer -- and only once total, instead
+# of 16 GiB of per-layer dead weight. Growth at request time is allowed: the
+# workspace is only locked during graph capture, and the dequant call in the
+# same function proves request-time growth runs.
+apply(F,
+       '''        buf_shape = (1, Hk, alloc_len, D)
+        k_buf, v_buf = current_workspace_manager().get_simultaneous(
+            (buf_shape, qdtype),
+            (buf_shape, qdtype),
+        )
+        ultraquant_full_dequant_kv(
+            kv_cache=kv_cache,
+            block_table=block_table,
+            k_out=k_buf,
+            v_out=v_buf,
+            alloc_len=alloc_len,
+        )
+
+        # Layer-cached prefix+chunk concatenation, grown once to worst case.
+        cap = block_table.shape[1] * block_size
+        k_full_buf = getattr(layer, "_uq_kfull_buf", None)
+        if (
+            k_full_buf is None
+            or k_full_buf.shape[0] < cap
+            or k_full_buf.dtype != qdtype
+        ):
+            k_full_buf = torch.empty(cap, Hk, D, dtype=qdtype, device=device)
+            layer._uq_kfull_buf = k_full_buf
+        v_full_buf = getattr(layer, "_uq_vfull_buf", None)
+        if (
+            v_full_buf is None
+            or v_full_buf.shape[0] < cap
+            or v_full_buf.dtype != qdtype
+        ):
+            v_full_buf = torch.empty(cap, Hk, D, dtype=qdtype, device=device)
+            layer._uq_vfull_buf = v_full_buf
+        k_full = k_full_buf[:seq_len]
+        v_full = v_full_buf[:seq_len]''',
+       '''        buf_shape = (1, Hk, alloc_len, D)
+        # --- RADIANCE FIX (continuation workspace: no per-layer worst-case
+        # buffers): the upstream per-layer k_full/v_full buffers were "grown
+        # once to worst case" = block_table capacity == 128 x 2048 tokens at
+        # the 262k setting -> 512 MiB per side cached on EVERY full-attention
+        # layer (16 layers -> 16 GiB), with a 512 MiB first-touch alloc at
+        # request time while the pool holds 0 B free. Allocate the concats
+        # from the shared workspace manager instead, in the same call as the
+        # dequant targets, so the four views are adjacent partitions of one
+        # scratch (no overlap); the manager keeps the high-water mark across
+        # layers and requests, so a long context pays once in total, not per
+        # layer. Request-time growth is allowed: only graph capture locks
+        # the workspace, and the dequant call itself already grows it per
+        # chunk while serving.
+        full_shape = (seq_len, Hk, D)
+        k_buf, v_buf, k_full, v_full = \
+            current_workspace_manager().get_simultaneous(
+                (buf_shape, qdtype),
+                (buf_shape, qdtype),
+                (full_shape, qdtype),
+                (full_shape, qdtype),
+            )
+        ultraquant_full_dequant_kv(
+            kv_cache=kv_cache,
+            block_table=block_table,
+            k_out=k_buf,
+            v_out=v_buf,
+            alloc_len=alloc_len,
+        )''',
+       'RADIANCE FIX (continuation workspace: no per-layer worst-case',
+       'ultraquant continuation workspace: shared manager, no 16 GiB layer buffers')

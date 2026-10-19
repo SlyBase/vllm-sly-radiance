@@ -86,8 +86,17 @@ release itself moves.
   The fallback now calls vLLM's Triton unified kernel (the same dense call shape as the
   sinks/head_dim>256 branch in the same function: GQA-native, online-softmax tiles, which is
   what `TRITON_ATTN` runs for these layers anyway); the FA2 varlen branch stays for
-  flash-attn-present builds. Found live 2026-10-19, fixed and scratch-verified against the
-  in-image source (apply + NOOP + ast).
+  flash-attn-present builds. Verified live across three crash cycles (expand CPython
+  shape error -> SDPA math-backend OOM of 746 MiB score materialization -> success).
+- Continuing the same patch (`patch_ultraquant_gqa`, hunk 2): the per-layer worst-case
+  `k_full_buf`/`v_full_buf` concat buffers underneath it OOM-killed the serve as well
+  ("grown once to worst case" = 128 × 2048 token block-table capacity at 262k context →
+  512 MiB per side, cached on every one of the 16 full-attention layers = 16 GiB worst
+  case, with a 512 MiB first-touch alloc at request time while the pool holds 0 B free).
+  Both concats now come from the shared workspace manager, in the same
+  `get_simultaneous` call as the dequant K/V targets (four adjacent partitions of one
+  scratch tensor; the dequant call in the same function already proved request-time
+  workspace growth is permitted — the workspace is only locked during graph capture).
 
 ### Measured
 - Night gate pending.
