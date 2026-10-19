@@ -109,6 +109,8 @@ def bench(a, ws, ss, cfg, iters):
 
 def cfgs_for(M):
     bms = [16] if M <= 16 else ([16, 32] if M <= 32 else [16, 32, 64])
+    if M > 128:  # prefill rows (the drafter's fc at M = 4089): the heuristic already runs BLOCK_M 128
+        bms = [128, 256]
     bns = [16, 32, 64, 128]
     bks = [64, 128]
     nws = [1, 2, 4, 8]

@@ -39,6 +39,19 @@ context-KV path reads them), the drafter's silu / conv int4 transforms are skipp
 all rows keep their natural order, and the lm_head (a ParallelLMHead scheme without .kernel) is
 never touched. Cost: +3.2 GiB VRAM for this drafter (context-expansion.md); check_w4a16_fuse.py
 covers the expansion, the apply_weights short-circuit and the guards on the CPU path.
+
+RADIANCE_DFLASH_FC_TILED_MIN_M (default 0 = off): the drafter's fc (combine_hidden_states,
+ReplicatedLinear N=5120 K=25600) is the one drafter linear that runs at a PREFILL token count -- 12
+calls at M = 4089 in the 47k request, 24.6 ms each -- and the gfx12x heuristic serves it with the
+128x64x64 tile it was measured for on decode batches. Per call it re-dequantizes the whole 65 MiB
+weight M / BLOCK_M times, so above the tile table's horizon (M > 64) this knob routes to a wider
+tile (256x128x64, 8 warps, 1 stage; bit-identical, DIGEST M = 513..4096). Cell bench 2026-10-19 vs the
+stock tile: M = 513 +5 %, 880 -7 %, 1514 -5 %, 1760 -16 %, 4096 -43 % (24.4 -> 13.9 ms). Threshold: 2048 for
+chunk 4096 (takes the 4089-token chunks only), 1024 for chunk 2048 (M = 1760). Server A/B (210 W, ABBA, two
+windows): +1.0 / +0.8 % and -0.4 / 0.0 % at 16k / 47k with the first tile (+0.7 % expected at 47k) -- below the drift.
+RADIANCE_DFLASH_FC_TILED_CFG="BM,BN,BK,warps[,stages]"
+overrides the tile (the sweep in sly/check_w4a16_fc_big_m.py --gpu --bench writes the winner back).
+Off by default: the heuristic is untouched and the tile table still owns M <= 64.
 """
 
 import sysconfig
@@ -149,6 +162,60 @@ apply(F,
       '        elif M <= 32:\n',
       '_radiance_override = _gfx12x_draft_override(',
       'rdna_hybrid_w4a16: gfx12x branch consults the drafter tile table')
+
+# --- 2b. wide tile for the large-M rows of the drafter's fc (RADIANCE_DFLASH_FC_TILED_MIN_M) ---
+# A separate hunk with its own sentinel: hunk 2 is already applied in the shipped image, so an edit
+# inside it would NOOP there. Anchors are text from after hunk 2 / untouched stock text.
+apply(F,
+      'def triton_w4a16_skinny_fmt_gemm(\n'
+      '    a: torch.Tensor,  # [M, K] fp16/bf16\n',
+      '# --- radiance (sly/patch_w4a16_tiles.py): wide tiles for the large-M rows of the drafter\'s fc ---\n'
+      'def _radiance_w4a16_big_m_cfg(group_size, K, N, M):\n'
+      '    """BLOCK sizes for large-M rows, None to keep the heuristic.\n'
+      '\n'
+      '    The gfx12x heuristic below was measured on decode batches. The drafter\'s fc\n'
+      '    (combine_hidden_states, N=5120, K=25600) is the one drafter linear that sees a prefill token\n'
+      '    count: 12 calls at M = 4089 in a 47k request, 24.6 ms each on the stock 128x64x64 tile. Its\n'
+      '    cost is the dequantized weight volume per call, (M / BLOCK_M) x the whole 65 MiB weight, so\n'
+      '    BLOCK_M 256 halves it. Only M above the tile table\'s horizon (64) is eligible;\n'
+      '    RADIANCE_DFLASH_FC_TILED_MIN_M is the smallest M that takes this path (0 = off, default),\n'
+      '    RADIANCE_DFLASH_FC_TILED_CFG overrides the tile as "BM,BN,BK,num_warps[,num_stages]" (the\n'
+      '    shape `sly/check_w4a16_fc_big_m.py --gpu --bench` sweeps). BLOCK_K is clamped to group_size\n'
+      '    by the caller (one scale per K tile).\n'
+      '    """\n'
+      '    import os\n'
+      '\n'
+      '    try:\n'
+      '        min_m = int(os.environ.get("RADIANCE_DFLASH_FC_TILED_MIN_M", "0"))\n'
+      '    except ValueError:\n'
+      '        return None\n'
+      '    if min_m <= 0 or M < min_m or M <= 64:  # 64 = _GFX12X_DRAFT_BUCKETS[-1]: the table\'s horizon\n'
+      '        return None\n'
+      '    cfg = (256, 128, 64, 8, 1)\n'
+      '    parts = [p for p in os.environ.get("RADIANCE_DFLASH_FC_TILED_CFG", "").replace(" ", "").split(",") if p]\n'
+      '    if len(parts) in (4, 5):\n'
+      '        try:\n'
+      '            vals = [int(p) for p in parts]\n'
+      '        except ValueError:\n'
+      '            return cfg\n'
+      '        cfg = (vals[0], vals[1], vals[2], vals[3], vals[4] if len(vals) == 5 else None)\n'
+      '    return cfg\n'
+      '\n'
+      '\n'
+      'def triton_w4a16_skinny_fmt_gemm(\n'
+      '    a: torch.Tensor,  # [M, K] fp16/bf16\n',
+      'def _radiance_w4a16_big_m_cfg(group_size, K, N, M):',
+      'rdna_hybrid_w4a16: large-M tile config for the drafter fc')
+apply(F,
+      '        _radiance_override = _gfx12x_draft_override(group_size, K, N, M)\n'
+      '        if _radiance_override is not None:\n',
+      '        _radiance_override = _gfx12x_draft_override(group_size, K, N, M)\n'
+      '        _radiance_big_m = _radiance_w4a16_big_m_cfg(group_size, K, N, M)  # radiance: prefill rows\n'
+      '        if _radiance_big_m is not None:\n'
+      '            BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _radiance_big_m\n'
+      '        elif _radiance_override is not None:\n',
+      '_radiance_w4a16_big_m_cfg(group_size, K, N, M)  # radiance: prefill rows',
+      'rdna_hybrid_w4a16: gfx12x branch takes the large-M tile')
 
 # --- 3. split-K / fast-dequant / tiled-layout kernel, epilogues, reduce, table, fused ops, post-load ---
 # Plain source (not a chain of string literals) so it reads like the kernel it becomes.

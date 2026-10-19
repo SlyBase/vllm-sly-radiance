@@ -10,6 +10,22 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.5.2] - 2026-10-19
+
+### Added
+- **Opt-in wide tile for the drafter's `fc` at prefill M (`RADIANCE_DFLASH_FC_TILED_MIN_M`, default `0` = off).**
+  The DFlash2 drafter's `fc` (`combine_hidden_states`, N = 5120, K = 25600) is the one drafter linear that
+  runs at the target's token count: 12 calls at M = 4089 in a 47k prefill (chunk 4096) on the stock
+  gfx12x heuristic's 128x64x64 tile, which was measured on decode batches. With the knob set (`2048` for
+  chunk 4096, `1024` for chunk 2048) M above the threshold takes a 256x128x64 tile (8 warps, 1 stage;
+  `RADIANCE_DFLASH_FC_TILED_CFG="BM,BN,BK,warps[,stages]"` overrides it) and M <= 64 is untouched. Each
+  dequantized weight tile is read half as often. `sly/check_w4a16_fc_big_m.py` on the R9700 at 210 W
+  (43 checks, 0 failures): output bit-identical to the stock tile at M = 513, 880, 1514, 1760, 4096; cell bench
+  stock -> wide tile 24.4 -> 13.9 ms at M = 4096 (-43 %), 6.6 -> 5.6 ms at 1760 (-16 %), +5 % at 513. A server
+  A/B (210 W, chunk 4096, ABBA, two windows) reads +0.3 / +0.4 % at 16k / 47k, inside the window drift: the
+  end-to-end gain is about 0.7 % at 47k (12 calls x ~10 ms) and is proven by the cell bench, not the server arm.
+  Off by default; no launch argument changes.
+
 ## [1.5.1] - 2026-10-16
 
 ### Added
