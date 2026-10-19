@@ -129,3 +129,49 @@ pays for that on every tile: +15-20 us per call at 19k context (1 sequence), +50
 561 vs 484 at 4). Scheduling barriers and staged loads removed the spills but not the occupancy
 loss. The un-rotation folded into the segment merge (`reduce_unrotate`) is kept: it costs nothing
 extra there. `sly/kv4/radiance_kv4h.hip` keeps the quantized query input (int4 by default, int8 as two planes).
+
+## Prefill levers measured on 2026-10-19 (R9700, 210 W, image 1.5.1, chunk 4096 unless noted)
+
+All four were checked after the drafter `fc` tile (#165) to see what is left of the 5 % prefill gap
+at 47k tokens against the Paiton image on the same card. None of them is adopted.
+
+### GDN `chunk_scan` with a smaller LDS footprint ("w3")
+
+Tried: `r4d_gdn_chunk_scan_k128_v128_c64_bf16` has 256 VGPRs, 4 spilled VGPRs (20 B/lane scratch) and 60,928 B LDS,
+so it runs one workgroup per CU and the 96 workgroups of a 4089-token chunk need two rounds (64 + 32). A variant
+(S and W+sA share one LDS union, one extra barrier per chunk, row scale and gate kept in registers, built without
+`-mcumode`) needs 43,520 B LDS, 240 VGPRs, 1 spill, 6 waves per SIMD, i.e. three workgroups per WGP and one round.
+Rejected: output is bit-identical to the stock kernel (28 of 28 digests over T = 64..4089, N = 1 and 2; error against
+an fp64 reference 4.4e-3 / 3.4e-3 for output / state) but the kernel is **9 % slower** (ABBA, median of 20, T = 4089,
+H = 48: 0.522 ms stock, 0.569 ms variant). The extra barrier, the spill and the lower rate per workgroup cost more
+than the second round saves. `chunk_scan` is 380 ms of 18.8 s at 47k (2 %), so even the planned -30 % would have been
+0.6 % end to end.
+
+### Attention without the LDS path: ablation only, no rewrite started
+
+Measured: one attention layer (`r4d_attn_prefill_h256_gqa6`, `R4D_ATTN_FP8=3`, M = 4089, ctx 0 / 16,356 / 40,890),
+timing-only variants that each remove one cost item (results are wrong by design; the patched base kernel equals the
+shipped one within 1 %): softmax replaced by `p = score` -9.5..-10.6 %; K/V fragments from a register instead of LDS
+-20.8..-22.0 %; K/V staging and barriers only for the first tile -14.9..-29.3 %; QK WMMA removed -25.6..-30.9 %; PV WMMA
+removed -28.6..-31.4 %. The items overlap (the sum is far above 100 %), so each number is an upper bound. The only
+removable item above 15 % is the LDS path; a kernel without LDS staging would have to load the fragments from L0/L2
+instead. Attention is 18.6 % of the 47k prefill, so a 10 % faster kernel is 1.9 % end to end, 15 % is 2.8 %. Not started:
+weeks of work for an unproven 0..3 %. The shipped f16-leg path was not ablated.
+
+### Launcher idle / prefill CUDA graph
+
+From the in-process profile (one request per depth): GPU idle is 7.5 % at 1.5k tokens and 2.5 % (471.7 ms) at 47k, a
+constant ~39 ms per chunk. 64 % of it (2,663 gaps, 302.7 ms) are gaps of 112..116 us right after `gemm_atiled<4>`
+before `add_rms_quant`, `silu_mul_quant` or the next GEMM: the length is the same whatever the number of launches, which
+looks like a stall at the end of a long kernel, not launch latency. A graph is not expected to remove it (at most
+~0.5 % end to end at 47k, an estimate), and fusing the silu quant into the GEMM epilogue already measured 0 +- 0.5 %.
+The Paiton image has more idle than ours at 47k (497 vs 472 ms). Not built.
+
+### Negative voltage offset beyond -50 mV
+
+The card already runs `voltage_offset: -50` (LACT, since September). Tried -75 mV at the 210 W cap with the GTOA stack:
+the GEMM cell check stayed bit-identical (24 digests, 0 WRONG) but the clock under load did not rise (median 1,895 vs
+1,916 MHz at 209 W) and prefill read 2,606 vs 2,721 tok/s at 16k and 2,200 vs 2,232 at 47k (window drift is up to 3 %,
+so this is "no gain", not a measured loss). -100 mV and GSM8K at -75 mV were not run. The assumption that the power cap
+turns less voltage into more clock (about +2 % per 25 mV from P ~ f V^2) did not hold on this card.
+
