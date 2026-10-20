@@ -60,22 +60,35 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   row slice in the fused norm/act-quant producers, bit-identical), `RADIANCE_MXFP4_AT_SKIP_PAD=1`
   (SKIPPAD in the A-tiled prefill GEMM) and `RADIANCE_MXFP4_TILED_OPROJ=1` (fragment-tiled
   `gdn_norm_quant`, byte-identical output). `RADIANCE_FUSED_NORM_QUANT` ships `1` as well: the
-  producers are what read `FUSED_NQ_REG` and `TILED_OPROJ`, so without the master those two would be
-  defaults that do nothing -- `1` is what `README` has documented since 0.1.6 and what the
-  production unit runs, this launcher now matches it.
+  fused norm/act-quant producers are what read `TILED_OPROJ` (gated on the master in
+  `radiance_fused_norm.py`), so without it that lever would do nothing -- `1` is what `README` has
+  documented since 0.1.6 and what the production unit runs, this launcher now matches it.
+  `RADIANCE_FUSED_NQ_REG` is **not** master-gated: the `.so` reads `nq_reg_v` once at load and every
+  caller of the `radiance::*_quant` launchers honours it, `radiance_arnq.py`'s residual-stream
+  epilogues (`RADIANCE_FP8_STREAM`, default `1`) included, so it acts with the master off too.
 
   Everything is still `${VAR:-default}`, and the default lives in the **launcher**, not in the kernel:
   the C++/Python side reads each knob and falls back to `0`, i.e. the stock path, so
   `--offload-device-only` assembly of the kernels is unchanged and turning a lever back off is an env
-  var rather than an image rebuild. `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048 R4D_ATTN_FP8=0
-  RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0 RADIANCE_MXFP4_TILED_OPROJ=0 ./serve-mxfp4.sh`
-  reproduces the old server.
+  var rather than an image rebuild. `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048
+  RADIANCE_FUSED_NORM_QUANT=0 RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0
+  RADIANCE_MXFP4_TILED_OPROJ=0 R4D_ATTN_FP8=3 ./serve-mxfp4.sh`
+  reproduces the old server (`R4D_ATTN_FP8` was already `3` on `origin/main`; it is spelled out so
+  the set is the complete pre-PR state -- `R4D_ATTN_FP8=0` is the `R5` arm, not a revert).
 
-  Cost: the 4096 chunk gives back ~3.5 % of the KV pool against 8192 -- and the `2x7551` row in
+  Cost: the 4096 chunk gives back 3.5 % of the KV pool against 8192 -- measured at 262k context,
+  423,463 tokens against 439,031 (15,568 fewer) -- and the `2x7551` row in
   `kv-profiles.tsv` is keyed on chunk 8192, so that host now falls back to vLLM's own profiling
   (safe, without the pin's +5.7 % margin) until a 4096 row is measured with `calibrate-kv.sh`.
   `TN4_MIN_M=513` has no memory cost: the wider tile is the same kernel, and the numerics are
   identical either way.
+
+  At TP=1 the single-GPU profile still overrides an unset `CHUNK` to `2560`: that profile is the
+  long-context shape (seqs 3, maxlen 220000) and its KV row in `kv-profiles.tsv` is keyed on chunk
+  2560. The table below is therefore the **TP=1 measured shape**, not the TP=1 zero-config start:
+  it was measured with `CHUNK=4096` (and seqs 8 / maxlen 65536) passed explicitly.
+  `CHUNK=4096 MAXSEQS=8 MAXLEN=65536 ./serve-mxfp4.sh` reproduces it, `SINGLE_GPU_PROFILE=0` drops
+  the override.
 
   Measured (one R9700, 210 W, BetterBench prefill, median of 8, prefix cache off, tok/s at 1.5k / 6k /
   12k / 24k / 47k prompt tokens). Control = the previous defaults; combination = the stack above on
