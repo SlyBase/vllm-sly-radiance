@@ -30,7 +30,7 @@ import os
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 TARGET = (
     Path(os.environ.get("RADIANCE_PATCH_TARGET_DIR") or sysconfig.get_paths()["purelib"])
@@ -80,14 +80,29 @@ apply(TARGET,
       "# radiance cactus: threshold",
       "cactus: Leviathan acceptance")
 
-apply(TARGET,
+# vLLM 0.32.0 inserts watermarking_skip_mask between watermarking and watermark_key, so the
+# cactus_delta wrapper arg anchors on the skip-mask + watermark_key tail (unique in the file).
+# The old shape stays for the launchers patching older images.
+apply_any(TARGET,
+      [
+      (
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n",
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      "    cactus_delta: float = CACTUS_DELTA,  # radiance cactus: wrapper arg (sly/patch_cactus.py)\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n"
+      ),
+      (
       "    watermarking: torch.Tensor | None = None,\n"
       "    watermark_key: int | None = None,\n"
       ") -> tuple[torch.Tensor, torch.Tensor]:\n",
       "    watermarking: torch.Tensor | None = None,\n"
       "    watermark_key: int | None = None,\n"
       "    cactus_delta: float = CACTUS_DELTA,  # radiance cactus: wrapper arg (sly/patch_cactus.py)\n"
-      ") -> tuple[torch.Tensor, torch.Tensor]:\n",
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n"
+      )],
       "# radiance cactus: wrapper arg",
       "cactus: rejection_sample signature")
 

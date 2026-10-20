@@ -1007,7 +1007,22 @@ apply_any(F,
           'LAYOUT: tl.constexpr = 0,  # radiance',
           'rdna_hybrid_w4a16: stock kernel LAYOUT parameter')
 
-apply(F,
+# vLLM 0.32.0: the stock kernel's b_ptrs now carry stride_bn (0.31 was implicitly K8 =
+# contiguous K//8). LAYOUT==0 keeps stride_bn (identical to stock); the radiance tile layout
+# is addressed absolutely and the stride is not part of it, so the tiled path is unchanged.
+apply_any(F,
+      [
+      (
+      '        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
+      '        if LAYOUT == 1:\n'
+      '            b_ptrs = b_ptr + (((offs_n[:, None] // 16) * (K8 // 16) + offs_k8[None, :] // 16) * 256\n'
+      '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
+      '        else:\n'
+      '            b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n'
+      ),
+      (
       '        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
       '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
       '        if LAYOUT == 1:\n'
@@ -1015,15 +1030,40 @@ apply(F,
       '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
       '        else:\n'
       '            b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
-      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n'
+      )],
       '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
       '        else:\n'
-      '            b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
+      '            b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
       '        mask_b = (offs_n[:, None] < N)',
       'rdna_hybrid_w4a16: stock kernel tiled addressing')
 
 # --- 6. stock launcher: tiled b_q, pass LAYOUT ---
-apply(F,
+# vLLM 0.32.0 added `b_q.stride(1) == 1` and scales asserts plus stride_bn / stride_am locals
+# inside the old anchor; the 0.32 shape anchors wider and keeps them (a packed tile tensor is
+# innermost-contiguous, so the assert passes; LAYOUT 1 never reads stride_bn).
+apply_any(F,
+      [
+      (
+      '    M, K = a.shape\n'
+      '    N = b_q.shape[0]\n'
+      '    K8 = K // 8\n'
+      '    num_groups = K // group_size\n'
+      '    stride_bn = b_q.stride(0)\n'
+      '    stride_am = a.stride(0)\n'
+      '\n'
+      '    assert b_q.shape == (N, K8), f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    M, K = a.shape\n'
+      '    layout = 1 if b_q.dim() == 4 else 0  # radiance: 1 = radiance_w4a16_tile blocks\n'
+      '    N = b_q.shape[0] * 16 if layout else b_q.shape[0]\n'
+      '    K8 = K // 8\n'
+      '    num_groups = K // group_size\n'
+      '    stride_bn = b_q.stride(0)\n'
+      '    stride_am = a.stride(0)\n'
+      '\n'
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      ),
+      (
       '    M, K = a.shape\n'
       '    N = b_q.shape[0]\n'
       '    K8 = K // 8\n'
@@ -1036,7 +1076,8 @@ apply(F,
       '    K8 = K // 8\n'
       '    num_groups = K // group_size\n'
       '\n'
-      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      )],
       'layout = 1 if b_q.dim() == 4 else 0  # radiance',
       'rdna_hybrid_w4a16: stock launcher accepts tiled weights')
 apply(F,
@@ -1054,8 +1095,53 @@ apply(F,
       '        LAYOUT=layout,\n        num_warps=num_warps,\n        **extra_kwargs,',
       'rdna_hybrid_w4a16: stock launch passes LAYOUT')
 
+# --- 6b. 0.32 stride asserts vs tiled weights (found at the first 1.7.0 UltraQuant start) ---
+# vLLM 0.32.0 added `b_q.stride(1) == 1` / "Weight rows must be contiguous" to
+# triton_w4a16_skinny_fmt_gemm. The assert means innermost-contiguity and is written for 2-D
+# weights; on a 4-D radiance_w4a16_tile weight stride(1) is the block stride != 1, and the LAYOUT
+# 1 addressing computes its indices instead of reading stride_bn -- so the assert fires exactly
+# when the tile store is in play (drafter `fc` projection, M-skinny). Pre-0.32 trees carry no
+# stride asserts; the second shape only attaches a comment, so a cross-version launch replay
+# on the previous image stays green instead of failing on a tree that was already fine.
+apply_any(F,
+      [
+      (
+      '    assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n',
+      '    # radiance: 4-D tiled weights are block-addressed (LAYOUT 1 computes the indices;\n'
+      '    # stride_bn is never read). stride(1) is the innermost-contiguity check and only\n'
+      '    # applies to 2-D weights; for the tile blocks K8 numel equality is asserted below.\n'
+      '    if b_q.dim() == 2:\n'
+      '        assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n'
+      ),
+      (
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    # radiance: this tree has no 0.32-style stride asserts; a 4-D tiled weight runs the\n'
+      '    # same index-addressed kernel here without a stride(1) guard.\n'
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      ),
+      ],
+      '# radiance: 4-D tiled weights are block-addressed',
+      'rdna_hybrid_w4a16: 0.32 stride assert tolerates tiled weights')
+
 # --- 7. apply op: tiled weights have N = 16 * dim 0 and never take the HIP skinny path ---
-apply(F,
+# vLLM 0.32.0: the skinny limit is now MEDIUM_SKINNY_LIMIT_ELEMENTS (1.2x the LDS elements,
+# see _pad_activation_rows); was LDS_CAPACITY_ELEMENTS. `w_q.dim() == 2` keeps the HIP
+# skinny path off the tiled layout regardless of the constant.
+apply_any(F,
+      [
+      (
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0]\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:\n',
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS and w_q.dim() == 2:\n'
+      ),
+      (
       '    M = x_2d.shape[0]\n'
       '    K = x_2d.shape[1]\n'
       '    N = w_q.shape[0]\n'
@@ -1065,8 +1151,9 @@ apply(F,
       '    K = x_2d.shape[1]\n'
       '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
       '\n'
-      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:\n',
-      'K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:',
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:\n'
+      )],
+      'K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS and w_q.dim() == 2:',
       'rdna_hybrid_w4a16: apply op handles tiled weights')
 apply(F,
       '    M = x_2d.size(0)\n'
@@ -1077,11 +1164,23 @@ apply(F,
       'rdna_hybrid_w4a16: fake impl handles tiled weights')
 
 # --- 8. load: store W4A16 weights tiled (RADIANCE_W4A16_TILED, default on) ---
-apply(F,
+# vLLM 0.32.0 moved the pack into pack_skinny_int4 (which also carries a gfx1151 row pad), so
+# `shuffled` left the load scope; the tile insert anchors on the new call and reads the shape
+# off w_q_skinny (int8 [N, K//2]: K = shape[1] * 2, exactly the convention line 825 uses).
+apply_any(F,
+      [
+      (
+      '        w_q_skinny = pack_skinny_int4(unpacked)\n',
+      '        w_q_skinny = pack_skinny_int4(unpacked)\n'
+      '        if _on_gfx12x() and _radiance_tiled_enabled(w_q_skinny.shape[0], w_q_skinny.shape[1] * 2):\n'
+      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n'
+      ),
+      (
       '        w_q_skinny = shuffled.contiguous().view(torch.int8)\n',
       '        w_q_skinny = shuffled.contiguous().view(torch.int8)\n'
       '        if _on_gfx12x() and _radiance_tiled_enabled(shuffled.shape[0], shuffled.shape[1] * 8):\n'
-      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n',
+      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n'
+      )],
       'w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance',
       'rdna_hybrid_w4a16: tiled weight layout at load')
 

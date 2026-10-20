@@ -12,14 +12,102 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [1.7.0] - 2026-10-20
 
-Automated stack update (Renovate + `ci/resolve_stack.py`): torch, triton, torchvision, aiter and transformers follow the vLLM release's own ROCm base, nothing else was changed on purpose.
+Stack bump to vLLM 0.32.0 (released 2026-10-18). torch / triton / torchvision are unchanged: 0.32.0's own
+`docker/Dockerfile.rocm_base` pins the same release/2.13 trio as 0.31.0, so everything below is what the
+release itself moves.
+
+### Added
+- **Upstream 4-bit KV cache for ROCm (`--kv-cache-dtype ultraquant_4bit`, vllm#57057) is now available**
+  to serve, on top of the repo's own TetraAttention (`KVCACHE_DTYPE=kv4`). UltraQuant is AMD's 4-bit KV
+  format (Hadamard rotation, one power-of-two scale per 32 channels, about 2x the density of FP8;
+  released with "ROCm gains the 4-bit ultraquant_4bit KV cache"), documented on MI355X. **Not yet measured
+  on the R9700** and not yet A/B'd against fp8 or TETRA; `fp8` stays the default and `kv4` stays the
+  measured 4-bit option until the gate says otherwise. The image needs no change: it is vLLM's own KV
+  dtype, gated to the launch only.
+- MiniCPM-V 4.7 support (`RADIANCE_MINICPMV4_7`) is native in 0.32.0 (vllm#58674): `sly/patch_minicpmv4_7.py`
+  leaves the Dockerfile patch loop into `ci/unused_patches.txt`, and the patch now SKIPs on a tree that
+  already carries the model instead of overwriting 0.32's newer files with its 0.31-era copies.
+- The 0.31.0-era aiter hold is lifted: vLLM 0.32.0 pins AITER v0.1.24.post1, whose
+  `aiter/ops/triton/__init__.py` carries the `unified_attention` alias again (verified in the
+  v0.1.24.post1 tree), so `ROCM_AITER_UNIFIED_ATTN` stays usable at the new pin.
+- Serving `ultraquant_4bit` together with DFlash drafting needs
+  **`--kv-cache-dtype-skip-layers sliding_window`**: the run-wide KV dtype also reaches the
+  drafter's per-layer backend selection, and the head-128 sliding-window / non-causal DFlash drafter
+  geometry has no backend that accepts `ultraquant_4bit` (the crash is a loud backend-selection
+  failure at engine init). This is upstream's own escape hatch (the same list TurboQuant uses for its
+  dense-model boundary layers, which is empty for hybrids), so the 16 full-attention layers still take
+  the UltraQuant backend while the drafter keeps `TRITON_ATTN` on its `auto` (bf16) window cache.
 
 ### Changed
-- **vLLM 0.31.0 -> 0.32.0**
-- aiter 0.1.23 -> 0.1.24.post1
-- transformers 5.17.0 -> 5.19.0
+- **vLLM 0.31.0 -> 0.32.0.** Every `sly/` patch re-anchored with identical behaviour (details in
+  `sly/README.md` and the patch files): `patch_skinny_gemm` (0.32 added a `VLLM_BATCH_INVARIANT`
+  early-return; the hook now sits after it, so a determinism serve keeps the deterministic GEMM),
+  `patch_gdn_metadata` (0.32 removed the "all rows drafted nothing" early-out from the spec-mask block -
+  the numpy fast path keeps that; and the pure-spec-block index slice is upstream now, so the 0.32 shape
+  keeps only the cached arange/empty), `patch_gdn_lazy` (abstract.py's RecoverSSM guard renamed to
+  `use_replayssm`; the `bt_row_idx` locals moved into `_copy_mamba_state_block`, both skip hooks
+  re-anchored to the call sites), `patch_w4a16_tiles` (the stock W4A16 kernel takes `stride_bn`, the
+  launcher gained stride asserts - the 0.32 `stride(1)` one guarded for tiled weights, see Fixed - the
+  skinny limit grew 1.2x and moved into `pack_skinny_int4`; for the
+  LAYOUT 0 path the stride is carried, the tiled layout is addressed absolutely as before),
+  `patch_nvfp4_mxfp4` (a `_is_mxfp4_w4a8_fp8` branch moved between the NVFP4 return and the MXFP4
+  check), `patch_cactus` (the rejection kernel gained `watermarking_skip_mask`; `cactus_delta` anchors on
+  the new tail). One behaviour note: **MRV2 is now the default model runner on ROCm** (#56360) and cascade
+  attention was removed upstream - the production launch used neither.
+- aiter 0.1.23 -> 0.1.24.post1 (vLLM 0.32.0's AITER_BRANCH, exactly).
+- transformers 5.17.0 -> 5.19.0 (newest inside 0.32.0's `>=5.16.1,<5.20.0`; also removes the old
+  MiniCPM-V AutoProcessor caveat, which needed `>=5.18`). PyPI dependency set regenerated
+  (`constraints.txt`, 78 changed pins) by `ci/resolve_stack.py`; python stays 3.12 (0.32 dropped 3.10).
+
+### Fixed
+- `sly/patch_w4a16_tiles`: guard `rdna_hybrid_w4a16`'s new 0.32 stride assert for tiled weights.
+  0.32 added `assert b_q.stride(1) == 1` ("Weight rows must be contiguous") to
+  `triton_w4a16_skinny_fmt_gemm`; the assert means innermost-contiguity and is written for 2-D
+  weights. On a 4-D `radiance_w4a16_tile` weight stride(1) is the block stride (the tile addressing
+  computes its indices and never reads `stride_bn`), so the assert fired at the first 1.7.0 UltraQuant
+  start on the drafter's `fc` combine projection (M-skinny -> tiled store). The guard keeps the assert
+  for 2-D weights only; the 4-D tile blocks stay checked by the patched `numel` equality. Found on the
+  first live UltraQuant start, fixed in-patch and verified by patch dry run (151 hunks, pass 2 all NOOP).
+- `patch_skinny_gemm`: restore the module-level `import radiance_gemm` that the 0.32 re-anchor of
+  `patch_skinny_gemm.py` dropped. The 0.31 shape inserted the import by rewriting the
+  `def rocm_unquantized_gemm_impl` anchor; the 0.32 body-only re-anchor shipped the hook text without
+  the import, so the first indunitized-GEMM call (inside the compiled dflash2 candidate-selector
+  graph at profile time) died with `NameError: _radiance_gemm is not defined`. The import is a second
+  idempotent hunk now (anchored on the def signature, unique in 0.31 and 0.32 trees).
+- `sly/patch_ultraquant_gqa` (new): rebuilds `_ultraquant_continuation_prefill`'s flash-attn-less
+  fallback. Two live failures on the same request shape (chunked prefill, >2048-token prompts,
+  24 q / 4 kv GQA): upstream passed the 4-head K/V to torch SDPA at the 24 query heads via
+  `tensor.expand()` — expand only grows singleton dims, so the engine died with "expanded size
+  of the tensor (24) must match the existing size (4)"; and SDPA's `enable_gqa` fixed the shape
+  but then OOM-killed the engine on a long cached_len, because without flash-attn torch routes
+  grouped-query SDPA through the math backend, which materializes the `Hq × cache_len` score
+  tensor (746 MiB for one layer of a ~40k-token prompt) while the KV pool holds 0 B free —
+  `--gpu-memory-utilization` changes do not help (the pool is sized to the util either way).
+  The fallback now calls vLLM's Triton unified kernel (the same dense call shape as the
+  sinks/head_dim>256 branch in the same function: GQA-native, online-softmax tiles, which is
+  what `TRITON_ATTN` runs for these layers anyway); the FA2 varlen branch stays for
+  flash-attn-present builds. Verified live across three crash cycles (expand CPython
+  shape error -> SDPA math-backend OOM of 746 MiB score materialization -> success).
+- Continuing the same patch (`patch_ultraquant_gqa`, hunk 2): the per-layer worst-case
+  `k_full_buf`/`v_full_buf` concat buffers underneath it OOM-killed the serve as well
+  ("grown once to worst case" = 128 × 2048 token block-table capacity at 262k context →
+  512 MiB per side, cached on every one of the 16 full-attention layers = 16 GiB worst
+  case, with a 512 MiB first-touch alloc at request time while the pool holds 0 B free).
+  Both concats now come from the shared workspace manager, in the same
+  `get_simultaneous` call as the dequant K/V targets (four adjacent partitions of one
+  scratch tensor; the dequant call in the same function already proved request-time
+  workspace growth is permitted — the workspace is only locked during graph capture).
 
 ### Measured
+- Live on the R9700 (2026-10-19, three 1.7.0 candidates serving the same probe set): **`ultraquant_4bit`
+  without speculative decoding at 200k/0.87: 698,181 KV tokens (3.49x concurrency)** vs **fp8 in the same
+  window: 310,038 (1.55x)** — 2.25x the pool, matching the 272-vs-512 bytes-per-token ratio; correct probe
+  answers at both temperatures, 38k-token prefill ~1.1 ms/token, two engine crashes fixed along the way
+  (continuation-prefill GQA/OOM, per-layer concat buffers). **UltraQuant with DFlash drafting degenerates
+  into token loops from the first verify step** (fp8 + drafter and UltraQuant + no-drafter are both
+  correct in the same probe set; drafter acceptance stays a healthy ~69 %, so the drafter is consistent
+  with the corrupted verify logits — the fault is in 0.32's UltraQuant padded-spec
+  verify geometry, not the drafter), so UltraQuant serves without a drafter until upstream fixes it.
 - Night gate pending.
 
 ## [1.6.0] - 2026-10-20
