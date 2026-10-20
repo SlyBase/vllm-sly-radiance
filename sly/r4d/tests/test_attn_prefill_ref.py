@@ -59,9 +59,10 @@ def prefill_reference(q, kv, bt, ctx, kvh, kdesc, vdesc, chunk=None):
     """
     M = q.shape[0]
     K, V = unpack_kv(kv, bt, ctx, kvh, kvheads=q.shape[1] // GQA)
-    out = torch.empty(M, GQA, HEAD_DIM)
-    limits = torch.arange(M).unsqueeze(1) + (ctx - M)                # causal, offset by ctx_prior
-    keys = torch.arange(ctx).unsqueeze(0)
+    dev = q.device
+    out = torch.empty(M, GQA, HEAD_DIM, device=dev)
+    limits = torch.arange(M, device=dev).unsqueeze(1) + (ctx - M)    # causal, offset by ctx_prior
+    keys = torch.arange(ctx, device=dev).unsqueeze(0)
     for h in range(GQA):
         qh = q[:, kvh * GQA + h].float() * (SCALE * kdesc)          # FOLDQ: scale in the query
         rows = [(0, M)] if chunk is None else [(a, a + chunk) for a in range(0, M, chunk)]
@@ -81,7 +82,7 @@ def prefill_reference_all(q, kv, bt, ctx, kvheads, kdesc=1.0, vdesc=1.0, chunk=N
     way -- a reference built for kvh = 0 alone is [M, GQA, D] and cannot be compared with o[M, H, D].
     """
     M = q.shape[0]
-    out = torch.empty(M, kvheads * GQA, HEAD_DIM)
+    out = torch.empty(M, kvheads * GQA, HEAD_DIM, device=q.device)
     for kvh in range(kvheads):
         out[:, kvh * GQA:(kvh + 1) * GQA] = prefill_reference(q, kv, bt, ctx, kvh, kdesc, vdesc,
                                                              chunk=chunk)
