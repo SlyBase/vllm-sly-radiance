@@ -15,9 +15,9 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1
 |---|---|
 | GPU | AMD Radeon AI PRO R9700, 32 GB, gfx1201 (RDNA4) — one card; TP 2/3/4/8 paths included but untested here |
 | ROCm | 10.1 (`rocm/dev-ubuntu-24.04:10.1.0-full`, HIP 7.16, pruned to gfx1201) |
-| PyTorch / Triton / torchvision | 2.13.0 / 3.8.0 (`git669b31ac`) / 0.28.0, all AMD's `+rocm10.1.0` wheels (the trio vLLM 0.31's ROCm base builds) |
-| vLLM | 0.31.0 (V1 engine, V2 model runner), built from source |
-| AITER / transformers | 0.1.23 / 5.17.0 |
+| PyTorch / Triton / torchvision | 2.13.0 / 3.8.0 (`git669b31ac`) / 0.28.0, all AMD's `+rocm10.1.0` wheels (the trio vLLM 0.31's ROCm base builds; unchanged at 0.32) |
+| vLLM | 0.32.0 (V1 engine, V2 model runner), built from source |
+| AITER / transformers | 0.1.24.post1 / 5.19.0 |
 | Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (prefill attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
 | Model | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, gated-delta-net hybrid) |
 | Drafter | [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16), DFlash2 k = 7 + prompt lookup |
@@ -100,8 +100,12 @@ hf download amd/Qwen3.8-27B-Quark-AWQ-MXFP4
 hf download syvai/Qwen3.8-27B-DFlash2-W4A16
 
 # 2. serve (OpenAI-compatible API on :8000)
+# --group-add takes the numeric GIDs of the host's GPU groups (do not use the "video"/"render"
+# names: docker resolves them against the container's group file, and the ROCm base image
+# carries no "render" entry). Check yours with `getent group video render` — on Ubuntu 24.04
+# these are 44 and 109; you must be a member of both (`sudo usermod -aG video,render $USER`).
 docker run -d --name vllm --restart unless-stopped \
-  --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
+  --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 109 \
   --security-opt seccomp=unconfined --ipc=host -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton -v aiter-cache:/root/.aiter \
@@ -171,6 +175,7 @@ production arguments; the numbers are the gain it measured when it went in
 | `RADIANCE_ADAPTIVE_WIDTH=perseq` (1.0, ported from the Radiance engine) | acceptance differs 2× between requests; per-request verify width on varlen FULL graphs ([why ggz14's version lost](docs/TECHNICAL.md#100-what-the-release-adds-and-the-measurements-behind-it)) | 8 concurrent requests **+4.7 %** |
 | ROCm 10.1 + torch 2.12 (1.0) | current AMD toolchain; the CPU-spin bug that held torch back is fixed | neutral (±1–2 %) |
 | vLLM 0.31.0 + torch 2.13 / triton 3.8.0 / torchvision 0.28.0 / aiter 0.1.23 (1.1) | the combination vLLM's own ROCm base builds, as AMD wheels | *pending GPU run* |
+| vLLM 0.32.0 + aiter 0.1.24.post1 / transformers 5.19.0 (1.6), same torch/triton/torchvision trio | the stack vLLM 0.32.0's own ROCm base pins (aiter held back until now because 0.1.24 had dropped an alias vLLM still imported; 0.1.24.post1 restores it) | *pending GPU run* |
 | Constraints for every PyPI pin, 4.8 GB image with a stable/volatile layer split | reproducible builds, ~35 MB update pulls | – |
 
 What was tried and rejected, with reasons: [docs/NOT-ADOPTED.md](docs/NOT-ADOPTED.md).
@@ -273,6 +278,25 @@ attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the p
 | Variable | Recommended | What it does |
 |---|---|---|
 | `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79). Decode 4-5 % faster per step at 1 and 4 streams (same-window A/B), prefill 3-4 % faster with `CHUNK` >= 3456 (the attention block is 1664 tokens, fp8: 880, so a turn recomputes up to 1,663 tokens on a prefix hit). Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
+
+From vLLM 0.32.0 (image 1.7.0) there is also a **native** ROCm 4-bit KV cache, `--kv-cache-dtype
+ultraquant_4bit` (vllm#57057): Hadamard rotation plus one power-of-two scale per 32 channels instead of
+one e4m3 scale per token, with the attention kernel shipped by vLLM/AMD rather than this repo's HIP
+kernel (AMD documented it on MI355X). It is incompatible with `FlashAttention >= 3` (0.32 downgrades
+the KV stack's own flash-attn setting, a logged warning). Measured live on the R9700 (0.87 edt,
+200k context, single request): **DFlash drafting is incompatible on this geometry** — with the
+drafter on, decode degenerates into token loops from the first verify step (fp8 with the drafter and
+UltraQuant without the drafter are both correct against the same probe; the difference is the
+multi-token verify path inside 0.32's UltraQuant KV geometry, file upstream). So until upstream or a
+later version fixes it, serve `ultraquant_4bit` **without** speculative decoding — measured live:
+**698,181 KV tokens / 3.49x concurrency at 200k** vs fp8's 310,038 / 1.55x in the same window
+(2.25x the pool), correct answers on both probe temperatures, and a 38k-token prefill at
+~1.1 ms/token through the chunked continuation path (Triton fallback; FlyDSL is ineligible at
+head_size 256). Known serve landmines this repo already patches or handles (`sly/patch_ultraquant_gqa.py`
+via the loop fix and the shared-workspace hunks, documented in sly/README.md): the 0.32
+continuation-prefill fallback killed the engine on any >2048-token prompt (GQA shape error, then a
+746 MiB score materialization in torch's math-SDPA), and upstream also cached 512-MiB-per-layer
+worst-case concat buffers (16 GiB across 16 layers at 262k).
 
 The offload patches, `kvwatch.py` and the `turnbench`/`tierbench` benches live in `kv-cache/` and ride
 the repo's existing `/patches` mount; `serve-mxfp4.sh` applies them at container start (not baked).

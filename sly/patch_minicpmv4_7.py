@@ -74,6 +74,13 @@ def main() -> None:
     if not ENABLED:
         print("  SKIP  minicpmv4_7: RADIANCE_MINICPMV4_7=0")
         return
+    # vLLM 0.32.0 contains vllm-project/vllm#58674 natively (registry entry, minicpmv4_7.py and
+    # the minicpmv4_6.py refactor). The shipped copies here are the 0.31-era files -- installing
+    # them over 0.32+'s own would clobber upstream's newer model code, so the patch stays off the
+    # loop from 1.7.0 and refuses to run on a tree that already carries the model natively.
+    if (MODELS / "minicpmv4_7.py").exists():
+        print("  SKIP  minicpmv4_7: native in this vLLM (0.32.0+); the 0.31-era copies are not installed")
+        return
     _install_file(MODELS / "minicpmv4_6.py", "minicpmv4_6.py",
                   "_scoped_mm_kwarg", "minicpmv4_7: 4.6 refactor")
     _install_file(MODELS / "minicpmv4_7.py", "minicpmv4_7.py",

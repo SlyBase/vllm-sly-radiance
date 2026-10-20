@@ -35,3 +35,5 @@ sly/patch_short_prefill.py     GDN 1-token prefill: 0.31's GDNAttentionMetadataB
 sly/patch_gdn_nonspec_mask.py  0.31 keeps non_spec_sequence_masks_cpu defined at the top of the mixed branch, and patch_gdn_metadata's 0.31 shape preserves that line, so the numpy path no longer leaves it unbound
 sly/patch_mamba_align_retire.py     vllm#55450 (align-mode Mamba retirement crosses null gaps) is in 0.31.0's single_type_kv_cache_manager.py verbatim (_num_retired_blocks, _remove_blocks_in_range)
 sly/patch_rocm_load_max_split.py    0.31.0's Worker._scoped_allocator_max_split gates on is_cuda_alike() (ROCm included) and also wraps profile_run
+# --- dropped at the vLLM 0.32.0 bump (1.7.0): native upstream, files kept for the 0.31.x lineage.
+sly/patch_minicpmv4_7.py     vllm#58674 (MiniCPM-V 4.7: minicpmv4_7.py, the minicpmv4_6.py inheritability refactor and the registry entry) is in v0.32.0; the patch now SKIPs on a tree that already carries the model (RADIANCE_MINICPMV4_7=1 there keeps upstream's native files)
