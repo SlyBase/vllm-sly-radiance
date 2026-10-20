@@ -10,6 +10,18 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.7.0] - 2026-10-20
+
+Automated stack update (Renovate + `ci/resolve_stack.py`): torch, triton, torchvision, aiter and transformers follow the vLLM release's own ROCm base, nothing else was changed on purpose.
+
+### Changed
+- **vLLM 0.31.0 -> 0.32.0**
+- aiter 0.1.23 -> 0.1.24.post1
+- transformers 5.17.0 -> 5.19.0
+
+### Measured
+- Night gate pending.
+
 ## [1.6.0] - 2026-10-20
 
 ### Added

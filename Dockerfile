@@ -76,9 +76,9 @@ ARG TORCHVISION_VERSION=0.28.0
 # (aiter/ops/triton/__init__.py maps it to attention.unified_attention). Lift the hold together with a
 # vLLM that imports the new path (or a patch).
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.23
+ARG AITER_VERSION=0.1.24.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.31.0
+ARG VLLM_VERSION=0.32.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
@@ -97,7 +97,7 @@ ARG VLLM_VERSION=0.31.0
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
 # first time a Gemma-4 checkpoint is actually served on this image.
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.17.0
+ARG TRANSFORMERS_VERSION=5.19.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
