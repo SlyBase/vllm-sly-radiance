@@ -6,7 +6,7 @@
 # Triggers:
 #   - a VERSION bump on main or a v* tag (the production build: a main-branch build is a build
 #     check, nothing more);
-#   - pull_request -- but ONLY for PRs from this repo's own branches (the head_repo == repo
+#   - pull_request -- but ONLY for non-draft PRs from this repo's own branches (head_repo == repo
 #     check): a PR from a fork must not reach the self-hosted runner (its code would execute
 #     on it). Own-branch PRs (the renovate/* trio PRs, feature branches) are the classic
 #     case where a build catches a compile-level break BEFORE the merge, at CPU-only cost
@@ -26,6 +26,9 @@ on:
     paths: [VERSION]
     tags: ["v*"]
   pull_request:
+    # a draft PR does not build (see the job `if:`); ready_for_review starts the build when it
+    # leaves draft
+    types: [opened, synchronize, reopened, ready_for_review]
     # only when something that ends up in the image can have moved (the stack PRs bump the pins in
     # Dockerfile / constraints.txt, and the Hermes re-anchor agent pushes patch fixes into sly/ and the
     # patch_*.py files to the same branch -- accept-night needs an image of exactly the head it gates,
@@ -75,9 +78,11 @@ jobs:
     # For a fork PR, head.repo.full_name is the fork's full name -> != -> skipped; for an
     # own-branch PR it equals github.repository -> runs. Only evaluated when the trigger is a
     # pull_request (the left side short-circuits every other event).
+    # A draft PR is skipped: experiments and WIP pushes need no image (hours of runner time).
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       !github.event.pull_request.draft)
     runs-on: [self-hosted, linux, x64, rocm-build]
     timeout-minutes: 300
     env:
