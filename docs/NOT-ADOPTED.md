@@ -140,3 +140,27 @@ pays for that on every tile: +15-20 us per call at 19k context (1 sequence), +50
 561 vs 484 at 4). Scheduling barriers and staged loads removed the spills but not the occupancy
 loss. The un-rotation folded into the segment merge (`reduce_unrotate`) is kept: it costs nothing
 extra there. `sly/kv4/radiance_kv4h.hip` keeps the quantized query input (int4 by default, int8 as two planes).
+
+## Prefill GEMM: overlap, big tile, library paths (2026-10, 210 W cell bench, tried for the 4,000 tok/s goal)
+
+All variants below were bit-identical to the A-tiled kernel (sha256 of the bf16 output equal for every cell) and
+measured against it ABBA in the same invocation. None gave a reproducible gain, so none is in the image. The
+sources of the two kernel variants are kept on the branch `exp/prefill-gemm-attempts` (commits b8249f1, 1e8fc9d).
+
+| Item | Why not |
+|---|---|
+| Software-pipelined W stream, double-buffered `sW`, one barrier per slab (`AT_OVL`) | Neutral to 0-4 % slower (gate_up / down, M 1536 and 4096). The compiler keeps dequant and the LDS store after the WMMA group (`sched_barrier`), only the global-load stream overlaps. |
+| Dequant interleaved between the WMMA groups | +1-3 % slower. |
+| Producer/consumer wave split (2 or 4 extra producer waves) | +2-8 % slower, reproducible in both ABBA pairs; VGPR 143-193, no spills. |
+| 16-wave big tile 256x128 / 256x256 (`AT_BIG`) | 256x128: +1-10 % slower. 256x256: +4-5 % slower at M >= 2048, about 2-3 % faster at M 1024-1536 for gate_up/qkvz (two pairs only, not enough for a server arm). |
+| Smaller row tile TM = 2/3 (`AT_TMS`, kept, default off) | Slower at M >= 768; only M 513-576 gains (+17-28 %, padding effect). |
+| `RADIANCE_GROUPM` raster grouping (K2) | Gain below the window drift (+0.1 % / +0.3 %). |
+| Dequant to a fp8 scratch + hipBLASLt (`torch._scaled_mm`), per matrix | 0.47-0.75x of the A-tiled kernel. hipBLASLt row-wise fp8 reaches only 96-129 TF/s on gfx1201 (TunableOp: <= 166), the dequant adds 108-812 us per matrix. Not bit-identical. |
+| bf16 dequant + `torch.matmul` | GEMM alone 70-113 TF/s. |
+| Triton fp8 GEMM (autotuned `tl.dot`) | 150-210 TF/s without any dequant, i.e. about the A-tiled kernel; a fused W4A8 Triton kernel cannot exceed that. |
+| libr4d GEMMs (`gemm_mxfp4a8_nt_m64`, `gemm_w4a8_nt_m64`, ...) | Constraint M <= 64; no large-M entry. |
+
+Where the time goes (ablation, `AT_ABL` flag, timing only): dequant ALU about 7 %, LDS store about 10 %, W global
+loads about 8-12 %, A stream 5-13 %; WMMA + LDS reads + barrier alone reach 259-281 TF/s against 160-230 TF/s
+for the kernel. A cheaper dequant alone is worth at most about 5 %. At 210 W the same cell varies up to 41 %
+between runs (M = 513), so gains below about 10 % need ABBA with many repeats.

@@ -21,7 +21,7 @@ SHAPES = [
     ("qkv",     14336, 5120, True),
     ("o_proj",   5120, 6144, False),   # gdn_norm_quant / attn out: row-major in production
     ("out_proj", 5120, 6144, False),
-    ("down",     5120, 17408, False),  # no tiled producer (K > add_rms limit)
+    ("down",     5120, 17408, True),   # silu_mul_quant (N=17408 <= 18432) tiles it since 0.3.0
     ("in_proj_ba", 96, 5120, True),
 ]
 DEC_KS, DEC_MAX_N, DEC_MTILE, DEC_MAX_TM, BMF = 4, 36864, 16, 8, 256
