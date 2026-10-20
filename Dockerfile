@@ -601,7 +601,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
      sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
-     sly/radiance_adaptive_width.py \
+     sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
@@ -743,6 +743,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
+             sly/patch_dflash_prefill_skip \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
