@@ -37,7 +37,7 @@ i.e. **~3,300 tok/s — not 4,000**. The remaining ~24 % is in the prefill kerne
    | gate_up | 34,816×5,120 | 47 % | `add_rms_quant` (from M=513) |
    | qkvz / qkv | 16,384/14,336×5,120 | 17 % | `add_rms_quant` (from M=513) |
    | down | 5,120×17,408 | 23 % | `silu_mul_quant` (from M=513): its N is the 17,408 half of the 34,816-wide gate_up row, inside the N ≤ 18,432 limit — no gap (corrected; verify with `bench_prefill_cells.py --check`) |
-   | o_proj / out_proj | 5,120×6,144 | 16 % | tiled `gdn_norm_quant` behind `RADIANCE_MXFP4_TILED_OPROJ=1` (default 0, GPU-window pending) |
+   | o_proj / out_proj | 5,120×6,144 | 16 % | tiled `gdn_norm_quant` behind `RADIANCE_MXFP4_TILED_OPROJ=1` (kernel default 0; `serve-mxfp4.sh` ships 1 since 1.5.2 -- the end-to-end stack above is that measurement) |
 
    A tiled `down` (a MAXG-16 silu producer or a second-stage producer) and a tiled
    `gdn_norm_quant` would extend the +11–13 % tile gain to the remaining 36 % of GEMM FLOPs —
@@ -189,12 +189,15 @@ What the numbers say:
 - Not comparable with the README 3,024: that is a full-run prefill phase; the sweep here reads about 5 % higher
   and the 300 W control in the same window is 3,318.
 
-New knobs (all default off, default path unchanged): `RADIANCE_MXFP4_TILED_OPROJ`, `RADIANCE_MXFP4_AT_TMS`,
-`RADIANCE_MXFP4_AT_TMS_MAX_M`. Existing: `RADIANCE_MXFP4_TN4_MIN_M`.
+New knobs (kernel default 0, so the compiled path is unchanged): `RADIANCE_MXFP4_TILED_OPROJ`,
+`RADIANCE_MXFP4_AT_TMS`, `RADIANCE_MXFP4_AT_TMS_MAX_M`. Existing: `RADIANCE_MXFP4_TN4_MIN_M`.
+`serve-mxfp4.sh` ships `RADIANCE_MXFP4_TILED_OPROJ=1` and `RADIANCE_MXFP4_TN4_MIN_M=513` since 1.5.2
+(the measured stack in the CHANGELOG); the knobs stay overridable, `=0` / `=2048` restore the old path.
 
 ## Verified floor knobs: SKIPPAD and the PSW weight layout (cell bench, 210 W)
 
-Two further A-tiled GEMM changes, both **default off**, both **bit-identical** to the current kernel
+Two further A-tiled GEMM changes, both **default off in the kernel** (`serve-mxfp4.sh` ships
+`RADIANCE_MXFP4_AT_SKIP_PAD=1` since 1.5.2), both **bit-identical** to the current kernel
 (sha256 DIGEST of the bf16 output), and both measured only in the cell bench so far. Full report,
 raw logs and the 300 W night script: `research/paiton-vs-sly/prefill-night/floor/` (REPORT.md,
 night300.sh). Gate: `ci/bench_at_psw.py`, layout self-check `ci/test_at_psw_layout.py`.

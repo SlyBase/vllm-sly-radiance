@@ -1054,13 +1054,31 @@ esac
 # coincide and nothing changes; with GPUS=1 the old "1,1" pair left the engine core with no
 # device at all ("No CUDA GPUs are available", 2026-09-16, first single-card serve on card 1).
 # Defaults in this exec block that carry the measured prefill stack (all `${VAR:-default}`, so the
-# environment still wins):  CHUNK=4096 -- see the comment at its default above.  R4D_ATTN_FP8=3 --
-# both 8-bit prefill attention legs, the numerics cost is documented in docs/TECHNICAL.md; the
-# libr4d compiled-in fallback stays 0, this line is the one place the default lives and a compiled
-# default would need a rebuild.  RADIANCE_MXFP4_TN4_MIN_M=513 -- the TN=4 tile from the first tile
-# up. The per-call cell bench crosses over near M~1700 (M=1536 -1.6 %, M=1024 -4.2 %, M=512 -8.8 %),
-# but a long prefill runs many full-size M and only ends on a short chunk, where that difference is
-# a fraction of the step: the measured stack (210 W, 1.5k-47k prompts) is net-positive at 513.
+# environment still wins). The measured combination, 210 W / one R9700 / BetterBench prefill at
+# 1.5k-47k prompts:  CHUNK=4096, RADIANCE_MXFP4_TN4_MIN_M=513, R4D_ATTN_FP8=3,
+# RADIANCE_FUSED_NORM_QUANT=1, RADIANCE_FUSED_NQ_REG=1, RADIANCE_MXFP4_AT_SKIP_PAD=1,
+# RADIANCE_MXFP4_TILED_OPROJ=1. Every one of them is still `${...:-}`, so a single env var puts the
+# old server back (`CHUNK=8192 RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0
+# RADIANCE_MXFP4_TILED_OPROJ=0 RADIANCE_MXFP4_TN4_MIN_M=2048 R4D_ATTN_FP8=0`), which is also why the
+# defaults live HERE and not in the kernels: the C++/Python side reads each knob and falls back to 0
+# (stock path, `--offload-device-only` assembly unchanged), a compiled-in default would need an
+# image rebuild to turn a lever back off.
+#   CHUNK=4096 -- see the comment at its default above.
+#   R4D_ATTN_FP8=3 -- both 8-bit prefill attention legs, the numerics cost is documented in
+#     docs/TECHNICAL.md; libr4d's compiled-in fallback stays 0.
+#   RADIANCE_MXFP4_TN4_MIN_M=513 -- the TN=4 tile from the first tile up. The per-call cell bench
+#     crosses over near M~1700 (M=1536 -1.6 %, M=1024 -4.2 %, M=512 -8.8 %), but a long prefill runs
+#     many full-size M and only ends on a short chunk, where that difference is a fraction of the
+#     step: the measured stack (210 W, 1.5k-47k prompts) is net-positive at 513.
+#   RADIANCE_FUSED_NORM_QUANT=1 -- the master knob of the fused norm/activation producers
+#     (docs/TECHNICAL.md). It has been the documented setting in README since 0.1.6 and is what the
+#     production unit runs; this launcher now matches it. FUSED_NQ_REG and TILED_OPROJ below are read
+#     INSIDE those producers, so without the master they would be defaults that do nothing.
+#   RADIANCE_FUSED_NQ_REG=1 -- register-resident row slice in the same producers (bit-identical).
+#   RADIANCE_MXFP4_AT_SKIP_PAD=1 -- a wave whose M-fragments all lie past the real M returns without
+#     staging the pad tile (docs/PREFILL-4000.md); A-tiled prefill only, hence the 513 above.
+#   RADIANCE_MXFP4_TILED_OPROJ=1 -- gdn_norm_quant writes the fragment layout so out_proj takes the
+#     A-tiled GEMM (byte-identical output, kernel cell bench +10..16 %).
 HIP_IDS=$(python3 -c "import sys; print(','.join(str(i) for i in range(len(sys.argv[1].split(',')))))" "$GPU_IDS")
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privileged --ipc=host --network=host \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
@@ -1092,6 +1110,10 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -e RADIANCE_MXFP4_DECODE_MAX_M="${RADIANCE_MXFP4_DECODE_MAX_M:-64}" \
   -e RADIANCE_MXFP4_DECODE_NT="${RADIANCE_MXFP4_DECODE_NT:-1}" \
   -e RADIANCE_MXFP4_A_TILED_MIN_M="${RADIANCE_MXFP4_A_TILED_MIN_M:-513}" \
+  -e RADIANCE_MXFP4_TILED_OPROJ="${RADIANCE_MXFP4_TILED_OPROJ:-1}" \
+  -e RADIANCE_FUSED_NORM_QUANT="${RADIANCE_FUSED_NORM_QUANT:-1}" \
+  -e RADIANCE_FUSED_NQ_REG="${RADIANCE_FUSED_NQ_REG:-1}" \
+  -e RADIANCE_MXFP4_AT_SKIP_PAD="${RADIANCE_MXFP4_AT_SKIP_PAD:-1}" \
   -e RADIANCE_MXFP4_WPERM="${RADIANCE_MXFP4_WPERM:-1}" \
   -e RADIANCE_TP_PAD="$TP_PAD" \
   -e RADIANCE_TP_PAD_INTERMEDIATE="${RADIANCE_TP_PAD_INTERMEDIATE:-}" \

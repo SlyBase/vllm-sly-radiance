@@ -37,7 +37,8 @@ unchanged (16 waves/SIMD). Bandwidth, not occupancy, was the limit.
 
 ## Knob
 
-`RADIANCE_FUSED_NQ_REG` (default **0** = stock, `set_nq_reg()` overrides it at runtime for in-process
+`RADIANCE_FUSED_NQ_REG` (kernel default **0** = stock, `serve-mxfp4.sh` ships `1` since 1.5.2 -- it is
+part of the measured stack; `=0` restores stock, `set_nq_reg()` overrides it at runtime for in-process
 A/B). Decode is unaffected (M<=64 was already fine: 1.05-1.4x, bit-identical).
 
 `RADIANCE_FUSED_NQ_ART` (128/512/1024, default 0 = launcher's choice, only with NQ_REG) sets the

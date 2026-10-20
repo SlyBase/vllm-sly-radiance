@@ -55,10 +55,22 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ### Changed
 - **The measured prefill stack is the default in `serve-mxfp4.sh`.** `CHUNK` (and therefore
   `--max-num-batched-tokens`) ships `4096` instead of `8192`, `RADIANCE_MXFP4_TN4_MIN_M` ships `513`
-  instead of `2048`, and `R4D_ATTN_FP8` keeps its `3` (both 8-bit prefill attention legs; the libr4d
-  compiled-in fallback stays `0`, the launcher line is the one place the default lives). Everything is
-  still `${VAR:-default}`: `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048 ./serve-mxfp4.sh` reproduces the
-  old server and `R4D_ATTN_FP8=0` restores the f16 legs.
+  instead of `2048`, `R4D_ATTN_FP8` keeps its `3`, and three levers that used to be experiment-branch
+  only now ship on because their kernels are in this tree: `RADIANCE_FUSED_NQ_REG=1` (register-resident
+  row slice in the fused norm/act-quant producers, bit-identical), `RADIANCE_MXFP4_AT_SKIP_PAD=1`
+  (SKIPPAD in the A-tiled prefill GEMM) and `RADIANCE_MXFP4_TILED_OPROJ=1` (fragment-tiled
+  `gdn_norm_quant`, byte-identical output). `RADIANCE_FUSED_NORM_QUANT` ships `1` as well: the
+  producers are what read `FUSED_NQ_REG` and `TILED_OPROJ`, so without the master those two would be
+  defaults that do nothing -- `1` is what `README` has documented since 0.1.6 and what the
+  production unit runs, this launcher now matches it.
+
+  Everything is still `${VAR:-default}`, and the default lives in the **launcher**, not in the kernel:
+  the C++/Python side reads each knob and falls back to `0`, i.e. the stock path, so
+  `--offload-device-only` assembly of the kernels is unchanged and turning a lever back off is an env
+  var rather than an image rebuild. `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048 R4D_ATTN_FP8=0
+  RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0 RADIANCE_MXFP4_TILED_OPROJ=0 ./serve-mxfp4.sh`
+  reproduces the old server.
+
   Cost: the 4096 chunk gives back ~3.5 % of the KV pool against 8192 -- and the `2x7551` row in
   `kv-profiles.tsv` is keyed on chunk 8192, so that host now falls back to vLLM's own profiling
   (safe, without the pin's +5.7 % margin) until a 4096 row is measured with `calibrate-kv.sh`.
@@ -74,17 +86,17 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   | control | 2556 | 2620 | 2605 | 2418 | 2064 |
   | combination | **2787** | **2845** | **2780** | **2624** | **2379** |
 
-  Same direction at 300 W: 3322 -> 3533 at 1.5k, 2814 -> 3150 at 47k. Three further legs of that
-  combination (register-resident fused-norm producers, SKIPPAD in the A-tiled GEMM, tiled `out_proj`)
-  are not defaulted here yet.
+  Same direction at 300 W: 3322 -> 3533 at 1.5k, 2814 -> 3150 at 47k. `sly/tests/test_prefill_defaults_cpu.py`
+  pins the launcher values, their `${VAR:-}` form, the master/producer dependency and the `0` fallback
+  in the kernels.
 
-  Kernel-level numerics change (fp8 attention legs; row relRMSE 1.7e-3 -> 3.1e-2). End-task quality
-  gate (GSM8K-200 + ppl, paired, 210 W): PENDING - see the PR description.
+Kernel-level numerics change (fp8 attention legs; row relRMSE 1.7e-3 -> 3.1e-2, kernel cell digest identical for the GEMM levers). End-task quality gate (GSM8K-200 + ppl, paired, 210 W): PENDING - see the PR description.
 
 *Measured (one R9700, prefill-only sweep, same-window control; details in docs/PREFILL-4000.md):* at 300 W
 the 1.5k prefill goes 3,318 -> 3,426 tok/s (+3.3 %) with `TILED_OPROJ=1` + `TN4_MIN_M=513`, 3,427 with chunk
 4096 added (+6 % at 16k, +7 % at 47k, KV pool -3.5 %). 4,000 tok/s is not reached. K2 (`GROUPM`) gave nothing
-beyond drift. All knobs default off; the default path is unchanged.
+beyond drift; the levers it measured ship in `serve-mxfp4.sh` since this section's *Changed*
+entry, with the kernels in this tree.
 
 ## [1.5.1] - 2026-10-16
 
