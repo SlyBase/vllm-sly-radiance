@@ -67,7 +67,7 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC=7 dflash / 4 mtp     speculative depth
   MAXSEQS=8                 max concurrent sequences
   MAXLEN=262144             max context length
-  CHUNK=8192                prefill chunk (--max-num-batched-tokens)
+  CHUNK=4096                prefill chunk (--max-num-batched-tokens)
   GPU_UTIL=0.98             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
@@ -236,9 +236,16 @@ IMAGE=${IMAGE:-stilldeadcode/vllm-radiance:0.9.3}
 NAME=${NAME:-vllmmxfp4074}
 PORT=${PORT:-8080}
 # Whether the caller set CHUNK explicitly -- captured BEFORE the default, so the single-GPU
-# profile below can tell "unset" from "deliberately 8192".
+# profile below can tell "unset" from "deliberately 4096".
 _SET_CHUNK=${CHUNK+1}
-CHUNK=${CHUNK:-8192}
+# 4096 is the measured prefill chunk: at --max-model-len 131072 it gives 3.5-4.8 % prefill over
+# 2048 on 8k-64k prompts, and 8192 is no faster than it while costing ~44k more KV tokens. The
+# measured stack (Tn=4 from M=513, both fp8 attention legs) was taken at this chunk, so the two
+# move together. The price is ~3.5 % of the KV pool against 8192; CHUNK=2048 returns the full
+# pool for 262k context and CHUNK=8192 the old default. The 2x7551 KV pin in kv-profiles.tsv is
+# keyed on chunk 8192 and therefore no longer matches -- vLLM profiles instead (safe, just
+# without the pin's +5.7 % margin) until a 4096 row is measured with calibrate-kv.sh.
+CHUNK=${CHUNK:-4096}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -692,7 +699,8 @@ if [ "$SINGLE_GPU_PROFILE" = 1 ]; then
   # nothing measurable (C8 162.0 vs 160.9; prefill within 1%) and returns the headroom; 2560
   # returns more of it again and is the chunk the 220000 pin below was reported at. The cost is
   # prefill transient size, not throughput -- but 2560 has NOT been benchmarked here the way 4096
-  # was. If long context is not what you want, CHUNK=4096 is the measured setting.
+  # was. Note this overrides the 4096 default above: it is the one place where "unset" does not
+  # mean 4096.
   [ -z "${_SET_CHUNK:-}" ] && CHUNK=2560
   # Context: the two-card default (262144) does not fit one 32 GiB card next to a 27B target plus
   # the drafter -- the NVFP4 prod checkpoint (bf16 lm_head) left 0.89 GiB of KV at 262144 and
@@ -1045,6 +1053,14 @@ esac
 # filtered list, so it must be 0..n-1, not the same absolute ids. With GPUS=0,1 both spellings
 # coincide and nothing changes; with GPUS=1 the old "1,1" pair left the engine core with no
 # device at all ("No CUDA GPUs are available", 2026-09-16, first single-card serve on card 1).
+# Defaults in this exec block that carry the measured prefill stack (all `${VAR:-default}`, so the
+# environment still wins):  CHUNK=4096 -- see the comment at its default above.  R4D_ATTN_FP8=3 --
+# both 8-bit prefill attention legs, the numerics cost is documented in docs/TECHNICAL.md; the
+# libr4d compiled-in fallback stays 0, this line is the one place the default lives and a compiled
+# default would need a rebuild.  RADIANCE_MXFP4_TN4_MIN_M=513 -- the TN=4 tile from the first tile
+# up. The per-call cell bench crosses over near M~1700 (M=1536 -1.6 %, M=1024 -4.2 %, M=512 -8.8 %),
+# but a long prefill runs many full-size M and only ends on a short chunk, where that difference is
+# a fraction of the step: the measured stack (210 W, 1.5k-47k prompts) is net-positive at 513.
 HIP_IDS=$(python3 -c "import sys; print(','.join(str(i) for i in range(len(sys.argv[1].split(',')))))" "$GPU_IDS")
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privileged --ipc=host --network=host \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
@@ -1072,7 +1088,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -e RADIANCE_MXFP4_SYNC="${RADIANCE_MXFP4_SYNC:-0}" \
   -e RADIANCE_MXFP4_CLONE="${RADIANCE_MXFP4_CLONE:-0}" -e RADIANCE_MXFP4_CHECKX="${RADIANCE_MXFP4_CHECKX:-0}" \
   -e RADIANCE_MXFP4_PADOUT="${RADIANCE_MXFP4_PADOUT:-0}" \
-  -e RADIANCE_MXFP4_TN4_MIN_M="${RADIANCE_MXFP4_TN4_MIN_M:-2048}" \
+  -e RADIANCE_MXFP4_TN4_MIN_M="${RADIANCE_MXFP4_TN4_MIN_M:-513}" \
   -e RADIANCE_MXFP4_DECODE_MAX_M="${RADIANCE_MXFP4_DECODE_MAX_M:-64}" \
   -e RADIANCE_MXFP4_DECODE_NT="${RADIANCE_MXFP4_DECODE_NT:-1}" \
   -e RADIANCE_MXFP4_A_TILED_MIN_M="${RADIANCE_MXFP4_A_TILED_MIN_M:-513}" \

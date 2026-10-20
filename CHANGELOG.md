@@ -32,6 +32,35 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   end-to-end gain is about 0.7 % at 47k (12 calls x ~10 ms) and is proven by the cell bench, not the server arm.
   Off by default; no launch argument changes.
 
+### Changed
+- **The measured prefill stack is the default in `serve-mxfp4.sh`.** `CHUNK` (and therefore
+  `--max-num-batched-tokens`) ships `4096` instead of `8192`, `RADIANCE_MXFP4_TN4_MIN_M` ships `513`
+  instead of `2048`, and `R4D_ATTN_FP8` keeps its `3` (both 8-bit prefill attention legs; the libr4d
+  compiled-in fallback stays `0`, the launcher line is the one place the default lives). Everything is
+  still `${VAR:-default}`: `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048 ./serve-mxfp4.sh` reproduces the
+  old server and `R4D_ATTN_FP8=0` restores the f16 legs.
+  Cost: the 4096 chunk gives back ~3.5 % of the KV pool against 8192 -- and the `2x7551` row in
+  `kv-profiles.tsv` is keyed on chunk 8192, so that host now falls back to vLLM's own profiling
+  (safe, without the pin's +5.7 % margin) until a 4096 row is measured with `calibrate-kv.sh`.
+  `TN4_MIN_M=513` has no memory cost: the wider tile is the same kernel, and the numerics are
+  identical either way.
+
+  Measured (one R9700, 210 W, BetterBench prefill, median of 8, prefix cache off, tok/s at 1.5k / 6k /
+  12k / 24k / 47k prompt tokens). Control = the previous defaults; combination = the stack above on
+  the same card in the same window:
+
+  | arm | 1.5k | 6k | 12k | 24k | 47k |
+  |---|---|---|---|---|---|
+  | control | 2556 | 2620 | 2605 | 2418 | 2064 |
+  | combination | **2787** | **2845** | **2780** | **2624** | **2379** |
+
+  Same direction at 300 W: 3322 -> 3533 at 1.5k, 2814 -> 3150 at 47k. Three further legs of that
+  combination (register-resident fused-norm producers, SKIPPAD in the A-tiled GEMM, tiled `out_proj`)
+  need kernel changes that are not in this branch, so they are not defaulted here.
+
+  Kernel-level numerics change (fp8 attention legs; row relRMSE 1.7e-3 -> 3.1e-2). End-task quality
+  gate (GSM8K-200 + ppl, paired, 210 W): PENDING - see the PR description.
+
 ## [1.5.1] - 2026-10-16
 
 ### Added

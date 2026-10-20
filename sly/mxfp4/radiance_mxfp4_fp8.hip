@@ -269,7 +269,8 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 //   M=8192 +10.0%  M=6144 +9.7%  M=4096 +8.5%  M=3072 +6.9%
 //   M=2048 +1.3%   M=1536 -1.6%  M=1024 -4.2%  M=512 -8.8%
 // Below the crossover the wide tile cannot fill: it halves the block count in N while BMF still
-// masks most of a short M. Hence TN=4 only from M >= 2048; RADIANCE_MXFP4_TN4_MIN_M overrides.
+// masks most of a short M. Hence TN=4 only from M >= 2048 here; RADIANCE_MXFP4_TN4_MIN_M overrides
+// (serve-mxfp4.sh ships 513: a long prefill only ends on a short chunk, the stack measures net-positive).
 // WPERM selects the weight layout. false is the checkpoint's own [N, K/2]; true is fragment
 // order, one 32-lane uint32 slot per (n-tile, k-step), which is what libr4d's
 // r4d_gemm_mxfp4a8_nt_m64 reads and what makes a wave's weight read 128 contiguous bytes instead

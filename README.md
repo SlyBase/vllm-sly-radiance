@@ -222,7 +222,7 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--attention-backend` | `R4D_HYBRID` | libr4d for long prefill runs, AITER for decode and short chunks. Plain `R4D` is not recommended (decode 60.9 vs 34.9 ms/step). `ROCM_AITER_UNIFIED_ATTN` is the fallback (slower long prefill) |
 | `--gpu-memory-utilization` | `0.98` | with `FULL_DECODE_ONLY` the profiled activation peak is 0.65 GiB, so 0.98 leaves room; 0.98 with `FULL_AND_PIECEWISE` gives only 404,947 KV tokens |
 | `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | graphs only for pure decode batches (0.22 GiB instead of 1.24); prefill and mixed steps run eagerly, no measured TTFT or c8 cost. Keep the capture-size list |
-| `--max-num-batched-tokens` | `2048` | prefill chunk size. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k |
+| `--max-num-batched-tokens` | `4096` | prefill chunk size; the shipped default (`CHUNK`), and the chunk the measured prefill stack was taken at. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** over 2048 at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k |
 | `--max-num-seqs` | `8` | 8 × (7 + 1) = 64 verify tokens per step, inside `DECODE_MAX_M`; above 8 requests queue (conc 16 = conc 8 throughput) |
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
@@ -232,12 +232,12 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |
 
 **Less context, more prefill:** if your requests stay well below 262k tokens, set
-`--max-model-len 131072 --max-num-batched-tokens 4096`: +3.5 … +4.8 % prefill on 8k–64k prompts, and the
+`--max-model-len 131072` (the prefill chunk is already `4096`): +3.5 … +4.8 % prefill on 8k–64k prompts, and the
 KV pool (~326k tokens) still holds two full 131k requests. Measured with image 0.4.0 on 2026-09-25 (300 W, prefill sweep; KV pools are 0.4.0 values, 1.0.0 holds ~11 % more):
 
 | `--max-model-len` / `--max-num-batched-tokens` | Prefill 2k / 8k / 16k / 32k / 64k tok/s | KV pool |
 |---|---|---|
-| 262144 / 2048 (default) | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 |
+| 262144 / 2048 | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 |
 | 131072 / 2048 | 3,379 / 3,344 / 3,212 / 2,936 / 2,520 | ~350k |
 | 131072 / **4096** | 3,375 / **3,444 / 3,351 / 3,057 / 2,613** | ~326k |
 | 131072 / 8192 | 3,367 / 3,486 / 3,290 / 3,022 / 2,579 | ~282k |

@@ -385,8 +385,9 @@ within 0.03 ms):
 
 Not bit-identical to the FLA path (different rounding of the bf16 state), so greedy text drifts
 after a few sentences; accuracy is unchanged. The extras' other kernels stay opt-in:
-`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain) and `R4D_ATTN_FP8`
-(8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
+`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain). `R4D_ATTN_FP8` (8-bit legs
+of the R4D prefill attention, R4D backend only) is the exception: `serve-mxfp4.sh` ships it at 3 since
+1.5.2, and `R4D_ATTN_FP8=0` restores the f16 legs. The lazy-snapshot kernels are built
 but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
 
 ## NVFP4 checkpoints via load-time MXFP4 requantization (0.3.6)
@@ -588,8 +589,9 @@ control's by construction.
   window, alibi, sinks, soft cap, non-causal, fused output quantization, non-bf16 output, graph capture.
 - **Precision.** The AITER path already does QK^T in fp8 and P.V with fp8 P (the layer hands the kernel an fp8 q with
   static scale 1.0; K/V tiles are cast to the q dtype), so the hybrid's f16-leg libr4d attention is the more accurate of the
-  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) stays off: with plain R4D it gave 64k 1918 tok/s
-  (+2 % over the f16 legs), not worth the accuracy cost.
+  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) ships at 3 since 1.5.2 (both
+  legs, part of the measured prefill stack); the note above was taken with plain R4D, where the legs gave
+  64k 1918 tok/s (+2 % over the f16 legs) on their own. `R4D_ATTN_FP8=0` restores the f16 legs.
 - **Measured** (tok/s, A/B/A control, hybrid, control): prefill 2k/8k/32k/64k C1 2375/2410/1976/1555, H
   2428/2506/2229/1919, C2 2380/2450/1970/1554, i.e. +2/+3/+13/+23 %. Greedy step 35.12/35.05/35.14 ms, c8 arrivals
   395.7/391.8/395.9 tok/s, short-prompt greedy text identical, prompt NLL delta -0.0007. Prompts that reach libr4d (one chunk
