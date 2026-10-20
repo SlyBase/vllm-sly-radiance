@@ -141,12 +141,17 @@ else
 fi
 
 # --------------------------------------------------------- drafter spec --------
+# DRAFT_SAMPLE: draft-side sampling for the DFlash2 drafter. `greedy` (default, the arm both
+# launchers ship) takes the draft head's argmax; `probabilistic` samples it with vLLM's shared-Gumbel
+# coupling (needs the full draft-logits head). Lossless either way -- the verifier decides the
+# emitted token -- so this is an acceptance/cost lever, not a numerics one.
+DRAFT_SAMPLE=${DRAFT_SAMPLE:-greedy}
 SPEC_ARGS=()
 if [ "$SPEC_METHOD" = dflash ] && [ -z "${NO_DRAFTER:-}" ]; then
   DRAFTER="$MODELS/$DRAFTER_REL"
   [ -d "$DRAFTER" ] || { echo "ERROR: drafter not at $DRAFTER (setup.sh)" >&2; exit 1; }
   SPEC_ARGS=(--speculative-config \
-    "{\"method\":\"dflash\",\"model\":\"/models/$DRAFTER_REL\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"TRITON_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"greedy\"}")
+    "{\"method\":\"dflash\",\"model\":\"/models/$DRAFTER_REL\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"TRITON_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}")
 elif [ "$SPEC_METHOD" = mtp ]; then
   # mtp uses the head inside the target (no extra download); measured default 4.
   mspec=${SPEC:-4}

@@ -537,7 +537,12 @@ print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ +
 # "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
 # fine -- torch's import is what actually pulls the runtime into the process.
 COPY sly/mxfp4/radiance_mxfp4_fp8.hip /opt/kernels/
+# RADIANCE_GROUPM (K2, default 0 = off): M-band raster grouping of the folded and A-tiled prefill GEMMs.
+# 0 adds no compiler flag, so the default build is the same object as before. See the macro
+# RAD_RASTER_GROUP in radiance_mxfp4_fp8.hip. Opt-in test builds only, pending a measured gain.
+ARG RADIANCE_GROUPM=0
 RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $([ "${RADIANCE_GROUPM}" != "0" ] && echo "-DRADIANCE_GROUPM=${RADIANCE_GROUPM}") \
       $(python -m pybind11 --includes) \
       /opt/kernels/radiance_mxfp4_fp8.hip -o /out/radiance_mxfp4_fp8.so \
  && PYTHONPATH=/out python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
@@ -579,6 +584,10 @@ FROM stack AS assemble
 # --- runtime modules and configs ---
 # radiance_amdsmi.py and .pth: amdsmi init-order fix. amdsmi must init before HIP at site-init in
 # every process, otherwise it enumerates 0 devices and platform detection fails.
+# tile_layout.py is not imported by the runtime, but sly/mxfp4/bench_prefill_cells.py and
+# ci/bench_at_psw.py (both meant to run inside this image) do `from tile_layout import untile`
+# with site-packages on sys.path -- it goes flat next to the other mxfp4 modules so the benches
+# do not need an extra bind mount.
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
@@ -586,6 +595,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_lmhead_int2.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
+     sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
      sly/radiance_adaptive_width.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
@@ -707,9 +717,9 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
-             sly/patch_gdn_fused_decode sly/patch_adaptive_width \
+             sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              sly/patch_minicpmv4_7 \
-             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus \
+             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \

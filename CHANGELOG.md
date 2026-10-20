@@ -10,6 +10,117 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.6.0] - 2026-10-20
+
+### Added
+- **Nucleus Speculative Decoding baked into the image (`RADIANCE_NSD`, default `0` = off).** `sly/patch_nsd.py`
+  joins the patch loop, so NSD no longer needs a bind-mount: `RADIANCE_NSD=1` (`RADIANCE_NSD_THETA`, default
+  0.95) ORs the target-nucleus test into the rejection kernel. Mutually exclusive with Cactus (fails at import
+  when both are set). Off by default; the default changes only after a GSM8K + ppl gate. `DRAFT_SAMPLE`
+  (`greedy` default, `probabilistic`) is now a launcher knob in `serve.sh` as in `serve-mxfp4.sh`.
+  CPU tests: `sly/tests/test_nsd_cpu.py`, `sly/tests/test_spec_knobs_cpu.py` (incl. patch order NSD/Cactus).
+- **Opt-in wide tile for the drafter's `fc` at prefill M (`RADIANCE_DFLASH_FC_TILED_MIN_M`, default `0` = off).**
+  The DFlash2 drafter's `fc` (`combine_hidden_states`, N = 5120, K = 25600) is the one drafter linear that
+  runs at the target's token count: 12 calls at M = 4089 in a 47k prefill (chunk 4096) on the stock
+  gfx12x heuristic's 128x64x64 tile, which was measured on decode batches. With the knob set (`2048` for
+  chunk 4096, `1024` for chunk 2048) M above the threshold takes a 256x128x64 tile (8 warps, 1 stage;
+  `RADIANCE_DFLASH_FC_TILED_CFG="BM,BN,BK,warps[,stages]"` overrides it) and M <= 64 is untouched. Each
+  dequantized weight tile is read half as often. `sly/check_w4a16_fc_big_m.py` on the R9700 at 210 W
+  (43 checks, 0 failures): output bit-identical to the stock tile at M = 513, 880, 1514, 1760, 4096; cell bench
+  stock -> wide tile 24.4 -> 13.9 ms at M = 4096 (-43 %), 6.6 -> 5.6 ms at 1760 (-16 %), +5 % at 513. A server
+  A/B (210 W, chunk 4096, ABBA, two windows) reads +0.3 / +0.4 % at 16k / 47k, inside the window drift: the
+  end-to-end gain is about 0.7 % at 47k (12 calls x ~10 ms) and is proven by the cell bench, not the server arm.
+  Off by default; no launch argument changes.
+- **Build option `RADIANCE_GROUPM` (default `0` = off): M-band raster grouping for the W4A8 prefill
+  GEMM.** `docker build --build-arg RADIANCE_GROUPM=16` compiles `radiance_mxfp4_fp8.so` with
+  `-DRADIANCE_GROUPM=16`; the folded and the A-tiled prefill kernels then number their blocks in
+  groups of 16 activation bands, so the blocks that share a weight tile are resident together and
+  the weight is read once per group instead of once per band (the same idea as `kGroupM` in libr4d's
+  fp8a8 GEMM). The map is a bijection over the grid: every output tile is computed once with the
+  same arithmetic. Test builds only; it is not in the release image until a GPU window shows a gain.
+- **Opt-in fragment-tiled `gdn_norm_quant` (`RADIANCE_MXFP4_TILED_OPROJ=1`, default `0`).** The GDN
+  out_proj producer writes the same fragment layout as `add_rms_quant`/`silu_mul_quant`, so the out_proj
+  GEMM (16 % of the prefill GEMM FLOPs) takes the A-tiled kernel from `A_TILED_MIN_M` upward. Cell bench: tiled
+  output is byte-identical to row-major, GEMM +10..16 % on o_proj/out_proj. `down` already used a tiled
+  producer (N = 17,408 is below the 18,432 limit).
+- **Opt-in short-M tile (`RADIANCE_MXFP4_AT_TMS=2|3`, `RADIANCE_MXFP4_AT_TMS_MAX_M`, default off).** Smaller
+  A-tiled row tile for M <= the given value; helps only M ~ 513..576 (padding), slower above.
+- `sly/mxfp4/bench_prefill_cells.py`: times the real producers, checks tiled == row-major byte for byte, prints
+  an output digest. New `ci/prefill_diag.sh` / `ci/prefill_trace_split.py` (rocprofv3 time split) and
+  `ci/prefill_ab.sh` arms `O`, `O0`, `T4`, `OT`, `OTA`, `OTR`, `GSM=1`.
+- `ci/prefill_ab.sh`: `SHORT=1` screening mode (one start per arm, three depths, three runs, no decode
+  phase), arms `K2` (this option, via a bind-mounted `.so`) and `R5` (`R4D_ATTN_FP8=3`), and an
+  optional `QUANT_FLAG` for `--quantization`.
+
+### Changed
+- **The measured prefill stack is the default in `serve-mxfp4.sh`.** `CHUNK` (and therefore
+  `--max-num-batched-tokens`) ships `4096` instead of `8192`, `RADIANCE_MXFP4_TN4_MIN_M` ships `513`
+  instead of `2048`, `R4D_ATTN_FP8` keeps its `3`, and three levers that used to be experiment-branch
+  only now ship on because their kernels are in this tree: `RADIANCE_FUSED_NQ_REG=1` (register-resident
+  row slice in the fused norm/act-quant producers, bit-identical), `RADIANCE_MXFP4_AT_SKIP_PAD=1`
+  (SKIPPAD in the A-tiled prefill GEMM) and `RADIANCE_MXFP4_TILED_OPROJ=1` (fragment-tiled
+  `gdn_norm_quant`, byte-identical output). `RADIANCE_FUSED_NORM_QUANT` ships `1` as well: the
+  fused norm/act-quant producers are what read `TILED_OPROJ` (gated on the master in
+  `radiance_fused_norm.py`), so without it that lever would do nothing -- `1` is what `README` has
+  documented since 0.1.6 and what the production unit runs, this launcher now matches it.
+  `RADIANCE_FUSED_NQ_REG` is **not** master-gated: the `.so` reads `nq_reg_v` once at load and every
+  caller of the `radiance::*_quant` launchers honours it, `radiance_arnq.py`'s residual-stream
+  epilogues (`RADIANCE_FP8_STREAM`, default `1`) included, so it acts with the master off too.
+
+  Everything is still `${VAR:-default}`, and the default lives in the **launcher**, not in the kernel:
+  the C++/Python side reads each knob and falls back to `0`, i.e. the stock path, so
+  `--offload-device-only` assembly of the kernels is unchanged and turning a lever back off is an env
+  var rather than an image rebuild. `CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048
+  RADIANCE_FUSED_NORM_QUANT=0 RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0
+  RADIANCE_MXFP4_TILED_OPROJ=0 R4D_ATTN_FP8=3 ./serve-mxfp4.sh`
+  reproduces the old server (`R4D_ATTN_FP8` was already `3` on `origin/main`; it is spelled out so
+  the set is the complete pre-PR state -- `R4D_ATTN_FP8=0` is the `R5` arm, not a revert).
+
+  Cost: the 4096 chunk gives back 3.5 % of the KV pool against 8192 -- measured at 262k context,
+  423,463 tokens against 439,031 (15,568 fewer) -- and the `2x7551` row in
+  `kv-profiles.tsv` is keyed on chunk 8192, so that host now falls back to vLLM's own profiling
+  (safe, without the pin's +5.7 % margin) until a 4096 row is measured with `calibrate-kv.sh`.
+  `TN4_MIN_M=513` has no memory cost: the wider tile is the same kernel, and the numerics are
+  identical either way.
+
+  At TP=1 the single-GPU profile still overrides an unset `CHUNK` to `2560`: that profile is the
+  long-context shape (seqs 3, maxlen 220000) and its KV row in `kv-profiles.tsv` is keyed on chunk
+  2560. The table below is therefore the **TP=1 measured shape**, not the TP=1 zero-config start:
+  it was measured with `CHUNK=4096` (and seqs 8 / maxlen 65536) passed explicitly.
+  `CHUNK=4096 MAXSEQS=8 MAXLEN=65536 ./serve-mxfp4.sh` reproduces it, `SINGLE_GPU_PROFILE=0` drops
+  the override.
+
+  Measured (one R9700, 210 W, BetterBench prefill, median of 8, prefix cache off, tok/s at 1.5k / 6k /
+  12k / 24k / 47k prompt tokens). Control = the previous defaults; combination = the stack above on
+  the same card in the same window:
+
+  | arm | 1.5k | 6k | 12k | 24k | 47k |
+  |---|---|---|---|---|---|
+  | control | 2556 | 2620 | 2605 | 2418 | 2064 |
+  | combination | **2787** | **2845** | **2780** | **2624** | **2379** |
+
+  Same direction at 300 W: 3322 -> 3533 at 1.5k, 2814 -> 3150 at 47k. `sly/tests/test_prefill_defaults_cpu.py`
+  pins the launcher values, their `${VAR:-}` form, the master/producer dependency and the `0` fallback
+  in the kernels.
+
+Kernel-level numerics change (fp8 attention legs; row relRMSE 1.7e-3 -> 3.1e-2, kernel cell digest identical for the GEMM levers). End-task quality gate (one image, ABBA C K K C, 210 W, thinking off, prompt cache off; C = the production unit's settings, K = the new defaults):
+
+| | C | K |
+|---|--:|--:|
+| GSM8K-200 CoT zero-shot, flexible-extract | 0.845 / 0.845 | 0.850 / 0.845 |
+| perplexity, fixed 4 891-token corpus | 2.4254 | 2.4289 / 2.4289 (+0.14 %) |
+| prefill tok/s at 1.5k / 6k / 12k / 24k / 47k | 2483 / 2468 / 2409 / 2267 / 1984 | 2656 / 2727 / 2693 / 2561 / 2335 |
+| prefill K/C | | +6.9 / +10.5 / +11.8 / +13.0 / +17.7 % |
+| decode aggregate tok/s c1 / c2 / c4 (32 requests) | 121.9 / 223.4 / 319.2 | 121.7 / 226.4 / 301.0 |
+
+Both quality criteria hold (GSM8K K >= C - 1 SE; ppl K <= 1.01 x C). Decode re-run (decode only, same image, ABBA, 32 requests per level): per-stream decode tok/s (median) c2 145.0 / 145.1 (C) vs 145.2 / 145.1 (K), c4 111.3 / 111.5 (C) vs 113.4 / 113.3 (K, +1.7 %); tokens per update 5.06 -> 5.27 at c4. The c4 aggregate reads 323 (C) vs 308 (K) because the K runs generated 2.5 % fewer tokens in a 2 % longer wall time (sampled outputs differ with the fp8 legs), not because a decode step got slower. The 4096 chunk costs 5 % of the KV pool at max-model-len 65536 (350 585 -> 332 960 tokens).
+
+*Measured (one R9700, prefill-only sweep, same-window control; details in docs/PREFILL-4000.md):* at 300 W
+the 1.5k prefill goes 3,318 -> 3,426 tok/s (+3.3 %) with `TILED_OPROJ=1` + `TN4_MIN_M=513`, 3,427 with chunk
+4096 added (+6 % at 16k, +7 % at 47k, KV pool -3.5 %). 4,000 tok/s is not reached. K2 (`GROUPM`) gave nothing
+beyond drift; the levers it measured ship in `serve-mxfp4.sh` since this section's *Changed*
+entry, with the kernels in this tree.
+
 ## [1.5.1] - 2026-10-16
 
 ### Added

@@ -385,8 +385,9 @@ within 0.03 ms):
 
 Not bit-identical to the FLA path (different rounding of the bf16 state), so greedy text drifts
 after a few sentences; accuracy is unchanged. The extras' other kernels stay opt-in:
-`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain) and `R4D_ATTN_FP8`
-(8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
+`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain). `R4D_ATTN_FP8` (8-bit legs
+of the R4D prefill attention, R4D backend only) is the exception: `serve-mxfp4.sh` ships it at 3 since
+1.6.0, and `R4D_ATTN_FP8=0` restores the f16 legs. The lazy-snapshot kernels are built
 but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
 
 ## NVFP4 checkpoints via load-time MXFP4 requantization (0.3.6)
@@ -588,8 +589,9 @@ control's by construction.
   window, alibi, sinks, soft cap, non-causal, fused output quantization, non-bf16 output, graph capture.
 - **Precision.** The AITER path already does QK^T in fp8 and P.V with fp8 P (the layer hands the kernel an fp8 q with
   static scale 1.0; K/V tiles are cast to the q dtype), so the hybrid's f16-leg libr4d attention is the more accurate of the
-  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) stays off: with plain R4D it gave 64k 1918 tok/s
-  (+2 % over the f16 legs), not worth the accuracy cost.
+  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) ships at 3 since 1.6.0 (both
+  legs, part of the measured prefill stack); the note above was taken with plain R4D, where the legs gave
+  64k 1918 tok/s (+2 % over the f16 legs) on their own. `R4D_ATTN_FP8=0` restores the f16 legs.
 - **Measured** (tok/s, A/B/A control, hybrid, control): prefill 2k/8k/32k/64k C1 2375/2410/1976/1555, H
   2428/2506/2229/1919, C2 2380/2450/1970/1554, i.e. +2/+3/+13/+23 %. Greedy step 35.12/35.05/35.14 ms, c8 arrivals
   395.7/391.8/395.9 tok/s, short-prompt greedy text identical, prompt NLL delta -0.0007. Prompts that reach libr4d (one chunk
@@ -697,6 +699,43 @@ What the CPU dry run cannot show, for the GPU window: 0.31 moves the DFlash cont
 (`_precompute_context_kv` inside `capture`), so the W4A16 context-KV GEMM now runs under capture; `_scoped_allocator_max_split`
 also wraps `profile_run` (KV pool size); `GDNAttentionMetadataBuilder` gained `update_block_table` / `uniform_spec_sequence_length`
 and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what `patch_adaptive_width` did by hand, now redundant).
+
+## Nucleus Speculative Decoding: `RADIANCE_NSD=1` (opt-in, default 0)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) relaxes the verifier for sampled (non-greedy)
+requests. A draft token x is accepted if the standard test passes (`u <= min(1, p(x)/q(x))`) **or** x is in
+the target nucleus S_theta(p): the mass of the tokens with a strictly higher target logit than x is <=
+theta (default 0.95). The residual distribution on a rejection and the bonus token are unchanged, so the
+only change is *more* acceptances.
+
+Where: `rejection_sample` in `vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py` (V2 runner, the
+path production runs). Its `target_logits` argument is already the sampled distribution (temperature,
+min-p, top-k, top-p applied by `Sampler.apply_sampling_params`), so p is what the paper needs. A token the
+sampler removed has logit -inf and is never in the nucleus. The lookup draft (point-mass q) and the
+probabilistic DFlash2 draft take the same branch; greedy rows, synthetic rates and block verification do
+not.
+
+How, without sorting the vocabulary: the nucleus test needs `sum(p_j for logit_j > logit_x)`. Per request
+and vocab block (8192 logits, the stock stats kernel's block) `_nsd_nucleus_mass_kernel` loads the draft
+token's logit, the global logsumexp (from the stock per-block max/sumexp) and streams the block once:
+`sum(where(l > l_x, exp(l - lse), 0))`. `_rejection_kernel` adds the blocks' partials of the step and ORs
+`mass <= theta` into `accepted`. One extra read of the target logits per draft row, a small fp32 scratch of
+`[num_logits, num_blocks]`, no atomics. Fixed shapes and no host sync, so FULL_DECODE_ONLY capture is
+unaffected; `USE_NSD` is a `constexpr`, so with `RADIANCE_NSD=0` the second kernel is never launched and the
+compiled rejection kernel is the stock one (checked bit for bit in the Triton interpreter,
+`sly/tests/nsd_kernel_check.py`).
+
+Knobs: `RADIANCE_NSD` (0|1, default 0), `RADIANCE_NSD_THETA` in [0, 1), one module-level read each, so a
+per-process constant. Cactus (`sly/patch_cactus.py`, default delta 0.5) hooks the same Leviathan branch and
+the paper's single-step bound does not cover a union of both rules: NSD=1 with the Cactus knob at anything
+but 0 raises at import, and because that knob defaults to 0.5 in this image the supported combination is
+`RADIANCE_NSD=1 RADIANCE_CACTUS_DELTA=0`. The patch is in the Dockerfile loop after `sly/patch_cactus`; the
+two apply in either order to the same file (`sly/tests/test_spec_knobs_cpu.py`).
+
+Status: default off, and it stays off until the numerics gate is run. The branch A/B reads +26 % weighted
+decode against the stock acceptance rule and ~+5 % against the Cactus-0.5 production config at concurrency 1
+(the latter inside the window noise). Open: GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparison
+against the Cactus-0.5 serve, plus step time and KV pool at concurrency 1 and 8.
 
 ## Build details
 

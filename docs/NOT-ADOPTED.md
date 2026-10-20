@@ -118,6 +118,17 @@ Measured with the arguments in [MINICPM-V47.md](MINICPM-V47.md), 210 W, BetterBe
 | CUDA-graph sizes aligned to k+1 (`[9,18,...]`) | Slower than `[8,16,32,...]`. |
 | Same AITER flag for Qwen3.8 production | Production already runs `R4D_HYBRID`; AITER 34.96 vs 35.00 ms at equal acceptance. |
 
+## Prefill kernel levers that failed their gate (2026-10-20)
+
+Both were written, compiled and measured on the R9700 at 210 W against the shipped kernels; neither
+beats its control, so both were dropped from the release. The work is archived on a branch
+(`exp/gdn-scan2`, `exp/attn-a1`) rather than carried here.
+
+| Item | Why not |
+|---|---|
+| GDN `chunk_scan` v2, staging prefetch issued in the chunk tail (`RADIANCE_GDN_SCAN_V2`) | Does what it set out to do and still loses: scratch spills 4 -> 0, VGPR 256 -> 205, LDS footprint, barriers, grid and instruction mix unchanged, **bit-identical on all 28 digest lines** (7 shapes x 2 layouts). Time at T = 4089, H = 48 (three runs, ABBA): **0.521 -> 0.541 ms = 1.042 x slower** (1.024 / 1.037 on the other two), against a GO of <= 0.92 x. Together with w3 (LDS diet, +8.9 %) the scan is therefore neither LDS- nor register-bound -- what is left is latency and the four chunk barriers. |
+| Attention A1 VALU diet, `O_CFOLD` + `O_MAX3` (`R4D_ATTN_OPT2`) | Cuts the arithmetic it targets -- softmax **53 -> 46 VALU** per steady m-tile block, 218 VGPR / 0 spills, outputs identical to the shipped arm -- and the time does not move: **1.008 x at 16k, 0.990 x at 40k**, i.e. noise around parity against a gate that asked for >= 4 %. The softmax VALU is not what limits the prefill attention kernel; WMMA and the LDS traffic are. |
+
 ## TetraAttention: query quantization in the attention kernel's prologue (2026-10-10)
 
 Tried: the HIP kernel takes the bf16 query, rotates it (Walsh-Hadamard as a butterfly over the
@@ -129,3 +140,73 @@ pays for that on every tile: +15-20 us per call at 19k context (1 sequence), +50
 561 vs 484 at 4). Scheduling barriers and staged loads removed the spills but not the occupancy
 loss. The un-rotation folded into the segment merge (`reduce_unrotate`) is kept: it costs nothing
 extra there. `sly/kv4/radiance_kv4h.hip` keeps the quantized query input (int4 by default, int8 as two planes).
+
+## Prefill GEMM: overlap, big tile, library paths (2026-10, 210 W cell bench, tried for the 4,000 tok/s goal)
+
+All variants below were bit-identical to the A-tiled kernel (sha256 of the bf16 output equal for every cell) and
+measured against it ABBA in the same invocation. None gave a reproducible gain, so none is in the image. The
+sources of the two kernel variants are kept on the branch `exp/prefill-gemm-attempts` (commits b8249f1, 1e8fc9d).
+
+| Item | Why not |
+|---|---|
+| Software-pipelined W stream, double-buffered `sW`, one barrier per slab (`AT_OVL`) | Neutral to 0-4 % slower (gate_up / down, M 1536 and 4096). The compiler keeps dequant and the LDS store after the WMMA group (`sched_barrier`), only the global-load stream overlaps. |
+| Dequant interleaved between the WMMA groups | +1-3 % slower. |
+| Producer/consumer wave split (2 or 4 extra producer waves) | +2-8 % slower, reproducible in both ABBA pairs; VGPR 143-193, no spills. |
+| 16-wave big tile 256x128 / 256x256 (`AT_BIG`) | 256x128: +1-10 % slower. 256x256: +4-5 % slower at M >= 2048, about 2-3 % faster at M 1024-1536 for gate_up/qkvz (two pairs only, not enough for a server arm). |
+| Smaller row tile TM = 2/3 (`AT_TMS`, kept, default off) | Slower at M >= 768; only M 513-576 gains (+17-28 %, padding effect). |
+| `RADIANCE_GROUPM` raster grouping (K2) | Gain below the window drift (+0.1 % / +0.3 %). |
+| Dequant to a fp8 scratch + hipBLASLt (`torch._scaled_mm`), per matrix | 0.47-0.75x of the A-tiled kernel. hipBLASLt row-wise fp8 reaches only 96-129 TF/s on gfx1201 (TunableOp: <= 166), the dequant adds 108-812 us per matrix. Not bit-identical. |
+| bf16 dequant + `torch.matmul` | GEMM alone 70-113 TF/s. |
+| Triton fp8 GEMM (autotuned `tl.dot`) | 150-210 TF/s without any dequant, i.e. about the A-tiled kernel; a fused W4A8 Triton kernel cannot exceed that. |
+| libr4d GEMMs (`gemm_mxfp4a8_nt_m64`, `gemm_w4a8_nt_m64`, ...) | Constraint M <= 64; no large-M entry. |
+
+Where the time goes (ablation, `AT_ABL` flag, timing only): dequant ALU about 7 %, LDS store about 10 %, W global
+loads about 8-12 %, A stream 5-13 %; WMMA + LDS reads + barrier alone reach 259-281 TF/s against 160-230 TF/s
+for the kernel. A cheaper dequant alone is worth at most about 5 %. At 210 W the same cell varies up to 41 %
+between runs (M = 513), so gains below about 10 % need ABBA with many repeats.
+
+## Prefill levers measured on 2026-10-19 (R9700, 210 W, image 1.5.1, chunk 4096 unless noted)
+
+All four were checked after the drafter `fc` tile (#165) to see what is left of the 5 % prefill gap
+at 47k tokens against the reference stack on the same card. None of them is adopted.
+
+### GDN `chunk_scan` with a smaller LDS footprint ("w3")
+
+Tried: `r4d_gdn_chunk_scan_k128_v128_c64_bf16` has 256 VGPRs, 4 spilled VGPRs (20 B/lane scratch) and 60,928 B LDS,
+so it runs one workgroup per CU and the 96 workgroups of a 4089-token chunk need two rounds (64 + 32). A variant
+(S and W+sA share one LDS union, one extra barrier per chunk, row scale and gate kept in registers, built without
+`-mcumode`) needs 43,520 B LDS, 240 VGPRs, 1 spill, 6 waves per SIMD, i.e. three workgroups per WGP and one round.
+Rejected: output is bit-identical to the stock kernel (28 of 28 digests over T = 64..4089, N = 1 and 2; error against
+an fp64 reference 4.4e-3 / 3.4e-3 for output / state) but the kernel is **9 % slower** (ABBA, median of 20, T = 4089,
+H = 48: 0.522 ms stock, 0.569 ms variant). The extra barrier, the spill and the lower rate per workgroup cost more
+than the second round saves. `chunk_scan` is 380 ms of 18.8 s at 47k (2 %), so even the planned -30 % would have been
+0.6 % end to end.
+
+### Attention without the LDS path: ablation only, no rewrite started
+
+Measured: one attention layer (`r4d_attn_prefill_h256_gqa6`, `R4D_ATTN_FP8=3`, M = 4089, ctx 0 / 16,356 / 40,890),
+timing-only variants that each remove one cost item (results are wrong by design; the patched base kernel equals the
+shipped one within 1 %): softmax replaced by `p = score` -9.5..-10.6 %; K/V fragments from a register instead of LDS
+-20.8..-22.0 %; K/V staging and barriers only for the first tile -14.9..-29.3 %; QK WMMA removed -25.6..-30.9 %; PV WMMA
+removed -28.6..-31.4 %. The items overlap (the sum is far above 100 %), so each number is an upper bound. The only
+removable item above 15 % is the LDS path; a kernel without LDS staging would have to load the fragments from L0/L2
+instead. Attention is 18.6 % of the 47k prefill, so a 10 % faster kernel is 1.9 % end to end, 15 % is 2.8 %. Not started:
+weeks of work for an unproven 0..3 %. The shipped f16-leg path was not ablated.
+
+### Launcher idle / prefill CUDA graph
+
+From the in-process profile (one request per depth): GPU idle is 7.5 % at 1.5k tokens and 2.5 % (471.7 ms) at 47k, a
+constant ~39 ms per chunk. 64 % of it (2,663 gaps, 302.7 ms) are gaps of 112..116 us right after `gemm_atiled<4>`
+before `add_rms_quant`, `silu_mul_quant` or the next GEMM: the length is the same whatever the number of launches, which
+looks like a stall at the end of a long kernel, not launch latency. A graph is not expected to remove it (at most
+~0.5 % end to end at 47k, an estimate), and fusing the silu quant into the GEMM epilogue already measured 0 +- 0.5 %.
+The reference stack has more idle than ours at 47k (497 vs 472 ms). Not built.
+
+### Negative voltage offset beyond -50 mV
+
+The card already runs `voltage_offset: -50` (LACT, since September). Tried -75 mV at the 210 W cap with the GTOA stack:
+the GEMM cell check stayed bit-identical (24 digests, 0 WRONG) but the clock under load did not rise (median 1,895 vs
+1,916 MHz at 209 W) and prefill read 2,606 vs 2,721 tok/s at 16k and 2,200 vs 2,232 at 47k (window drift is up to 3 %,
+so this is "no gain", not a measured loss). -100 mV and GSM8K at -75 mV were not run. The assumption that the power cap
+turns less voltage into more clock (about +2 % per 25 mV from P ~ f V^2) did not hold on this card.
+

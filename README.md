@@ -118,7 +118,7 @@ docker run -d --name vllm --restart unless-stopped \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
   --speculative-config.num_speculative_tokens 7 \
-  --speculative-config.draft_sample_method probabilistic \
+  --speculative-config.draft_sample_method greedy \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \
   --max-num-seqs 8 --max-num-batched-tokens 2048 \
@@ -191,9 +191,11 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_MXFP4_DECODE_MAX_M` | `128` | split-K decode kernel up to M = 128: covers `max-num-seqs × 8` and the mixed CUDA-graph sizes |
 | `RADIANCE_MXFP4_WIDE_MAX_M` | `192` (default `0` = off) | split-K decode kernel with 9–12 M fragments for M 129…192 instead of the padded 256-row tile: TTFT of 160-token prompts −13.8 %. Not 256: the folded tile wins again there (+11 % GEMM time at M 256). Needs `WPERM=1` |
 | `RADIANCE_ADAPTIVE_WIDTH` | `perseq` (default `0` = off) | per-request verify width, graph-safe (varlen FULL graphs): c8 with arrivals +4.7 %, one stream unchanged. `uniform` (one width per batch) gave +1.5 %. Tuning knobs `RADIANCE_AW_*` in [sly/README.md](sly/README.md) |
+| `RADIANCE_NSD` + `RADIANCE_NSD_THETA` | `0` (off) + `0.95` (opt-in, **unmeasured**) | Nucleus Speculative Decoding ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) in the rejection sampler: a draft token inside the target nucleus (mass of strictly higher target logits <= theta) is accepted besides the usual test; residual and bonus token unchanged. Only for sampling (temperature > 0), greedy is untouched. Trades a bounded deviation from the target distribution for acceptance; theta 0.95 is the paper's default, 0.90 is the second value to test. Excludes `RADIANCE_CACTUS_DELTA` (both set = startup error). Details: [sly/README.md](sly/README.md) `patch_nsd.py` |
 | `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
+| `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
 | `RADIANCE_LMHEAD_INT4` | `1` | int4 vocabulary head (656 MB instead of 2.5 GB per call; GSM8K unchanged). `RADIANCE_LMHEAD_FP8=1` is the more exact fallback |
 | `RADIANCE_LMHEAD_INT2` | `1` (with greedy decoding) | the 2-bit greedy vocabulary head: 2-bit coarse pass + bf16 top-16 re-rank, ≈7.5× less head traffic per decode step than int4; greedy-only (declines under sampling, byte-identical default otherwise) |
@@ -222,21 +224,22 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--attention-backend` | `R4D_HYBRID` | libr4d for long prefill runs, AITER for decode and short chunks. Plain `R4D` is not recommended (decode 60.9 vs 34.9 ms/step). `ROCM_AITER_UNIFIED_ATTN` is the fallback (slower long prefill) |
 | `--gpu-memory-utilization` | `0.98` | with `FULL_DECODE_ONLY` the profiled activation peak is 0.65 GiB, so 0.98 leaves room; 0.98 with `FULL_AND_PIECEWISE` gives only 404,947 KV tokens |
 | `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | graphs only for pure decode batches (0.22 GiB instead of 1.24); prefill and mixed steps run eagerly, no measured TTFT or c8 cost. Keep the capture-size list |
-| `--max-num-batched-tokens` | `2048` | prefill chunk size. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k |
+| `--max-num-batched-tokens` | `4096` | prefill chunk size; the shipped default (`CHUNK`), and the chunk the measured prefill stack was taken at. Larger chunks prefill long prompts faster but take activation memory from the KV pool: measured at `--max-model-len 131072`, 4096 gives **+3.5 … +4.8 % prefill** over 2048 at 8k–64k prompts (short prompts unchanged) for ~24k fewer KV tokens (−7 %); 8192 is no faster than 4096 and costs ~68k tokens. 2048 keeps the full pool for 262k. At TP=1 the single-GPU profile (below) keeps `CHUNK=2560` unless you set it — that profile is the long-context shape and its KV pin is keyed on 2560; the measurement above used `CHUNK=4096` explicitly |
 | `--max-num-seqs` | `8` | 8 × (7 + 1) = 64 verify tokens per step, inside `DECODE_MAX_M`; above 8 requests queue (conc 16 = conc 8 throughput) |
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
 | `--speculative-config.num_speculative_tokens` | `7` | the drafter's maximum (block size 8) |
+| `--speculative-config.draft_sample_method` | `greedy` | draft-side sampling: `greedy` takes the draft head's argmax, `probabilistic` samples it with vLLM's shared-Gumbel coupling (needs the full draft-logits head). Lossless either way — the verifier decides the emitted token — so this trades acceptance rate against per-step cost, not accuracy. `serve.sh` / `serve-mxfp4.sh` take it as `DRAFT_SAMPLE` (`DRAFT_SAMPLE=probabilistic ./serve-mxfp4.sh`); the like-for-like A/B against `probabilistic` is still open ([BENCHMARKS.md](docs/BENCHMARKS.md), step 2, arm G) |
 | `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes) |
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |
 
 **Less context, more prefill:** if your requests stay well below 262k tokens, set
-`--max-model-len 131072 --max-num-batched-tokens 4096`: +3.5 … +4.8 % prefill on 8k–64k prompts, and the
+`--max-model-len 131072` (the prefill chunk is already `4096`): +3.5 … +4.8 % prefill on 8k–64k prompts, and the
 KV pool (~326k tokens) still holds two full 131k requests. Measured with image 0.4.0 on 2026-09-25 (300 W, prefill sweep; KV pools are 0.4.0 values, 1.0.0 holds ~11 % more):
 
 | `--max-model-len` / `--max-num-batched-tokens` | Prefill 2k / 8k / 16k / 32k / 64k tok/s | KV pool |
 |---|---|---|
-| 262144 / 2048 (default) | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 |
+| 262144 / 2048 | 3,363 / 3,326 / 3,196 / 2,926 / 2,512 | 384,316 |
 | 131072 / 2048 | 3,379 / 3,344 / 3,212 / 2,936 / 2,520 | ~350k |
 | 131072 / **4096** | 3,375 / **3,444 / 3,351 / 3,057 / 2,613** | ~326k |
 | 131072 / 8192 | 3,367 / 3,486 / 3,290 / 3,022 / 2,579 | ~282k |
@@ -306,6 +309,39 @@ keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the
 distribution-sensitive sampling, reproducing published numbers). Do not raise it above 0.5 without measuring
 quality on your own prompts.
 
+### Nucleus Speculative Decoding (opt-in, off by default)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) is a second, **opt-in** acceptance rule for
+sampled requests. A draft token x is accepted when the standard test passes **or** x lies in the target
+nucleus: the probability mass of the tokens with a strictly higher target logit than x is <= `theta`.
+The residual distribution on a rejection and the bonus token are untouched, so the rule only ever accepts
+*more* — at the price of the paper's single-step bound on the deviation from the target distribution,
+which is why it is not the default. Patch: `sly/patch_nsd.py`, CPU-tested in `sly/tests/test_spec_knobs_cpu.py`
+(wiring) and `sly/tests/test_nsd_cpu.py` (rule, kernel in the Triton interpreter). Greedy rows, synthetic
+rates and block verification are not touched.
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `RADIANCE_NSD` | `0` (default) | `1` enables the nucleus rule. With it off nothing extra is launched and the NSD branch is compiled out (same arithmetic as stock). Read once at start (per-process constant) |
+| `RADIANCE_NSD_THETA` | `0.95` | nucleus mass in `[0, 1)`. Smaller = a tighter nucleus = fewer extra acceptances and less drift |
+
+NSD replaces the acceptance rule that Cactus rewrites, and the paper's bound does not cover the union of
+both, so the two are mutually exclusive: in this image **`RADIANCE_NSD=1` needs `RADIANCE_CACTUS_DELTA=0`**
+(otherwise the engine refuses to start with a `RuntimeError` — Cactus is on by default at 0.5, and the
+check reads that default, not an unset variable). Launch:
+
+```bash
+RADIANCE_NSD=1 RADIANCE_CACTUS_DELTA=0 ./serve-mxfp4.sh
+```
+
+A/B for this branch (1 R9700, production arguments, concurrency 1; the run is not yet in
+`radiance-benchmarks`, so treat the figures as the branch owner's, not as a citable window): **+26 %
+weighted decode against the stock acceptance rule** and **~+5 % against the Cactus-0.5 production
+config**, the latter inside the window noise. That is not enough to make it the default: a numerics-changing default needs the
+quality gate, i.e. GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparison against the Cactus-0.5
+serve, plus an unchanged step time and KV pool at concurrency 1 and 8. Until that gate is run, keep
+`RADIANCE_NSD=0` for chat/production and enable it only in a measured arm.
+
 ### Other checkpoints and GPUs
 
 | Switch | For |
@@ -337,6 +373,7 @@ This image stands on other people's work:
   slydlake/radiance) — the `adaptive_k` verify-width policy behind `RADIANCE_ADAPTIVE_WIDTH` and the M-band findings
   (wide decode tile) behind `RADIANCE_MXFP4_WIDE_MAX_M`, ported to vLLM's graph model.
 - **[extfs](https://github.com/extfs)** (Tom Hillbrunner) — TetraAttention (`KVCACHE_DTYPE=kv4`, `sly/kv4/`): the 4-bit KV cache with the int4/int8 WMMA attention kernel, its tests and accuracy harness (PR #135, taken wholesale; the image wiring, a 1.4.0 rebase and the re-measurement are ours).
+- **[EIT-NLP/Nucleus-Speculative-Decoding](https://github.com/EIT-NLP/Nucleus-Speculative-Decoding)** — the NSD acceptance rule (`RADIANCE_NSD`, arxiv 2610.07822): the rule and the reference `clean_nsd` membership test; the Triton kernel, the vLLM V2 rejection-sampler wiring and the tests are ours (code re-written, not copied).
 - **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.

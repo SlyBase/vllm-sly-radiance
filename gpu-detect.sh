@@ -174,7 +174,12 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
   [ -n "$RAD_GPU_SKIPPED" ] && echo "skipped (<${RAD_MIN_GPU_MIB} MiB):$RAD_GPU_SKIPPED"
   echo "tensor parallel:  $RAD_TP   (supported: $RAD_TP_ALLOWED)"
   echo "hardware sig:     $RAD_GPU_SIG"
-  kv=$(rad_kv_lookup "$RAD_GPU_SIG" "${MAXSEQS:-8}" "${CHUNK:-8192}" "${MAXLEN:-262144}" "${SPEC_METHOD:-dflash}")
+  # One place for the batch shape this script predicts a KV pin for: the SAME chunk default
+  # serve-mxfp4.sh ships (4096). A pin is keyed on (seqs, chunk, maxlen), so predicting it with the
+  # old 8192 chunk named a row the serve no longer uses (sly/tests/test_prefill_defaults_cpu.py
+  # pins the two equal). The TP=1 single-GPU profile is the exception: it pins seqs 3 / chunk 2560 /
+  # maxlen 220000, so pass those three explicitly when predicting that shape.
+  kv=$(rad_kv_lookup "$RAD_GPU_SIG" "${MAXSEQS:-8}" "${CHUNK:-4096}" "${MAXLEN:-262144}" "${SPEC_METHOD:-dflash}")
   if [ -n "$kv" ]; then
     echo "KV cache pin:     $kv bytes ($(awk -v b="$kv" 'BEGIN{printf "%.2f", b/1073741824}') GiB/GPU, measured)"
   else

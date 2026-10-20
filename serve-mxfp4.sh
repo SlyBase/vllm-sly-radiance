@@ -67,7 +67,7 @@ Everything is an environment variable; these are the ones worth knowing.
   SPEC=7 dflash / 4 mtp     speculative depth
   MAXSEQS=8                 max concurrent sequences
   MAXLEN=262144             max context length
-  CHUNK=8192                prefill chunk (--max-num-batched-tokens)
+  CHUNK=4096                prefill chunk (--max-num-batched-tokens)
   GPU_UTIL=0.98             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
@@ -236,9 +236,17 @@ IMAGE=${IMAGE:-stilldeadcode/vllm-radiance:0.9.3}
 NAME=${NAME:-vllmmxfp4074}
 PORT=${PORT:-8080}
 # Whether the caller set CHUNK explicitly -- captured BEFORE the default, so the single-GPU
-# profile below can tell "unset" from "deliberately 8192".
+# profile below can tell "unset" from "deliberately 4096".
 _SET_CHUNK=${CHUNK+1}
-CHUNK=${CHUNK:-8192}
+# 4096 is the measured prefill chunk: at --max-model-len 131072 it gives 3.5-4.8 % prefill over
+# 2048 on 8k-64k prompts, and 8192 is no faster than it. The price is KV pool: measured at 262k
+# context, 4096 holds 423,463 tokens against 439,031 at 8192 (-3.5 %, 15,568 fewer; arm table in
+# docs/PREFILL-4000.md). The measured stack (Tn=4 from M=513, both fp8 attention legs) was taken at
+# this chunk, so the two move together. CHUNK=2048 returns the full pool for 262k context and
+# CHUNK=8192 the old default. The 2x7551 KV pin in kv-profiles.tsv is keyed on chunk 8192 and
+# therefore no longer matches -- vLLM profiles instead (safe, just without the pin's +5.7 % margin)
+# until a 4096 row is measured with calibrate-kv.sh.
+CHUNK=${CHUNK:-4096}
 R4D_ATTN=${R4D_ATTN:-1}
 # GDN in_proj merge (radiance_gdnmerge.py): in_proj_qkvz + in_proj_ba as ONE GEMM, removing 96
 # GEMM launches and 48 activation quants per forward. Measured 2026-08-29: single-stream decode
@@ -692,7 +700,13 @@ if [ "$SINGLE_GPU_PROFILE" = 1 ]; then
   # nothing measurable (C8 162.0 vs 160.9; prefill within 1%) and returns the headroom; 2560
   # returns more of it again and is the chunk the 220000 pin below was reported at. The cost is
   # prefill transient size, not throughput -- but 2560 has NOT been benchmarked here the way 4096
-  # was. If long context is not what you want, CHUNK=4096 is the measured setting.
+  # was. Note this overrides the 4096 default above: it is the one place where "unset" does not
+  # mean 4096. The reason is the long-context shape this profile pins (seqs=3, maxlen=220000): its
+  # KV row in kv-profiles.tsv is keyed on chunk=2560, and a 4096 chunk would need a new row. So a
+  # TP=1 start WITHOUT CHUNK runs 2560, not the 4096 chunk the measured prefill stack (CHANGELOG,
+  # docs/PREFILL-4000.md) was taken at -- that table was measured with CHUNK=4096 passed explicitly.
+  # Restore the measured shape with `MAXSEQS=8 MAXLEN=65536 CHUNK=4096`, or drop the profile with
+  # SINGLE_GPU_PROFILE=0.
   [ -z "${_SET_CHUNK:-}" ] && CHUNK=2560
   # Context: the two-card default (262144) does not fit one 32 GiB card next to a 27B target plus
   # the drafter -- the NVFP4 prod checkpoint (bf16 lm_head) left 0.89 GiB of KV at 262144 and
@@ -858,10 +872,11 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # disable_padded_drafter_batch is the single-stream lever (~+50% on the 27B hybrids) and the
   # image bakes the vLLM unpad patch it relies on; it applies to dflash as well as mtp.
   # DRAFT_SAMPLE=probabilistic drafts stochastically with vLLM's shared-Gumbel coupling
-  # instead of argmax. The serve samples at temperature 0.7, and greedy one-hot drafts accept
-  # with only p_target(argmax); matched sampling accepts with sum(min(p,q)). Costs the full
-  # draft-logits head (bypasses the int2 argmax fast path) until the sparse draft_logits_spec
-  # integration exists -- measure acceptance vs that cost before defaulting.
+  # instead of argmax. Lossless either way (the verifier's rejection test is what decides the
+  # emitted token, so both drafters sample the target distribution exactly), but the two differ in
+  # acceptance rate and in what they cost per step: greedy is one argmax over the draft head,
+  # probabilistic needs the full draft-logits head. Default greedy -- the arm both launchers ship;
+  # the like-for-like A/B against probabilistic is still open (docs/BENCHMARKS.md, step 2, arm G).
   DRAFT_SAMPLE=${DRAFT_SAMPLE:-greedy}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
 else
@@ -1044,6 +1059,39 @@ esac
 # filtered list, so it must be 0..n-1, not the same absolute ids. With GPUS=0,1 both spellings
 # coincide and nothing changes; with GPUS=1 the old "1,1" pair left the engine core with no
 # device at all ("No CUDA GPUs are available", 2026-09-16, first single-card serve on card 1).
+# Defaults in this exec block that carry the measured prefill stack (all `${VAR:-default}`, so the
+# environment still wins). The measured combination, 210 W / one R9700 / BetterBench prefill at
+# 1.5k-47k prompts:  CHUNK=4096, RADIANCE_MXFP4_TN4_MIN_M=513, R4D_ATTN_FP8=3,
+# RADIANCE_FUSED_NORM_QUANT=1, RADIANCE_FUSED_NQ_REG=1, RADIANCE_MXFP4_AT_SKIP_PAD=1,
+# RADIANCE_MXFP4_TILED_OPROJ=1. Every one of them is still `${...:-}`, so a single env var puts the
+# old server back (`CHUNK=8192 RADIANCE_MXFP4_TN4_MIN_M=2048 RADIANCE_FUSED_NORM_QUANT=0
+# RADIANCE_FUSED_NQ_REG=0 RADIANCE_MXFP4_AT_SKIP_PAD=0 RADIANCE_MXFP4_TILED_OPROJ=0
+# R4D_ATTN_FP8=3`), which is also why the
+# defaults live HERE and not in the kernels: the C++/Python side reads each knob and falls back to 0
+# (stock path, `--offload-device-only` assembly unchanged), a compiled-in default would need an
+# image rebuild to turn a lever back off.
+#   CHUNK=4096 -- see the comment at its default above.
+#   R4D_ATTN_FP8=3 -- both 8-bit prefill attention legs, the numerics cost is documented in
+#     docs/TECHNICAL.md; libr4d's compiled-in fallback stays 0. The knob is unchanged by this
+#     branch (origin/main also shipped 3), it appears in the revert set only so that set is the
+#     complete old state; R4D_ATTN_FP8=0 is a DIFFERENT arm, not a revert.
+#   RADIANCE_MXFP4_TN4_MIN_M=513 -- the TN=4 tile from the first tile up. The per-call cell bench
+#     crosses over near M~1700 (M=1536 -1.6 %, M=1024 -4.2 %, M=512 -8.8 %), but a long prefill runs
+#     many full-size M and only ends on a short chunk, where that difference is a fraction of the
+#     step: the measured stack (210 W, 1.5k-47k prompts) is net-positive at 513.
+#   RADIANCE_FUSED_NORM_QUANT=1 -- the master knob of the fused norm/activation producers
+#     (docs/TECHNICAL.md). It has been the documented setting in README since 0.1.6 and is what the
+#     production unit runs; this launcher now matches it. TILED_OPROJ below is read in
+#     radiance_fused_norm.py and gated on the master there, so without it that lever is inert.
+#   RADIANCE_FUSED_NQ_REG=1 -- register-resident row slice in the same producers (bit-identical).
+#     Unlike TILED_OPROJ it is NOT master-gated: the .so reads nq_reg_v once at load
+#     (radiance_mxfp4_fp8.hip:1809) and every caller of the radiance::*_quant launchers honours it,
+#     including radiance_arnq.py's residual-stream epilogues (RADIANCE_FP8_STREAM, default 1) and
+#     whichever producers run with the master off. So it also acts with FUSED_NORM_QUANT=0.
+#   RADIANCE_MXFP4_AT_SKIP_PAD=1 -- a wave whose M-fragments all lie past the real M returns without
+#     staging the pad tile (docs/PREFILL-4000.md); A-tiled prefill only, hence the 513 above.
+#   RADIANCE_MXFP4_TILED_OPROJ=1 -- gdn_norm_quant writes the fragment layout so out_proj takes the
+#     A-tiled GEMM (byte-identical output, kernel cell bench +10..16 %).
 HIP_IDS=$(python3 -c "import sys; print(','.join(str(i) for i in range(len(sys.argv[1].split(',')))))" "$GPU_IDS")
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privileged --ipc=host --network=host \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
@@ -1071,10 +1119,14 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -e RADIANCE_MXFP4_SYNC="${RADIANCE_MXFP4_SYNC:-0}" \
   -e RADIANCE_MXFP4_CLONE="${RADIANCE_MXFP4_CLONE:-0}" -e RADIANCE_MXFP4_CHECKX="${RADIANCE_MXFP4_CHECKX:-0}" \
   -e RADIANCE_MXFP4_PADOUT="${RADIANCE_MXFP4_PADOUT:-0}" \
-  -e RADIANCE_MXFP4_TN4_MIN_M="${RADIANCE_MXFP4_TN4_MIN_M:-2048}" \
+  -e RADIANCE_MXFP4_TN4_MIN_M="${RADIANCE_MXFP4_TN4_MIN_M:-513}" \
   -e RADIANCE_MXFP4_DECODE_MAX_M="${RADIANCE_MXFP4_DECODE_MAX_M:-64}" \
   -e RADIANCE_MXFP4_DECODE_NT="${RADIANCE_MXFP4_DECODE_NT:-1}" \
   -e RADIANCE_MXFP4_A_TILED_MIN_M="${RADIANCE_MXFP4_A_TILED_MIN_M:-513}" \
+  -e RADIANCE_MXFP4_TILED_OPROJ="${RADIANCE_MXFP4_TILED_OPROJ:-1}" \
+  -e RADIANCE_FUSED_NORM_QUANT="${RADIANCE_FUSED_NORM_QUANT:-1}" \
+  -e RADIANCE_FUSED_NQ_REG="${RADIANCE_FUSED_NQ_REG:-1}" \
+  -e RADIANCE_MXFP4_AT_SKIP_PAD="${RADIANCE_MXFP4_AT_SKIP_PAD:-1}" \
   -e RADIANCE_MXFP4_WPERM="${RADIANCE_MXFP4_WPERM:-1}" \
   -e RADIANCE_TP_PAD="$TP_PAD" \
   -e RADIANCE_TP_PAD_INTERMEDIATE="${RADIANCE_TP_PAD_INTERMEDIATE:-}" \
