@@ -196,6 +196,6 @@ for name in SHAPES:
                       f"{tf(A):.1f} {tf(Bm):.1f} {(a1[1] + a2[1]) / 2:.0f} {(b1[1] + b2[1]) / 2:.0f} "
                       f"{(a1[2] + a2[2]) / 2:.1f} {(b1[2] + b2[2]) / 2:.1f}", flush=True)
         setv(0)
-    del real, Wv, Sv, RF, gu_w; torch.cuda.empty_cache()
+    real = Wv = Sv = RF = gu_w = None; torch.cuda.empty_cache()  # rebind, not del: the closures above read these names
 stop[0] = True
 print("DONE", flush=True)
