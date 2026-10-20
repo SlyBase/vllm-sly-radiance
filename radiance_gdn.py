@@ -53,6 +53,20 @@ def _bind(op: str, **geometry):
 # for, so writing them here would be a second copy of the constants just read out of the library --
 # ask it which kernel it has instead, and the names stay in the registry next to the kernels.
 _CHUNK_SCAN = _bind("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK)
+# RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3: an opt-in build variant of the chunk_scan, same arithmetic and
+# byte-identical outputs (docs/GDN-CHUNK-SCAN-VARIANTS.md). s1 = workgroup-processor mode, s2 = s1 + 43 KB
+# LDS (3 workgroups per WGP), s3 = s2 + late staging prefetch. Default off. A libr4d without them ignores
+# the unknown `variant` key and answers with the stock name, so the name -- not the answer being
+# non-None -- tells whether the variant is really there.
+SCAN_VARIANT = os.environ.get("RADIANCE_GDN_SCAN_VARIANT", "")
+if SCAN_VARIANT and _CHUNK_SCAN is not None and _r4d is not None:
+    _var_name = _r4d.select("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK,
+                            variant=SCAN_VARIANT)
+    if _var_name and _var_name.endswith("_" + SCAN_VARIANT) and hasattr(_r4d, _var_name):
+        _CHUNK_SCAN = getattr(_r4d, _var_name)
+    else:
+        sys.stderr.write(f"[radiance.gdn] RADIANCE_GDN_SCAN_VARIANT={SCAN_VARIANT} is not in this libr4d, "
+                         "keeping the stock chunk_scan\n")
 _CONV_PREP = _bind("gdn_conv_prep", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V,
                    chunk=CHUNK)
 _CONV_UPDATE = _bind("gdn_conv_update", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V)
