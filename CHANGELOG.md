@@ -13,6 +13,15 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [1.5.2] - 2026-10-19
 
 ### Added
+- **`RADIANCE_GDN_SCAN_V2`, default `0` = off; unmeasured.** A second `gdn_chunk_scan` translation unit
+  (`sly/r4d/r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip`, patch `sly/r4d/r4d_gdn_scan_v2.patch`) that
+  runs the same arithmetic with the next chunk's staging prefetch issued in the chunk tail instead of
+  its head, so the 24 VGPRs it occupies are no longer live across the main WMMA loop. CPU compile
+  (gfx1201): **205 VGPR, 0 spills** against the stock 256 VGPR / 4 spills (20 B/lane), with the LDS
+  footprint, the four barriers, the grid and the instruction mix unchanged (`v_wmma` 80/80). w3 showed
+  that raising the waves/SIMD does not pay, so this slice buys nothing with occupancy and does not
+  claim a timing result: no GPU window has been run. Gates in `docs/GDN-CHUNK-SCAN-V2.md`; GPU test
+  `sly/gdn/tests/gpu_chunk_scan_v2.py` (DIGEST must equal stock, GO at <= 0.92 x, ABORT above 0.95).
 - **Nucleus Speculative Decoding baked into the image (`RADIANCE_NSD`, default `0` = off).** `sly/patch_nsd.py`
   joins the patch loop, so NSD no longer needs a bind-mount: `RADIANCE_NSD=1` (`RADIANCE_NSD_THETA`, default
   0.95) ORs the target-nucleus test into the rejection kernel. Mutually exclusive with Cactus (fails at import

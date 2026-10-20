@@ -1,0 +1,95 @@
+diff --git a/build.sh b/build.sh
+index d02982f..9f74631 100755
+--- a/build.sh
++++ b/build.sh
+@@ -39,6 +39,7 @@ UNITS=(
+   "r4d_attn_paged_h256_gqa6:"
+   "r4d_attn_vit_h72_bf16:"
+   "r4d_gdn_chunk_scan_k128_v128_c64_bf16:-mcumode"
++  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2:"
+   "r4d_gdn_conv_w4_h128_bf16:"
+   "r4d_gdn_kkt_solve_k128_c64_bf16:"
+   "r4d_gdn_recurrent_update_k128_v128_bf16_fp32state:"
+diff --git a/r4d.h b/r4d.h
+index 1e9fd78..fa1328d 100644
+--- a/r4d.h
++++ b/r4d.h
+@@ -103,6 +103,15 @@ int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
+         const void* cu, int N, int H, int Hg, int K, int V, int bt,
+         float scale, void* stream);
+ void r4d_gdn_dims(int* head_k, int* head_v, int* chunk);
++// Same contract, same geometry and byte-identical outputs as the entry point above; it differs only
++// in WHERE the next chunk's staging prefetch is issued, which lets the register allocator drop the
++// four scratch spills the stock unit carries. Selected with select("gdn_chunk_scan", ...,
++// variant="v2"); a build without it ignores the unknown key and answers with the stock name.
++int r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2(
++        const void* q, const void* k, const void* v, const void* A,
++        const void* g, const void* beta, const void* h0, void* o, void* ht,
++        const void* cu, int N, int H, int Hg, int K, int V, int bt,
++        float scale, void* stream);
+ 
+ // The chunk preamble: A = (I + strict_lower(diag(beta) K K^T e^{g_i-g_j}))^-1 per chunk, which is
+ // FLA's chunk_scaled_dot_kkt_fwd followed by solve_tril with the fp32 gram in between never
+diff --git a/r4d_module.hip b/r4d_module.hip
+index 3a6fa1d..9b97d41 100644
+--- a/r4d_module.hip
++++ b/r4d_module.hip
+@@ -134,11 +134,14 @@ static int64_t attn_decode_scratch_bytes(int num_seqs, int q_len, int q_heads, i
+ // =================================================================================================
+ // gated delta net
+ // =================================================================================================
+-static void gdn_chunk_scan(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
++template <int (*Fn)(const void*, const void*, const void*, const void*, const void*, const void*,
++                    const void*, void*, void*, const void*, int, int, int, int, int, int, float,
++                    void*)>
++static void gdn_chunk_scan_impl(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
+                            int64_t h0, int64_t o, int64_t ht, int64_t cu, int num_seqs,
+                            int num_v_heads, int num_k_heads, int head_k, int head_v, int chunk,
+                            double scale, int64_t stream) {
+-  int rc = r4d_gdn_chunk_scan_k128_v128_c64_bf16(
++  int rc = Fn(
+       (const void*)q, (const void*)k, (const void*)v, (const void*)A, (const void*)g,
+       (const void*)beta, (const void*)h0, (void*)o, (void*)ht, (const void*)cu, num_seqs,
+       num_v_heads, num_k_heads, head_k, head_v, chunk, (float)scale, (void*)stream);
+@@ -681,7 +684,10 @@ PYBIND11_MODULE(r4d, m) {
+   }
+ 
+   // ---- gated delta net ----
+-  m.def("gdn_chunk_scan_k128_v128_c64_bf16", &gdn_chunk_scan);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16",
++        &gdn_chunk_scan_impl<r4d_gdn_chunk_scan_k128_v128_c64_bf16>);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16_v2",
++        &gdn_chunk_scan_impl<r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2>);
+   m.def("gdn_kkt_solve_k128_c64_bf16", &gdn_kkt_solve);
+   m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
+   m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
+diff --git a/r4d_registry.hip b/r4d_registry.hip
+index c886dfd..9f76af4 100644
+--- a/r4d_registry.hip
++++ b/r4d_registry.hip
+@@ -55,6 +55,12 @@ static const R4DConstraint cAttnVit[] = {
+ static const R4DConstraint cGdnChunkScan[] = {
+     C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64),
+ };
++// Same constraints plus the key that selects it. select() returns the FIRST match, so this row must
++// stay above the stock one: a query carrying variant="v2" would otherwise be answered by the stock
++// row, which has no variant constraint and so ignores the key.
++static const R4DConstraint cGdnChunkScanV2[] = {
++    C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64), C_IN("variant", "v2"),
++};
+ static const R4DConstraint cGdnConvPrep[] = {
+     C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64),
+ };
+@@ -189,6 +195,12 @@ static const R4DKernelInfo kKernels[] = {
+      "one cu_seqlens segment per image",
+      "bf16 query / key / value / out, f16 operands, fp32 accumulate",
+      ROW(cAttnVit)},
++    {"gdn_chunk_scan_k128_v128_c64_bf16_v2", "gdn", "gdn_chunk_scan",
++     "gated delta net chunked scan, v2: same kernel, same LDS and barriers, the next chunk's staging "
++     "prefetch issued in the chunk tail instead of its head (no scratch spills)",
++     "head_k 128, head_v 128, chunk 64, varlen; only for select(..., variant=\"v2\")",
++     "bf16 q/k/v/A, fp32 gate/beta/state, bf16 out, fp32 final state",
++     ROW(cGdnChunkScanV2)},
+     {"gdn_chunk_scan_k128_v128_c64_bf16", "gdn", "gdn_chunk_scan",
+      "gated delta net chunked scan: WY recompute, state recurrence and output in one kernel",
+      "head_k 128, head_v 128, chunk 64, varlen, state resident in WMMA accumulators",

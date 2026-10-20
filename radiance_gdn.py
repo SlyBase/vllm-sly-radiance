@@ -53,6 +53,19 @@ def _bind(op: str, **geometry):
 # for, so writing them here would be a second copy of the constants just read out of the library --
 # ask it which kernel it has instead, and the names stay in the registry next to the kernels.
 _CHUNK_SCAN = _bind("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK)
+# RADIANCE_GDN_SCAN_V2=1: the v2 chunk_scan -- same kernel, same arithmetic, same LDS and barriers,
+# with the next chunk's staging prefetch issued in the chunk tail instead of its head so the stock
+# unit's four scratch spills go away (docs/GDN-CHUNK-SCAN-V2.md). Default off. A libr4d without it
+# ignores the unknown `variant` key and answers with the stock name, so the name -- not the answer
+# being non-None -- tells whether v2 is really there.
+SCAN_V2 = os.environ.get("RADIANCE_GDN_SCAN_V2", "0") == "1"
+if SCAN_V2 and _CHUNK_SCAN is not None and _r4d is not None:
+    _v2_name = _r4d.select("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK, variant="v2")
+    if _v2_name and _v2_name.endswith("_v2") and hasattr(_r4d, _v2_name):
+        _CHUNK_SCAN = getattr(_r4d, _v2_name)
+    else:
+        sys.stderr.write("[radiance.gdn] RADIANCE_GDN_SCAN_V2=1 but this libr4d has no v2 chunk_scan, "
+                         "keeping the stock kernel\n")
 _CONV_PREP = _bind("gdn_conv_prep", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V,
                    chunk=CHUNK)
 _CONV_UPDATE = _bind("gdn_conv_update", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V)
