@@ -1,8 +1,8 @@
 # Prefill 4,000 tok/s: the non-GEMM producers (Hebel #4)
 
 Status: **measured, bit-identical, small** (2026-10-18, 210 W, production launch line).
-Parent document: [PREFILL-4000.md](PREFILL-4000.md). Full report with all logs: the research tree
-`paiton-vs-sly/prefill-night/nongemm/REPORT.md` (not part of this repo).
+Parent document: [PREFILL-4000.md](PREFILL-4000.md). Full report with all logs: `REPORT.md` in the
+measurement workspace (not part of this repo).
 
 ## Result
 
@@ -75,8 +75,8 @@ SHORT=1 G_DIR=/root/nongemm/so-night ARMS="G0 G G0 G" OUT=/root/prefill-ab-nq ci
 
 ## Not verified
 
-- 300 W: the whole table above is 210 W. A 300 W night script exists
-  (`paiton-vs-sly/prefill-night/nongemm/night300.sh`, arms G0/G, ~1.5k / 16k / 47k); it has not run.
+- 300 W: the whole table above is 210 W. A 300 W night script exists in that workspace
+  (`night300.sh`, arms G0/G, ~1.5k / 16k / 47k); it has not run.
 - 47k prompt: only 15.8k was measured in situ. The producers are per-token bandwidth work, so the
   relative gain should hold, but it is extrapolation.
 - Concurrency > 1 (batching mixes M per call), prefix caching on, and other model checkpoints.

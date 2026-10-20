@@ -9,10 +9,10 @@ the reference runs in [README.md](../README.md) and [BENCHMARKS.md](BENCHMARKS.m
 Bring the 1.5k-prompt prefill from **3,024 tok/s** (1.5.1 reference, 300 W, production arguments)
 to **4,000 tok/s** (+32 %).
 
-Feasibility: Paiton's MXFP4 setup reaches 3,691 / 3,831 / 3,871 / 3,750 / 3,455 tok/s at
-1.5k / 6k / 12k / 24k / 64k on the same card class (BENCHMARKS.md → Recipe step 1). The
-4,000 target sits slightly above their 12k figure, so it is realistic — but it is **kernel
-headroom, not config headroom** (below).
+Feasibility: the reference stack's MXFP4 setup reaches 3,691 / 3,831 / 3,871 / 3,750 / 3,455 tok/s at
+1.5k / 6k / 12k / 24k / 64k on the same card class (as published; see the recipe step in
+[BENCHMARKS.md](BENCHMARKS.md)). The 4,000 target sits slightly above the reference 12k figure, so
+it is realistic — but it is **kernel headroom, not config headroom** (below).
 
 ## Lever audit: the four candidates are already on
 
@@ -42,7 +42,7 @@ i.e. **~3,300 tok/s — not 4,000**. The remaining ~24 % is in the prefill kerne
    A tiled `down` (a MAXG-16 silu producer or a second-stage producer) and a tiled
    `gdn_norm_quant` would extend the +11–13 % tile gain to the remaining 36 % of GEMM FLOPs —
    order +4 % prefill if the tile gain transfers, more if the row-major path is worse than that.
-2. **Attention and GDN prefill kernels.** The BENCHMARKS Paiton gap "grows with depth
+2. **Attention and GDN prefill kernels.** The reference stack's published gap "grows with depth
    (≈ +12 % at 2k, ≈ +27 % at 64k)" after the chunk correction — attributed to their
    attention/GDN prefill kernels. Ours: libr4d paged prefill attention (`R4D_HYBRID`) and the
    narrow-state bf16 GDN kernels (`sly/gdn/`). This is the largest unmeasured block.
@@ -70,14 +70,14 @@ must be 436,906 tokens (439,031 on 1.5.1).
 | 6 | K: `KVCACHE_DTYPE=kv4` + chunk 4096 | TETRA +3–4 % prefill and the 1.75× KV pool in the same window |
 | 7 | C2: control again | window drift; discard the window if C2 deviates > 3 % from C1 |
 
-Success criteria: any arm ≥ 3,600 tok/s at 1.5k (within 8 % of Paiton's 12k figure) → follow-up
+Success criteria: any arm ≥ 3,600 tok/s at 1.5k (within 8 % of the reference stack's 12k figure) → follow-up
 with production conditions (KV pool, GSM8K 200 against `ci/accept/baselines/`), then README /
 CHANGELOG per AGENTS.md. If no arm gets above ~3,300, the gain is in the kernels:
 
 - `sly/mxfp4/bench_prefill_cells.py` — cell-level GEMM sweep; the `down` and `o_proj`/`out_proj`
   row-major gap is the first kernel work item (a tiled producer each).
 - `sly/bench_decode_attn.py` (2D prefill/extend mode) — attention cells at the 1,536-q_len shape.
-- GDN prefill: the `sly/gdn/` HIP kernels against the Paiton gap at 2k.
+- GDN prefill: the `sly/gdn/` HIP kernels against the reference stack's gap at 2k.
 
 ## Result of the first A/B window (2026-10-17, 210 W)
 
@@ -199,8 +199,9 @@ New knobs (kernel default 0, so the compiled path is unchanged): `RADIANCE_MXFP4
 Two further A-tiled GEMM changes, both **default off in the kernel** (`serve-mxfp4.sh` ships
 `RADIANCE_MXFP4_AT_SKIP_PAD=1` since 1.5.2), both **bit-identical** to the current kernel
 (sha256 DIGEST of the bf16 output), and both measured only in the cell bench so far. Full report,
-raw logs and the 300 W night script: `research/paiton-vs-sly/prefill-night/floor/` (REPORT.md,
-night300.sh). Gate: `ci/bench_at_psw.py`, layout self-check `ci/test_at_psw_layout.py`.
+raw logs and the 300 W night script live in the measurement workspace outside this repo
+(`floor/REPORT.md`, `night300.sh`). Gate: `ci/bench_at_psw.py`, layout self-check
+`ci/test_at_psw_layout.py`.
 
 - **SKIPPAD** (`RADIANCE_MXFP4_AT_SKIP_PAD=1`, commit 48c5fa1): a wave whose M-fragments all lie past
   M is pure tile padding; it still stages W and meets every barrier but skips its A loads, LDS reads
