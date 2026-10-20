@@ -191,6 +191,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_MXFP4_DECODE_MAX_M` | `128` | split-K decode kernel up to M = 128: covers `max-num-seqs × 8` and the mixed CUDA-graph sizes |
 | `RADIANCE_MXFP4_WIDE_MAX_M` | `192` (default `0` = off) | split-K decode kernel with 9–12 M fragments for M 129…192 instead of the padded 256-row tile: TTFT of 160-token prompts −13.8 %. Not 256: the folded tile wins again there (+11 % GEMM time at M 256). Needs `WPERM=1` |
 | `RADIANCE_ADAPTIVE_WIDTH` | `perseq` (default `0` = off) | per-request verify width, graph-safe (varlen FULL graphs): c8 with arrivals +4.7 %, one stream unchanged. `uniform` (one width per batch) gave +1.5 %. Tuning knobs `RADIANCE_AW_*` in [sly/README.md](sly/README.md) |
+| `RADIANCE_NSD` + `RADIANCE_NSD_THETA` | `0` (off) + `0.95` (opt-in, **unmeasured**) | Nucleus Speculative Decoding ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) in the rejection sampler: a draft token inside the target nucleus (mass of strictly higher target logits <= theta) is accepted besides the usual test; residual and bonus token unchanged. Only for sampling (temperature > 0), greedy is untouched. Trades a bounded deviation from the target distribution for acceptance; theta 0.95 is the paper's default, 0.90 is the second value to test. Excludes `RADIANCE_CACTUS_DELTA` (both set = startup error). Details: [sly/README.md](sly/README.md) `patch_nsd.py` |
 | `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
@@ -372,6 +373,7 @@ This image stands on other people's work:
   slydlake/radiance) — the `adaptive_k` verify-width policy behind `RADIANCE_ADAPTIVE_WIDTH` and the M-band findings
   (wide decode tile) behind `RADIANCE_MXFP4_WIDE_MAX_M`, ported to vLLM's graph model.
 - **[extfs](https://github.com/extfs)** (Tom Hillbrunner) — TetraAttention (`KVCACHE_DTYPE=kv4`, `sly/kv4/`): the 4-bit KV cache with the int4/int8 WMMA attention kernel, its tests and accuracy harness (PR #135, taken wholesale; the image wiring, a 1.4.0 rebase and the re-measurement are ours).
+- **[EIT-NLP/Nucleus-Speculative-Decoding](https://github.com/EIT-NLP/Nucleus-Speculative-Decoding)** — the NSD acceptance rule (`RADIANCE_NSD`, arxiv 2610.07822): the rule and the reference `clean_nsd` membership test; the Triton kernel, the vLLM V2 rejection-sampler wiring and the tests are ours (code re-written, not copied).
 - **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.
