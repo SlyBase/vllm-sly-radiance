@@ -118,7 +118,7 @@ docker run -d --name vllm --restart unless-stopped \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
   --speculative-config.num_speculative_tokens 7 \
-  --speculative-config.draft_sample_method probabilistic \
+  --speculative-config.draft_sample_method greedy \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \
   --max-num-seqs 8 --max-num-batched-tokens 2048 \
@@ -227,6 +227,7 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
 | `--speculative-config.num_speculative_tokens` | `7` | the drafter's maximum (block size 8) |
+| `--speculative-config.draft_sample_method` | `greedy` | draft-side sampling: `greedy` takes the draft head's argmax, `probabilistic` samples it with vLLM's shared-Gumbel coupling (needs the full draft-logits head). Lossless either way — the verifier decides the emitted token — so this trades acceptance rate against per-step cost, not accuracy. `serve.sh` / `serve-mxfp4.sh` take it as `DRAFT_SAMPLE` (`DRAFT_SAMPLE=probabilistic ./serve-mxfp4.sh`); the like-for-like A/B against `probabilistic` is still open ([BENCHMARKS.md](docs/BENCHMARKS.md), step 2, arm G) |
 | `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes) |
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |
 
@@ -305,6 +306,39 @@ keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the
 `RADIANCE_CACTUS_DELTA=0` when you need output that is statistically identical to the target model (evals,
 distribution-sensitive sampling, reproducing published numbers). Do not raise it above 0.5 without measuring
 quality on your own prompts.
+
+### Nucleus Speculative Decoding (opt-in, off by default)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) is a second, **opt-in** acceptance rule for
+sampled requests. A draft token x is accepted when the standard test passes **or** x lies in the target
+nucleus: the probability mass of the tokens with a strictly higher target logit than x is <= `theta`.
+The residual distribution on a rejection and the bonus token are untouched, so the rule only ever accepts
+*more* — at the price of the paper's single-step bound on the deviation from the target distribution,
+which is why it is not the default. Patch: `sly/patch_nsd.py`, CPU-tested in `sly/tests/test_spec_knobs_cpu.py`
+(wiring) and `sly/tests/test_nsd_cpu.py` (rule, kernel in the Triton interpreter). Greedy rows, synthetic
+rates and block verification are not touched.
+
+| Variable | Recommended | What it does |
+|---|---|---|
+| `RADIANCE_NSD` | `0` (default) | `1` enables the nucleus rule. With it off nothing extra is launched and the NSD branch is compiled out (same arithmetic as stock). Read once at start (per-process constant) |
+| `RADIANCE_NSD_THETA` | `0.95` | nucleus mass in `[0, 1)`. Smaller = a tighter nucleus = fewer extra acceptances and less drift |
+
+NSD replaces the acceptance rule that Cactus rewrites, and the paper's bound does not cover the union of
+both, so the two are mutually exclusive: in this image **`RADIANCE_NSD=1` needs `RADIANCE_CACTUS_DELTA=0`**
+(otherwise the engine refuses to start with a `RuntimeError` — Cactus is on by default at 0.5, and the
+check reads that default, not an unset variable). Launch:
+
+```bash
+RADIANCE_NSD=1 RADIANCE_CACTUS_DELTA=0 ./serve-mxfp4.sh
+```
+
+A/B for this branch (1 R9700, production arguments, concurrency 1; the run is not yet in
+`radiance-benchmarks`, so treat the figures as the branch owner's, not as a citable window): **+26 %
+weighted decode against the stock acceptance rule** and **~+5 % against the Cactus-0.5 production
+config**, the latter inside the window noise. That is not enough to make it the default: a numerics-changing default needs the
+quality gate, i.e. GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparison against the Cactus-0.5
+serve, plus an unchanged step time and KV pool at concurrency 1 and 8. Until that gate is run, keep
+`RADIANCE_NSD=0` for chat/production and enable it only in a measured arm.
 
 ### Other checkpoints and GPUs
 

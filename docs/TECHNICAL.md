@@ -698,6 +698,43 @@ What the CPU dry run cannot show, for the GPU window: 0.31 moves the DFlash cont
 also wraps `profile_run` (KV pool size); `GDNAttentionMetadataBuilder` gained `update_block_table` / `uniform_spec_sequence_length`
 and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what `patch_adaptive_width` did by hand, now redundant).
 
+## Nucleus Speculative Decoding: `RADIANCE_NSD=1` (opt-in, default 0)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) relaxes the verifier for sampled (non-greedy)
+requests. A draft token x is accepted if the standard test passes (`u <= min(1, p(x)/q(x))`) **or** x is in
+the target nucleus S_theta(p): the mass of the tokens with a strictly higher target logit than x is <=
+theta (default 0.95). The residual distribution on a rejection and the bonus token are unchanged, so the
+only change is *more* acceptances.
+
+Where: `rejection_sample` in `vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py` (V2 runner, the
+path production runs). Its `target_logits` argument is already the sampled distribution (temperature,
+min-p, top-k, top-p applied by `Sampler.apply_sampling_params`), so p is what the paper needs. A token the
+sampler removed has logit -inf and is never in the nucleus. The lookup draft (point-mass q) and the
+probabilistic DFlash2 draft take the same branch; greedy rows, synthetic rates and block verification do
+not.
+
+How, without sorting the vocabulary: the nucleus test needs `sum(p_j for logit_j > logit_x)`. Per request
+and vocab block (8192 logits, the stock stats kernel's block) `_nsd_nucleus_mass_kernel` loads the draft
+token's logit, the global logsumexp (from the stock per-block max/sumexp) and streams the block once:
+`sum(where(l > l_x, exp(l - lse), 0))`. `_rejection_kernel` adds the blocks' partials of the step and ORs
+`mass <= theta` into `accepted`. One extra read of the target logits per draft row, a small fp32 scratch of
+`[num_logits, num_blocks]`, no atomics. Fixed shapes and no host sync, so FULL_DECODE_ONLY capture is
+unaffected; `USE_NSD` is a `constexpr`, so with `RADIANCE_NSD=0` the second kernel is never launched and the
+compiled rejection kernel is the stock one (checked bit for bit in the Triton interpreter,
+`sly/tests/nsd_kernel_check.py`).
+
+Knobs: `RADIANCE_NSD` (0|1, default 0), `RADIANCE_NSD_THETA` in [0, 1), one module-level read each, so a
+per-process constant. Cactus (`sly/patch_cactus.py`, default delta 0.5) hooks the same Leviathan branch and
+the paper's single-step bound does not cover a union of both rules: NSD=1 with the Cactus knob at anything
+but 0 raises at import, and because that knob defaults to 0.5 in this image the supported combination is
+`RADIANCE_NSD=1 RADIANCE_CACTUS_DELTA=0`. The patch is in the Dockerfile loop after `sly/patch_cactus`; the
+two apply in either order to the same file (`sly/tests/test_spec_knobs_cpu.py`).
+
+Status: default off, and it stays off until the numerics gate is run. The branch A/B reads +26 % weighted
+decode against the stock acceptance rule and ~+5 % against the Cactus-0.5 production config at concurrency 1
+(the latter inside the window noise). Open: GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparison
+against the Cactus-0.5 serve, plus step time and KV pool at concurrency 1 and 8.
+
 ## Build details
 
 - ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the

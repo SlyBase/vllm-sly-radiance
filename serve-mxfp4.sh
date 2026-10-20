@@ -858,10 +858,11 @@ if [ "$SPEC_METHOD" = dflash ]; then
   # disable_padded_drafter_batch is the single-stream lever (~+50% on the 27B hybrids) and the
   # image bakes the vLLM unpad patch it relies on; it applies to dflash as well as mtp.
   # DRAFT_SAMPLE=probabilistic drafts stochastically with vLLM's shared-Gumbel coupling
-  # instead of argmax. The serve samples at temperature 0.7, and greedy one-hot drafts accept
-  # with only p_target(argmax); matched sampling accepts with sum(min(p,q)). Costs the full
-  # draft-logits head (bypasses the int2 argmax fast path) until the sparse draft_logits_spec
-  # integration exists -- measure acceptance vs that cost before defaulting.
+  # instead of argmax. Lossless either way (the verifier's rejection test is what decides the
+  # emitted token, so both drafters sample the target distribution exactly), but the two differ in
+  # acceptance rate and in what they cost per step: greedy is one argmax over the draft head,
+  # probabilistic needs the full draft-logits head. Default greedy -- the arm both launchers ship;
+  # the like-for-like A/B against probabilistic is still open (docs/BENCHMARKS.md, step 2, arm G).
   DRAFT_SAMPLE=${DRAFT_SAMPLE:-greedy}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$CDRAFTER\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"$DRAFT_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}"
 else

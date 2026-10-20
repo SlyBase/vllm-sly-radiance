@@ -13,6 +13,12 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [1.5.2] - 2026-10-19
 
 ### Added
+- **Nucleus Speculative Decoding baked into the image (`RADIANCE_NSD`, default `0` = off).** `sly/patch_nsd.py`
+  joins the patch loop, so NSD no longer needs a bind-mount: `RADIANCE_NSD=1` (`RADIANCE_NSD_THETA`, default
+  0.95) ORs the target-nucleus test into the rejection kernel. Mutually exclusive with Cactus (fails at import
+  when both are set). Off by default; the default changes only after a GSM8K + ppl gate. `DRAFT_SAMPLE`
+  (`greedy` default, `probabilistic`) is now a launcher knob in `serve.sh` as in `serve-mxfp4.sh`.
+  CPU tests: `sly/tests/test_nsd_cpu.py`, `sly/tests/test_spec_knobs_cpu.py` (incl. patch order NSD/Cactus).
 - **Opt-in wide tile for the drafter's `fc` at prefill M (`RADIANCE_DFLASH_FC_TILED_MIN_M`, default `0` = off).**
   The DFlash2 drafter's `fc` (`combine_hidden_states`, N = 5120, K = 25600) is the one drafter linear that
   runs at the target's token count: 12 calls at M = 4089 in a 47k prefill (chunk 4096) on the stock
