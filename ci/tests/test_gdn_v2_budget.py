@@ -6,9 +6,15 @@ per-workgroup efficiency, because the w3 measurement showed that more waves per 
 (docs/GDN-CHUNK-SCAN-V2.md). So the gates are the stock geometry -- LDS exactly 60,928 B, 4
 waves/SIMD, VGPR <= 256 -- plus the point of the slice: ZERO spills, where the stock kernel spills
 four of them (20 B/lane of scratch traffic inside the chunk loop).
+
+Both reports are compiled with the flags build.sh uses, `-mcumode` included: without it the wave mode
+moves the SGPR count on its own, so a flag-less v2 would not be a control arm of the stock build.
+
+    python3 -m unittest discover -s ci/tests -p 'test_gdn*.py' -v
 """
 import pathlib
 import re
+import unittest
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
 STOCK_VGPR, STOCK_SPILLS, STOCK_SCRATCH = 256, 4, 20      # libr4d a3e4833 + extras, CPU compile
@@ -36,18 +42,21 @@ def check_v2(r):
     return bad
 
 
-def test_stock_is_the_baseline_this_slice_measures_against():
-    r = parse((FIX / "gdn_scan_stock.remark.txt").read_text())
-    assert (r["vgpr"], r["spills"], r["scratch"], r["lds"]) == (STOCK_VGPR, STOCK_SPILLS,
-                                                               STOCK_SCRATCH, LDS_STOCK)
+class Budget(unittest.TestCase):
+    def test_stock_is_the_baseline_this_slice_measures_against(self):
+        r = parse((FIX / "gdn_scan_stock.remark.txt").read_text())
+        assert (r["vgpr"], r["spills"], r["scratch"], r["lds"]) == (
+            STOCK_VGPR, STOCK_SPILLS, STOCK_SCRATCH, LDS_STOCK)
+
+    def test_stock_fails_the_no_spill_gate(self):
+        # the red that this slice exists to turn green
+        assert check_v2(parse((FIX / "gdn_scan_stock.remark.txt").read_text())) == [
+            "spills 4 != 0", "scratch 20 != 0"]
+
+    def test_v2_within_budget(self):
+        r = parse((FIX / "gdn_scan_v2.remark.txt").read_text())
+        assert check_v2(r) == [], r
 
 
-def test_stock_fails_the_no_spill_gate():
-    # the red that this slice exists to turn green
-    assert check_v2(parse((FIX / "gdn_scan_stock.remark.txt").read_text())) == ["spills 4 != 0",
-                                                                              "scratch 20 != 0"]
-
-
-def test_v2_within_budget():
-    r = parse((FIX / "gdn_scan_v2.remark.txt").read_text())
-    assert check_v2(r) == [], r
+if __name__ == "__main__":
+    unittest.main()

@@ -65,7 +65,9 @@ def test_v2_patch_is_applied_after_the_extras_patch_and_before_build_sh():
 def test_the_unit_is_staged_under_the_name_the_patch_builds():
     """build.sh compiles `<unit>.hip` out of the source root, so the COPY must land there."""
     patch = (R4D / V2_PATCH).read_text()
-    m = re.search(r'^\+\s*"' + re.escape(V2_UNIT.removesuffix(".hip")) + r':"', patch, re.M)
+    # the row is "<unit>[:<flags>]"; v2 builds with the stock unit's flags, so -mcumode is expected
+    m = re.search(r'^\+\s*"' + re.escape(V2_UNIT.removesuffix(".hip")) + r'(?::-mcumode)?"', patch,
+                  re.M)
     assert m, f"r4d_gdn_scan_v2.patch does not add the {V2_UNIT.removesuffix('.hip')} unit to build.sh"
     block = r4d_run_block()
     staged = re.search(r"cp /opt/kernels/" + re.escape(V2_UNIT) + r" \.?/?\s*\\", block)
