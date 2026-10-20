@@ -118,6 +118,17 @@ Measured with the arguments in [MINICPM-V47.md](MINICPM-V47.md), 210 W, BetterBe
 | CUDA-graph sizes aligned to k+1 (`[9,18,...]`) | Slower than `[8,16,32,...]`. |
 | Same AITER flag for Qwen3.8 production | Production already runs `R4D_HYBRID`; AITER 34.96 vs 35.00 ms at equal acceptance. |
 
+## Prefill kernel levers that failed their gate (2026-10-20)
+
+Both were written, compiled and measured on the R9700 at 210 W against the shipped kernels; neither
+beats its control, so both were dropped from the release. The work is archived on a branch
+(`exp/gdn-scan2`, `exp/attn-a1`) rather than carried here.
+
+| Item | Why not |
+|---|---|
+| GDN `chunk_scan` v2, staging prefetch issued in the chunk tail (`RADIANCE_GDN_SCAN_V2`) | Does what it set out to do and still loses: scratch spills 4 -> 0, VGPR 256 -> 205, LDS footprint, barriers, grid and instruction mix unchanged, **bit-identical on all 28 digest lines** (7 shapes x 2 layouts). Time at T = 4089, H = 48 (three runs, ABBA): **0.521 -> 0.541 ms = 1.042 x slower** (1.024 / 1.037 on the other two), against a GO of <= 0.92 x. Together with w3 (LDS diet, +8.9 %) the scan is therefore neither LDS- nor register-bound -- what is left is latency and the four chunk barriers. |
+| Attention A1 VALU diet, `O_CFOLD` + `O_MAX3` (`R4D_ATTN_OPT2`) | Cuts the arithmetic it targets -- softmax **53 -> 46 VALU** per steady m-tile block, 218 VGPR / 0 spills, outputs identical to the shipped arm -- and the time does not move: **1.008 x at 16k, 0.990 x at 40k**, i.e. noise around parity against a gate that asked for >= 4 %. The softmax VALU is not what limits the prefill attention kernel; WMMA and the LDS traffic are. |
+
 ## TetraAttention: query quantization in the attention kernel's prologue (2026-10-10)
 
 Tried: the HIP kernel takes the bf16 query, rotates it (Walsh-Hadamard as a butterfly over the

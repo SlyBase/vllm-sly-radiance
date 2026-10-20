@@ -1,8 +1,0 @@
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0: Function Name: _Z28r4d_gdn_chunk_scan_v2_kernelPKtS0_S0_S0_PKfS2_S2_PtPfPKiiif
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     TotalSGPRs: 66
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     VGPRs: 205
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     ScratchSize [bytes/lane]: 0
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     Occupancy [waves/SIMD]: 4
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     SGPRs Spill: 0
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     VGPRs Spill: 0
-r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip:288:0:     LDS Size [bytes/block]: 60928

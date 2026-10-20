@@ -212,7 +212,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: "ci/tests unit tests (offline: stack resolver + GDN v2 wiring)"
+      - name: resolver unit tests (offline, recorded fixtures)
         run: python3 -m unittest discover -s ci/tests
 
       - name: Dockerfile pins vs the derived stack
@@ -233,13 +233,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: pytest sly/tests sly/r4d/tests
+      - name: pytest sly/tests
         run: |
           python3 -m pip install --quiet numpy pytest torch --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple
-          # sly/r4d/tests carries the fp32 oracle the A1 GPU gate is judged against, and the gate's own
-          # [M, H, D] reference shape (the patch/pin checks skip where R4D_SRC is absent)
-          python3 -m pytest sly/tests sly/r4d/tests -q
+          python3 -m pytest sly/tests -q
 
   reanchor-brief:
     # A stack PR whose sly patches no longer apply to the new vLLM: hand it to the owner's Hermes agent

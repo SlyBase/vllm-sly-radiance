@@ -345,10 +345,10 @@ index a4f359a..846b94a 100644
  //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
  // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index cd4e294..42512a6 100644
+index cd4e294..3694dab 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -57,9 +57,56 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -57,9 +57,35 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -361,23 +361,13 @@ index cd4e294..42512a6 100644
 +    // chunk, ~/mxfp4_work/tier8). Whether that accuracy trade is FREE at the end task is exactly
 +    // what the serving gates (ppl + GSM8K paired) decide; kernel-level parity already decided the
 +    // default, which is why these are bits and not the baseline.
-+    // R4D_ATTN_OPT2: 1 = the A1 VALU diet (O_CFOLD | O_MAX3), 2 and 3 arm one bit alone, because the
-+    // A/B measures each separately (MAX3 alone is the bit-identity control). Default 0 = the shipped
-+    // bit set, unchanged. Read ONCE per process, exactly like R4D_ATTN_FP8: the gate script starts
-+    // one process per arm, so a per-launch read would buy nothing and would only invite the A/B to
-+    // re-arm the kernel in-process, which the launcher's contract does not promise.
-+    int fp8mode = 0, opt2 = 0;
++    int fp8mode = 0;
 +    if constexpr (!KVP) {
 +        static const int m = [] {
 +            const char* e = getenv("R4D_ATTN_FP8");
 +            return e ? atoi(e) : 0;
 +        }();
 +        fp8mode = m;
-+        static const int a = [] {
-+            const char* e = getenv("R4D_ATTN_OPT2");
-+            return e ? atoi(e) : 0;
-+        }();
-+        opt2 = a;
 +    }
 +#define P_LAUNCH(OPTX)                                                                            \
 +    do {                                                                                          \
@@ -385,31 +375,20 @@ index cd4e294..42512a6 100644
 +                                                    A_BLOCK_SIZE, KVP, OPTX>),                    \
 +                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
 +    } while (0)
-+// A1 is armed on the fp8mode == 3 leg and NOWHERE else: FP8=2 goes 19 -> 22 spills and bf16 KV
-+// 23 -> 38, and FP8=1 / FP8=0 are not the serving arm either, so the extra bits are only ever asked
-+// of the arm this slice was measured on.
-+#define P_LAUNCH2(OPTX)                                                                           \
-+    do {                                                                                          \
-+        if      (opt2 == 1) P_LAUNCH((OPTX) | O_CFOLD | O_MAX3);                                  \
-+        else if (opt2 == 2) P_LAUNCH((OPTX) | O_CFOLD);                                           \
-+        else if (opt2 == 3) P_LAUNCH((OPTX) | O_MAX3);                                            \
-+        else                P_LAUNCH(OPTX);                                                       \
-+    } while (0)
 +    if constexpr (!KVP) {
-+        if (fp8mode == 3)      P_LAUNCH2(P_OPT | O_QK8 | O_PV8);
++        if (fp8mode == 3)      P_LAUNCH(P_OPT | O_QK8 | O_PV8);
 +        else if (fp8mode == 2) P_LAUNCH(P_OPT | O_PV8);
 +        else if (fp8mode == 1) P_LAUNCH(P_OPT | O_QK8);
 +        else                   P_LAUNCH(P_OPT);
 +    } else {
 +        P_LAUNCH(P_OPT);
 +    }
-+#undef P_LAUNCH2
 +#undef P_LAUNCH
      CHK();
      return 0;
  }
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 513d97f..cc99367 100644
+index 513d97f..da52a10 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
 @@ -38,6 +38,25 @@
@@ -438,37 +417,21 @@ index 513d97f..cc99367 100644
  #define O_FOLDQ   8
  #define O_CONTIG  512
  #define O_PF2    1024
-@@ -71,6 +90,29 @@
- // the default fence invalidates the vector cache twice per tile for a synchronisation that only
+@@ -72,6 +91,13 @@
  // ever orders LDS.
  #define O_LDSB  2097152
-+// A1 (R4D_ATTN_OPT2=1): ONE VALU cut on the softmax path, plus a codegen-no-op control arm:
-+//   CFOLD  the p exponent's offset (SHIFT - m_ref) is folded into the QK accumulator's C operand
-+//          instead of being added to all eight lanes on every m-tile, and by the definition of that
-+//          offset the rescale test becomes a CONSTANT compare (raw + off > SHIFT + GROW). Needs
-+//          FOLDQ -- the QK scale has to be in Q already, an additive C operand cannot carry it.
-+//   MAX3   the eight-lane row max written as a 3-operand tree instead of a 7-deep chain. On this
-+//          toolchain that is a no-op in codegen (LLVM already picks v_max3_num_f32 for the chain),
-+//          which is exactly what makes it the control arm of the A/B: same output, same VGPR.
-+// MAX3 only reorders fmax, so its output is bit-identical. CFOLD moves one add into the fp32
-+// accumulator, i.e. the p exponent argument changes by <= 1 ulp.
-+#define O_CFOLD  4194304
-+#define O_MAX3  16777216
-+
+ 
 +typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
-+// 3-operand f32 max written as a tree. It compiles to the same two chained max ops the inline
-+// chain produced -- LLVM already picks v_max3_num_f32 either way -- so this is the A/B's
-+// CONTROL arm (bit-identical output, same VGPR) and not an optimisation.
-+__device__ __forceinline__ float max3f(float a, float b, float c) { return fmaxf(fmaxf(a, b), c); }
 +// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
 +__device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d) {
 +    const uint32_t w = __builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false);
 +    return __builtin_amdgcn_cvt_pk_fp8_f32(c, d, w, true);
 +}
- 
++
  // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
  template<class D, int FOLDQ, int F16>
-@@ -90,11 +130,17 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+ __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
+@@ -90,11 +116,15 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int CTG   = (OPT & O_CONTIG) ? 1 : 0;
      constexpr int PF    = 1 << ((OPT >> 10) & 3);
      constexpr int SGB   = (OPT & O_SGB) ? 1 : 0;
@@ -480,14 +443,12 @@ index 513d97f..cc99367 100644
      constexpr int KWIDE = (OPT & O_KWIDE) ? 1 : 0;
 +    constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
 +    constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
-+    constexpr int CFOLD = ((OPT & O_CFOLD) && FOLDQ) ? 1 : 0;
-+    constexpr int MAX3  = (OPT & O_MAX3) ? 1 : 0;
 +    static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
 +    static_assert(!(OPT & O_QK8) || KWIDE, "QK8 raw-byte staging is written for the wide K fetch");
      typedef DT16<F16> D;
      typedef typename D::frag frag16;
  
-@@ -113,11 +159,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -113,11 +143,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int NTR     = (TILE / 8) * (HEAD_DIM / (KVP ? 32 : 64));
      constexpr int VREGS   = (NTR + NWARPS - 1) / NWARPS;        // uint4 of raw V per thread
      constexpr float PSHIFT = D::SHIFT;
@@ -516,7 +477,7 @@ index 513d97f..cc99367 100644
  
      const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
      const int c = lane & 15, h = lane >> 4;
-@@ -140,6 +199,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -140,6 +183,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      const float mul   = a.scale * kdesc * 1.44269504089f;
  
      frag16 qf[NKS];
@@ -524,7 +485,7 @@ index 513d97f..cc99367 100644
      {
          const uint16_t* qp = (const uint16_t*)a.q
                             + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
-@@ -148,17 +208,28 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -148,10 +192,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              // CONTIG reads the same 8 d as ONE run; the legacy map splits them 4+4.
              const uint2 l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
              const uint2 h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
@@ -550,15 +511,7 @@ index 513d97f..cc99367 100644
          }
      }
  
-     const int klimit = ctx - a.q_len + qpos;
- 
-     float m_ref = -3.0e38f;
--    float off   = PSHIFT + 3.0e38f;
-+    float off   = CFOLD ? 0.0f : (PSHIFT + 3.0e38f);
-     float l_i   = 0.0f;
-     v8f acc[NKS];
-     #pragma unroll
-@@ -229,6 +300,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -229,6 +284,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  const int key = KWIDE ? (2 * (i >> 5) + (i & 1)) : (i / (HEAD_DIM / KEL));
                  const int ch  = KWIDE ? ((i & 31) >> 1) : (i - key * (HEAD_DIM / KEL));
                  if (KWIDE && key >= TILE) continue;
@@ -570,7 +523,7 @@ index 513d97f..cc99367 100644
                  uint16_t* kd = &sK[key * KSTR + ch * KEL];
                  #pragma unroll
                  for (int q = 0; q < KEL / 8; ++q) {
-@@ -266,6 +342,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -266,6 +326,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                      // ADJACENT d; v_perm_b32 splits them back into two d rows.
                      const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
                      const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
@@ -582,12 +535,11 @@ index 513d97f..cc99367 100644
                      uint32_t wl[4], wh[4];
                      fp8x8_to_16x4w<D>(make_uint2(lo0, lo1), wl);
                      fp8x8_to_16x4w<D>(make_uint2(hi0, hi1), wh);
-@@ -310,7 +391,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -310,7 +375,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
          #pragma unroll 1
          for (int mt = 0; mt < MT; ++mt) {
              v8f s = (v8f){0,0,0,0,0,0,0,0};
 -            {
-+            if constexpr (CFOLD) s = (v8f){off,off,off,off,off,off,off,off};
 +            if constexpr (QK8) {
 +                // Same PF discipline, half the fragment bytes, 2x the WMMA issue rate.
 +                const uint8_t* krow8 = &sK8[(mt * 16 + c) * KSTR8] + 8 * h;
@@ -606,56 +558,7 @@ index 513d97f..cc99367 100644
                  const uint16_t* krow = &sK[(mt * 16 + c) * KSTR] + (CTG ? 8 * h : 0);
                  // PF fragments are LOADED before the matching PF WMMAs are ISSUED, so the wait in
                  // front of each WMMA becomes `s_wait_dscnt PF-1` instead of a full drain.
-@@ -343,12 +439,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
-                 for (int e = 0; e < 8; ++e) sc[e] = (kbase + e <= klimit) ? sc[e] : -INFINITY;
-             }
- 
--            float smax = sc[0];
--            #pragma unroll
--            for (int e = 1; e < 8; ++e) smax = fmaxf(smax, sc[e]);
--            if (wave_any(smax > m_ref + PGROW)) {
-+            float smax;
-+            if constexpr (MAX3) {
-+                const float m0 = max3f(sc[0], sc[1], sc[2]);
-+                const float m1 = max3f(sc[3], sc[4], sc[5]);
-+                smax = fmaxf(max3f(m0, m1, sc[6]), sc[7]);
-+            } else {
-+                smax = sc[0];
-+                #pragma unroll
-+                for (int e = 1; e < 8; ++e) smax = fmaxf(smax, sc[e]);
-+            }
-+            // CFOLD compares in folded space: + off is the same test, translated (loop-invariant)
-+            if (wave_any(smax > (CFOLD ? (m_ref + PGROW + off) : (m_ref + PGROW)))) {
-                 const float rmax  = fmaxf(smax, swap16(smax));
--                const float mnew  = fmaxf(fmaxf(m_ref, rmax), -3.0e38f);
-+                // CFOLD compares in folded space, so undo the baked offset before the max bookkeeping
-+                const float raw   = CFOLD ? rmax - off : rmax;
-+                const float mnew  = fmaxf(fmaxf(m_ref, raw), -3.0e38f);
-                 const float alpha = ex2(m_ref - mnew);
-                 #pragma unroll
-                 for (int dt = 0; dt < NKS; ++dt)
-@@ -356,19 +462,41 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
-                     for (int e = 0; e < 8; ++e) acc[dt][e] *= alpha;
-                 l_i *= alpha;
-                 m_ref = mnew;
--                off   = PSHIFT - mnew;
-+                if constexpr (CFOLD) {
-+                    const float off_new = PSHIFT - mnew;
-+                    #pragma unroll
-+                    for (int e = 0; e < 8; ++e) sc[e] += off_new - off;
-+                    off  = off_new;
-+                } else {
-+                    off = PSHIFT - mnew;
-+                }
-             }
- 
-             float pf[8], lsum = 0.0f;
-             #pragma unroll
-             for (int e = 0; e < 8; ++e) {
--                const float p = ex2(sc[e] + off);
-+                const float p = ex2(CFOLD ? sc[e] : (sc[e] + off));
-                 pf[e] = p;
-                 if (!DOT2) lsum += p;
+@@ -368,7 +447,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              }
              if (!DOT2) l_i += lsum;
  

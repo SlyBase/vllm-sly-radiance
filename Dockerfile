@@ -483,8 +483,7 @@ RUN mkdir -p /out /opt/kernels
 # and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
 # ride RCCL.
 # One shared object holding every hand-written kernel this image runs: paged attention (prefill and
-# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan (the stock unit and, since this
-# pin, the v2 variant of it), the TP=2 P2P all-reduce in both
+# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
 # its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
 # fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
 # path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
@@ -506,16 +505,6 @@ ARG R4D_VERSION
 # original check was actually protecting against), not the self-reported semver string, which prints
 # only as informational context alongside it.
 COPY sly/r4d/r4d_extras_rx10.patch /opt/kernels/
-# sly/r4d/r4d_gdn_scan_v2.patch is a second, additive change on top of the extras above: it adds the
-# v2 gated-delta-net chunk_scan translation unit to libr4d's build.sh, declares it in r4d.h, binds it
-# in r4d_module.hip and registers it as the row that a `variant="v2"` query reaches (RADIANCE_GDN_SCAN_V2,
-# default 0 = stock). Its hunks touch the same four files the extras patch already rewrote, so it is
-# applied AFTER it. The unit itself is a repo file rather than a hunk
-# (sly/r4d/r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip), so it is copied into the source root: build.sh
-# compiles `<unit>.hip` from there. Without both lines the registry has no v2 row, select() answers the
-# stock kernel and the knob silently measures nothing.
-COPY sly/r4d/r4d_gdn_scan_v2.patch /opt/kernels/
-COPY sly/r4d/r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip /opt/kernels/
 RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && git init -q && git remote add origin ${R4D_REPO} \
  && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
@@ -523,8 +512,6 @@ RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && [ "$GOT" = "${R4D_VERSION}" ] \
     || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
  && git apply /opt/kernels/r4d_extras_rx10.patch \
- && git apply /opt/kernels/r4d_gdn_scan_v2.patch \
- && cp /opt/kernels/r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip . \
  && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
  && PYTHONPATH=/out python -c "import sys, torch, r4d; \
 print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \

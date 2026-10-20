@@ -13,23 +13,6 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [1.5.2] - 2026-10-19
 
 ### Added
-- **`RADIANCE_GDN_SCAN_V2`, default `0` = off; measured 1.037 x slower, so off.** A second
-  `gdn_chunk_scan` translation unit (`sly/r4d/r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2.hip`, patch
-  `sly/r4d/r4d_gdn_scan_v2.patch`) that runs the same arithmetic with the next chunk's staging prefetch
-  issued in the chunk tail instead of its head, so the 24 VGPRs it occupies are no longer live across
-  the main WMMA loop. CPU compile (gfx1201): **205 VGPR, 0 spills** against the stock 256 VGPR / 4
-  spills (20 B/lane), with the LDS footprint, the four barriers, the grid and the instruction mix
-  unchanged (`v_wmma` 80/80). Both units are built with the same flags (`-mcumode`): the wave mode
-  moves SGPR on its own, so a flag-less v2 would not be a control arm. With those flags `PLATE=0` (the
-  unit split with the stock issue point) reproduces the stock report digit for digit -- 256 VGPR / 4
-  spills / 20 B/lane / 60,928 B LDS / 4 waves/SIMD / 69 SGPR -- and `PLATE=1` is where 205 / 0 / 66
-  comes from. w3 showed that raising the waves/SIMD does not pay, so this slice buys nothing with
-  occupancy. GPU window (2026-10-20, R9700 at 210 W, ABBA, 20 reps at T = 4089, H = 48):
-  **bit-identical to stock on all 28 digest lines** (`o` and `ht`, 7 shapes x 2 layouts), accuracy
-  inside the gate (3.6-4.4e-3 / 3.3e-3), and **0.521 -> 0.541 ms = 1.037 x**, i.e. ABORT against the
-  0.95 limit -- the four spill accesses really do sit outside the chunk loop, so the headroom does not
-  buy time and the knob stays off. Gates in `docs/GDN-CHUNK-SCAN-V2.md`; GPU test
-  `sly/gdn/tests/gpu_chunk_scan_v2.py` (DIGEST must equal stock, GO at <= 0.92 x, ABORT above 0.95).
 - **Nucleus Speculative Decoding baked into the image (`RADIANCE_NSD`, default `0` = off).** `sly/patch_nsd.py`
   joins the patch loop, so NSD no longer needs a bind-mount: `RADIANCE_NSD=1` (`RADIANCE_NSD_THETA`, default
   0.95) ORs the target-nucleus test into the rejection kernel. Mutually exclusive with Cactus (fails at import
@@ -48,29 +31,6 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   A/B (210 W, chunk 4096, ABBA, two windows) reads +0.3 / +0.4 % at 16k / 47k, inside the window drift: the
   end-to-end gain is about 0.7 % at 47k (12 calls x ~10 ms) and is proven by the cell bench, not the server arm.
   Off by default; no launch argument changes.
-- **A1 VALU diet for the R4D prefill attention kernel (`R4D_ATTN_OPT2`, default `0` = unmeasured).**
-  Two OPT bits in `sly/r4d/r4d_extras_rx10.patch`: `O_CFOLD` (bit 22) folds the softmax offset into the
-  QK WMMA's C operand, which removes the eight adds per m-tile in front of the exponents and turns
-  the lazy-rescale test into a constant compare; `O_MAX3` (bit 24) writes the row max as a 3-operand
-  tree. `R4D_ATTN_OPT2=1` arms both, `2` and `3` arm one alone for the A/B. Only one of the two is a
-  cut: CFOLD. `MAX3` is a no-op in codegen (it only reorders `fmax`, and LLVM already emits
-  `v_max3_num_f32` for the base chain), i.e. same output and same VGPR -- it is the A/B's
-  bit-identity control, not an optimisation, and nothing in this entry claims a second VALU cut.
-  Default `0` is byte-for-byte the shipped
-  arm: 215 VGPR / 0 spills / 27,008 B LDS. At `R4D_ATTN_FP8=3` (the serving arm) A1 compiles to
-  218 VGPR / 0 spills / 27,008 B LDS, still one workgroup per CU (24 warps need 6 of the 6 waves/SIMD
-  the register file allows either way, so occupancy 7 -> 6 costs no residency), and the steady-state
-  m-tile block shrinks 80 -> 70 instructions (53 -> 46 VALU) while the rarely taken rescale branch
-  grows 92 -> 105 (`sc[e] += off_new - off`). On the arms that already spill A1 moves the spill the
-  wrong way -- `R4D_ATTN_FP8=2` 19 -> 22, bf16 KV 23 -> 38 -- so the launcher applies the bits only
-  inside its `fp8mode == 3` branch and leaves every other leg on the shipped mask (`FP8=1` goes
-  4 -> 0 spills and `FP8=0` 22 -> 17, both untouched by A1). `R4D_ATTN_OPT2` is read once per process,
-  exactly like `R4D_ATTN_FP8`; the gate script therefore starts one process per arm and runs the
-  series base, cfold, both, max3, base again (ABBA over processes). Not yet measured on the card:
-  the GO/NO-GO is >= 4 % kernel time at ctx 16k and 40k, via `sly/r4d/tests/gpu_attn_prefill_opt2.py`
-  (GPU window). CPU tests: `sly/r4d/tests/test_attn_prefill_ref.py` (fp32 oracle vs
-  `scaled_dot_product_attention`, the gate's all-kv-head `[M, H, D]` reference against that same
-  oracle, plus the patch applying to the pin and the default mask carrying neither bit).
 
 ## [1.5.1] - 2026-10-16
 
