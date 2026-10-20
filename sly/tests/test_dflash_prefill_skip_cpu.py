@@ -74,6 +74,18 @@ def test_old_chunks_skip_and_the_tail_does_not():
     assert skip.skip_context(s, _batch([L - 4096], [4096], [L])) is False      # final chunk
 
 
+def test_short_prefill_chunks_do_not_skip():
+    s = _spec()
+    L = 47000
+    # the chunk after a skipped one must itself be at least window + margin tokens, otherwise its
+    # draft read reaches back into the skipped range (--max-num-batched-tokens 2048 -> 2032)
+    assert _with_knob("1", lambda: skip.skip_context(s, _batch([0], [2032], [L]))) is False
+    # --max-num-batched-tokens 4096 -> 4080 tokens: covered by the next chunk
+    assert _with_knob("1", lambda: skip.skip_context(s, _batch([0], [4080], [L]))) is True
+    assert skip.skip_context(s, _batch([0], [2559], [L])) is False
+    assert skip.skip_context(s, _batch([0], [2560], [L])) is True
+
+
 def test_decode_and_mixed_batches_are_untouched():
     s = _spec()
     L = 47000

@@ -12,6 +12,10 @@ margin = max(RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN, 2 KV blocks): the block
 last skipped position (partly unwritten) must lie wholly below the first block the attention can
 touch, whatever its tile size is.
 
+A step also never skips when its prefill chunk is shorter than `window + margin`: the chunk after a
+skipped one must fill the whole window, or its draft read reaches back into the skipped range (a
+discarded draft only, but it could read unwritten - possibly NaN - slots).
+
 Off (stays stock) with prefix caching on (a cached drafter block of a skipped position would hold
 garbage for the next request that shares the prefix), with any non-sliding drafter layer, without a
 configured window, and with data parallelism (the draft step is a collective).
@@ -40,10 +44,12 @@ def _config(spec):
     if why:
         sys.stderr.write(f"[radiance.dflash_skip] RADIANCE_DFLASH_PREFILL_WINDOW_SKIP ignored: {why}\n")
         return ()
+    window = int(window or 0)  # checked above; the `or` narrows the config's Optional type
     block = max(g.kv_cache_spec.block_size for g in spec.kv_cache_config.kv_cache_groups)
     margin = max(int(os.environ.get("RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN", "512")), 2 * block)
-    sys.stderr.write(f"[radiance.dflash_skip] ON: window {window}, margin {margin}\n")
-    return int(window), margin
+    sys.stderr.write(f"[radiance.dflash_skip] ON: window {window}, margin {margin}, "
+                     f"chunks >= {window + margin} tokens\n")
+    return window, margin
 
 
 def skip_context(spec, input_batch, dummy_run=False, is_profile=False):
@@ -57,5 +63,9 @@ def skip_context(spec, input_batch, dummy_run=False, is_profile=False):
     if not cfg:
         return False
     n = input_batch.num_reqs
+    # A skipped chunk must be covered by the next written chunk inside the window: with fewer than
+    # window + margin tokens this step, that chunk's draft read would reach into the skipped range.
+    if int(input_batch.num_scheduled_tokens[:n].max()) < cfg[0] + cfg[1]:
+        return False
     end = input_batch.num_computed_prefill_tokens_np[:n] + input_batch.num_scheduled_tokens[:n]
     return bool((end <= input_batch.prefill_len_np[:n] - cfg[0] - cfg[1]).all())
