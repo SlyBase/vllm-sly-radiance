@@ -49,10 +49,12 @@ def _config(spec):
 def skip_context(spec, input_batch, dummy_run=False, is_profile=False):
     """True when this step is a prefill chunk of every request and all its positions lie below
     prompt_len - window - margin."""
+    if dummy_run or is_profile:  # before _config: the profile run precedes set_attn (no kv_cache_config yet)
+        return False
     cfg = getattr(spec, "_radiance_pf_skip", None)
     if cfg is None:
         cfg = spec._radiance_pf_skip = _config(spec)
-    if not cfg or dummy_run or is_profile:
+    if not cfg:
         return False
     n = input_batch.num_reqs
     end = input_batch.num_computed_prefill_tokens_np[:n] + input_batch.num_scheduled_tokens[:n]

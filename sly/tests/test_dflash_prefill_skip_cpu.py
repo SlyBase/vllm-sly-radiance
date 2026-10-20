@@ -92,6 +92,12 @@ def test_dummy_and_profile_runs_never_skip():
     b = _batch([0], [4096], [47000])
     assert _with_knob("1", lambda: skip.skip_context(s, b, dummy_run=True)) is False
     assert _with_knob("1", lambda: skip.skip_context(s, b, is_profile=True)) is False
+    # the profile run precedes set_attn: the speculator has no kv_cache_config yet, so the
+    # config must not be read (and not memoised) on a dummy/profile call
+    bare = _spec()
+    del bare.kv_cache_config
+    assert _with_knob("1", lambda: skip.skip_context(bare, b, is_profile=True)) is False
+    assert getattr(bare, "_radiance_pf_skip", None) is None
 
 
 def test_margin_covers_two_kv_blocks():
