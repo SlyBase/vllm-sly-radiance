@@ -1,7 +1,10 @@
 # GDN `chunk_scan` v2: killing the four spills by moving one live range
 
-Status 2026-10-20, branch `exp/gdn-scan2`, nothing pushed, **nothing run on the GPU**. Knob
-`RADIANCE_GDN_SCAN_V2`, default `0` = stock.
+Status 2026-10-20: merged into `perf/prefill-beat-paiton` and baked into the image (Dockerfile
+kernels stage). **One GPU window has been run** (210 W, 46 s, ABBA 20 reps at T = 4089, H = 48): the
+variant is bit-identical to the stock kernel on all 14 digests and inside the accuracy gate, and
+**1.037 x slower** (0.521 -> 0.541 ms), i.e. ABORT -- the headroom this slice buys is not speed, as
+the honest reading below predicted. Knob `RADIANCE_GDN_SCAN_V2`, default `0` = stock.
 
 ## Why this slice, and not the other two candidates
 
@@ -46,17 +49,22 @@ shortest live range, with only the state loop and the writeback left as the late
 
 `ci/gdn_scan_resources.sh` / `ci/tests/fixtures/gdn_scan_v2.remark.txt`:
 
+Both units are compiled with the flags `build.sh` uses for them, `-mcumode` included: without it the
+wave mode moves the SGPR count on its own, so a flag-less v2 would not be a control arm of the stock
+build.
+
 | Build | VGPR | spills | scratch B/lane | LDS B | waves/SIMD | SGPR |
 |---|--:|--:|--:|--:|--:|--:|
 | stock `chunk_scan` (`-mcumode`) | 256 | 4 | 20 | 60,928 | 4 | 69 |
-| v2, `PLATE=0` (unit split only) | 256 | 4 | 20 | 60,928 | 4 | 66 |
-| **v2, `PLATE=1` (default)** | **205** | **0** | **0** | **60,928** | **4** | **66** |
-| v2, `PLATE=2` | 188 | 0 | 0 | 60,928 | 4 | 66 |
+| v2, `PLATE=0` (`-mcumode`, unit split only) | 256 | 4 | 20 | 60,928 | 4 | 69 |
+| **v2, `PLATE=1` (default, `-mcumode`)** | **205** | **0** | **0** | **60,928** | **4** | **66** |
+| v2, `PLATE=2` (`-mcumode`) | 188 | 0 | 0 | 60,928 | 4 | 66 |
 | v2, `PLATE=1`, `LDSO2=1` | 208 | 0 | 0 | 60,928 | 4 | 66 |
 | v2, `PLATE=2`, `LDSO2=1`, `APRE=1` | 256 | 2 | 12 | 60,928 | 4 | 66 |
 
-`PLATE=0` compiling to the stock figures is the control: the new translation unit and the rename add
-no pressure of their own, so the difference is the live range and nothing else.
+`PLATE=0` reproducing the stock figures bit for digit -- VGPR, spills, scratch, LDS, waves and SGPR --
+is the control: same flags, same layout, only the issue point of the prefetch differs, so the
+difference is the live range and nothing else.
 
 Static ISA, `PLATE=1` against stock (`amdclang++ --cuda-device-only -S`, count of real ISA lines:
 1382 -> 1384): `v_wmma` 80/80, `global_load` 46/46, `global_store` 10/10, `s_barrier` 10/10,
@@ -77,6 +85,12 @@ because it spilled 146 registers at NW=8 -- now compiles clean (208 VGPR, 0 spil
 here because its static effect is small (1142 -> 1137 instructions, 0.4 %), and a 0.4 % static change
 is not worth an unmeasured behaviour change; it is listed as an arm for the GPU window instead.
 
+Measured (one window, R9700 at 210 W, `sly/gdn/tests/gpu_chunk_scan_v2.py`): stock 0.521 ms vs v2
+0.541 ms at T = 4089, H = 48, ratio **1.037** -> ABORT against the 0.95 limit; 28/28 DIGEST lines equal
+(`o` and `ht`), accuracy `o` 3.6-4.4e-3 / state 3.3-3.4e-3, all inside the gate. That is the expected
+outcome for a slice whose prize was headroom rather than instructions: the spill pair really is
+outside the chunk loop. Keep the knob off; the 51 free VGPRs are the artefact worth building on.
+
 **The 379.8 -> ~280 ms target is not demonstrated by this slice.** A 26 % gap cannot be closed by
 four spills, and nothing here has been timed. What is demonstrated is that the spill wall is gone and
 that the kernel now has room to be scheduled -- the timing question is the GPU gate below, and it is
@@ -88,8 +102,8 @@ expected to come out well short of 0.92 unless the headroom translates.
 |---|---|---|
 | reference math unchanged | `sly/gdn/tests/test_chunk_scan_ref.py` (CPU) | fp64 chunked == fp64 naive, relRMSE <= 1e-10 |
 | resource budget | `ci/tests/test_gdn_v2_budget.py` (fixture) | VGPR <= 256, **spills 0**, scratch 0, LDS 60,928, 4 waves/SIMD |
-| patch wiring | `ci/tests/test_gdn_scan_v2_patch.py` (CPU; applies the patch to a pin copy when `R4D_SRC` is set) | applies clean, registry row with `variant="v2"` first, module binding, build.sh unit |
-| knob | `ci/tests/test_gdn_scan_v2_select.py` (CPU) | unset/0 = stock and no `variant` query; 1 = v2; 1 without v2 = stock + one message |
+| patch wiring | `ci/tests/test_gdn_scan_v2_patch.py` (unittest, `python3 -m unittest discover -s ci/tests`; applies the patch to a pin copy when `R4D_SRC` is set) | applies clean, registry row with `variant="v2"` first, module binding, build.sh unit with `-mcumode` |
+| knob | `sly/tests/test_gdn_scan_v2_select_cpu.py` (CPU, `pytest sly/tests`) | unset/0 = stock and no `variant` query; 1 = v2; 1 without v2 = stock + one message |
 | **GPU** | `sly/gdn/tests/gpu_chunk_scan_v2.py` **[GPU window]** | DIGEST (`o`, `ht`) == stock for T in {64, 65, 513, 880, 1514, 1760, 4089} x N in {1, 2}; accuracy vs fp64 o <= 5e-3 / state <= 4e-3; timing T = 4089 H = 48 ABBA median 20 |
 
 Timing verdict: **GO** if ratio <= 0.92, **ABORT** if > 0.95 (unchanged from the G1 gate). Run it

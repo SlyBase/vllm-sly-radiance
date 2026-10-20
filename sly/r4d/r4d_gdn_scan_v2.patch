@@ -6,7 +6,7 @@ index d02982f..9f74631 100755
    "r4d_attn_paged_h256_gqa6:"
    "r4d_attn_vit_h72_bf16:"
    "r4d_gdn_chunk_scan_k128_v128_c64_bf16:-mcumode"
-+  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2:"
++  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_v2:-mcumode"
    "r4d_gdn_conv_w4_h128_bf16:"
    "r4d_gdn_kkt_solve_k128_c64_bf16:"
    "r4d_gdn_recurrent_update_k128_v128_bf16_fp32state:"
