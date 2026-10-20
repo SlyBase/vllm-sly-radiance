@@ -216,3 +216,7 @@ def test_knob_unknown_variant_keeps_stock_and_says_so(monkeypatch, capsys):
 def test_knob_on_a_build_without_variants_keeps_stock(monkeypatch, capsys):
     assert load(monkeypatch, False, "s2")._CHUNK_SCAN.__name__ == STOCK
     assert capsys.readouterr().err.count("RADIANCE_GDN_SCAN_VARIANT=s2") == 1
+
+
+if __name__ == "__main__":  # same entry point as the other CPU tests: `python3 sly/tests/<this file>`
+    sys.exit(pytest.main([__file__, "-q"]))

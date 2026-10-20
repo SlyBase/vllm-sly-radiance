@@ -60,6 +60,29 @@ gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that r
 and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
 The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
 
+### 1.8.0 acceptance run at 300 W — **not measured yet**
+
+The table below is a skeleton: every cell is a placeholder that the 300 W acceptance run fills in. The
+run uses the production arguments of the quickstart on both arms, on the same card, in the same window,
+second start, `--no-enable-prefix-caching` (the drafter-skip knob requires it), and the 1.8.0 opt-in
+knobs enabled per the Options table. Nothing here is a result — the numbers are deliberately absent
+until the run exists.
+
+| | **ours (1.8.0 stack)** | **reference stack (same card, same args)** |
+|---|---|---|
+| **Prefill**, 2K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
+| **Prefill**, 8K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
+| **Prefill**, 16K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
+| **Prefill**, 32K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
+| **Prefill**, 64K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
+| **Decode, single stream** (weighted) | TBD (300 W run) | TBD (300 W run) |
+| update gap p50 / p99 | TBD (300 W run) | TBD (300 W run) |
+| tokens per update | TBD (300 W run) | TBD (300 W run) |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | TBD (300 W run) | TBD (300 W run) |
+| time to first token, 64K tokens | TBD (300 W run) | TBD (300 W run) |
+| KV pool, 262k context (tokens) | TBD (300 W run) | TBD (300 W run) |
+| GSM8K 200 (greedy) | TBD (300 W run) | TBD (300 W run) |
+
 The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 
 Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
@@ -199,6 +222,9 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_NSD` + `RADIANCE_NSD_THETA` | `0` (off) + `0.95` (opt-in, **unmeasured**) | Nucleus Speculative Decoding ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) in the rejection sampler: a draft token inside the target nucleus (mass of strictly higher target logits <= theta) is accepted besides the usual test; residual and bonus token unchanged. Only for sampling (temperature > 0), greedy is untouched. Trades a bounded deviation from the target distribution for acceptance; theta 0.95 is the paper's default, 0.90 is the second value to test. Excludes `RADIANCE_CACTUS_DELTA` (both set = startup error). Details: [sly/README.md](sly/README.md) `patch_nsd.py` |
 | `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
+| `R4D_ATTN_DB` (+ `R4D_ATTN_TILE`) | `0` (opt-in, **not yet measured end to end**) | 1.8.0: double-buffered K/V staging, one barrier per key tile (O_DB), only with `R4D_ATTN_FP8=3` — otherwise inert. Bit-identical output, one layer M = 4089: 27.128 → 26.310 ms at ctx 40,890 (−3.0 %), 11.763 → 11.313 ms at 16,356 (−3.8 %), 1.687 → 1.571 ms at 0 (−6.9 %). `R4D_ATTN_TILE=16/32/48` (default 48) picks the key tile; tile 16 *without* DB is 7.7 % slower than tile 48, which is why the earlier tile-16 attempt lost |
+| `RADIANCE_GDN_SCAN_VARIANT` | unset (stock) | 1.8.0: `s1` / `s2` / `s3` select build-time variants of the GDN chunk scan in the same `r4d.so` (`s1` = no `-mcumode`, `s2` = + LDS diet, `s3` = + late staging). DIGEST bit-identical at T = 64/65/880/1760/4089 and varlen; one layer T = 4089 stock 0.5720 ms, s1 0.4860 (−15.0 %), s2 0.5366 (−6.2 %), s3 0.4255 (−25.6 %); s3 189 VGPR / 43,008 B LDS vs stock 256 / 4-VGPR spill / 60,928 B. s1+s3 is the pair, s2 alone is worse than s1. Details: [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) |
+| `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `0` (opt-in, GPU identity test **not yet run**) | 1.8.0: skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; no end-to-end number yet |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |

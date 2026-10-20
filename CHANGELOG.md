@@ -10,6 +10,43 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.8.0] - 2026-10-21
+
+Three opt-in prefill knobs on top of 1.7.0. All three are **off by default**, leave the stock launch
+bit-identical when off, and have **no end-to-end (serve-level) measurement yet**: every number below is a
+one-layer kernel microbench, and none of the three has been through a 300 W acceptance run. See
+[docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) for the GDN variants.
+
+### Added
+- **`R4D_ATTN_DB=1` (+ `R4D_ATTN_TILE=16|32|48`)**: double-buffered K/V staging with one barrier per key
+  tile in the libr4d prefill attention kernel (O_DB). Output is **bit-identical** to the stock kernel;
+  only the LDS slicing and the issue point of the staging loads move. Gate: `R4D_ATTN_FP8=3`, otherwise the
+  knob is inert. One attention layer (`r4d_attn_prefill_h256_gqa6`, M = 4089): **27.128 → 26.310 ms at
+  ctx 40,890 (−3.0 %)**, 11.763 → 11.313 ms at ctx 16,356 (−3.8 %), 1.687 → 1.571 ms at ctx 0 (−6.9 %).
+  Tile 16 *without* DB is 7.7 % slower than the shipped tile 48 (29.236 ms at 40,890), which is why the
+  earlier tile-16 attempt lost; DB is what pays for the smaller tile. Off by default, not yet measured end
+  to end.
+- **`RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3`**: build-time variants of the GDN chunk scan in the same `r4d.so`,
+  selectable per process (`unset` = stock entry point): `s1` = workgroup-processor mode (unit built without
+  `-mcumode`), `s2` = `s1` + LDS diet (state mirror aliases sA + W), `s3` = `s2` + the next chunk's staging
+  loads issued after barrier (3). DIGEST bit-identical against stock at T = 64 / 65 / 880 / 1760 / 4089 and
+  a varlen split, 5 repeats stable. One layer, T = 4089: stock **0.5720 ms**, s1 0.4860 (**−15.0 %**),
+  s2 0.5366 (−6.2 %), s3 0.4255 (**−25.6 %**). `s3` uses 189 VGPR (no spill) and 43,008 B LDS against stock's
+  256 VGPR with a 4-VGPR spill and 60,928 B. `s2` alone is slower than `s1`, so the useful pair is s1 + s3.
+  Off by default, not yet measured end to end.
+- **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1`** (+ `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN`, default 512):
+  the DFlash2 drafter has 5 sliding-attention layers with a 2,048-token window, so in an intermediate
+  prefill chunk it only ever reads the last ~2,048 positions while the scheduler drops its draft tokens
+  anyway; the knob skips its `fc`, context-K/V fill and draft step for chunks whose end lies at least
+  `window + margin` below the prompt length. Gate: prefix caching must be **off** (with APC on the knob
+  warns once and does nothing), all drafter layers must be sliding, and DP must be 1. CPU-gated by
+  `sly/tests/test_dflash_prefill_skip_cpu.py`; **the GPU identity test has not been run yet**, and there is
+  no end-to-end number. Off by default.
+
+### Changed
+- `VERSION` 1.7.0 → 1.8.0. No change to the default serve path: without the three variables above the
+  launch is the 1.7.0 stack, bit for bit.
+
 ## [1.7.0] - 2026-10-20
 
 Stack bump to vLLM 0.32.0 (released 2026-10-18). torch / triton / torchvision are unchanged: 0.32.0's own
