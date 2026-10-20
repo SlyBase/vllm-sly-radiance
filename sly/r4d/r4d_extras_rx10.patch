@@ -348,7 +348,7 @@ diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
 index cd4e294..42512a6 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -57,9 +57,50 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -57,9 +57,56 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -361,20 +361,23 @@ index cd4e294..42512a6 100644
 +    // chunk, ~/mxfp4_work/tier8). Whether that accuracy trade is FREE at the end task is exactly
 +    // what the serving gates (ppl + GSM8K paired) decide; kernel-level parity already decided the
 +    // default, which is why these are bits and not the baseline.
-+    // R4D_ATTN_OPT2: 1 = the A1 VALU diet (O_CFOLD | O_MAX3) on top of whichever arm the fp8 knob
-+    // picks; 2 and 3 arm one bit alone, because the A/B measures each separately (MAX3 alone is the
-+    // bit-identity control). Default 0 = the shipped bit set, unchanged.
-+    const int opt2 = [] {          // per launch, not cached: one process can arm variants ABBA
-+        const char* e = getenv("R4D_ATTN_OPT2");
-+        return e ? atoi(e) : 0;
-+    }();
-+    int fp8mode = 0;
++    // R4D_ATTN_OPT2: 1 = the A1 VALU diet (O_CFOLD | O_MAX3), 2 and 3 arm one bit alone, because the
++    // A/B measures each separately (MAX3 alone is the bit-identity control). Default 0 = the shipped
++    // bit set, unchanged. Read ONCE per process, exactly like R4D_ATTN_FP8: the gate script starts
++    // one process per arm, so a per-launch read would buy nothing and would only invite the A/B to
++    // re-arm the kernel in-process, which the launcher's contract does not promise.
++    int fp8mode = 0, opt2 = 0;
 +    if constexpr (!KVP) {
 +        static const int m = [] {
 +            const char* e = getenv("R4D_ATTN_FP8");
 +            return e ? atoi(e) : 0;
 +        }();
 +        fp8mode = m;
++        static const int a = [] {
++            const char* e = getenv("R4D_ATTN_OPT2");
++            return e ? atoi(e) : 0;
++        }();
++        opt2 = a;
 +    }
 +#define P_LAUNCH(OPTX)                                                                            \
 +    do {                                                                                          \
@@ -382,6 +385,9 @@ index cd4e294..42512a6 100644
 +                                                    A_BLOCK_SIZE, KVP, OPTX>),                    \
 +                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
 +    } while (0)
++// A1 is armed on the fp8mode == 3 leg and NOWHERE else: FP8=2 goes 19 -> 22 spills and bf16 KV
++// 23 -> 38, and FP8=1 / FP8=0 are not the serving arm either, so the extra bits are only ever asked
++// of the arm this slice was measured on.
 +#define P_LAUNCH2(OPTX)                                                                           \
 +    do {                                                                                          \
 +        if      (opt2 == 1) P_LAUNCH((OPTX) | O_CFOLD | O_MAX3);                                  \
@@ -391,11 +397,11 @@ index cd4e294..42512a6 100644
 +    } while (0)
 +    if constexpr (!KVP) {
 +        if (fp8mode == 3)      P_LAUNCH2(P_OPT | O_QK8 | O_PV8);
-+        else if (fp8mode == 2) P_LAUNCH2(P_OPT | O_PV8);
-+        else if (fp8mode == 1) P_LAUNCH2(P_OPT | O_QK8);
-+        else                   P_LAUNCH2(P_OPT);
++        else if (fp8mode == 2) P_LAUNCH(P_OPT | O_PV8);
++        else if (fp8mode == 1) P_LAUNCH(P_OPT | O_QK8);
++        else                   P_LAUNCH(P_OPT);
 +    } else {
-+        P_LAUNCH2(P_OPT);
++        P_LAUNCH(P_OPT);
 +    }
 +#undef P_LAUNCH2
 +#undef P_LAUNCH
@@ -432,11 +438,11 @@ index 513d97f..cc99367 100644
  #define O_FOLDQ   8
  #define O_CONTIG  512
  #define O_PF2    1024
-@@ -71,6 +90,27 @@
+@@ -71,6 +90,29 @@
  // the default fence invalidates the vector cache twice per tile for a synchronisation that only
  // ever orders LDS.
  #define O_LDSB  2097152
-+// A1 (R4D_ATTN_OPT2=1): two VALU cuts on the softmax path. Both are value-neutral in f32:
++// A1 (R4D_ATTN_OPT2=1): ONE VALU cut on the softmax path, plus a codegen-no-op control arm:
 +//   CFOLD  the p exponent's offset (SHIFT - m_ref) is folded into the QK accumulator's C operand
 +//          instead of being added to all eight lanes on every m-tile, and by the definition of that
 +//          offset the rescale test becomes a CONSTANT compare (raw + off > SHIFT + GROW). Needs
@@ -450,7 +456,9 @@ index 513d97f..cc99367 100644
 +#define O_MAX3  16777216
 +
 +typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
-+// 3-operand f32 max: one instruction where two chained fmaxf are needed, exact either way.
++// 3-operand f32 max written as a tree. It compiles to the same two chained max ops the inline
++// chain produced -- LLVM already picks v_max3_num_f32 either way -- so this is the A/B's
++// CONTROL arm (bit-identical output, same VGPR) and not an optimisation.
 +__device__ __forceinline__ float max3f(float a, float b, float c) { return fmaxf(fmaxf(a, b), c); }
 +// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
 +__device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d) {

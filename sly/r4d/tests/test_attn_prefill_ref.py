@@ -45,29 +45,46 @@ O_CFOLD, O_MAX3 = 1 << 22, 1 << 24
 
 def unpack_kv(kv, bt, ctx, kvh, kvheads):
     """[nblk, kvheads, BS, 2*D] fp8 bytes + block table -> [ctx, 2*D] float, block order undone."""
-    k = torch.empty(ctx, 2 * HEAD_DIM)
-    for kk in range(ctx):
-        blk = int(bt[0, kk // BS])
-        k[kk] = kv[blk, kvh, kk % BS].float()
+    pos = torch.arange(ctx, device=kv.device)
+    blk = bt[0][pos // BS].long()
+    k = kv[blk, kvh, pos % BS].float()
     return k[:, :HEAD_DIM], k[:, HEAD_DIM:]
 
 
-def prefill_reference(q, kv, bt, ctx, kvh, kdesc, vdesc):
+def prefill_reference(q, kv, bt, ctx, kvh, kdesc, vdesc, chunk=None):
     """What the kernel computes, in float32: o[i] = softmax(q_i K^T) V, keys <= ctx - q_len + i.
 
-    q: [M, H, D] bf16 (H = kvheads * GQA); kv/bt/ctx as the launcher takes them.
+    q: [M, H, D] bf16 (H = kvheads * GQA); kv/bt/ctx as the launcher takes them. One kv head, so the
+    result is [M, GQA, D]; `chunk` bounds the M x ctx score matrix (the GPU gate passes 128).
     """
     M = q.shape[0]
     K, V = unpack_kv(kv, bt, ctx, kvh, kvheads=q.shape[1] // GQA)
     out = torch.empty(M, GQA, HEAD_DIM)
+    limits = torch.arange(M).unsqueeze(1) + (ctx - M)                # causal, offset by ctx_prior
+    keys = torch.arange(ctx).unsqueeze(0)
     for h in range(GQA):
         qh = q[:, kvh * GQA + h].float() * (SCALE * kdesc)          # FOLDQ: scale in the query
-        s = qh @ K.T                                                 # ... so K stays raw
-        limits = torch.arange(M).unsqueeze(1) + (ctx - M)            # causal, offset by ctx_prior
-        keys = torch.arange(ctx).unsqueeze(0)
-        s = s.masked_fill(keys > limits, -float("inf"))
-        p = torch.softmax(s, dim=-1)
-        out[:, h] = p @ (V * vdesc)
+        rows = [(0, M)] if chunk is None else [(a, a + chunk) for a in range(0, M, chunk)]
+        for a, b in rows:
+            s = qh[a:b] @ K.T                                        # ... so K stays raw
+            s = s.masked_fill(keys > limits[a:b], -float("inf"))
+            p = torch.softmax(s, dim=-1)
+            out[a:b, h] = p @ (V * vdesc)
+    return out
+
+
+def prefill_reference_all(q, kv, bt, ctx, kvheads, kdesc=1.0, vdesc=1.0, chunk=None):
+    """The same oracle for every kv head: [M, kvheads * GQA, D], head order of the launcher's output.
+
+    The kernel launches grid.y = kv_heads and serves q head `kvh * GQA + hi` with kv head `kvh`
+    (r4d_attn_prefill_kernel: `qhead = kvh * GQA + hi`), so the oracle has to be laid out the same
+    way -- a reference built for kvh = 0 alone is [M, GQA, D] and cannot be compared with o[M, H, D].
+    """
+    M = q.shape[0]
+    out = torch.empty(M, kvheads * GQA, HEAD_DIM)
+    for kvh in range(kvheads):
+        out[:, kvh * GQA:(kvh + 1) * GQA] = prefill_reference(q, kv, bt, ctx, kvh, kdesc, vdesc,
+                                                             chunk=chunk)
     return out
 
 
@@ -129,6 +146,54 @@ def test_reference_is_causal_at_the_offset():
     p = torch.softmax(s[:38], dim=-1)                     # row 0 sees keys 0..37 (ctx_prior + itself)
     want = p @ V[:38]
     assert (ref[0, 0] - want).abs().max().item() <= 1e-5
+
+
+# --------------------------------------------------------------------------- the GPU gate's shapes
+
+def _gate_module():
+    """Import sly/r4d/tests/gpu_attn_prefill_opt2.py without running its main()."""
+    import importlib.util
+    p = Path(__file__).resolve().parent / "gpu_attn_prefill_opt2.py"
+    spec = importlib.util.spec_from_file_location("gpu_attn_prefill_opt2", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_gate_reference_covers_every_kv_head():
+    """The gate's oracle has to be [M, H, D] for H = kv_heads * GQA, not [M, GQA, D] of kv head 0.
+
+    The launcher writes o[M, H, D] and the kernel serves q head `kvh * GQA + hi` from kv head `kvh`,
+    so a reference built for one kv head has the wrong shape and every arm comparison would raise
+    instead of scoring.
+    """
+    _need_torch()
+    gate = _gate_module()
+    kvheads = 2
+    q, kv, bt, ctx = make_case(64, 37, kvheads)
+    ref = gate.reference(q, kv, bt, ctx, kvheads)
+    assert tuple(ref.shape) == (64, kvheads * GQA, HEAD_DIM), ref.shape
+    for kvh in range(kvheads):
+        want = prefill_reference(q, kv, bt, ctx, kvh, 1.0, 1.0)
+        assert torch.allclose(ref[:, kvh * GQA:(kvh + 1) * GQA], want, atol=1e-6), kvh
+    assert ref[:, GQA:].abs().sum() > 0, "kv head 1 is all zeros"
+
+
+def test_gate_scores_a_stub_kernel_over_every_head():
+    """Stub the kernel with a launcher-shaped [M, H, D] buffer: the gate's metric must run and be 0."""
+    _need_torch()
+    gate = _gate_module()
+    kvheads = 4
+    q, kv, bt, ctx = make_case(40, 5, kvheads)
+    M, H = q.shape[0], q.shape[1]
+    ref = gate.reference(q, kv, bt, ctx, kvheads)
+    out = torch.empty(M, H, HEAD_DIM)
+    out.copy_(ref)                                     # what a correct kernel writes
+    med, mx = gate.row_relrmse(out, ref)
+    assert (med, mx) == (0.0, 0.0)
+    out[:, :] = 0.0                                    # and the metric has to see a wrong arm
+    med, _ = gate.row_relrmse(out, ref)
+    assert med > 0.5
 
 
 # --------------------------------------------------------------------------- the patch
