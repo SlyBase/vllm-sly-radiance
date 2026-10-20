@@ -345,10 +345,10 @@ index a4f359a..846b94a 100644
  //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
  // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index cd4e294..3694dab 100644
+index cd4e294..b18a485 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -57,9 +57,35 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -57,9 +57,49 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -369,14 +369,27 @@ index cd4e294..3694dab 100644
 +        }();
 +        fp8mode = m;
 +    }
-+#define P_LAUNCH(OPTX)                                                                            \
++#define P_LAUNCHT(TILEX, OPTX)                                                                    \
 +    do {                                                                                          \
-+        hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, P_TILE, A_HEAD_DIM, A_GQA,          \
++        hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, TILEX, A_HEAD_DIM, A_GQA,           \
 +                                                    A_BLOCK_SIZE, KVP, OPTX>),                    \
 +                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
 +    } while (0)
++#define P_LAUNCH(OPTX) P_LAUNCHT(P_TILE, OPTX)
 +    if constexpr (!KVP) {
-+        if (fp8mode == 3)      P_LAUNCH(P_OPT | O_QK8 | O_PV8);
++        if (fp8mode == 3) {
++            // R4D_ATTN_TILE (16/32/48, default 48) and R4D_ATTN_DB (1 = double-buffered one-barrier
++            // staging, O_DB) pick the key tile and staging of the 8-bit path. Read per launch so a
++            // microbench can A/B them in one process; unset = the shipped tile-48 kernel.
++            const char* et = getenv("R4D_ATTN_TILE");
++            const char* ed = getenv("R4D_ATTN_DB");
++            const int t = et ? atoi(et) : P_TILE;
++            const bool db = ed && atoi(ed) != 0;
++            constexpr int B = P_OPT | O_QK8 | O_PV8;
++            if      (t == 16) { if (db) P_LAUNCHT(16, B | O_DB); else P_LAUNCHT(16, B); }
++            else if (t == 32) { if (db) P_LAUNCHT(32, B | O_DB); else P_LAUNCHT(32, B); }
++            else              { if (db) P_LAUNCHT(48, B | O_DB); else P_LAUNCHT(48, B); }
++        }
 +        else if (fp8mode == 2) P_LAUNCH(P_OPT | O_PV8);
 +        else if (fp8mode == 1) P_LAUNCH(P_OPT | O_QK8);
 +        else                   P_LAUNCH(P_OPT);
@@ -384,11 +397,12 @@ index cd4e294..3694dab 100644
 +        P_LAUNCH(P_OPT);
 +    }
 +#undef P_LAUNCH
++#undef P_LAUNCHT
      CHK();
      return 0;
  }
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 513d97f..da52a10 100644
+index 513d97f..118d5cf 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
 @@ -38,6 +38,25 @@
@@ -417,21 +431,29 @@ index 513d97f..da52a10 100644
  #define O_FOLDQ   8
  #define O_CONTIG  512
  #define O_PF2    1024
-@@ -72,6 +91,13 @@
+@@ -71,6 +90,21 @@
+ // the default fence invalidates the vector cache twice per tile for a synchronisation that only
  // ever orders LDS.
  #define O_LDSB  2097152
- 
++// DB: double-buffered K/V staging with ONE barrier per key tile. Tile ti+1's global loads are issued
++// right after the barrier, the LDS stores for it are the LAST step of tile ti (into the other
++// buffer), so they overlap the WMMA of waves that are still computing instead of sitting in a
++// barrier-bounded window with no WMMA in flight. The buffer written during tile ti was last read
++// before barrier ti, which is the whole hazard argument. Same math and same accumulation order as
++// the single-buffered loop; only the staging schedule changes. Needs the 8-bit legs (byte tiles),
++// KWIDE and BTS: LDS is 2 x (TILE*264 + 256*(TILE+8)) bytes.
++#define O_DB    4194304
++
 +typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
 +// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
 +__device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d) {
 +    const uint32_t w = __builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false);
 +    return __builtin_amdgcn_cvt_pk_fp8_f32(c, d, w, true);
 +}
-+
+ 
  // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
  template<class D, int FOLDQ, int F16>
- __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
-@@ -90,11 +116,15 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -90,11 +124,17 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int CTG   = (OPT & O_CONTIG) ? 1 : 0;
      constexpr int PF    = 1 << ((OPT >> 10) & 3);
      constexpr int SGB   = (OPT & O_SGB) ? 1 : 0;
@@ -441,14 +463,16 @@ index 513d97f..da52a10 100644
      constexpr int GPREV = (OPT & O_GPREV) ? 1 : 0;
      constexpr int LDSB  = (OPT & O_LDSB)  ? 1 : 0;
      constexpr int KWIDE = (OPT & O_KWIDE) ? 1 : 0;
++    constexpr int DB    = (OPT & O_DB) ? 1 : 0;
 +    constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
 +    constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
 +    static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
 +    static_assert(!(OPT & O_QK8) || KWIDE, "QK8 raw-byte staging is written for the wide K fetch");
++    static_assert(!DB || (QK8 && PV8 && KWIDE && BTS), "DB staging is written for the byte-tile legs");
      typedef DT16<F16> D;
      typedef typename D::frag frag16;
  
-@@ -113,11 +143,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -113,11 +153,28 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int NTR     = (TILE / 8) * (HEAD_DIM / (KVP ? 32 : 64));
      constexpr int VREGS   = (NTR + NWARPS - 1) / NWARPS;        // uint4 of raw V per thread
      constexpr float PSHIFT = D::SHIFT;
@@ -470,14 +494,18 @@ index 513d97f..da52a10 100644
 +    // Strides are padded 8 (bytes or shorts alike) so the 16-row fragment reads spread across
 +    // all 32 banks.
 +    constexpr int KSTR8 = HEAD_DIM + 8, VSTR8 = TILE + 8;
-+    __shared__ uint16_t sK[QK8 ? (TILE * KSTR8 + 1) / 2 : TILE * KSTR];
-+    __shared__ uint16_t sV16[PV8 ? (HEAD_DIM * VSTR8 + 1) / 2 : HEAD_DIM * VSTR];
++    constexpr int NBUF = DB ? 2 : 1;
++    constexpr int KBYTES = TILE * KSTR8, VBYTES = HEAD_DIM * VSTR8;   // one buffer, byte legs
++    __shared__ uint16_t sK[QK8 ? NBUF * ((TILE * KSTR8 + 1) / 2) : TILE * KSTR];
++    __shared__ uint16_t sV16[PV8 ? NBUF * ((HEAD_DIM * VSTR8 + 1) / 2) : HEAD_DIM * VSTR];
 +    uint8_t* const sK8 = (uint8_t*)sK;
 +    uint8_t* const sV8 = (uint8_t*)sV16;
++    uint8_t* wK8 = sK8;   // staging target; DB flips it to the buffer the next tile reads
++    uint8_t* wV8 = sV8;
  
      const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
      const int c = lane & 15, h = lane >> 4;
-@@ -140,6 +183,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -140,6 +197,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      const float mul   = a.scale * kdesc * 1.44269504089f;
  
      frag16 qf[NKS];
@@ -485,7 +513,7 @@ index 513d97f..da52a10 100644
      {
          const uint16_t* qp = (const uint16_t*)a.q
                             + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
-@@ -148,10 +192,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -148,10 +206,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              // CONTIG reads the same 8 d as ONE run; the legacy map splits them 4+4.
              const uint2 l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
              const uint2 h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
@@ -511,38 +539,81 @@ index 513d97f..da52a10 100644
          }
      }
  
-@@ -229,6 +284,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -229,6 +298,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  const int key = KWIDE ? (2 * (i >> 5) + (i & 1)) : (i / (HEAD_DIM / KEL));
                  const int ch  = KWIDE ? ((i & 31) >> 1) : (i - key * (HEAD_DIM / KEL));
                  if (KWIDE && key >= TILE) continue;
 +                if constexpr (QK8) {
 +                    // K stays e4m3: no upconvert, one b128 store, sK footprint halves.
-+                    *(uint4*)(&sK8[key * KSTR8 + ch * KEL]) = kreg[p];
++                    *(uint4*)(&wK8[key * KSTR8 + ch * KEL]) = kreg[p];
 +                    continue;
 +                }
                  uint16_t* kd = &sK[key * KSTR + ch * KEL];
                  #pragma unroll
                  for (int q = 0; q < KEL / 8; ++q) {
-@@ -266,6 +326,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -266,6 +340,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                      // ADJACENT d; v_perm_b32 splits them back into two d rows.
                      const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
                      const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
 +                    if constexpr (PV8) {
-+                        *(uint2*)(&sV8[(d0 + 2 * vj)     * VSTR8 + kg * 8]) = make_uint2(lo0, lo1);
-+                        *(uint2*)(&sV8[(d0 + 2 * vj + 1) * VSTR8 + kg * 8]) = make_uint2(hi0, hi1);
++                        *(uint2*)(&wV8[(d0 + 2 * vj)     * VSTR8 + kg * 8]) = make_uint2(lo0, lo1);
++                        *(uint2*)(&wV8[(d0 + 2 * vj + 1) * VSTR8 + kg * 8]) = make_uint2(hi0, hi1);
 +                        continue;
 +                    }
                      uint32_t wl[4], wh[4];
                      fp8x8_to_16x4w<D>(make_uint2(lo0, lo1), wl);
                      fp8x8_to_16x4w<D>(make_uint2(hi0, hi1), wh);
-@@ -310,7 +375,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -287,7 +366,13 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+         #pragma unroll
+         for (int i = 0; i < NB; ++i) blk[i] = bt[i];
+     }
+-    if (GPREV) fetchV(0, blk);
++    if (GPREV && !DB) fetchV(0, blk);
++    if (DB) {   // tile 0 into buffer 0; the first barrier of the loop publishes it
++        fetchK(0, blk);
++        fetchV(0, blk);
++        storeV();
++        storeK();
++    }
+ 
+     for (int ti = 0; ti < ntiles; ++ti) {
+         const int k0 = ti * TILE;
+@@ -298,19 +383,41 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+             for (int i = 0; i < NB; ++i) blkn[i] = bt[tb + i];
+         }
+         if (LDSB) lds_barrier(); else __syncthreads();
+-        fetchK(k0, blk);
+-        if (!GPREV) fetchV(k0, blk);
+-        storeV();              // V first: its data is already in registers, so it covers K's wait
+-        storeK();
+-        if (LDSB) lds_barrier(); else __syncthreads();
+-        // The next tile's global loads are issued HERE, before the 96 WMMAs below, and the wait
+-        // that consumes them does not appear until after the next barrier.
+-        if (GPREV && ti + 1 < ntiles) fetchV(k0 + TILE, blkn);
++        if (DB) {
++            if (ti + 1 < ntiles) { fetchK(k0 + TILE, blkn); fetchV(k0 + TILE, blkn); }
++            wK8 = sK8 + ((ti + 1) & 1) * KBYTES;
++            wV8 = sV8 + ((ti + 1) & 1) * VBYTES;
++        } else {
++            fetchK(k0, blk);
++            if (!GPREV) fetchV(k0, blk);
++            storeV();          // V first: its data is already in registers, so it covers K's wait
++            storeK();
++            if (LDSB) lds_barrier(); else __syncthreads();
++            // The next tile's global loads are issued HERE, before the 96 WMMAs below, and the wait
++            // that consumes them does not appear until after the next barrier.
++            if (GPREV && ti + 1 < ntiles) fetchV(k0 + TILE, blkn);
++        }
++        const uint8_t* const rK8 = sK8 + (DB ? (ti & 1) * KBYTES : 0);
++        const uint8_t* const rV8 = sV8 + (DB ? (ti & 1) * VBYTES : 0);
+ 
          #pragma unroll 1
          for (int mt = 0; mt < MT; ++mt) {
              v8f s = (v8f){0,0,0,0,0,0,0,0};
 -            {
 +            if constexpr (QK8) {
 +                // Same PF discipline, half the fragment bytes, 2x the WMMA issue rate.
-+                const uint8_t* krow8 = &sK8[(mt * 16 + c) * KSTR8] + 8 * h;
++                const uint8_t* krow8 = &rK8[(mt * 16 + c) * KSTR8] + 8 * h;
 +                #pragma unroll
 +                for (int g = 0; g < NKS; g += PF) {
 +                    v2i32_r4d kb8[PF];
@@ -558,7 +629,7 @@ index 513d97f..da52a10 100644
                  const uint16_t* krow = &sK[(mt * 16 + c) * KSTR] + (CTG ? 8 * h : 0);
                  // PF fragments are LOADED before the matching PF WMMAs are ISSUED, so the wait in
                  // front of each WMMA becomes `s_wait_dscnt PF-1` instead of a full drain.
-@@ -368,7 +447,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -368,7 +475,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              }
              if (!DOT2) l_i += lsum;
  
@@ -566,7 +637,7 @@ index 513d97f..da52a10 100644
 +            if constexpr (PV8) {
 +                const v2i32_r4d p8 = (v2i32_r4d){(int)pk_fp8x4(pf[0], pf[1], pf[2], pf[3]),
 +                                                 (int)pk_fp8x4(pf[4], pf[5], pf[6], pf[7])};
-+                const uint8_t* vbase8 = &sV8[c * VSTR8 + mt * 16 + 8 * h];
++                const uint8_t* vbase8 = &rV8[c * VSTR8 + mt * 16 + 8 * h];
 +                #pragma unroll
 +                for (int g = 0; g < NKS; g += PF) {
 +                    v2i32_r4d vb8[PF];
@@ -582,6 +653,17 @@ index 513d97f..da52a10 100644
                  uint32_t pw[4];
                  #pragma unroll
                  for (int e = 0; e < 8; e += 2) pw[e >> 1] = D::pk(pf[e], pf[e + 1]);
+@@ -410,6 +532,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+                 }
+             }
+         }
++        if (DB && ti + 1 < ntiles) {   // last step: stage tile ti+1 for the next barrier
++            storeV();
++            storeK();
++        }
+         if (BTS) {
+             #pragma unroll
+             for (int i = 0; i < NB; ++i) blk[i] = blkn[i];
 diff --git a/r4d_gdn_fused_update_w4k128v128.h b/r4d_gdn_fused_update_w4k128v128.h
 new file mode 100644
 index 0000000..839ee1f
