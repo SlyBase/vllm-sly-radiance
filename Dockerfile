@@ -584,6 +584,10 @@ FROM stack AS assemble
 # --- runtime modules and configs ---
 # radiance_amdsmi.py and .pth: amdsmi init-order fix. amdsmi must init before HIP at site-init in
 # every process, otherwise it enumerates 0 devices and platform detection fails.
+# tile_layout.py is not imported by the runtime, but sly/mxfp4/bench_prefill_cells.py and
+# ci/bench_at_psw.py (both meant to run inside this image) do `from tile_layout import untile`
+# with site-packages on sys.path -- it goes flat next to the other mxfp4 modules so the benches
+# do not need an extra bind mount.
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
@@ -591,6 +595,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_lmhead_int2.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
+     sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
      sly/radiance_adaptive_width.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \

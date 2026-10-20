@@ -141,9 +141,15 @@ def test_draft_sample_method_is_switchable_and_documented():
 
 
 def test_nsd_is_documented_as_opt_in():
+    """The default the README documents has to be the default the patch code carries -- text pinned
+    against text would not notice the code moving off 0."""
+    code = NSD.read_text().replace('\\"', '"')
+    m = re.search(r'"RADIANCE_NSD", "([^"]+)"', code)
+    assert m, "sly/patch_nsd.py no longer reads RADIANCE_NSD with a literal default"
+    default = m.group(1)
     readme = README.read_text()
-    assert re.search(r"\|\s*`RADIANCE_NSD`\s*\|\s*`0`", readme), \
-        "README must document RADIANCE_NSD with its default 0"
+    assert re.search(rf"\|\s*`RADIANCE_NSD`\s*\|\s*`{re.escape(default)}`", readme), \
+        f"README must document RADIANCE_NSD with its default {default} (sly/patch_nsd.py)"
     assert "RADIANCE_NSD=1" in readme, "README must show how to switch NSD on"
     assert "RADIANCE_CACTUS_DELTA=0" in readme, \
         "README must say that NSD=1 needs the Cactus knob at 0"

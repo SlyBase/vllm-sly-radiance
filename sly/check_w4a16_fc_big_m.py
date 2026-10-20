@@ -78,11 +78,14 @@ def knobs(**kv):
 
 # ---- the dispatch, read out of the patched source (no torch, no vLLM needed) --------------------
 
+# The pristine (unpatched) rdna_hybrid_w4a16.py: the pinned vLLM source checkout of this repo,
+# `.dryrun/src`, which is what ci/patch_dryrun.sh materialises -- relative to the repo root, never an
+# absolute host path (this file ships in the image: Dockerfile `COPY sly/ /opt/patches/sly/`). Point
+# RADIANCE_VLLM_SRC at another checkout, or pass --src, when the tree is elsewhere.
+ROOT = HERE.parent
 PRISTINE = [
-    "/opt/data/vllm-sly-radiance/.dryrun/src/vllm/vllm/model_executor/kernels/linear/"
-    "mixed_precision/rdna_hybrid_w4a16.py",
-    "/opt/data/repos/vllm-sly-radiance/.dryrun/src/vllm/vllm/model_executor/kernels/linear/"
-    "mixed_precision/rdna_hybrid_w4a16.py",
+    Path(os.environ.get("RADIANCE_VLLM_SRC") or ROOT / ".dryrun" / "src")
+    / "vllm/vllm/model_executor/kernels/linear/mixed_precision/rdna_hybrid_w4a16.py",
 ]
 
 
