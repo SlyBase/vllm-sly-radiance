@@ -53,6 +53,9 @@ Knobs (read at import):
                                   then refuses to load like `--attention-backend R4D` does
   R4D_ATTN_FP8                    0 (default) | 1 | 2 | 3: libr4d's own opt-in 8-bit legs of the prefill kernel
                                   (QK8 / PV8 / both). Orthogonal; see docs/TECHNICAL.md (1.0) for what it costs in accuracy.
+  R4D_ATTN_TILE / R4D_ATTN_DB     libr4d's key tile (default 48) and O_DB staging; read per launch, active only
+                                  at R4D_ATTN_FP8=3. Off-default they are logged once per process, with the
+                                  instance name and fp8 mode, so a served run proves which kernel it got.
 """
 
 import dataclasses
@@ -94,6 +97,30 @@ def _say_once(key: str, msg: str) -> None:
     if key not in _logged:
         _logged.add(key)
         _say(msg)
+
+
+def _o_db_note(kernel: str, fp8: str) -> str | None:
+    """The line for a non-default R4D_ATTN_TILE / R4D_ATTN_DB, or None on the shipped path.
+
+    libr4d reads the pair per launch and only acts on it at fp8mode 3 (both 8-bit legs); the line
+    spells that out rather than implying a kernel that cannot be selected. One line per process is
+    the caller's job (`_say_once`), because forward runs once per layer.
+    """
+    tile = os.environ.get("R4D_ATTN_TILE") or "48"
+    db = os.environ.get("R4D_ATTN_DB", "0") not in ("", "0")
+    if not db and tile == "48":
+        return None
+    msg = (
+        f"R4D_ATTN_DB: prefill instance {kernel} "
+        f"(tile {tile}, O_DB {'on' if db else 'off'}, fp8 legs {fp8})"
+    )
+    return msg if fp8 == "3" else msg + " -- inert: the pair only acts on fp8 legs 3"
+
+
+def _o_db_say(kernel: str, fp8: str) -> None:
+    msg = _o_db_note(kernel, fp8)
+    if msg is not None:
+        _say_once("o_db", msg)
 
 
 def _plan(query_start_loc_cpu: torch.Tensor, num_reqs: int, min_q: int):
@@ -329,6 +356,7 @@ class R4DHybridAttentionImpl(RocmAiterUnifiedAttentionImpl):
 
         variant, mult, head_stride, ratio = geom
         launch = _PREFILL[variant]
+        _o_db_say(launch.__name__, os.environ.get("R4D_ATTN_FP8", "0"))
         k_descale, v_descale = self._descale_ptrs(layer, query.device)
         table, lo = self._block_table16(attn_metadata, runs, mult, ratio)
         max_blocks = table.shape[1]
