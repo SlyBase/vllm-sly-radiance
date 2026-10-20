@@ -113,7 +113,7 @@ Kernel-level numerics change (fp8 attention legs; row relRMSE 1.7e-3 -> 3.1e-2, 
 | prefill K/C | | +6.9 / +10.5 / +11.8 / +13.0 / +17.7 % |
 | decode aggregate tok/s c1 / c2 / c4 (32 requests) | 121.9 / 223.4 / 319.2 | 121.7 / 226.4 / 301.0 |
 
-Both quality criteria hold (GSM8K K >= C - 1 SE; ppl K <= 1.01 x C). Decode c1 and c2 are flat; c4 reads -5.7 % on one arm per side (the second C arm and the first K arm lost their decode pass to host-RAM guard and OOM aborts in the measuring harness) and is not re-measured yet. The 4096 chunk costs 5 % of the KV pool at max-model-len 65536 (350 585 -> 332 960 tokens).
+Both quality criteria hold (GSM8K K >= C - 1 SE; ppl K <= 1.01 x C). Decode re-run (decode only, same image, ABBA, 32 requests per level): per-stream decode tok/s (median) c2 145.0 / 145.1 (C) vs 145.2 / 145.1 (K), c4 111.3 / 111.5 (C) vs 113.4 / 113.3 (K, +1.7 %); tokens per update 5.06 -> 5.27 at c4. The c4 aggregate reads 323 (C) vs 308 (K) because the K runs generated 2.5 % fewer tokens in a 2 % longer wall time (sampled outputs differ with the fp8 legs), not because a decode step got slower. The 4096 chunk costs 5 % of the KV pool at max-model-len 65536 (350 585 -> 332 960 tokens).
 
 *Measured (one R9700, prefill-only sweep, same-window control; details in docs/PREFILL-4000.md):* at 300 W
 the 1.5k prefill goes 3,318 -> 3,426 tok/s (+3.3 %) with `TILED_OPROJ=1` + `TN4_MIN_M=513`, 3,427 with chunk
