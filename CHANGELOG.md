@@ -31,6 +31,24 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   A/B (210 W, chunk 4096, ABBA, two windows) reads +0.3 / +0.4 % at 16k / 47k, inside the window drift: the
   end-to-end gain is about 0.7 % at 47k (12 calls x ~10 ms) and is proven by the cell bench, not the server arm.
   Off by default; no launch argument changes.
+- **A1 VALU diet for the R4D prefill attention kernel (`R4D_ATTN_OPT2`, default `0` = unmeasured).**
+  Two OPT bits in `sly/r4d/r4d_extras_rx10.patch`: `O_CFOLD` (bit 22) folds the softmax offset into the
+  QK WMMA's C operand, which removes the eight adds per m-tile in front of the exponents and turns
+  the lazy-rescale test into a constant compare; `O_MAX3` (bit 24) writes the row max as a 3-operand
+  tree. `R4D_ATTN_OPT2=1` arms both, `2` and `3` arm one alone for the A/B (`3` is the bit-identity
+  control: MAX3 only reorders `fmax`, and the base chain already compiles to `v_max3_num_f32`, so the
+  control is a no-op in codegen -- same output, same VGPR). Default `0` is byte-for-byte the shipped
+  arm: 215 VGPR / 0 spills / 27,008 B LDS. At `R4D_ATTN_FP8=3` (the serving arm) A1 compiles to
+  218 VGPR / 0 spills / 27,008 B LDS, still one workgroup per CU (24 warps need 6 of the 6 waves/SIMD
+  the register file allows either way, so occupancy 7 -> 6 costs no residency), and the steady-state
+  m-tile block shrinks 80 -> 70 instructions (53 -> 46 VALU) while the rarely taken rescale branch
+  grows 92 -> 105 (`sc[e] += off_new - off`). On the arms that already spill A1 moves the spill the
+  wrong way -- `R4D_ATTN_FP8=2` 19 -> 22, bf16 KV 23 -> 38 -- so `R4D_ATTN_OPT2` must only be armed
+  on the `FP8=3` arm; `FP8=1` goes 4 -> 0 spills and `FP8=0` 22 -> 17. Not yet measured on the card:
+  the GO/NO-GO is >= 4 % kernel time at ctx 16k and 40k, via `sly/r4d/tests/gpu_attn_prefill_opt2.py`
+  (GPU window). CPU tests: `sly/r4d/tests/test_attn_prefill_ref.py` (fp32 oracle vs
+  `scaled_dot_product_attention`, plus the patch applying to the pin and the default mask carrying
+  neither bit).
 
 ## [1.5.1] - 2026-10-16
 
