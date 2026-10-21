@@ -20,7 +20,6 @@ import ast
 import os
 import re
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -109,33 +108,93 @@ def test_rounding_matches_torch_on_random_values():
             "1e6 random fp32 bit patterns")
 
 
-def test_launcher_helper():
-    """`_q_fp32_ok` alone decides whether the cast in forward() is skipped."""
+def _launcher_ns(push, said):
+    """`_q_fp32_ok` and `_q_kernel` with the module names they close over, no vllm import."""
     src = LAUNCHER.read_text()
     tree = ast.parse(src)
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_q_fp32_ok")
-    ns = {"os": os, "torch": torch}
-    exec(compile(ast.get_source_segment(src, fn), str(LAUNCHER), "exec"), ns)
-    ok = ns["_q_fp32_ok"]
+    ns = {
+        "os": os,
+        "torch": torch,
+        "_set_q_fp32": push,
+        "_logged": set(),
+        "_say_once": lambda key, msg: said.append(msg),
+    }
+    for name in ("_q_fp32_ok", "_q_kernel"):
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+        exec(compile(ast.get_source_segment(src, fn), str(LAUNCHER), "exec"), ns)
+    return ns
 
-    def q(dtype):
-        return SimpleNamespace(dtype=dtype)
 
-    saved = os.environ.pop("RADIANCE_ATTN_Q_FP32", None)
+def test_toggle_follows_the_pointer():
+    """The kernel is told, per launch, exactly whether the pointer it gets is fp32.
+
+    This is the whole fix: the answer used to be an environment read on both sides, and the two
+    disagree on every query the glue declines -- where the kernel then reads 4 bytes per element
+    out of a 2-byte buffer (host reset on a 1515-token prefill).
+    """
+    pushed, said = [], []
+    kern = _launcher_ns(pushed.append, said)["_q_kernel"]
+    q32 = torch.randn(8, 2, 256)
+    env = os.environ.pop("RADIANCE_ATTN_Q_FP32", None)
     try:
-        assert not ok(q(torch.float32), 1.0), "the knob must default off"
+        out = kern(q32, 1.0)
+        assert pushed == [0] and out.dtype == torch.bfloat16, "the knob must default off"
+
         os.environ["RADIANCE_ATTN_Q_FP32"] = "1"
-        assert ok(q(torch.float32), 1.0), "fp32 q with the knob on must skip the cast"
-        assert not ok(q(torch.bfloat16), 1.0), "a bf16 q needs no kernel-side rounding"
-        assert not ok(q(torch.float8_e4m3fn), 1.0), "the fp8 query path has no fp32 form"
-        assert not ok(q(torch.float32), 0.5), "q_scale must be folded by the cast path, not the kernel"
+        pushed.clear()
+        out = kern(q32, 1.0)
+        assert pushed == [1], "contiguous fp32 q with q_scale 1 must tell the kernel fp32"
+        assert out.data_ptr() == q32.data_ptr(), "the qualifying query must not be copied"
+
+        pushed.clear()
+        q16 = q32.to(torch.bfloat16)
+        out = kern(q16, 1.0)
+        assert pushed == [0] and out.data_ptr() == q16.data_ptr(), \
+            "a bf16 q with the knob on must still be declared bf16 (the fault case)"
+
+        pushed.clear()
+        out = kern(q32.transpose(0, 1).contiguous().transpose(0, 1), 1.0)
+        assert pushed == [0] and out.dtype == torch.bfloat16, "a non-contiguous q must be copied"
+
+        pushed.clear()
+        out = kern(q32, 0.5)
+        assert pushed == [0] and out.dtype == torch.bfloat16, \
+            "q_scale must be folded by the cast path, never by the kernel"
+        assert torch.equal(out.float(), q16.float() * 0.5), "the fold must stay on the cast path"
+
+        pushed.clear()
+        out = kern(torch.zeros(4, 2, 256, dtype=torch.float8_e4m3fn), 1.0)
+        assert pushed == [0] and out.dtype == torch.bfloat16, "the fp8 query path has no fp32 form"
+
         os.environ["RADIANCE_ATTN_Q_FP32"] = "0"
-        assert not ok(q(torch.float32), 1.0)
+        pushed.clear()
+        assert kern(q32, 1.0).dtype == torch.bfloat16 and pushed == [0]
     finally:
         os.environ.pop("RADIANCE_ATTN_Q_FP32", None)
-        if saved is not None:
-            os.environ["RADIANCE_ATTN_Q_FP32"] = saved
-    assert "and not _q_fp32_ok(q, q_scale)" in src, "forward() does not consult the helper"
+        if env is not None:
+            os.environ["RADIANCE_ATTN_Q_FP32"] = env
+    assert any("RADIANCE_ATTN_Q_FP32" in m for m in said), \
+        "the fp32 path must say once that it took effect"
+
+
+def test_older_lib_never_gets_fp32():
+    """A libr4d without set_q_fp32 cannot be told, so it is handed bf16 and told why."""
+    pushed, said = [], []
+    kern = _launcher_ns(None, said)["_q_kernel"]
+    env = os.environ.pop("RADIANCE_ATTN_Q_FP32", None)
+    os.environ["RADIANCE_ATTN_Q_FP32"] = "1"
+    try:
+        out = kern(torch.randn(4, 2, 256), 1.0)
+    finally:
+        os.environ.pop("RADIANCE_ATTN_Q_FP32", None)
+        if env is not None:
+            os.environ["RADIANCE_ATTN_Q_FP32"] = env
+    assert out.dtype == torch.bfloat16, "an old libr4d must never be handed fp32 q"
+    assert pushed == [], "there is no toggle to push"
+    assert any("no set_q_fp32" in m for m in said), "the decline must be logged once, with the reason"
+    src = LAUNCHER.read_text()
+    assert '_set_q_fp32 = getattr(r4d, "set_q_fp32", None)' in src, \
+        "the toggle must be looked up with getattr so an old libr4d loads"
 
 
 def test_patch_wiring():
@@ -148,7 +207,15 @@ def test_patch_wiring():
     assert not re.search(r"^[+-]\s*#define P_OPT", PATCH, re.M), (
         "the patch must not move the shipped prefill mask")
     assert "OPTX | O_QF32" in ADDED, "the launcher must add O_QF32 to the instance it dispatches"
-    assert 'getenv("RADIANCE_ATTN_Q_FP32")' in ADDED, "libr4d must read the knob the glue reads"
+    # The kernel must NOT decide from the environment: the env is process-wide, the answer is
+    # per query. It reads the toggle the caller pushed instead.
+    assert 'getenv("RADIANCE_ATTN_Q_FP32")' not in ADDED, (
+        "libr4d must not read RADIANCE_ATTN_Q_FP32 from the environment")
+    assert "static int g_q_fp32 = 0;" in ADDED, "the toggle must default off"
+    assert "int  r4d_q_fp32(void);" in ADDED, "the launch side needs the accessor"
+    assert "const bool qf = r4d_q_fp32() != 0;" in ADDED, "prefill_launch must read the toggle"
+    assert 'm.def("set_q_fp32", &set_q_fp32' in ADDED, "the Python binding must exist"
+    assert "g_q_fp32 = on ? 1 : 0;" in ADDED, "set_q_fp32 must store a normalised 0/1"
     # The rounding must be applied before the folded query scale, i.e. the fp32 path must feed the
     # same bf16 dwords the bf16 path loads, not a re-derived scale.
     assert "r4d_bf16x2(f0.x, f0.y)" in ADDED and "r4d_qcvt<D, FOLDQ, F16>(l0.x, mul)" in ADDED

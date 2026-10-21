@@ -18,10 +18,23 @@ index 5e67e65..d02982f 100755
    "r4d_ar_oneshot_2rank_exact:"
    "r4d_ar_oneshot_2rank_wht6:"
 diff --git a/r4d.h b/r4d.h
-index 7addfcd..1e9fd78 100644
+index 7addfcd..9beee11 100644
 --- a/r4d.h
 +++ b/r4d.h
-@@ -155,6 +155,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
+@@ -73,6 +73,12 @@ long r4d_attn_decode_h256_gqa6_scratch_bytes(const R4DArgs* a);
+ // The geometry the attention kernels above are compiled for, so a caller can test a model against
+ // it instead of discovering the mismatch at the first launch.
+ void r4d_attn_dims(int* head_dim, int* gqa, int* block_size, int* max_decode_rows);
++// The prefill query type, as a value the CALLER owns (set_q_fp32 on the pybind side, default 0).
++// It must not be read from the environment: "is the pointer I just got fp32?" is a per-query
++// question and the env is process-wide, so a bf16 query on the fp32 path reads 4 bytes per element
++// out of a 2-byte buffer. Only a caller that passes an fp32, contiguous [tokens, heads, 256] query
++// may turn this on, and it must turn it off again before passing anything else.
++int  r4d_q_fp32(void);
+ 
+ // ---- attention: vision encoder -------------------------------------------------------------
+ // Dense, non-causal, multi-head attention at the vision tower's head_dim of 72, bf16 throughout.
+@@ -155,6 +161,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
  // l2 norm, the state update and the output, against the paged state cache. The state is fp32
  // (this model's config asks for it) and one is written per candidate token, which is the whole
  // cost of the kernel. Replaces fused_sigmoid_gating_delta_rule_update.
@@ -59,7 +72,7 @@ index 7addfcd..1e9fd78 100644
  int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* q, const void* k, const void* v, const void* a, const void* b,
          long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
-@@ -162,6 +193,73 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+@@ -162,6 +199,73 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* ssm_state_indices, long indices_stride, const void* num_accepted,
          const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
          int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
@@ -133,7 +146,7 @@ index 7addfcd..1e9fd78 100644
  
  // ---- all-reduce: one-shot, push, 2 ranks over P2P ------------------------------------------
  // One-shot means each rank pushes its whole input into the peer's IPC scratch and then reduces
-@@ -180,6 +278,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
+@@ -180,6 +284,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
                                  long seq_ctrs, long slot_stride16, long inp, long out, long n_elem,
                                  long dtype, long stream, long nblocks, long nthreads, long drain,
                                  long acq);
@@ -148,7 +161,7 @@ index 7addfcd..1e9fd78 100644
  // Same topology, but the wire payload is Walsh-Hadamard rotated and quantised to 6 bits per element
  // over groups of 64 (plus a bf16 scale per group). Lossy, and bf16 / fp16 payload only. Takes this
  // rank's own packed copy (loc_pack) as well, so the reduce folds exactly the bytes it sent.
-@@ -188,6 +294,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
+@@ -188,6 +300,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
                                 long scale_off_bytes, long inp, long out, long n_elem, long dtype,
                                 long stream, long nblocks, long nthreads, long drain, long acq);
  int  r4d_ar_max_blocks(void);                                   // the two 2-rank kernels
@@ -345,21 +358,22 @@ index a4f359a..846b94a 100644
  //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
  // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index cd4e294..7e01328 100644
+index cd4e294..a0dedd8 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -3,7 +3,9 @@
+@@ -3,7 +3,10 @@
  // are compiled for (head_dim 256, 6 queries per KV head, paged block 16) because that geometry is
  // a hard gate -- everything else is rejected below rather than run.
  //
 -// The query is bf16 in every variant. Quantising it measured an order of magnitude worse against
-+// The query is bf16 in every variant, or fp32 with O_QF32 (RADIANCE_ATTN_Q_FP32=1), where the
-+// kernel prologue rounds it to bf16 itself so a caller that already has fp32 q (Gemma's rms_norm)
-+// need not copy it first. Quantising it measured an order of magnitude worse against
++// The query is bf16 in every variant, or fp32 with O_QF32 (set_q_fp32(1) on the pybind side, which
++// the caller sets per launch and only when the pointer it passes IS fp32), where the kernel
++// prologue rounds it to bf16 itself so a caller that already has fp32 q (Gemma's rms_norm) need not
++// copy it first. Quantising it measured an order of magnitude worse against
  // the fp32 oracle (2.58e-02 vs ~2.3e-03), and the two-term e4m3 form that DOES reach f16 accuracy
  // is 4-10% slower end to end -- so the 8-bit query arms are gone rather than kept behind a flag.
  // What ships is the two families that differ only in KV cache dtype: bf16 KV (all 16-bit) and fp8
-@@ -57,9 +59,65 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -57,9 +60,69 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -387,15 +401,19 @@ index cd4e294..7e01328 100644
 +                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
 +    } while (0)
 +#define P_LAUNCH(OPTX) P_LAUNCHT(P_TILE, OPTX)
-+    // RADIANCE_ATTN_Q_FP32=1: the caller hands over its fp32 query (Gemma's rms_norm leaves it
-+    // fp32) and the kernel rounds it in its prologue, which removes a full bf16 copy of q per
-+    // (layer, chunk) -- 54 ms over a 47k-token prefill. Values are identical (RNE, see O_QF32), so
-+    // this is a launch-shape choice only. Read per launch like R4D_ATTN_TILE / R4D_ATTN_DB, and
-+    // read by the Python side the same way, so the two can only ever agree.
-+    const bool qf = [] {
-+        const char* e = getenv("RADIANCE_ATTN_Q_FP32");
-+        return e && atoi(e) != 0;
-+    }();
++    // O_QF32: the caller hands over its fp32 query (Gemma's rms_norm leaves it fp32) and the kernel
++    // rounds it in its prologue, which removes a full bf16 copy of q per (layer, chunk) -- 54 ms
++    // over a 47k-token prefill. Values are identical (RNE, see O_QF32), so this is a launch-shape
++    // choice only.
++    //
++    // NOT from the environment. "Is the pointer I just got fp32?" is a per-query question and the
++    // env is process-wide: with RADIANCE_ATTN_Q_FP32=1 exported and a glue that decides per query
++    // (fp32 AND q_scale == 1 AND contiguous), the two disagree on exactly the queries that do not
++    // qualify, and a bf16 buffer read on this path reads 4 bytes per element out of 2 -- an
++    // out-of-bounds read that took the host down on a 1515-token prefill. So the caller pushes the
++    // answer (set_q_fp32) immediately before each launch and the default is off, which is the
++    // shipped kernel.
++    const bool qf = r4d_q_fp32() != 0;
 +#define P_LAUNCHTQ(TILEX, OPTX)                                                                   \
 +    do {                                                                                          \
 +        if (qf) P_LAUNCHT(TILEX, OPTX | O_QF32); else P_LAUNCHT(TILEX, OPTX);                     \
@@ -2419,10 +2437,28 @@ index 0000000..4b25df5
 +  }
 +}
 diff --git a/r4d_module.hip b/r4d_module.hip
-index d373a98..3a6fa1d 100644
+index d373a98..954371e 100644
 --- a/r4d_module.hip
 +++ b/r4d_module.hip
-@@ -224,6 +224,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
+@@ -121,6 +121,17 @@ static void attn(int64_t q, int64_t kv, int64_t block_table, int64_t seqused_k,
+                              : "r4d attn_decode_h256_gqa6_fp8kv"));
+ }
+ 
++// The prefill query type, owned by the caller: 1 = "the q pointer of the next prefill launch is
++// fp32", 0 = bf16 (the shipped kernel). Default 0. Deliberately a plain global set from Python
++// right before a launch and not an environment read -- see the note in r4d.h. It is per process,
++// like the launch knobs, because a serve is single-threaded on the launch side; a caller that
++// passes bf16 q while this is 1 reads out of bounds, which is why the binding is the only writer.
++static int g_q_fp32 = 0;
++
++extern "C" int r4d_q_fp32(void) { return g_q_fp32; }
++
++static void set_q_fp32(int on) { g_q_fp32 = on ? 1 : 0; }
++
+ // Bytes of split-KV partial buffer one decode launch of this shape needs. The caller sizes its
+ // persistent scratch from the worst case ONCE, at startup: allocating inside a graph capture is
+ // not allowed, and the buffer has to be the same address at capture and at replay.
+@@ -224,6 +235,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
                               std::to_string(rc) + ")");
  }
  
@@ -2461,7 +2497,7 @@ index d373a98..3a6fa1d 100644
  static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_t rows,
                                int64_t xrow, int64_t zrow, int64_t orow, int width, double eps,
                                int act, int64_t stream) {
-@@ -238,7 +270,50 @@ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_
+@@ -238,7 +281,50 @@ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_
                               std::to_string(rc) + ")");
  }
  
@@ -2513,7 +2549,7 @@ index d373a98..3a6fa1d 100644
                                   int64_t ab_stride, bool ab_is_bf16, int64_t A_log,
                                   int64_t dt_bias, int64_t state, int64_t state_slot_stride,
                                   int64_t state_head_stride, int64_t o, int64_t cu,
-@@ -247,7 +322,7 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+@@ -247,7 +333,7 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
                                   int norm_act, int num_seqs, int num_v_heads, int num_k_heads,
                                   int head_k, int head_v, double scale, double softplus_thr,
                                   int64_t stream) {
@@ -2522,7 +2558,7 @@ index d373a98..3a6fa1d 100644
        (const void*)q, (const void*)k, (const void*)v, (const void*)a, (const void*)b, ab_stride,
        ab_is_bf16 ? 1 : 0, (const void*)A_log, (const void*)dt_bias, (void*)state,
        state_slot_stride, state_head_stride, (void*)o, (const void*)cu, (const void*)sidx,
-@@ -255,11 +330,11 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+@@ -255,11 +341,11 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
        (float)norm_eps, norm_act, num_seqs, num_v_heads, num_k_heads, head_k, head_v,
        (float)scale, (float)softplus_thr, (void*)stream);
    if (rc == -1)
@@ -2538,7 +2574,18 @@ index d373a98..3a6fa1d 100644
  }
  
  // =================================================================================================
-@@ -611,7 +686,30 @@ PYBIND11_MODULE(r4d, m) {
+@@ -590,6 +676,10 @@ PYBIND11_MODULE(r4d, m) {
+   m.def("attn_decode_h256_gqa6_bf16kv",  &attn<1, 1>);
+   m.def("attn_decode_h256_gqa6_scratch_bytes", &attn_decode_scratch_bytes);
+   m.def("attn_vit_h72_bf16", &attn_vit);
++  // The prefill query type. The CALLER must own this: it answers "is the pointer I am about to
++  // pass fp32?", which the kernel cannot know on its own. Set it before EVERY prefill launch.
++  m.def("set_q_fp32", &set_q_fp32,
++        "prefill q is fp32 (1) or bf16 (0, default); the kernel must be told before each launch");
+   {
+     int hd = 0, gqa = 0, bs = 0, rows = 0;
+     r4d_attn_dims(&hd, &gqa, &bs, &rows);
+@@ -611,7 +701,30 @@ PYBIND11_MODULE(r4d, m) {
    m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
    m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
    m.def("gdn_conv_update_w4_h128_bf16", &gdn_conv_update);
@@ -2570,7 +2617,7 @@ index d373a98..3a6fa1d 100644
    m.def("gdn_gated_rmsnorm_h128_bf16", &gdn_gated_rmsnorm);
    {
      int hk = 0, hv = 0, c = 0;
-@@ -628,6 +726,7 @@ PYBIND11_MODULE(r4d, m) {
+@@ -628,6 +741,7 @@ PYBIND11_MODULE(r4d, m) {
    m.def("ar_ipc_memzero", &r4d_ar_ipc_memzero);
    m.def("ar_ipc_enable_peer", &r4d_ar_ipc_enable_peer);
    m.def("ar_oneshot_2rank_exact", &r4d_ar_oneshot_2rank_exact);

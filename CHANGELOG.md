@@ -121,6 +121,26 @@ are one-layer microbenches. See
   is the last phase on a hot card, junction 110 °C). GSM8K not run: no numerics default changes.
 - `VERSION` 1.7.0 → 1.8.0.
 
+### Fixed
+- **`RADIANCE_ATTN_Q_FP32` could hand a bf16 query to the fp32 kernel path** — a `Memory access fault` in
+  `r4d_attn_prefill_kernel<24,16,256,6,16,0,24926827>` (O_QF32, bit 24) on the first 1,515-token prefill,
+  followed by a host reset. The kernel decided the query type itself, per launch, from
+  `getenv("RADIANCE_ATTN_Q_FP32")`, while the glue skipped its bf16 cast only for a query that qualified
+  (`fp32`, `q_scale == 1`, knob on): the env is process-wide and that answer is per query, so on exactly
+  the queries the glue declined, libr4d read 4 bytes per element out of a 2-byte buffer. libr4d no longer
+  looks at the environment: `set_q_fp32(int)` is a caller-owned toggle (default 0, `r4d_q_fp32()` is what
+  `prefill_launch` reads), and `radiance_r4d_hybrid_attn.py` pushes it right before every launch from the
+  same decision that decides the cast, so bf16 q can never take the fp32 path. A libr4d without the
+  binding (older `.so`) is detected with `getattr` and never gets the fp32 path; non-contiguous queries are
+  declined as well; the first decline logs its reason once. CPU-gated by
+  `sly/tests/test_attn_q_fp32_cpu.py` (fp32+contiguous+`q_scale` 1 only; bf16 / fp8 / scaled /
+  non-contiguous / env-off / old-lib arms).
+- **One-time proof lines for the three 1.8.0 knobs**, printed when the path actually takes effect in a
+  served run: `RADIANCE_ATTN_Q_FP32` (first fp32 prefill launch, or once with the decline reason),
+  `RADIANCE_GDN_GATE_INPLACE` (first prefill chunk on the in-place h0 path, with `zeros`/`nomask`) and
+  `RADIANCE_MXFP4_TALL` (first tall dispatch, with M, N and `tn_m`). Default-off knobs that change the
+  kernel are only proven by what the process says it dispatched.
+
 ## [1.7.0] - 2026-10-20
 
 Stack bump to vLLM 0.32.0 (released 2026-10-18). torch / triton / torchvision are unchanged: 0.32.0's own

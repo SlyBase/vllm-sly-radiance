@@ -147,6 +147,7 @@ EMPTY_OUT = os.environ.get("RADIANCE_GDN_EMPTY_OUT", "0") == "1"
 # until the GPU gate (bit-identity + ABBA) has run.
 GATE_INPLACE = os.environ.get("RADIANCE_GDN_GATE_INPLACE", "0") == "1"
 _H0_ZEROS: dict = {}
+_H0_SAID = [False]          # the proof line: first step that actually takes the in-place path
 
 
 # RADIANCE_GDN_TRACE_SIDX=1: log, once per decode step for the first two sequences, the resident
@@ -195,6 +196,11 @@ def _h0_mode(md) -> str:
             md._radiance_h0_mode = mode      # metadata is rebuilt per step; one sync per step
         except Exception:                    # slotted/foreign metadata: just pay it again next layer
             pass
+        if mode != "gather" and not _H0_SAID[0]:
+            _H0_SAID[0] = True
+            sys.stderr.write(
+                f"[radiance.gdn] RADIANCE_GDN_GATE_INPLACE: chunk scan takes the in-place h0 path "
+                f"({mode}: {'all' if mode == 'nomask' else 'no'} rows carry a state)\n")
     return mode
 
 

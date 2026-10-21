@@ -31,6 +31,7 @@
 #include <hip/hip_bf16.h>
 #include <pybind11/pybind11.h>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <cstdlib>
 namespace py = pybind11;
@@ -2086,6 +2087,15 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
 #undef RAD_AT_P
   } else
   if (g_at_tall && wperm && !wh && N == 34816 && tn_m >= g_at_tall_min_m) {   // gate_up only
+    // Proof line for the serving log: the tall tile is only ever a measurement claim until a
+    // served run shows it was actually dispatched, and with which shape.
+    static bool said_tall = false;
+    if (!said_tall) {
+      said_tall = true;
+      fprintf(stderr, "[radiance.mxfp4] RADIANCE_MXFP4_TALL: tall tile dispatched (M %d, N %d, tn_m %d)\n",
+              M, N, tn_m);
+      fflush(stderr);
+    }
     RAD_AT_TM(2, true, false, 8);
   } else
   if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {
