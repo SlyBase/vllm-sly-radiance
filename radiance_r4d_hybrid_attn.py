@@ -36,6 +36,9 @@ supports_quant_query_input, and the AITER decode path needs that. libr4d has no 
 for the R4D runs q is widened back to bf16 (exact: e4m3 values are bf16-representable, times the static
 q scale). It carries the same fp8 rounding the AITER kernel has anyway; the R4D kernel then runs its
 f16 legs (R4D_ATTN_FP8=0), i.e. is more accurate than the kernel it replaces for the rest of the chain.
+With RADIANCE_ATTN_Q_FP32=1 the fp32 query that Gemma's rms_norm leaves behind is not copied at
+all: the prefill kernel rounds it to bf16 in its own prologue, bit-identically, which removes a 54 ms
+copy per 47k-token prefill (see _q_fp32_ok).
 
 Anything libr4d cannot take falls back to the AITER path on the whole step: no libr4d, geometry other
 than head_dim 256 / GQA 6, sliding window, alibi, sinks, logits soft cap, non-causal, a fused output
@@ -121,6 +124,25 @@ def _o_db_say(kernel: str, fp8: str) -> None:
     msg = _o_db_note(kernel, fp8)
     if msg is not None:
         _say_once("o_db", msg)
+
+
+def _q_fp32_ok(q: torch.Tensor, q_scale: float) -> bool:
+    """True when libr4d can read this query as fp32 instead of a bf16 copy of it.
+
+    `RADIANCE_ATTN_Q_FP32=1` makes the prefill kernel round the query to bf16 in its own prologue
+    (round-to-nearest-even, exactly what `.to(torch.bfloat16)` below would have produced), so the
+    attention output stays bit-identical while the 50 MB read + 25 MB write copy per (layer, chunk)
+    -- 54 ms over a 47k-token prefill -- disappears. The knob is read per call, exactly like
+    libr4d's own launch reads it, so the two sides cannot disagree.
+    Only an fp32 query qualifies: the fp8-query path widens e4m3 back to bf16 and has no fp32 form.
+    Only q_scale == 1 qualifies: the cast below folds q_scale into the *bf16* values, the kernel
+    path does not fold it at all.
+    """
+    return (
+        q.dtype == torch.float32
+        and q_scale == 1.0
+        and os.environ.get("RADIANCE_ATTN_Q_FP32", "0") == "1"
+    )
 
 
 def _plan(query_start_loc_cpu: torch.Tensor, num_reqs: int, min_q: int):
@@ -406,7 +428,7 @@ class R4DHybridAttentionImpl(RocmAiterUnifiedAttentionImpl):
                 continue
             _, first_req, n_seqs, q_len, first_tok = run
             q = query[first_tok : first_tok + n_seqs * q_len]
-            if q.dtype != torch.bfloat16:
+            if q.dtype != torch.bfloat16 and not _q_fp32_ok(q, q_scale):
                 q = q.to(torch.bfloat16)
                 if q_scale != 1.0:
                     q = q * q_scale

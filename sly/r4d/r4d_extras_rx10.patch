@@ -1,5 +1,5 @@
 diff --git a/build.sh b/build.sh
-index 5e67e65..91fce67 100755
+index 5e67e65..d02982f 100755
 --- a/build.sh
 +++ b/build.sh
 @@ -42,6 +42,14 @@ UNITS=(
@@ -18,7 +18,7 @@ index 5e67e65..91fce67 100755
    "r4d_ar_oneshot_2rank_exact:"
    "r4d_ar_oneshot_2rank_wht6:"
 diff --git a/r4d.h b/r4d.h
-index 7addfcd..fe765f5 100644
+index 7addfcd..1e9fd78 100644
 --- a/r4d.h
 +++ b/r4d.h
 @@ -155,6 +155,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
@@ -133,7 +133,7 @@ index 7addfcd..fe765f5 100644
  
  // ---- all-reduce: one-shot, push, 2 ranks over P2P ------------------------------------------
  // One-shot means each rank pushes its whole input into the peer's IPC scratch and then reduces
-@@ -180,6 +264,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
+@@ -180,6 +278,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
                                  long seq_ctrs, long slot_stride16, long inp, long out, long n_elem,
                                  long dtype, long stream, long nblocks, long nthreads, long drain,
                                  long acq);
@@ -148,7 +148,7 @@ index 7addfcd..fe765f5 100644
  // Same topology, but the wire payload is Walsh-Hadamard rotated and quantised to 6 bits per element
  // over groups of 64 (plus a bf16 scale per group). Lossy, and bf16 / fp16 payload only. Takes this
  // rank's own packed copy (loc_pack) as well, so the reduce folds exactly the bytes it sent.
-@@ -188,6 +280,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
+@@ -188,6 +294,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
                                 long scale_off_bytes, long inp, long out, long n_elem, long dtype,
                                 long stream, long nblocks, long nthreads, long drain, long acq);
  int  r4d_ar_max_blocks(void);                                   // the two 2-rank kernels
@@ -345,10 +345,21 @@ index a4f359a..846b94a 100644
  //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
  // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index cd4e294..b18a485 100644
+index cd4e294..7e01328 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -57,9 +57,49 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -3,7 +3,9 @@
+ // are compiled for (head_dim 256, 6 queries per KV head, paged block 16) because that geometry is
+ // a hard gate -- everything else is rejected below rather than run.
+ //
+-// The query is bf16 in every variant. Quantising it measured an order of magnitude worse against
++// The query is bf16 in every variant, or fp32 with O_QF32 (RADIANCE_ATTN_Q_FP32=1), where the
++// kernel prologue rounds it to bf16 itself so a caller that already has fp32 q (Gemma's rms_norm)
++// need not copy it first. Quantising it measured an order of magnitude worse against
+ // the fp32 oracle (2.58e-02 vs ~2.3e-03), and the two-term e4m3 form that DOES reach f16 accuracy
+ // is 4-10% slower end to end -- so the 8-bit query arms are gone rather than kept behind a flag.
+ // What ships is the two families that differ only in KV cache dtype: bf16 KV (all 16-bit) and fp8
+@@ -57,9 +59,65 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -376,6 +387,20 @@ index cd4e294..b18a485 100644
 +                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
 +    } while (0)
 +#define P_LAUNCH(OPTX) P_LAUNCHT(P_TILE, OPTX)
++    // RADIANCE_ATTN_Q_FP32=1: the caller hands over its fp32 query (Gemma's rms_norm leaves it
++    // fp32) and the kernel rounds it in its prologue, which removes a full bf16 copy of q per
++    // (layer, chunk) -- 54 ms over a 47k-token prefill. Values are identical (RNE, see O_QF32), so
++    // this is a launch-shape choice only. Read per launch like R4D_ATTN_TILE / R4D_ATTN_DB, and
++    // read by the Python side the same way, so the two can only ever agree.
++    const bool qf = [] {
++        const char* e = getenv("RADIANCE_ATTN_Q_FP32");
++        return e && atoi(e) != 0;
++    }();
++#define P_LAUNCHTQ(TILEX, OPTX)                                                                   \
++    do {                                                                                          \
++        if (qf) P_LAUNCHT(TILEX, OPTX | O_QF32); else P_LAUNCHT(TILEX, OPTX);                     \
++    } while (0)
++#define P_LAUNCHQ(OPTX) P_LAUNCHTQ(P_TILE, OPTX)
 +    if constexpr (!KVP) {
 +        if (fp8mode == 3) {
 +            // R4D_ATTN_TILE (16/32/48, default 48) and R4D_ATTN_DB (1 = double-buffered one-barrier
@@ -386,23 +411,25 @@ index cd4e294..b18a485 100644
 +            const int t = et ? atoi(et) : P_TILE;
 +            const bool db = ed && atoi(ed) != 0;
 +            constexpr int B = P_OPT | O_QK8 | O_PV8;
-+            if      (t == 16) { if (db) P_LAUNCHT(16, B | O_DB); else P_LAUNCHT(16, B); }
-+            else if (t == 32) { if (db) P_LAUNCHT(32, B | O_DB); else P_LAUNCHT(32, B); }
-+            else              { if (db) P_LAUNCHT(48, B | O_DB); else P_LAUNCHT(48, B); }
++            if      (t == 16) { if (db) P_LAUNCHTQ(16, B | O_DB); else P_LAUNCHTQ(16, B); }
++            else if (t == 32) { if (db) P_LAUNCHTQ(32, B | O_DB); else P_LAUNCHTQ(32, B); }
++            else              { if (db) P_LAUNCHTQ(48, B | O_DB); else P_LAUNCHTQ(48, B); }
 +        }
-+        else if (fp8mode == 2) P_LAUNCH(P_OPT | O_PV8);
-+        else if (fp8mode == 1) P_LAUNCH(P_OPT | O_QK8);
-+        else                   P_LAUNCH(P_OPT);
++        else if (fp8mode == 2) P_LAUNCHQ(P_OPT | O_PV8);
++        else if (fp8mode == 1) P_LAUNCHQ(P_OPT | O_QK8);
++        else                   P_LAUNCHQ(P_OPT);
 +    } else {
-+        P_LAUNCH(P_OPT);
++        P_LAUNCHQ(P_OPT);
 +    }
++#undef P_LAUNCHQ
++#undef P_LAUNCHTQ
 +#undef P_LAUNCH
 +#undef P_LAUNCHT
      CHK();
      return 0;
  }
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 513d97f..118d5cf 100644
+index 513d97f..42a2f11 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
 @@ -38,6 +38,25 @@
@@ -431,7 +458,7 @@ index 513d97f..118d5cf 100644
  #define O_FOLDQ   8
  #define O_CONTIG  512
  #define O_PF2    1024
-@@ -71,6 +90,21 @@
+@@ -71,6 +90,28 @@
  // the default fence invalidates the vector cache twice per tile for a synchronisation that only
  // ever orders LDS.
  #define O_LDSB  2097152
@@ -443,6 +470,13 @@ index 513d97f..118d5cf 100644
 +// the single-buffered loop; only the staging schedule changes. Needs the 8-bit legs (byte tiles),
 +// KWIDE and BTS: LDS is 2 x (TILE*264 + 256*(TILE+8)) bytes.
 +#define O_DB    4194304
++// QF32: the caller hands over the fp32 query it already has instead of a bf16 copy of it. Gemma's
++// rms_norm keeps q fp32 (weight.float() promotes), so the glue used to cast 12.6 M elements per
++// (layer, chunk) -- 54 ms of pure bandwidth over a 47k-token prefill -- only for the kernel to read
++// bf16 again. This bit rounds it here instead: the prologue converts fp32 -> bf16 with the same
++// round-to-nearest-even (and the same NaN handling) as torch's .to(bfloat16), so every downstream
++// value, including the folded query scale, is bit-identical to the cast path. Nothing else changes.
++#define O_QF32  16777216
 +
 +typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
 +// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
@@ -453,7 +487,30 @@ index 513d97f..118d5cf 100644
  
  // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
  template<class D, int FOLDQ, int F16>
-@@ -90,11 +124,17 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -80,6 +121,22 @@ __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
+                  __builtin_bit_cast(float, w & 0xffff0000u) * s);
+ }
+ 
++// fp32 -> bf16 bits, round-to-nearest-even, NaN kept NaN. Exactly torch's .to(bfloat16): ties round
++// to the even mantissa, subnormals collapse to a bf16 subnormal (or to zero), overflow to infinity,
++// and a NaN keeps its sign and the top of its payload quietly. Used by the QF32 prologue so the
++// kernel can read the fp32 query the norm layer already produced and land on the same bits the
++// caller's cast would have written. Kept as integer arithmetic (not v_cvt_pk_bf16_f32) so the CPU
++// test in sly/tests can check the identical formula against torch, bit for bit.
++__device__ __forceinline__ uint32_t r4d_bf16_rne(float f) {
++    const uint32_t u = __builtin_bit_cast(uint32_t, f);
++    if ((u & 0x7f800000u) == 0x7f800000u && (u & 0x007fffffu)) return (u >> 16) | 0x0040u;
++    return (u + 0x7fffu + ((u >> 16) & 1u)) >> 16;
++}
++// two fp32 -> one dword holding two bf16, low half first: the layout the bf16 query loads produce.
++__device__ __forceinline__ uint32_t r4d_bf16x2(float lo, float hi) {
++    return r4d_bf16_rne(lo) | (r4d_bf16_rne(hi) << 16);
++}
++
+ template<int NWARPS, int TILE, int HEAD_DIM, int GQA, int BS, int KVP, int OPT>
+ __global__ __launch_bounds__(NWARPS * 32)
+ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -90,11 +147,18 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int CTG   = (OPT & O_CONTIG) ? 1 : 0;
      constexpr int PF    = 1 << ((OPT >> 10) & 3);
      constexpr int SGB   = (OPT & O_SGB) ? 1 : 0;
@@ -464,6 +521,7 @@ index 513d97f..118d5cf 100644
      constexpr int LDSB  = (OPT & O_LDSB)  ? 1 : 0;
      constexpr int KWIDE = (OPT & O_KWIDE) ? 1 : 0;
 +    constexpr int DB    = (OPT & O_DB) ? 1 : 0;
++    constexpr int QF32  = (OPT & O_QF32) ? 1 : 0;
 +    constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
 +    constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
 +    static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
@@ -472,9 +530,13 @@ index 513d97f..118d5cf 100644
      typedef DT16<F16> D;
      typedef typename D::frag frag16;
  
-@@ -113,11 +153,28 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -112,12 +176,32 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     constexpr int KREGS   = KPASS * (KVP ? 2 : 1);             // uint4 of raw K per thread
      constexpr int NTR     = (TILE / 8) * (HEAD_DIM / (KVP ? 32 : 64));
      constexpr int VREGS   = (NTR + NWARPS - 1) / NWARPS;        // uint4 of raw V per thread
++    static_assert(!DB || (KPASS == 1 && VREGS == 1 && TILE <= 2 * NWARPS),
++                  "the merged DB prefetch is one K pass and one V load per thread, and both fit"
++                  " in the first TILE/2 warps");
      constexpr float PSHIFT = D::SHIFT;
 -    constexpr float PGROW  = D::GROW;
 -    static_assert(!KWIDE || KPASS == 1, "the wide K fetch is one straight-line pass");
@@ -505,7 +567,7 @@ index 513d97f..118d5cf 100644
  
      const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
      const int c = lane & 15, h = lane >> 4;
-@@ -140,6 +197,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -140,18 +224,43 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      const float mul   = a.scale * kdesc * 1.44269504089f;
  
      frag16 qf[NKS];
@@ -513,14 +575,30 @@ index 513d97f..118d5cf 100644
      {
          const uint16_t* qp = (const uint16_t*)a.q
                             + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
-@@ -148,10 +206,21 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+         #pragma unroll
+         for (int t = 0; t < NKS; ++t) {
              // CONTIG reads the same 8 d as ONE run; the legacy map splits them 4+4.
-             const uint2 l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
-             const uint2 h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
+-            const uint2 l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
+-            const uint2 h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
 -            qf[t] = D::mk(make_uint2(r4d_qcvt<D, FOLDQ, F16>(l0.x, mul),
 -                                     r4d_qcvt<D, FOLDQ, F16>(l0.y, mul)),
 -                          make_uint2(r4d_qcvt<D, FOLDQ, F16>(h0.x, mul),
 -                                     r4d_qcvt<D, FOLDQ, F16>(h0.y, mul)));
++            uint2 l0, h0;
++            if constexpr (QF32) {
++                // fp32: the same element map, four floats per read instead of four bf16, rounded
++                // here. The indexes are ELEMENT indexes, so they are the same numbers.
++                const float* qpf = (const float*)a.q
++                                 + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
++                const int i0 = 16 * t + (CTG ? 8 * h : 4 * h);
++                const int i1 = CTG ? i0 + 4 : 16 * t + 8 + 4 * h;
++                const float4 f0 = *(const float4*)(qpf + i0), f1 = *(const float4*)(qpf + i1);
++                l0 = make_uint2(r4d_bf16x2(f0.x, f0.y), r4d_bf16x2(f0.z, f0.w));
++                h0 = make_uint2(r4d_bf16x2(f1.x, f1.y), r4d_bf16x2(f1.z, f1.w));
++            } else {
++                l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
++                h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
++            }
 +            if constexpr (QK8) {
 +                // e4m3 Q, folded scale first: the fold puts |q| in ~[0.05, 1], comfortably inside
 +                // e4m3, and its error is relative so the fold costs nothing extra.
@@ -539,7 +617,7 @@ index 513d97f..118d5cf 100644
          }
      }
  
-@@ -229,6 +298,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -229,6 +338,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  const int key = KWIDE ? (2 * (i >> 5) + (i & 1)) : (i / (HEAD_DIM / KEL));
                  const int ch  = KWIDE ? ((i & 31) >> 1) : (i - key * (HEAD_DIM / KEL));
                  if (KWIDE && key >= TILE) continue;
@@ -551,7 +629,7 @@ index 513d97f..118d5cf 100644
                  uint16_t* kd = &sK[key * KSTR + ch * KEL];
                  #pragma unroll
                  for (int q = 0; q < KEL / 8; ++q) {
-@@ -266,6 +340,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -266,6 +380,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                      // ADJACENT d; v_perm_b32 splits them back into two d rows.
                      const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
                      const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
@@ -563,22 +641,100 @@ index 513d97f..118d5cf 100644
                      uint32_t wl[4], wh[4];
                      fp8x8_to_16x4w<D>(make_uint2(lo0, lo1), wl);
                      fp8x8_to_16x4w<D>(make_uint2(hi0, hi1), wh);
-@@ -287,7 +366,13 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -280,6 +399,66 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+         }
+     };
+ 
++    // DB: BOTH prefetches of one tile in a SINGLE predicated region, one address pass, no load
++    // drain between the two loads.
++    //  * one region: the predicate (the first TILE/2 warps hold all the K items and all the V
++    //    items of a tile) is evaluated once and wraps both loads, so there is one exec save/restore
++    //    instead of two;
++    //  * one pass: both address chains are derived before either load issues -- they are
++    //    independent, so they interleave and dual-issue, and at TILE == BS both fold to the same
++    //    block-table entry and the same 64-bit block address;
++    //  * adjacent: the two global loads are the last two statements of the region, so nothing is
++    //    left for the scheduler to sink between them -- which is what put a `s_wait_loadcnt 0`
++    //    there and serialized the two memory latencies.
++    auto fetchKV = [&](int k0, const int* blks) {
++        constexpr int DG = HEAD_DIM / 64;                 // KVP == 0: DB needs the byte legs
++        constexpr bool PART = TILE < 2 * NWARPS;          // tile 48: every warp carries work
++        if (PART && warp >= TILE / 2) return;
++        {
++            const int key = 2 * (tid >> 5) + (tid & 1);   // K: this thread's 16 bytes
++            const int ch  = (tid & 31) >> 1;
++            const int kg  = warp / DG, dg = warp - kg * DG;   // V: this warp's 8 keys x 16 d
++            const int kk  = min(k0 + key, ctx - 1);
++            const int kvv = min(k0 + kg * 8 + vj, ctx - 1);
++            // TILE == BS (the instantiated DB tiles) means the whole key tile is ONE paged block:
++            // the two chains then read the same table entry and share one block address, so this
++            // is one scalar load, one 64-bit multiply and two offset chains off it -- the "one
++            // address pass" of the merged prefetch. TILE > BS keeps the per-thread entry.
++            const auto base = [&](int k) -> size_t {
++                const int b = NB == 1 ? blks[0] : blks[(k - k0) / BS];
++                return (size_t)b * a.kv_block_stride + (size_t)kvh * a.kv_head_stride
++                     + (size_t)(k % BS) * (2 * HEAD_DIM);
++            };
++            const uint8_t* const kp = (const uint8_t*)a.kv + base(kk) + ch * 16;
++            const void* const vp = (const uint8_t*)a.kv + base(kvv) + HEAD_DIM + dg * 64 + vg * 16;
++            kreg[0] = *(const uint4*)kp;
++            vreg[0] = __builtin_bit_cast(uint4, load_tr_b128(vp));
++        }
++    };
++
++    // DB: both LDS stores of one tile in ONE predicated region too, for the same reason as fetchKV
++    // -- two statements with the same predicate cost a second exec save/restore and two extra
++    // predicated joins per tile. V first, its data is the older of the two. DB implies the byte
++    // legs, so this is the PV8/QK8 store path spelled out rather than routed through the generic
++    // storeV/storeK above.
++    auto storeKV = [&]() {
++        constexpr int DG = HEAD_DIM / 64;
++        constexpr bool PART = TILE < 2 * NWARPS;
++        if (PART && warp >= TILE / 2) return;
++        {
++            const int kg = warp / DG, dg = warp - kg * DG;
++            const int d0 = dg * 64 + vg * 16;
++            const int key = 2 * (tid >> 5) + (tid & 1);
++            const int ch  = (tid & 31) >> 1;
++            const uint4 v = vreg[0];
++            const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
++            const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
++            *(uint2*)(&wV8[(d0 + 2 * vj)     * VSTR8 + kg * 8]) = make_uint2(lo0, lo1);
++            *(uint2*)(&wV8[(d0 + 2 * vj + 1) * VSTR8 + kg * 8]) = make_uint2(hi0, hi1);
++            *(uint4*)(&wK8[key * KSTR8 + ch * KEL]) = kreg[0];
++        }
++    };
++
+     // The block table for tile ti is fetched during tile ti-1, so the scalar load has an entire
+     // store phase and two barriers to complete instead of stalling the KV address chain.
+     int blk[NB];
+@@ -287,30 +466,72 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
          #pragma unroll
          for (int i = 0; i < NB; ++i) blk[i] = bt[i];
      }
 -    if (GPREV) fetchV(0, blk);
++    // DB: the block-table entries of the tile the loop prefetches, carried across the loop and
++    // refilled at the END of the iteration that consumed the previous ones (see the loop).
++    int blkp[NB];
++    if constexpr (DB) {
++        if (BTS && ntiles > 1) {
++            #pragma unroll
++            for (int i = 0; i < NB; ++i) blkp[i] = bt[NB + i];
++        }
++    }
 +    if (GPREV && !DB) fetchV(0, blk);
 +    if (DB) {   // tile 0 into buffer 0; the first barrier of the loop publishes it
-+        fetchK(0, blk);
-+        fetchV(0, blk);
-+        storeV();
-+        storeK();
++        fetchKV(0, blk);
++        storeKV();
 +    }
  
      for (int ti = 0; ti < ntiles; ++ti) {
          const int k0 = ti * TILE;
-@@ -298,19 +383,41 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+         int blkn[NB];
+-        if (BTS && ti + 1 < ntiles) {
++        if (BTS && !DB && ti + 1 < ntiles) {
+             const int tb = (ti + 1) * NB;
+             #pragma unroll
              for (int i = 0; i < NB; ++i) blkn[i] = bt[tb + i];
          }
          if (LDSB) lds_barrier(); else __syncthreads();
@@ -590,10 +746,17 @@ index 513d97f..118d5cf 100644
 -        // The next tile's global loads are issued HERE, before the 96 WMMAs below, and the wait
 -        // that consumes them does not appear until after the next barrier.
 -        if (GPREV && ti + 1 < ntiles) fetchV(k0 + TILE, blkn);
-+        if (DB) {
-+            if (ti + 1 < ntiles) { fetchK(k0 + TILE, blkn); fetchV(k0 + TILE, blkn); }
++        if constexpr (DB) {
++            if (ti + 1 < ntiles) fetchKV(k0 + TILE, blkp);
 +            wK8 = sK8 + ((ti + 1) & 1) * KBYTES;
 +            wV8 = sV8 + ((ti + 1) & 1) * VBYTES;
++            // P3: the entries for tile ti+2 are issued AFTER this tile's two global loads, and are
++            // consumed at the top of the next iteration -- the scalar load gets a whole body of
++            // lead time instead of being awaited a few instructions after the barrier.
++            if (BTS && ti + 2 < ntiles) {
++                #pragma unroll
++                for (int i = 0; i < NB; ++i) blkp[i] = bt[(ti + 2) * NB + i];
++            }
 +        } else {
 +            fetchK(k0, blk);
 +            if (!GPREV) fetchV(k0, blk);
@@ -629,7 +792,7 @@ index 513d97f..118d5cf 100644
                  const uint16_t* krow = &sK[(mt * 16 + c) * KSTR] + (CTG ? 8 * h : 0);
                  // PF fragments are LOADED before the matching PF WMMAs are ISSUED, so the wait in
                  // front of each WMMA becomes `s_wait_dscnt PF-1` instead of a full drain.
-@@ -368,7 +475,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -368,7 +589,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              }
              if (!DOT2) l_i += lsum;
  
@@ -653,17 +816,18 @@ index 513d97f..118d5cf 100644
                  uint32_t pw[4];
                  #pragma unroll
                  for (int e = 0; e < 8; e += 2) pw[e >> 1] = D::pk(pf[e], pf[e + 1]);
-@@ -410,6 +532,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -410,7 +646,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  }
              }
          }
+-        if (BTS) {
 +        if (DB && ti + 1 < ntiles) {   // last step: stage tile ti+1 for the next barrier
-+            storeV();
-+            storeK();
++            storeKV();
 +        }
-         if (BTS) {
++        if (BTS && !DB) {
              #pragma unroll
              for (int i = 0; i < NB; ++i) blk[i] = blkn[i];
+         }
 diff --git a/r4d_gdn_fused_update_w4k128v128.h b/r4d_gdn_fused_update_w4k128v128.h
 new file mode 100644
 index 0000000..839ee1f
@@ -1491,7 +1655,7 @@ index 0000000..c54458d
 +}
 diff --git a/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
 new file mode 100644
-index 0000000..0000000
+index 0000000..c1eff07
 --- /dev/null
 +++ b/r4d_gdn_lazy_update_k128_v128_bf16_bf16state.hip
 @@ -0,0 +1,31 @@
@@ -2255,7 +2419,7 @@ index 0000000..4b25df5
 +  }
 +}
 diff --git a/r4d_module.hip b/r4d_module.hip
-index d373a98..ff2a5ac 100644
+index d373a98..3a6fa1d 100644
 --- a/r4d_module.hip
 +++ b/r4d_module.hip
 @@ -224,6 +224,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
@@ -2406,7 +2570,7 @@ index d373a98..ff2a5ac 100644
    m.def("gdn_gated_rmsnorm_h128_bf16", &gdn_gated_rmsnorm);
    {
      int hk = 0, hv = 0, c = 0;
-@@ -628,6 +722,7 @@ PYBIND11_MODULE(r4d, m) {
+@@ -628,6 +726,7 @@ PYBIND11_MODULE(r4d, m) {
    m.def("ar_ipc_memzero", &r4d_ar_ipc_memzero);
    m.def("ar_ipc_enable_peer", &r4d_ar_ipc_enable_peer);
    m.def("ar_oneshot_2rank_exact", &r4d_ar_oneshot_2rank_exact);
@@ -2415,7 +2579,7 @@ index d373a98..ff2a5ac 100644
    m.def("ar_oneshot_4rank_exact", &r4d_ar_oneshot_4rank_exact);
    m.def("ar_oneshot_8rank_exact", &r4d_ar_oneshot_8rank_exact);
 diff --git a/r4d_registry.hip b/r4d_registry.hip
-index 22dccba..feafc2b 100644
+index 22dccba..c886dfd 100644
 --- a/r4d_registry.hip
 +++ b/r4d_registry.hip
 @@ -66,6 +66,39 @@ static const R4DConstraint cGdnKktSolve[] = {
@@ -2458,7 +2622,7 @@ index 22dccba..feafc2b 100644
  };
  static const R4DConstraint cGdnGatedRmsNorm[] = {
      C_EQ("channels", 128),
-@@ -176,12 +205,64 @@ static const R4DKernelInfo kKernels[] = {
+@@ -176,12 +209,64 @@ static const R4DKernelInfo kKernels[] = {
       "head_k 128, chunk 64, varlen; one gram per k head, applied to every v head of the group",
       "bf16 k and A out, fp32 beta / gate / gram / inverse",
       ROW(cGdnKktSolve)},

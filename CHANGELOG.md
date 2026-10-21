@@ -28,6 +28,26 @@ are one-layer microbenches. See
   earlier tile-16 attempt lost; DB is what pays for the smaller tile. End to end at 300 W (together with
   the s3 scan variant and `RADIANCE_DFLASH_FC_TILED_MIN_M=513`) the effect is **within single-start noise**
   (E1 vs A1 −1.8 .. +0.9 % over 2K-64K prefill). Off by default.
+- **`O_DB` prefetch prologue (same knob, `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`)**: the tile-16 double-buffer's
+  per-tile prologue now issues K and V in **one** predicated region, with both addresses derived in one
+  pass off a single block-table entry and the two global loads back to back, and the block-table index for
+  tile *t+2* is fetched after them and consumed in the next iteration. Values are unchanged (the gate
+  hashes D16 against the previous build and against same-tile stock per context); what moves is the
+  schedule: tile loop **386 → 369** instructions, `s_mul_u64` 2 → 1, `s_wait_kmcnt` 3 → 2, exec
+  save/restore 4 → 2 — i.e. the loop the reference stack runs, reached from our own source rather than
+  from a compiler accident. Every other instance (all eight non-`O_QF32` masks, including the shipped
+  tile-48 one) compiles to an **instruction-for-instruction identical** body, so nothing shipped moves.
+  `ci/attn_sched_lint.py` reads the emitted assembly of `r4d_attn_paged_h256_gqa6.hip` and fails the build
+  on a regression of exactly these numbers (386-instruction loop, two load regions, a drain between the
+  loads); it is the CPU-side gate for this class of change and needs no GPU. GPU gate prepared, not run.
+- **`RADIANCE_ATTN_Q_FP32=1`**: hand the prefill kernel the fp32 query Gemma's rms_norm already produced
+  instead of a bf16 copy of it. `O_QF32` rounds it to bf16 inside the kernel prologue (round-to-nearest-even
+  with torch's NaN handling, so **bit-identical** to the `.to(bfloat16)` it replaces), which removes the
+  `direct_copy` at `radiance_r4d_hybrid_attn.py:382` — 192 launches, **54.07 ms** of a 47k-token prefill
+  (50 MB read + 25 MB write per layer per chunk). CPU-gated by `sly/tests/test_attn_q_fp32_cpu.py`
+  (formula vs `torch.to(bfloat16)` bit for bit over the bf16 grid, ties, subnormals, infinities and 2 × 1e6
+  random values; knob wiring). The instance is an extra bit on the existing masks, so every shipped
+  instance keeps its exact code object. Off by default; GPU gate prepared, not run.
 - **`RADIANCE_MXFP4_TALL=1`** (+ `RADIANCE_MXFP4_TALL_MIN_M`, default `2048`): an opt-in 512x64x64
   A-tiled prefill tile (TMT=8, TN=2, LBK=64; 8 waves of 128x32, 234 VGPR, 4,736 B LDS, no spill) for
   **gate_up only (N 34,816)**, WPERM e4m3 fragment-order weights, at M >= `RADIANCE_MXFP4_TALL_MIN_M`.
