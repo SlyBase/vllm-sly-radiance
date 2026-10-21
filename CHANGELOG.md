@@ -12,8 +12,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [1.8.0] - 2026-10-21
 
-Three opt-in prefill knobs on top of 1.7.0. All three are **off by default**, leave the stock launch
-bit-identical when off. End-to-end (serve-level) results at 300 W are given per knob below (prefill sweep,
+Three prefill knobs on top of 1.7.0. Two are **off by default**; the drafter skip is **on by default in
+`serve-mxfp4.sh`** (it only acts with prefix caching off). End-to-end (serve-level) results at 300 W are given per knob below (prefill sweep,
 8 runs median, one start per arm, so differences under ~2 % are single-start noise); the kernel numbers
 are one-layer microbenches. See
 [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) for the GDN variants.
@@ -45,12 +45,24 @@ are one-layer microbenches. See
   warns once and does nothing), all drafter layers must be sliding, and DP must be 1. CPU-gated by
   `sly/tests/test_dflash_prefill_skip_cpu.py`. End to end at 300 W (E2 vs E1, working skip with margin 1760,
   chunks >= 3808 tokens): **+2.1 % at 16K, +3.6 % at 32K, +3.2 % at 64K** prefill tok/s (3,697 vs 3,621,
-  3,475 vs 3,355, 3,167 vs 3,068). **The GPU identity test has not been run yet**, and production runs with
-  prefix caching, where the knob disables itself, so it stays **off by default**.
+  3,475 vs 3,355, 3,167 vs 3,068). GPU identity test: see Changed.
 
 ### Changed
-- `VERSION` 1.7.0 → 1.8.0. No change to the default serve path: without the three variables above the
-  launch is the 1.7.0 stack, bit for bit.
+- **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` now defaults to `1` in `serve-mxfp4.sh`** (`${VAR:-1}`; the module
+  default stays `0`, `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=0` reverts). It is lossless by construction (all 5
+  drafter layers use a 2,048 sliding window, the masking is exact per position, the scheduler discards
+  prefill drafts) and by GPU test at 210 W: knob on vs off on the same patched image gave **identical text
+  and identical per-position spec-decode acceptance counters for 10 requests** (20k and 40k
+  window-sensitive prompts, 4 short prompts, a mixed batch), while two knob-off starts differed from each
+  other (known start-to-start nondeterminism). The skip line was logged only in the ON arm (margin 1760,
+  chunks >= 3,808 tokens). It disables itself with prefix caching (the production default), so it only acts
+  with APC off. `R4D_ATTN_DB` and `RADIANCE_GDN_SCAN_VARIANT` stay default off.
+- Full BetterBench 0.4.0 run at 300 W of this stack (ours only): decode weighted median **153.1 tok/s**,
+  update gap p50 33.8-34.2 ms per category, p99 35.3 ms, tokens per update 3.09 (prose) to 6.35 (math), TTFT
+  p50 88 ms, concurrency 1/2/4/8/16 aggregate 136.1 / 231.0 / 355.0 / 479.0 / 481.0 tok/s, prefill inside
+  the full run 3,249 / 3,399 / 3,411 / 3,304 / 3,046 tok/s at 2K-64K (lower than the sweep because prefill
+  is the last phase on a hot card, junction 110 °C). GSM8K not run: no numerics default changes.
+- `VERSION` 1.7.0 → 1.8.0.
 
 ## [1.7.0] - 2026-10-20
 

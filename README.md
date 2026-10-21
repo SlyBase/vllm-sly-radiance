@@ -62,31 +62,54 @@ The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus s
 
 ### 1.8.0 acceptance run at 300 W
 
-Prefill and decode rows are measured; rows marked TBD come from the full BetterBench run and are filled later.
+Three blocks, each only with what was measured: the prefill sweep and the c1/c2/c4 decode run were
+measured on both stacks under the same conditions; the full BetterBench run was done on our stack only.
 
-| | **ours (1.8.0 stack)** | **reference stack (same card, same args)** |
+**Prefill sweep (same conditions, both stacks)**
+
+| | **ours (1.8.0 stack)** | **reference stack** |
 |---|---|---|
-| **Prefill**, 2K prompt tok/s | 3,522.8 | 3,695.0 |
-| **Prefill**, 8K prompt tok/s | 3,732.4 | 3,773.8 |
-| **Prefill**, 16K prompt tok/s | 3,697.2 | 3,752.9 |
-| **Prefill**, 32K prompt tok/s | 3,475.3 | 3,578.8 |
-| **Prefill**, 64K prompt tok/s | 3,167.1 | 3,284.0 |
-| **Decode, single stream** (weighted) | 160.0 tok/s | 144.3 tok/s |
-| update gap p50 / p99 | TBD (full run) | TBD (full run) |
-| tokens per update | TBD (full run) | TBD (full run) |
-| **Concurrency** 1 / 2 / 4, aggregate tok/s | 127.6 / 239.0 / 330.4 | 114.0 / 197.5 / 304.6 |
-| **Concurrency** 8 / 16, aggregate tok/s | TBD (full run) | TBD (full run) |
-| time to first token, 64K tokens | TBD (full run) | TBD (full run) |
+| Prefill, 2K prompt tok/s | 3,522.8 | 3,695.0 |
+| Prefill, 8K prompt tok/s | 3,732.4 | 3,773.8 |
+| Prefill, 16K prompt tok/s | 3,697.2 | 3,752.9 |
+| Prefill, 32K prompt tok/s | 3,475.3 | 3,578.8 |
+| Prefill, 64K prompt tok/s | 3,167.1 | 3,284.0 |
 | KV pool (tokens) | 332,960 | 174,634 |
-| GSM8K 200 (greedy) | TBD (full run) | TBD (full run) |
+
+**Decode c1/c2/c4 (32 requests per level, both stacks)**
+
+| | **ours (1.8.0 stack)** | **reference stack** |
+|---|---|---|
+| Decode, single stream (weighted) | 160.0 tok/s | 144.3 tok/s |
+| Concurrency 1 / 2 / 4, aggregate tok/s | 127.6 / 239.0 / 330.4 | 114.0 / 197.5 / 304.6 |
+
+**Full BetterBench 0.4.0 run (ours only; the reference stack was not run through it)**
+
+| | **ours (1.8.0 stack)** | **reference stack** |
+|---|---|---|
+| Decode, single stream (weighted median) | 153.1 tok/s | not measured (prefill sweep and decode only) |
+| update gap p50 (per category) | 33.8-34.2 ms | not measured (prefill sweep and decode only) |
+| update gap p99 | 35.3 ms | not measured (prefill sweep and decode only) |
+| tokens per update (chat / code / file_edit / json / math / prose / reasoning / summarization) | 4.25 / 5.75 / 5.32 / 6.24 / 6.35 / 3.09 / 3.92 / 4.59 | not measured (prefill sweep and decode only) |
+| time to first token p50 (short prompts) | 88 ms | not measured (prefill sweep and decode only) |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 136.1 / 231.0 / 355.0 / 479.0 / 481.0 | not measured (prefill sweep and decode only) |
+| Prefill, 2K / 8K / 16K / 32K / 64K prompt tok/s (inside the full run) | 3,249.4 / 3,398.6 / 3,411.4 / 3,303.8 / 3,045.7 | not measured (prefill sweep and decode only) |
+| GSM8K 200 (greedy) | not run (no numerics default changes in 1.8.0) | not run |
+
+The full-run prefill is lower than the sweep because prefill is the last phase of the full run, on a card
+that is already hot (junction 110 °C).
 
 Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
-`r4d.so` / GDN module / drafter-skip module, BetterBench `--prefill`, 8 runs median, prefix cache off, chunk 4096,
-`--max-model-len 65536`, thinking off, one start per arm. Prefill depths are nominal 2K/8K/16K/32K/64K
-(1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens). Ours = E2: 1.6.0 prefill stack plus
-`R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`, `RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the
-drafter skip. Decode: c1/c2/c4 with 32 requests per level. Prefill is still 1.1-4.7 % behind the reference stack
-(it also runs at a lower clock, 2,296 MHz vs 2,374-2,439 MHz; the remaining gap is in the W4A8 GEMM).
+`r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
+thinking off, one start per arm. Sweep and full run: BetterBench 0.4.0, 8 prefill runs median, 3 warmup + 20
+passes per decode category, 48 requests per concurrency level in the full run. Prefill depths are nominal
+2K/8K/16K/32K/64K (1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens in the sweep). Ours = E2 (the
+full run is the same configuration): the 1.6.0 prefill stack (`RADIANCE_MXFP4_TN4_MIN_M=513`,
+`RADIANCE_FUSED_NQ_REG=1`, `RADIANCE_MXFP4_AT_SKIP_PAD=1`, `RADIANCE_MXFP4_TILED_OPROJ=1`,
+`R4D_ATTN_FP8=3`) plus `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`,
+`RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the drafter skip. Prefill is still 1.1-4.7 % behind the reference
+stack in the sweep (it also runs at a lower clock, 2,296 MHz vs 2,374-2,439 MHz; the remaining gap is in the
+W4A8 GEMM).
 
 The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 
@@ -229,7 +252,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
 | `R4D_ATTN_DB` (+ `R4D_ATTN_TILE`) | `0` (opt-in, **not yet measured end to end**) | 1.8.0: double-buffered K/V staging, one barrier per key tile (O_DB), only with `R4D_ATTN_FP8=3` — otherwise inert. Bit-identical output, one layer M = 4089: 27.128 → 26.310 ms at ctx 40,890 (−3.0 %), 11.763 → 11.313 ms at 16,356 (−3.8 %), 1.687 → 1.571 ms at 0 (−6.9 %). `R4D_ATTN_TILE=16/32/48` (default 48) picks the key tile; tile 16 *without* DB is 7.7 % slower than tile 48, which is why the earlier tile-16 attempt lost |
 | `RADIANCE_GDN_SCAN_VARIANT` | unset (stock) | 1.8.0: `s1` / `s2` / `s3` select build-time variants of the GDN chunk scan in the same `r4d.so` (`s1` = no `-mcumode`, `s2` = + LDS diet, `s3` = + late staging). DIGEST bit-identical at T = 64/65/880/1760/4089 and varlen; one layer T = 4089 stock 0.5720 ms, s1 0.4860 (−15.0 %), s2 0.5366 (−6.2 %), s3 0.4255 (−25.6 %); s3 189 VGPR / 43,008 B LDS vs stock 256 / 4-VGPR spill / 60,928 B. s1+s3 is the pair, s2 alone is worse than s1. Details: [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) |
-| `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `0` (opt-in, GPU identity test **not yet run**) | 1.8.0: skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; no end-to-end number yet |
+| `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `1` in `serve-mxfp4.sh` (module default `0`; `=0` reverts) | 1.8.0: lossless (GPU identity test: identical text and per-position acceptance counters, knob on vs off, 10 requests). Skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1, so it only acts with prefix caching off. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; +2.1 / +3.6 / +3.2 % prefill at 16K / 32K / 64K |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |

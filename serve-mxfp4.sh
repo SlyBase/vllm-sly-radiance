@@ -1092,6 +1092,10 @@ esac
 #     staging the pad tile (docs/PREFILL-4000.md); A-tiled prefill only, hence the 513 above.
 #   RADIANCE_MXFP4_TILED_OPROJ=1 -- gdn_norm_quant writes the fragment layout so out_proj takes the
 #     A-tiled GEMM (byte-identical output, kernel cell bench +10..16 %).
+#   RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1 -- the drafter skips fc / context-K/V / draft on old prefill
+#     chunks (all 5 layers slide over 2048, its prefill drafts are discarded). Lossless: GPU test knob
+#     on vs off gave identical text and per-position acceptance counters. Disables itself under prefix
+#     caching, so it only acts with APC off. `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=0` reverts it.
 HIP_IDS=$(python3 -c "import sys; print(','.join(str(i) for i in range(len(sys.argv[1].split(',')))))" "$GPU_IDS")
 exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privileged --ipc=host --network=host \
   --device /dev/kfd --device /dev/dri "${GROUP_FLAGS[@]}" \
@@ -1127,6 +1131,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
   -e RADIANCE_FUSED_NORM_QUANT="${RADIANCE_FUSED_NORM_QUANT:-1}" \
   -e RADIANCE_FUSED_NQ_REG="${RADIANCE_FUSED_NQ_REG:-1}" \
   -e RADIANCE_MXFP4_AT_SKIP_PAD="${RADIANCE_MXFP4_AT_SKIP_PAD:-1}" \
+  -e RADIANCE_DFLASH_PREFILL_WINDOW_SKIP="${RADIANCE_DFLASH_PREFILL_WINDOW_SKIP:-1}" \
   -e RADIANCE_MXFP4_WPERM="${RADIANCE_MXFP4_WPERM:-1}" \
   -e RADIANCE_TP_PAD="$TP_PAD" \
   -e RADIANCE_TP_PAD_INTERMEDIATE="${RADIANCE_TP_PAD_INTERMEDIATE:-}" \

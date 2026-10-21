@@ -192,6 +192,15 @@ def test_wiring_loop_copy_and_docs():
     assert f'"{KNOB}", "0"' in (ROOT / "sly" / "radiance_dflash_skip.py").read_text(), "default must be 0"
 
 
+def test_launcher_ships_the_skip_on_and_overridable():
+    """The module default stays 0 (stock path without the launcher); serve-mxfp4.sh turns it on, as
+    `${VAR:-1}` so `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=0` still reverts it."""
+    txt = (ROOT / "serve-mxfp4.sh").read_text()
+    assert f'-e {KNOB}="${{{KNOB}:-1}}"' in txt, "serve-mxfp4.sh must ship the drafter skip default on"
+    for off in ("R4D_ATTN_DB", "RADIANCE_GDN_SCAN_VARIANT"):
+        assert off not in txt.replace("R4D_ATTN_DB\n", ""), f"{off} must stay out of the launcher defaults"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
