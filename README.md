@@ -60,28 +60,33 @@ gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that r
 and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
 The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
 
-### 1.8.0 acceptance run at 300 W — **not measured yet**
+### 1.8.0 acceptance run at 300 W
 
-The table below is a skeleton: every cell is a placeholder that the 300 W acceptance run fills in. The
-run uses the production arguments of the quickstart on both arms, on the same card, in the same window,
-second start, `--no-enable-prefix-caching` (the drafter-skip knob requires it), and the 1.8.0 opt-in
-knobs enabled per the Options table. Nothing here is a result — the numbers are deliberately absent
-until the run exists.
+Prefill and decode rows are measured; rows marked TBD come from the full BetterBench run and are filled later.
 
 | | **ours (1.8.0 stack)** | **reference stack (same card, same args)** |
 |---|---|---|
-| **Prefill**, 2K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
-| **Prefill**, 8K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
-| **Prefill**, 16K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
-| **Prefill**, 32K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
-| **Prefill**, 64K prompt tok/s | TBD (300 W run) | TBD (300 W run) |
-| **Decode, single stream** (weighted) | TBD (300 W run) | TBD (300 W run) |
-| update gap p50 / p99 | TBD (300 W run) | TBD (300 W run) |
-| tokens per update | TBD (300 W run) | TBD (300 W run) |
-| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | TBD (300 W run) | TBD (300 W run) |
-| time to first token, 64K tokens | TBD (300 W run) | TBD (300 W run) |
-| KV pool, 262k context (tokens) | TBD (300 W run) | TBD (300 W run) |
-| GSM8K 200 (greedy) | TBD (300 W run) | TBD (300 W run) |
+| **Prefill**, 2K prompt tok/s | 3,522.8 | 3,695.0 |
+| **Prefill**, 8K prompt tok/s | 3,732.4 | 3,773.8 |
+| **Prefill**, 16K prompt tok/s | 3,697.2 | 3,752.9 |
+| **Prefill**, 32K prompt tok/s | 3,475.3 | 3,578.8 |
+| **Prefill**, 64K prompt tok/s | 3,167.1 | 3,284.0 |
+| **Decode, single stream** (weighted) | 160.0 tok/s | 144.3 tok/s |
+| update gap p50 / p99 | TBD (full run) | TBD (full run) |
+| tokens per update | TBD (full run) | TBD (full run) |
+| **Concurrency** 1 / 2 / 4, aggregate tok/s | 127.6 / 239.0 / 330.4 | 114.0 / 197.5 / 304.6 |
+| **Concurrency** 8 / 16, aggregate tok/s | TBD (full run) | TBD (full run) |
+| time to first token, 64K tokens | TBD (full run) | TBD (full run) |
+| KV pool (tokens) | 332,960 | 174,634 |
+| GSM8K 200 (greedy) | TBD (full run) | TBD (full run) |
+
+Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
+`r4d.so` / GDN module / drafter-skip module, BetterBench `--prefill`, 8 runs median, prefix cache off, chunk 4096,
+`--max-model-len 65536`, thinking off, one start per arm. Prefill depths are nominal 2K/8K/16K/32K/64K
+(1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens). Ours = E2: 1.6.0 prefill stack plus
+`R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`, `RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the
+drafter skip. Decode: c1/c2/c4 with 32 requests per level. Prefill is still 1.1-4.7 % behind the reference stack
+(it also runs at a lower clock, 2,296 MHz vs 2,374-2,439 MHz; the remaining gap is in the W4A8 GEMM).
 
 The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 

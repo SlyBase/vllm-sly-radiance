@@ -13,8 +13,9 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [1.8.0] - 2026-10-21
 
 Three opt-in prefill knobs on top of 1.7.0. All three are **off by default**, leave the stock launch
-bit-identical when off, and have **no end-to-end (serve-level) measurement yet**: every number below is a
-one-layer kernel microbench, and none of the three has been through a 300 W acceptance run. See
+bit-identical when off. End-to-end (serve-level) results at 300 W are given per knob below (prefill sweep,
+8 runs median, one start per arm, so differences under ~2 % are single-start noise); the kernel numbers
+are one-layer microbenches. See
 [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) for the GDN variants.
 
 ### Added
@@ -24,8 +25,9 @@ one-layer kernel microbench, and none of the three has been through a 300 W acce
   knob is inert. One attention layer (`r4d_attn_prefill_h256_gqa6`, M = 4089): **27.128 → 26.310 ms at
   ctx 40,890 (−3.0 %)**, 11.763 → 11.313 ms at ctx 16,356 (−3.8 %), 1.687 → 1.571 ms at ctx 0 (−6.9 %).
   Tile 16 *without* DB is 7.7 % slower than the shipped tile 48 (29.236 ms at 40,890), which is why the
-  earlier tile-16 attempt lost; DB is what pays for the smaller tile. Off by default, not yet measured end
-  to end.
+  earlier tile-16 attempt lost; DB is what pays for the smaller tile. End to end at 300 W (together with
+  the s3 scan variant and `RADIANCE_DFLASH_FC_TILED_MIN_M=513`) the effect is **within single-start noise**
+  (E1 vs A1 −1.8 .. +0.9 % over 2K-64K prefill). Off by default.
 - **`RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3`**: build-time variants of the GDN chunk scan in the same `r4d.so`,
   selectable per process (`unset` = stock entry point): `s1` = workgroup-processor mode (unit built without
   `-mcumode`), `s2` = `s1` + LDS diet (state mirror aliases sA + W), `s3` = `s2` + the next chunk's staging
@@ -33,15 +35,18 @@ one-layer kernel microbench, and none of the three has been through a 300 W acce
   a varlen split, 5 repeats stable. One layer, T = 4089: stock **0.5720 ms**, s1 0.4860 (**−15.0 %**),
   s2 0.5366 (−6.2 %), s3 0.4255 (**−25.6 %**). `s3` uses 189 VGPR (no spill) and 43,008 B LDS against stock's
   256 VGPR with a 4-VGPR spill and 60,928 B. `s2` alone is slower than `s1`, so the useful pair is s1 + s3.
-  Off by default, not yet measured end to end.
+  End to end at 300 W the gain is **within single-start noise** (E1 vs A1 −1.8 .. +0.9 %, see above).
+  Off by default.
 - **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1`** (+ `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN`, default 512):
   the DFlash2 drafter has 5 sliding-attention layers with a 2,048-token window, so in an intermediate
   prefill chunk it only ever reads the last ~2,048 positions while the scheduler drops its draft tokens
   anyway; the knob skips its `fc`, context-K/V fill and draft step for chunks whose end lies at least
   `window + margin` below the prompt length. Gate: prefix caching must be **off** (with APC on the knob
   warns once and does nothing), all drafter layers must be sliding, and DP must be 1. CPU-gated by
-  `sly/tests/test_dflash_prefill_skip_cpu.py`; **the GPU identity test has not been run yet**, and there is
-  no end-to-end number. Off by default.
+  `sly/tests/test_dflash_prefill_skip_cpu.py`. End to end at 300 W (E2 vs E1, working skip with margin 1760,
+  chunks >= 3808 tokens): **+2.1 % at 16K, +3.6 % at 32K, +3.2 % at 64K** prefill tok/s (3,697 vs 3,621,
+  3,475 vs 3,355, 3,167 vs 3,068). **The GPU identity test has not been run yet**, and production runs with
+  prefix caching, where the knob disables itself, so it stays **off by default**.
 
 ### Changed
 - `VERSION` 1.7.0 → 1.8.0. No change to the default serve path: without the three variables above the
