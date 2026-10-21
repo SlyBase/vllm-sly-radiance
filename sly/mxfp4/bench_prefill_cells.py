@@ -59,16 +59,17 @@ from tile_layout import untile
 # K % 128 == 0 (the fragment layout) and K <= 10240 (the launcher's _ADD_RMS_MAX_K).
 SHAPES = [
     ("gate_up", 34816, 5120),
+    ("in_proj", 16480, 5120),   # merged GDN qkvz + ba (tall-tile shape); not in the default sweep
     ("qkvz",    16384, 5120),
     ("qkv",     14336, 5120),
     ("o_proj",   5120, 6144),
     ("out_proj", 5120, 6144),
     ("down",     5120, 17408),
 ]
-TILED_OK = {"gate_up", "qkvz", "qkv", "o_proj", "out_proj", "down"}
+TILED_OK = {"gate_up", "in_proj", "qkvz", "qkv", "o_proj", "out_proj", "down"}
 # Production tile wiring: add_rms-quant consumers + down (silu_mul_quant); o_proj/out_proj only
 # with RADIANCE_MXFP4_TILED_OPROJ=1 (default off).
-PROD_TILED = {"gate_up", "qkvz", "qkv", "down"}
+PROD_TILED = {"gate_up", "in_proj", "qkvz", "qkv", "down"}
 PRODUCER = {"o_proj": "gdn", "out_proj": "gdn", "down": "silu"}  # default: add_rms
 PROD_AT_MIN_M = 513  # RADIANCE_MXFP4_A_TILED_MIN_M in the README quickstart
 
@@ -142,6 +143,8 @@ def main(a):
     rows = []
     torch.manual_seed(0)
     for name, N, K in SHAPES:
+        if name not in a.shapes.split(","):
+            continue
         wbytes = N * K // 2 + N * K // 32
         copies = max(2, -(-a.rotate_mb * (1 << 20) // wbytes))
         W = [torch.randint(0, 256, (N, K // 2), dtype=torch.uint8, device=dev)
@@ -236,6 +239,8 @@ def main(a):
     print(f"{'shape':9s} {'M':>5s}  {'rowmajor':>9s} {'atiled':>9s} {'delta':>7s}  "
           "prod choice (A_TILED_MIN_M=513; o_proj tiled only with TILED_OPROJ=1)")
     for name, N, K in SHAPES:
+        if name not in a.shapes.split(","):
+            continue
         for M in ms:
             rm = cell.get((name, M, "rowmajor"))
             at = cell.get((name, M, "atiled"))
@@ -256,6 +261,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--ms", default="96,128,160,192,256,320,384,512,513,576,768,1024,1536,"
                                     "2048,3072,4096,6144,8192")
+    ap.add_argument("--shapes", default="gate_up,qkvz,qkv,o_proj,out_proj,down")
     ap.add_argument("--iters", type=int, default=100)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--rotate-mb", type=int, default=256)

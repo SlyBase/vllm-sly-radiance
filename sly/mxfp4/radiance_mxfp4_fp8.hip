@@ -2029,6 +2029,14 @@ static int g_at_psw = 0;
 static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e ? atoi(e) : 0; }();
 static void set_at_psw(int v) { g_at_psw = v; }
 static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
+// TALL (RADIANCE_MXFP4_TALL=1, default off): 512x64x64 tile (TMT=8, TN=2, LBK=64, 8 waves of 128x32)
+// for the two shapes where it halves the weight-side work per MAC -- gate_up (N 34816) and the merged
+// GDN in_proj (N 16480) -- at tn_m >= RADIANCE_MXFP4_TALL_MIN_M (default 2048). Same K order and WMMA
+// chain per output as TN=2/TN=4, so the bytes match them (gated by the DIGEST lines of
+// bench_prefill_cells.py --check). Fragment-order e4m3 weights, no PSW/E6 only.
+static int g_at_tall = [] { const char *e = getenv("RADIANCE_MXFP4_TALL"); return e ? atoi(e) : 0; }();
+static int g_at_tall_min_m = [] { const char *e = getenv("RADIANCE_MXFP4_TALL_MIN_M"); return e ? atoi(e) : 2048; }();
+static void set_at_tall(int v, int min_m) { g_at_tall = v; g_at_tall_min_m = min_m; }
 // tn_m: the M that picks the tile variant (TN / short-M tile). Equal to M except for the pieces of an
 // M-split launch (launch_at_impl below), which keep the variant of the full M.
 static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
@@ -2052,7 +2060,7 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 && TM_ != 8 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
@@ -2075,6 +2083,9 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
     } while (0)
     if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
 #undef RAD_AT_P
+  } else
+  if (g_at_tall && wperm && !wh && (N == 34816 || N == 16480) && tn_m >= g_at_tall_min_m) {
+    RAD_AT_TM(2, true, false, 8);
   } else
   if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
@@ -2146,6 +2157,7 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
   m.def("set_at_psw", &set_at_psw, "select the A-tiled PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_tall", &set_at_tall, "bench: toggle the tall tile in-process (default from RADIANCE_MXFP4_TALL / _TALL_MIN_M)");
   m.def("set_at_skip_pad", &set_at_skip_pad, "bench: toggle SKIPPAD in-process (default from RADIANCE_MXFP4_AT_SKIP_PAD)");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");
