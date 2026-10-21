@@ -58,6 +58,18 @@ are one-layer microbenches. See
   3,475 vs 3,355, 3,167 vs 3,068). GPU identity test: see Changed.
 
 ### Changed
+- **`serve-mxfp4.sh` now ships `--no-async-scheduling` by default** (`RADIANCE_NO_ASYNC_SCHED=1`; `=0` drops
+  the flag and lets dflash auto-enable async scheduling, `ASYNC=1` still forces `--async-scheduling`).
+  Measured at 300 W on one R9700, same image, prefix cache off, chunk 4096, `--max-model-len 65536`,
+  thinking off, 8 timed runs per prefill depth, 32 requests per decode level, median; the only difference
+  between the two arms is the flag. Prefill 2K/8K/16K/32K/64K tok/s **3,789.5 / 3,803.3 / 3,704.0 /
+  3,487.3 / 3,170.6** against async's 3,544.1 / 3,759.4 / 3,550.4 / 3,449.8 / 3,199.2 — **+6.9 / +1.2 /
+  +4.3 / +1.1 / −0.9 %**. Decode weighted **unchanged** (159.8 vs 160.0 tok/s, −0.2 %), c1 +1.1 %
+  (129.0 vs 127.6), **c2 −11.7 %** (210.9 vs 239.0, the price of losing the decode overlap), c4 +3.0 %
+  (340.3 vs 330.5). Why: with dflash, async scheduling adds an output-drain engine step whose output is
+  fetched through an event wait; without it the first token is sampled inside the prefill step, which is
+  where the win lands (largest at short prompts). Scheduling-only: no numerics, kernel, or graph change,
+  so there is no accuracy risk. CPU-gated by `sly/tests/test_launcher_async_sched_cpu.py`.
 - **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` now defaults to `1` in `serve-mxfp4.sh`** (`${VAR:-1}`; the module
   default stays `0`, `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=0` reverts). It is lossless by construction (all 5
   drafter layers use a 2,048 sliding window, the masking is exact per position, the scheduler discards

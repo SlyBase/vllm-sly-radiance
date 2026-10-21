@@ -69,6 +69,10 @@ Everything is an environment variable; these are the ones worth knowing.
   MAXLEN=262144             max context length
   CHUNK=4096                prefill chunk (--max-num-batched-tokens)
   GPU_UTIL=0.98             VRAM fraction; use 0.75 for perplexity work (prompt_logprobs)
+  RADIANCE_NO_ASYNC_SCHED=1 append --no-async-scheduling (default; prefill up to +7 % on short
+                            prompts, decode c2 -12 %).
+                            0 drops the flag and lets dflash auto-enable async scheduling;
+                            ASYNC=1 forces --async-scheduling instead
 
   TP=<auto>                 tensor-parallel size; defaults to the largest of 8/4/2/1 that the
                             detected cards can fill (head counts rule out 3, 6 and 12)
@@ -846,9 +850,31 @@ esac
 # batches deep. There is nothing to overlap: the worker CPU chain is 8.5 ms at conc-8 (prep 6.5 +
 # sample 1.5 + engine/IPC 0.45) and the drafter's GPU tail after sampling is 5.4 ms (3.6 single),
 # so the GPU idles <=1.5 ms/step in sync mode, and both modes sit at the 209 W cap / ~2.83 GHz.
-# Keep 0: sync has the simpler failure modes and identical numbers.
+# Keep 0: sync has the simpler failure modes and, in that decode-only test, identical numbers.
+# 2026-10-21, 300 W, dflash, two arms whose only difference is the flag (APC off, chunk 4096, maxlen
+# 65536, thinking off, 8 timed runs per depth, 32 requests per decode level, median): async on
+# (N1: no flag, dflash auto-enables it) vs --no-async-scheduling (N2). Prefill tok/s at 2K/8K/16K/
+# 32K/64K: N1 3544.1/3759.4/3550.4/3449.8/3199.2, N2 3789.5/3803.3/3704.0/3487.3/3170.6
+# (+6.9/+1.2/+4.3/+1.1/-0.9 %). Decode weighted/c1/c2/c4: N1 160.0/127.6/239.0/330.5,
+# N2 159.8/129.0/210.9/340.3 (-0.2/+1.1/-11.7/+3.0 %). With dflash, async adds an output-drain
+# engine step whose output is fetched through an event wait; without it the first token is sampled
+# inside the prefill step. The win is prefill-side (largest at short prompts) and decode weighted is
+# unchanged; concurrency-2 decode is the price of losing the decode overlap (c1 and c4 gain).
+# So the default is the flag ON, as a flag (not an env var into the container), overridable:
+#   RADIANCE_NO_ASYNC_SCHED=1  (default) -> --no-async-scheduling
+#   RADIANCE_NO_ASYNC_SCHED=0  -> no flag at all; dflash then auto-enables async (the N1 arm)
+#   ASYNC=1                    -> --async-scheduling, wins over both, and re-enables padded drafter
+#                                 batches (vLLM refuses async together with disable_padded_drafter_batch)
 ASYNC=${ASYNC:-0}
-if [ "$ASYNC" = 1 ]; then ASYNC_FLAG="--async-scheduling"; UNPAD=false; else ASYNC_FLAG="--no-async-scheduling"; UNPAD=true; fi
+NO_ASYNC_SCHED=${RADIANCE_NO_ASYNC_SCHED:-1}
+if [ "$ASYNC" = 1 ]; then
+  ASYNC_FLAG="--async-scheduling"; UNPAD=false
+elif [ "$NO_ASYNC_SCHED" = 1 ]; then
+  ASYNC_FLAG="--no-async-scheduling"; UNPAD=true
+else
+  # no scheduling flag: dflash auto-enables async scheduling, which cannot run unpadded
+  ASYNC_FLAG=""; UNPAD=false
+fi
 
 # Speculative config, built here so the drafter path is validated before podman is invoked rather
 # than surfacing as an HF repo-id error inside the worker.

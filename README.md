@@ -67,21 +67,23 @@ measured on both stacks under the same conditions; the full BetterBench run was 
 
 **Prefill sweep (same conditions, both stacks)**
 
-| | **ours (1.8.0 stack)** | **reference stack** |
-|---|---|---|
-| Prefill, 2K prompt tok/s | 3,522.8 | 3,695.0 |
-| Prefill, 8K prompt tok/s | 3,732.4 | 3,773.8 |
-| Prefill, 16K prompt tok/s | 3,697.2 | 3,752.9 |
-| Prefill, 32K prompt tok/s | 3,475.3 | 3,578.8 |
-| Prefill, 64K prompt tok/s | 3,167.1 | 3,284.0 |
-| KV pool (tokens) | 332,960 | 174,634 |
+| | **ours (shipping config)** | **reference stack** | **delta** |
+|---|---|---|---|
+| Prefill, 2K prompt tok/s | 3,789.5 | 3,695.0 | +2.6 % |
+| Prefill, 8K prompt tok/s | 3,803.3 | 3,773.8 | +0.8 % |
+| Prefill, 16K prompt tok/s | 3,704.0 | 3,752.9 | −1.3 % |
+| Prefill, 32K prompt tok/s | 3,487.3 | 3,578.8 | −2.6 % |
+| Prefill, 64K prompt tok/s | 3,170.6 | 3,284.0 | −3.4 % |
+| KV pool (tokens) | 332,960 | 174,634 |  |
 
 **Decode c1/c2/c4 (32 requests per level, both stacks)**
 
-| | **ours (1.8.0 stack)** | **reference stack** |
-|---|---|---|
-| Decode, single stream (weighted) | 160.0 tok/s | 144.3 tok/s |
-| Concurrency 1 / 2 / 4, aggregate tok/s | 127.6 / 239.0 / 330.4 | 114.0 / 197.5 / 304.6 |
+| | **ours (shipping config)** | **reference stack** | **delta** |
+|---|---|---|---|
+| Decode, single stream (weighted) | 159.8 tok/s | 144.3 tok/s | +10.7 % |
+| Concurrency 1, aggregate tok/s | 129.0 | 114.0 | +13.2 % |
+| Concurrency 2, aggregate tok/s | 210.9 | 197.5 | +6.8 % |
+| Concurrency 4, aggregate tok/s | 340.3 | 304.6 | +11.7 % |
 
 **Full BetterBench 0.4.0 run (ours only; the reference stack was not run through it)**
 
@@ -96,20 +98,26 @@ measured on both stacks under the same conditions; the full BetterBench run was 
 | Prefill, 2K / 8K / 16K / 32K / 64K prompt tok/s (inside the full run) | 3,249.4 / 3,398.6 / 3,411.4 / 3,303.8 / 3,045.7 | not measured (prefill sweep and decode only) |
 | GSM8K 200 (greedy) | not run (no numerics default changes in 1.8.0) | not run |
 
+full run re-measured with the shipping config: TBD (running)
+
 The full-run prefill is lower than the sweep because prefill is the last phase of the full run, on a card
-that is already hot (junction 110 °C).
+that is already hot (junction 110 °C). The full-run numbers above predate the scheduling default and are
+being re-measured; the sweep and c1/c2/c4 tables are the shipping launcher configuration.
 
 Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
 `r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
 thinking off, one start per arm. Sweep and full run: BetterBench 0.4.0, 8 prefill runs median, 3 warmup + 20
 passes per decode category, 48 requests per concurrency level in the full run. Prefill depths are nominal
-2K/8K/16K/32K/64K (1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens in the sweep). Ours = E2 (the
-full run is the same configuration): the 1.6.0 prefill stack (`RADIANCE_MXFP4_TN4_MIN_M=513`,
+2K/8K/16K/32K/64K (1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens in the sweep). Ours = the
+shipping launcher config: the 1.6.0 prefill stack (`RADIANCE_MXFP4_TN4_MIN_M=513`,
 `RADIANCE_FUSED_NQ_REG=1`, `RADIANCE_MXFP4_AT_SKIP_PAD=1`, `RADIANCE_MXFP4_TILED_OPROJ=1`,
 `R4D_ATTN_FP8=3`) plus `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`,
-`RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the drafter skip. Prefill is still 1.1-4.7 % behind the reference
-stack in the sweep (it also runs at a lower clock, 2,296 MHz vs 2,374-2,439 MHz; the remaining gap is in the
-W4A8 GEMM).
+`RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the drafter skip, and **the shipping launcher now appends
+`--no-async-scheduling` by default** (`serve-mxfp4.sh`, `RADIANCE_NO_ASYNC_SCHED=1`; `=0` drops the flag,
+which lets dflash auto-enable async scheduling — that is the N1 arm of the A/B, and it cost 1.2-6.9 % prefill
+and bought 11.7 % concurrency-2 decode while weighted decode was unchanged). Prefill with the flag is now
+2.6 % / 0.8 % ahead at 2K / 8K and 1.3-3.4 % behind at 16K-64K (it also runs at a lower clock, 2,296 MHz vs
+2,374-2,439 MHz; the remaining gap is in the W4A8 GEMM).
 
 The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 
@@ -253,6 +261,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `R4D_ATTN_DB` (+ `R4D_ATTN_TILE`) | `0` (opt-in, **not yet measured end to end**) | 1.8.0: double-buffered K/V staging, one barrier per key tile (O_DB), only with `R4D_ATTN_FP8=3` — otherwise inert. Bit-identical output, one layer M = 4089: 27.128 → 26.310 ms at ctx 40,890 (−3.0 %), 11.763 → 11.313 ms at 16,356 (−3.8 %), 1.687 → 1.571 ms at 0 (−6.9 %). `R4D_ATTN_TILE=16/32/48` (default 48) picks the key tile; tile 16 *without* DB is 7.7 % slower than tile 48, which is why the earlier tile-16 attempt lost |
 | `RADIANCE_GDN_SCAN_VARIANT` | unset (stock) | 1.8.0: `s1` / `s2` / `s3` select build-time variants of the GDN chunk scan in the same `r4d.so` (`s1` = no `-mcumode`, `s2` = + LDS diet, `s3` = + late staging). DIGEST bit-identical at T = 64/65/880/1760/4089 and varlen; one layer T = 4089 stock 0.5720 ms, s1 0.4860 (−15.0 %), s2 0.5366 (−6.2 %), s3 0.4255 (−25.6 %); s3 189 VGPR / 43,008 B LDS vs stock 256 / 4-VGPR spill / 60,928 B. s1+s3 is the pair, s2 alone is worse than s1. Details: [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) |
 | `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `1` in `serve-mxfp4.sh` (module default `0`; `=0` reverts) | 1.8.0: lossless (GPU identity test: identical text and per-position acceptance counters, knob on vs off, 10 requests). Skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1, so it only acts with prefix caching off. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; +2.1 / +3.6 / +3.2 % prefill at 16K / 32K / 64K |
+| `RADIANCE_NO_ASYNC_SCHED` | `1` in `serve-mxfp4.sh` (ship it; `=0` drops the flag, `ASYNC=1` forces async) | 1.8.0: append `--no-async-scheduling`. With dflash, async scheduling adds an output-drain engine step whose output is fetched through an event wait; without the flag the first token is sampled inside the prefill step. 300 W A/B, only the flag differing: prefill 2K/8K/16K/32K/64K **+6.9 / +1.2 / +4.3 / +1.1 / −0.9 %**, decode weighted unchanged (−0.2 %), c1 +1.1 %, c2 **−11.7 %** (the lost decode overlap), c4 +3.0 %. Scheduling-only: no numerics change. CPU test `sly/tests/test_launcher_async_sched_cpu.py` |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
