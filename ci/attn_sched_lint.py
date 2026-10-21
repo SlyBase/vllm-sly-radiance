@@ -44,7 +44,7 @@ LABEL = re.compile(r"^([.A-Za-z_$][\w.$]*):")
 INSTR = re.compile(r"^\t([a-z][a-z0-9_.]*)\b[ \t]*(.*)$")
 
 O_DB = 4194304
-O_QF32 = 16777216
+O_QF8 = 16777216
 LIMITS = dict(loop=372, load_gap=3, loadcnt=1, kmcnt=2, mul_u64=1, saveexec=2, vgpr=240)
 
 
@@ -229,8 +229,8 @@ def main(argv=None):
                          " the tile-16 instance, the other tiles are informational)")
     ap.add_argument("--mask", type=lambda s: int(s, 0), default=None,
                     help="exact OPT mask (default: any mask with the O_DB bit)")
-    ap.add_argument("--qf32", action="store_true",
-                    help="lint the fp32-query instance (O_QF32) instead of the bf16 one")
+    ap.add_argument("--qf8", action="store_true",
+                    help="lint the e4m3-query instance (O_QF8) instead of the bf16 one")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if a.tile != 16:
@@ -243,7 +243,7 @@ def main(argv=None):
         if not m:
             continue
         tile, opt = int(m.group(2)), int(m.group(7))
-        if tile == a.tile and opt & O_DB and bool(opt & O_QF32) == a.qf32 \
+        if tile == a.tile and opt & O_DB and bool(opt & O_QF8) == a.qf8 \
                 and (a.mask is None or opt == a.mask):
             hits.append((name, k, opt))
     if len(hits) != 1:

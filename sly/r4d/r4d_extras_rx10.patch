@@ -18,23 +18,32 @@ index 5e67e65..d02982f 100755
    "r4d_ar_oneshot_2rank_exact:"
    "r4d_ar_oneshot_2rank_wht6:"
 diff --git a/r4d.h b/r4d.h
-index 7addfcd..9beee11 100644
+index 7addfcd..d811d63 100644
 --- a/r4d.h
 +++ b/r4d.h
-@@ -73,6 +73,12 @@ long r4d_attn_decode_h256_gqa6_scratch_bytes(const R4DArgs* a);
+@@ -55,6 +55,7 @@ struct R4DArgs {
+     float scale;
+     int  splits;                // decode only; 0 = let the split law choose
+     int  max_ctx;               // host-visible context bound (seqused_k is device-side)
++    float q_scale;              // prefill, e4m3 query only (O_QF8): the static query scale; else unused
+ };
+ 
+ extern "C" {
+@@ -73,6 +74,13 @@ long r4d_attn_decode_h256_gqa6_scratch_bytes(const R4DArgs* a);
  // The geometry the attention kernels above are compiled for, so a caller can test a model against
  // it instead of discovering the mismatch at the first launch.
  void r4d_attn_dims(int* head_dim, int* gqa, int* block_size, int* max_decode_rows);
-+// The prefill query type, as a value the CALLER owns (set_q_fp32 on the pybind side, default 0).
-+// It must not be read from the environment: "is the pointer I just got fp32?" is a per-query
-+// question and the env is process-wide, so a bf16 query on the fp32 path reads 4 bytes per element
-+// out of a 2-byte buffer. Only a caller that passes an fp32, contiguous [tokens, heads, 256] query
-+// may turn this on, and it must turn it off again before passing anything else.
-+int  r4d_q_fp32(void);
++// The prefill query format, as a value the CALLER owns (set_q_fp8 on the pybind side, default 0).
++// 0 = the query is bf16 (the shipped kernel); > 0 = it is e4m3 and this is the static q_scale the
++// kernel applies while widening. It must not be read from the environment: "is the pointer I just
++// got e4m3?" is a per-query question and the env is process-wide, so a bf16 query on the e4m3 path
++// reads half the bytes it has. Only a caller that passes a contiguous e4m3 [tokens, heads, 256]
++// query may turn this on, and it must turn it off again before passing anything else.
++float r4d_q_fp8(void);
  
  // ---- attention: vision encoder -------------------------------------------------------------
  // Dense, non-causal, multi-head attention at the vision tower's head_dim of 72, bf16 throughout.
-@@ -155,6 +161,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
+@@ -155,6 +163,37 @@ int r4d_gdn_gated_rmsnorm_h128_bf16(const void* x, const void* z, const void* w,
  // l2 norm, the state update and the output, against the paged state cache. The state is fp32
  // (this model's config asks for it) and one is written per candidate token, which is the whole
  // cost of the kernel. Replaces fused_sigmoid_gating_delta_rule_update.
@@ -72,7 +81,7 @@ index 7addfcd..9beee11 100644
  int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* q, const void* k, const void* v, const void* a, const void* b,
          long ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,
-@@ -162,6 +199,73 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+@@ -162,6 +201,73 @@ int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
          const void* ssm_state_indices, long indices_stride, const void* num_accepted,
          const void* z_gate, const void* norm_weight, float norm_eps, int norm_act,
          int N, int H, int Hg, int K, int V, float scale, float softplus_thr, void* stream);
@@ -146,7 +155,7 @@ index 7addfcd..9beee11 100644
  
  // ---- all-reduce: one-shot, push, 2 ranks over P2P ------------------------------------------
  // One-shot means each rank pushes its whole input into the peer's IPC scratch and then reduces
-@@ -180,6 +284,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
+@@ -180,6 +286,14 @@ void r4d_ar_oneshot_2rank_exact(long peer_scratch, long my_scratch, long peer_fl
                                  long seq_ctrs, long slot_stride16, long inp, long out, long n_elem,
                                  long dtype, long stream, long nblocks, long nthreads, long drain,
                                  long acq);
@@ -161,7 +170,7 @@ index 7addfcd..9beee11 100644
  // Same topology, but the wire payload is Walsh-Hadamard rotated and quantised to 6 bits per element
  // over groups of 64 (plus a bf16 scale per group). Lossy, and bf16 / fp16 payload only. Takes this
  // rank's own packed copy (loc_pack) as well, so the reduce folds exactly the bytes it sent.
-@@ -188,6 +300,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
+@@ -188,6 +302,7 @@ void r4d_ar_oneshot_2rank_wht6(long peer_scratch, long my_scratch, long peer_fla
                                 long scale_off_bytes, long inp, long out, long n_elem, long dtype,
                                 long stream, long nblocks, long nthreads, long drain, long acq);
  int  r4d_ar_max_blocks(void);                                   // the two 2-rank kernels
@@ -358,22 +367,23 @@ index a4f359a..846b94a 100644
  //   [ packed symbols, chunk-interleaved ] ... [ scale_off_bytes ] ... [ bf16 scales: n_groups ]
  // A CHUNK is 32 groups = 2048 elements. One wave owns a chunk and every lane emits exactly 64
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index cd4e294..a0dedd8 100644
+index cd4e294..a10d16c 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -3,7 +3,10 @@
+@@ -3,7 +3,11 @@
  // are compiled for (head_dim 256, 6 queries per KV head, paged block 16) because that geometry is
  // a hard gate -- everything else is rejected below rather than run.
  //
 -// The query is bf16 in every variant. Quantising it measured an order of magnitude worse against
-+// The query is bf16 in every variant, or fp32 with O_QF32 (set_q_fp32(1) on the pybind side, which
-+// the caller sets per launch and only when the pointer it passes IS fp32), where the kernel
-+// prologue rounds it to bf16 itself so a caller that already has fp32 q (Gemma's rms_norm) need not
-+// copy it first. Quantising it measured an order of magnitude worse against
++// The query is bf16 in every variant, or e4m3 with O_QF8 (set_q_fp8(q_scale) on the pybind side,
++// which the caller sets per launch and only when the pointer it passes IS e4m3), where the kernel
++// prologue widens it and applies the static query scale itself, rounding to bf16 exactly as the
++// caller's own `q.to(bf16) * q_scale` would, so a caller whose attention layer already quantised q
++// to fp8 need not copy it back first. Quantising it measured an order of magnitude worse against
  // the fp32 oracle (2.58e-02 vs ~2.3e-03), and the two-term e4m3 form that DOES reach f16 accuracy
  // is 4-10% slower end to end -- so the 8-bit query arms are gone rather than kept behind a flag.
  // What ships is the two families that differ only in KV cache dtype: bf16 KV (all 16-bit) and fp8
-@@ -57,9 +60,69 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+@@ -57,9 +61,70 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
      if (a->q_heads / a->kv_heads != A_GQA) return -2;
      constexpr int BQ = (P_NWARPS * 16) / A_GQA;
      dim3 grid((a->q_len + BQ - 1) / BQ, a->kv_heads, a->num_seqs);
@@ -394,29 +404,30 @@ index cd4e294..a0dedd8 100644
 +        }();
 +        fp8mode = m;
 +    }
++    // O_QF8: the caller hands over its e4m3 query (the attention layer quantised it for the KV-fp8
++    // path) and the kernel widens it in its prologue and applies q_scale, which removes a full bf16
++    // copy of q per (layer, chunk) -- 57 ms over a 47k-token prefill. The bf16 dwords it builds are
++    // the ones `q.to(bf16) * q_scale` would have written, so this is a launch-shape choice only.
++    //
++    // NOT from the environment. "Is the pointer I just got e4m3?" is a per-query question and the
++    // env is process-wide: a glue that decides per query (e4m3 AND contiguous) and a kernel that
++    // reads a knob disagree on exactly the queries that do not qualify, and a bf16 buffer read on
++    // this path is an out-of-bounds read (it took the host down once, with the earlier fp32 form of
++    // this). So the caller pushes the answer (set_q_fp8) immediately before each launch and the
++    // default is off, which is the shipped kernel.
++    const float qs = r4d_q_fp8();
++    R4DArgs ab = *a;
++    ab.q_scale = qs;
 +#define P_LAUNCHT(TILEX, OPTX)                                                                    \
 +    do {                                                                                          \
 +        hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, TILEX, A_HEAD_DIM, A_GQA,           \
 +                                                    A_BLOCK_SIZE, KVP, OPTX>),                    \
-+                           grid, dim3(P_NWARPS * 32), 0, s, *a);                                  \
++                           grid, dim3(P_NWARPS * 32), 0, s, ab);                                  \
 +    } while (0)
 +#define P_LAUNCH(OPTX) P_LAUNCHT(P_TILE, OPTX)
-+    // O_QF32: the caller hands over its fp32 query (Gemma's rms_norm leaves it fp32) and the kernel
-+    // rounds it in its prologue, which removes a full bf16 copy of q per (layer, chunk) -- 54 ms
-+    // over a 47k-token prefill. Values are identical (RNE, see O_QF32), so this is a launch-shape
-+    // choice only.
-+    //
-+    // NOT from the environment. "Is the pointer I just got fp32?" is a per-query question and the
-+    // env is process-wide: with RADIANCE_ATTN_Q_FP32=1 exported and a glue that decides per query
-+    // (fp32 AND q_scale == 1 AND contiguous), the two disagree on exactly the queries that do not
-+    // qualify, and a bf16 buffer read on this path reads 4 bytes per element out of 2 -- an
-+    // out-of-bounds read that took the host down on a 1515-token prefill. So the caller pushes the
-+    // answer (set_q_fp32) immediately before each launch and the default is off, which is the
-+    // shipped kernel.
-+    const bool qf = r4d_q_fp32() != 0;
 +#define P_LAUNCHTQ(TILEX, OPTX)                                                                   \
 +    do {                                                                                          \
-+        if (qf) P_LAUNCHT(TILEX, OPTX | O_QF32); else P_LAUNCHT(TILEX, OPTX);                     \
++        if (qs > 0.0f) P_LAUNCHT(TILEX, OPTX | O_QF8); else P_LAUNCHT(TILEX, OPTX);               \
 +    } while (0)
 +#define P_LAUNCHQ(OPTX) P_LAUNCHTQ(P_TILE, OPTX)
 +    if constexpr (!KVP) {
@@ -447,7 +458,7 @@ index cd4e294..a0dedd8 100644
      return 0;
  }
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 513d97f..42a2f11 100644
+index 513d97f..090be45 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
 @@ -38,6 +38,25 @@
@@ -476,7 +487,7 @@ index 513d97f..42a2f11 100644
  #define O_FOLDQ   8
  #define O_CONTIG  512
  #define O_PF2    1024
-@@ -71,6 +90,28 @@
+@@ -71,6 +90,30 @@
  // the default fence invalidates the vector cache twice per tile for a synchronisation that only
  // ever orders LDS.
  #define O_LDSB  2097152
@@ -488,13 +499,15 @@ index 513d97f..42a2f11 100644
 +// the single-buffered loop; only the staging schedule changes. Needs the 8-bit legs (byte tiles),
 +// KWIDE and BTS: LDS is 2 x (TILE*264 + 256*(TILE+8)) bytes.
 +#define O_DB    4194304
-+// QF32: the caller hands over the fp32 query it already has instead of a bf16 copy of it. Gemma's
-+// rms_norm keeps q fp32 (weight.float() promotes), so the glue used to cast 12.6 M elements per
-+// (layer, chunk) -- 54 ms of pure bandwidth over a 47k-token prefill -- only for the kernel to read
-+// bf16 again. This bit rounds it here instead: the prologue converts fp32 -> bf16 with the same
-+// round-to-nearest-even (and the same NaN handling) as torch's .to(bfloat16), so every downstream
-+// value, including the folded query scale, is bit-identical to the cast path. Nothing else changes.
-+#define O_QF32  16777216
++// QF8: the caller hands over the e4m3 query the attention layer already quantised (static scale,
++// for the fp8 KV cache) instead of a bf16 copy of it. The glue used to run `q.to(bf16)` and, when the
++// static scale is not 1, `q * q_scale` on it before every launch -- 25 MB read + 50 MB write per
++// (layer, chunk), 57 ms over a 47k-token prefill -- only for the kernel to read bf16 again. This bit
++// does it in the prologue instead: each e4m3 byte is widened to fp32 (exact), multiplied by
++// a.q_scale in fp32 and rounded once to bf16, RNE -- which is what torch computes for a bf16 tensor
++// times a python scalar -- so the dwords handed on, the folded query scale and everything downstream
++// are bit-identical to the cast path. Nothing else changes.
++#define O_QF8  16777216
 +
 +typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
 +// pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
@@ -505,16 +518,16 @@ index 513d97f..42a2f11 100644
  
  // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
  template<class D, int FOLDQ, int F16>
-@@ -80,6 +121,22 @@ __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
+@@ -80,6 +123,29 @@ __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
                   __builtin_bit_cast(float, w & 0xffff0000u) * s);
  }
  
 +// fp32 -> bf16 bits, round-to-nearest-even, NaN kept NaN. Exactly torch's .to(bfloat16): ties round
 +// to the even mantissa, subnormals collapse to a bf16 subnormal (or to zero), overflow to infinity,
-+// and a NaN keeps its sign and the top of its payload quietly. Used by the QF32 prologue so the
-+// kernel can read the fp32 query the norm layer already produced and land on the same bits the
-+// caller's cast would have written. Kept as integer arithmetic (not v_cvt_pk_bf16_f32) so the CPU
-+// test in sly/tests can check the identical formula against torch, bit for bit.
++// and a NaN keeps its sign and the top of its payload quietly. Used by the QF8 prologue to round
++// the scaled query once, like the caller's `q.to(bf16) * q_scale` does. Kept as integer arithmetic
++// (not v_cvt_pk_bf16_f32) so the CPU test in sly/tests can check the identical formula against
++// torch, bit for bit.
 +__device__ __forceinline__ uint32_t r4d_bf16_rne(float f) {
 +    const uint32_t u = __builtin_bit_cast(uint32_t, f);
 +    if ((u & 0x7f800000u) == 0x7f800000u && (u & 0x007fffffu)) return (u >> 16) | 0x0040u;
@@ -524,11 +537,18 @@ index 513d97f..42a2f11 100644
 +__device__ __forceinline__ uint32_t r4d_bf16x2(float lo, float hi) {
 +    return r4d_bf16_rne(lo) | (r4d_bf16_rne(hi) << 16);
 +}
++// four e4m3 bytes (element order) -> two dwords of two bf16 each, scaled by s: widen exactly
++// (v_cvt_pk_f32_fp8), one fp32 multiply, one RNE.
++__device__ __forceinline__ uint2 r4d_q8_to_bf16(uint32_t w, float s) {
++    const v2f lo = __builtin_amdgcn_cvt_pk_f32_fp8(w, false);
++    const v2f hi = __builtin_amdgcn_cvt_pk_f32_fp8(w, true);
++    return make_uint2(r4d_bf16x2(lo.x * s, lo.y * s), r4d_bf16x2(hi.x * s, hi.y * s));
++}
 +
  template<int NWARPS, int TILE, int HEAD_DIM, int GQA, int BS, int KVP, int OPT>
  __global__ __launch_bounds__(NWARPS * 32)
  void r4d_attn_prefill_kernel(const R4DArgs a)
-@@ -90,11 +147,18 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -90,11 +156,18 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int CTG   = (OPT & O_CONTIG) ? 1 : 0;
      constexpr int PF    = 1 << ((OPT >> 10) & 3);
      constexpr int SGB   = (OPT & O_SGB) ? 1 : 0;
@@ -539,7 +559,7 @@ index 513d97f..42a2f11 100644
      constexpr int LDSB  = (OPT & O_LDSB)  ? 1 : 0;
      constexpr int KWIDE = (OPT & O_KWIDE) ? 1 : 0;
 +    constexpr int DB    = (OPT & O_DB) ? 1 : 0;
-+    constexpr int QF32  = (OPT & O_QF32) ? 1 : 0;
++    constexpr int QF8   = (OPT & O_QF8) ? 1 : 0;
 +    constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
 +    constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
 +    static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
@@ -548,7 +568,7 @@ index 513d97f..42a2f11 100644
      typedef DT16<F16> D;
      typedef typename D::frag frag16;
  
-@@ -112,12 +176,32 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -112,12 +185,32 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int KREGS   = KPASS * (KVP ? 2 : 1);             // uint4 of raw K per thread
      constexpr int NTR     = (TILE / 8) * (HEAD_DIM / (KVP ? 32 : 64));
      constexpr int VREGS   = (NTR + NWARPS - 1) / NWARPS;        // uint4 of raw V per thread
@@ -585,7 +605,7 @@ index 513d97f..42a2f11 100644
  
      const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
      const int c = lane & 15, h = lane >> 4;
-@@ -140,18 +224,43 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -140,18 +233,42 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      const float mul   = a.scale * kdesc * 1.44269504089f;
  
      frag16 qf[NKS];
@@ -603,16 +623,15 @@ index 513d97f..42a2f11 100644
 -                          make_uint2(r4d_qcvt<D, FOLDQ, F16>(h0.x, mul),
 -                                     r4d_qcvt<D, FOLDQ, F16>(h0.y, mul)));
 +            uint2 l0, h0;
-+            if constexpr (QF32) {
-+                // fp32: the same element map, four floats per read instead of four bf16, rounded
-+                // here. The indexes are ELEMENT indexes, so they are the same numbers.
-+                const float* qpf = (const float*)a.q
-+                                 + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
++            if constexpr (QF8) {
++                // e4m3: the same element map, four bytes per read instead of four bf16. The indexes
++                // are ELEMENT indexes, so they are the same numbers.
++                const uint8_t* qp8 = (const uint8_t*)a.q
++                                   + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
 +                const int i0 = 16 * t + (CTG ? 8 * h : 4 * h);
 +                const int i1 = CTG ? i0 + 4 : 16 * t + 8 + 4 * h;
-+                const float4 f0 = *(const float4*)(qpf + i0), f1 = *(const float4*)(qpf + i1);
-+                l0 = make_uint2(r4d_bf16x2(f0.x, f0.y), r4d_bf16x2(f0.z, f0.w));
-+                h0 = make_uint2(r4d_bf16x2(f1.x, f1.y), r4d_bf16x2(f1.z, f1.w));
++                l0 = r4d_q8_to_bf16(*(const uint32_t*)(qp8 + i0), a.q_scale);
++                h0 = r4d_q8_to_bf16(*(const uint32_t*)(qp8 + i1), a.q_scale);
 +            } else {
 +                l0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h : 4 * h));
 +                h0 = *(const uint2*)(qp + 16 * t + (CTG ? 8 * h + 4 : 8 + 4 * h));
@@ -635,7 +654,7 @@ index 513d97f..42a2f11 100644
          }
      }
  
-@@ -229,6 +338,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -229,6 +346,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  const int key = KWIDE ? (2 * (i >> 5) + (i & 1)) : (i / (HEAD_DIM / KEL));
                  const int ch  = KWIDE ? ((i & 31) >> 1) : (i - key * (HEAD_DIM / KEL));
                  if (KWIDE && key >= TILE) continue;
@@ -647,7 +666,7 @@ index 513d97f..42a2f11 100644
                  uint16_t* kd = &sK[key * KSTR + ch * KEL];
                  #pragma unroll
                  for (int q = 0; q < KEL / 8; ++q) {
-@@ -266,6 +380,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -266,6 +388,11 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                      // ADJACENT d; v_perm_b32 splits them back into two d rows.
                      const uint32_t lo0 = byte_gather(v.x, v.y, 0), lo1 = byte_gather(v.z, v.w, 0);
                      const uint32_t hi0 = byte_gather(v.x, v.y, 1), hi1 = byte_gather(v.z, v.w, 1);
@@ -659,7 +678,7 @@ index 513d97f..42a2f11 100644
                      uint32_t wl[4], wh[4];
                      fp8x8_to_16x4w<D>(make_uint2(lo0, lo1), wl);
                      fp8x8_to_16x4w<D>(make_uint2(hi0, hi1), wh);
-@@ -280,6 +399,66 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -280,6 +407,66 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
          }
      };
  
@@ -726,7 +745,7 @@ index 513d97f..42a2f11 100644
      // The block table for tile ti is fetched during tile ti-1, so the scalar load has an entire
      // store phase and two barriers to complete instead of stalling the KV address chain.
      int blk[NB];
-@@ -287,30 +466,72 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -287,30 +474,72 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
          #pragma unroll
          for (int i = 0; i < NB; ++i) blk[i] = bt[i];
      }
@@ -810,7 +829,7 @@ index 513d97f..42a2f11 100644
                  const uint16_t* krow = &sK[(mt * 16 + c) * KSTR] + (CTG ? 8 * h : 0);
                  // PF fragments are LOADED before the matching PF WMMAs are ISSUED, so the wait in
                  // front of each WMMA becomes `s_wait_dscnt PF-1` instead of a full drain.
-@@ -368,7 +589,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -368,7 +597,22 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              }
              if (!DOT2) l_i += lsum;
  
@@ -834,7 +853,7 @@ index 513d97f..42a2f11 100644
                  uint32_t pw[4];
                  #pragma unroll
                  for (int e = 0; e < 8; e += 2) pw[e >> 1] = D::pk(pf[e], pf[e + 1]);
-@@ -410,7 +646,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -410,7 +654,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
                  }
              }
          }
@@ -2437,28 +2456,29 @@ index 0000000..4b25df5
 +  }
 +}
 diff --git a/r4d_module.hip b/r4d_module.hip
-index d373a98..954371e 100644
+index d373a98..4264782 100644
 --- a/r4d_module.hip
 +++ b/r4d_module.hip
-@@ -121,6 +121,17 @@ static void attn(int64_t q, int64_t kv, int64_t block_table, int64_t seqused_k,
+@@ -121,6 +121,18 @@ static void attn(int64_t q, int64_t kv, int64_t block_table, int64_t seqused_k,
                               : "r4d attn_decode_h256_gqa6_fp8kv"));
  }
  
-+// The prefill query type, owned by the caller: 1 = "the q pointer of the next prefill launch is
-+// fp32", 0 = bf16 (the shipped kernel). Default 0. Deliberately a plain global set from Python
-+// right before a launch and not an environment read -- see the note in r4d.h. It is per process,
-+// like the launch knobs, because a serve is single-threaded on the launch side; a caller that
-+// passes bf16 q while this is 1 reads out of bounds, which is why the binding is the only writer.
-+static int g_q_fp32 = 0;
++// The prefill query format, owned by the caller: 0 = the q pointer of the next prefill launch is
++// bf16 (the shipped kernel, default); > 0 = it is e4m3 and this is the q_scale the kernel applies
++// while widening it. Deliberately a plain global set from Python right before a launch and not an
++// environment read -- see the note in r4d.h. It is per process, like the launch knobs, because a
++// serve is single-threaded on the launch side; a caller that passes bf16 q while this is on reads
++// out of bounds, which is why the binding is the only writer.
++static float g_q_fp8 = 0.0f;
 +
-+extern "C" int r4d_q_fp32(void) { return g_q_fp32; }
++extern "C" float r4d_q_fp8(void) { return g_q_fp8; }
 +
-+static void set_q_fp32(int on) { g_q_fp32 = on ? 1 : 0; }
++static void set_q_fp8(double scale) { g_q_fp8 = scale > 0 ? (float)scale : 0.0f; }
 +
  // Bytes of split-KV partial buffer one decode launch of this shape needs. The caller sizes its
  // persistent scratch from the worst case ONCE, at startup: allocating inside a graph capture is
  // not allowed, and the buffer has to be the same address at capture and at replay.
-@@ -224,6 +235,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
+@@ -224,6 +236,38 @@ static void gdn_conv_update(int64_t x, int64_t xpitch, int64_t wgt, int64_t bias
                               std::to_string(rc) + ")");
  }
  
@@ -2497,7 +2517,7 @@ index d373a98..954371e 100644
  static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_t rows,
                                int64_t xrow, int64_t zrow, int64_t orow, int width, double eps,
                                int act, int64_t stream) {
-@@ -238,7 +281,50 @@ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_
+@@ -238,7 +282,50 @@ static void gdn_gated_rmsnorm(int64_t x, int64_t z, int64_t w, int64_t o, int64_
                               std::to_string(rc) + ")");
  }
  
@@ -2549,7 +2569,7 @@ index d373a98..954371e 100644
                                   int64_t ab_stride, bool ab_is_bf16, int64_t A_log,
                                   int64_t dt_bias, int64_t state, int64_t state_slot_stride,
                                   int64_t state_head_stride, int64_t o, int64_t cu,
-@@ -247,7 +333,7 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+@@ -247,7 +334,7 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
                                   int norm_act, int num_seqs, int num_v_heads, int num_k_heads,
                                   int head_k, int head_v, double scale, double softplus_thr,
                                   int64_t stream) {
@@ -2558,7 +2578,7 @@ index d373a98..954371e 100644
        (const void*)q, (const void*)k, (const void*)v, (const void*)a, (const void*)b, ab_stride,
        ab_is_bf16 ? 1 : 0, (const void*)A_log, (const void*)dt_bias, (void*)state,
        state_slot_stride, state_head_stride, (void*)o, (const void*)cu, (const void*)sidx,
-@@ -255,11 +341,11 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
+@@ -255,11 +342,11 @@ static void gdn_recurrent_update(int64_t q, int64_t k, int64_t v, int64_t a, int
        (float)norm_eps, norm_act, num_seqs, num_v_heads, num_k_heads, head_k, head_v,
        (float)scale, (float)softplus_thr, (void*)stream);
    if (rc == -1)
@@ -2574,18 +2594,18 @@ index d373a98..954371e 100644
  }
  
  // =================================================================================================
-@@ -590,6 +676,10 @@ PYBIND11_MODULE(r4d, m) {
+@@ -590,6 +677,10 @@ PYBIND11_MODULE(r4d, m) {
    m.def("attn_decode_h256_gqa6_bf16kv",  &attn<1, 1>);
    m.def("attn_decode_h256_gqa6_scratch_bytes", &attn_decode_scratch_bytes);
    m.def("attn_vit_h72_bf16", &attn_vit);
-+  // The prefill query type. The CALLER must own this: it answers "is the pointer I am about to
-+  // pass fp32?", which the kernel cannot know on its own. Set it before EVERY prefill launch.
-+  m.def("set_q_fp32", &set_q_fp32,
-+        "prefill q is fp32 (1) or bf16 (0, default); the kernel must be told before each launch");
++  // The prefill query format. The CALLER must own this: it answers "is the pointer I am about to
++  // pass e4m3?", which the kernel cannot know on its own. Set it before EVERY prefill launch.
++  m.def("set_q_fp8", &set_q_fp8,
++        "prefill q is e4m3 with this q_scale (> 0) or bf16 (0, default); tell the kernel before each launch");
    {
      int hd = 0, gqa = 0, bs = 0, rows = 0;
      r4d_attn_dims(&hd, &gqa, &bs, &rows);
-@@ -611,7 +701,30 @@ PYBIND11_MODULE(r4d, m) {
+@@ -611,7 +702,30 @@ PYBIND11_MODULE(r4d, m) {
    m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
    m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
    m.def("gdn_conv_update_w4_h128_bf16", &gdn_conv_update);
@@ -2617,7 +2637,7 @@ index d373a98..954371e 100644
    m.def("gdn_gated_rmsnorm_h128_bf16", &gdn_gated_rmsnorm);
    {
      int hk = 0, hv = 0, c = 0;
-@@ -628,6 +741,7 @@ PYBIND11_MODULE(r4d, m) {
+@@ -628,6 +742,7 @@ PYBIND11_MODULE(r4d, m) {
    m.def("ar_ipc_memzero", &r4d_ar_ipc_memzero);
    m.def("ar_ipc_enable_peer", &r4d_ar_ipc_enable_peer);
    m.def("ar_oneshot_2rank_exact", &r4d_ar_oneshot_2rank_exact);

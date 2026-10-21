@@ -35,19 +35,25 @@ are one-layer microbenches. See
   hashes D16 against the previous build and against same-tile stock per context); what moves is the
   schedule: tile loop **386 → 369** instructions, `s_mul_u64` 2 → 1, `s_wait_kmcnt` 3 → 2, exec
   save/restore 4 → 2 — i.e. the loop the reference stack runs, reached from our own source rather than
-  from a compiler accident. Every other instance (all eight non-`O_QF32` masks, including the shipped
+  from a compiler accident. Every other instance (all eight non-`O_QF8` masks, including the shipped
   tile-48 one) compiles to an **instruction-for-instruction identical** body, so nothing shipped moves.
   `ci/attn_sched_lint.py` reads the emitted assembly of `r4d_attn_paged_h256_gqa6.hip` and fails the build
   on a regression of exactly these numbers (386-instruction loop, two load regions, a drain between the
   loads); it is the CPU-side gate for this class of change and needs no GPU. GPU gate prepared, not run.
-- **`RADIANCE_ATTN_Q_FP32=1`**: hand the prefill kernel the fp32 query Gemma's rms_norm already produced
-  instead of a bf16 copy of it. `O_QF32` rounds it to bf16 inside the kernel prologue (round-to-nearest-even
-  with torch's NaN handling, so **bit-identical** to the `.to(bfloat16)` it replaces), which removes the
-  `direct_copy` at `radiance_r4d_hybrid_attn.py:382` — 192 launches, **54.07 ms** of a 47k-token prefill
-  (50 MB read + 25 MB write per layer per chunk). CPU-gated by `sly/tests/test_attn_q_fp32_cpu.py`
-  (formula vs `torch.to(bfloat16)` bit for bit over the bf16 grid, ties, subnormals, infinities and 2 × 1e6
-  random values; knob wiring). The instance is an extra bit on the existing masks, so every shipped
-  instance keeps its exact code object. Off by default; GPU gate prepared, not run.
+- **`RADIANCE_ATTN_Q_FP8=1`**: the prefill kernel reads the e4m3 query the attention layer already
+  quantised (`--kv-cache-dtype fp8` makes vLLM quantise q for this impl) instead of a bf16 copy of it.
+  `O_QF8` widens each byte exactly, multiplies by the static `q_scale` in fp32 and rounds once to bf16
+  (round-to-nearest-even, torch's NaN handling) inside the kernel prologue, which is exactly what the
+  glue's `q.to(bfloat16)` and `q * q_scale` compute, so the output is **bit-identical** — and the
+  `direct_copy` at `radiance_r4d_hybrid_attn.py` (176 launches, **~57 ms** of a 47k-token prefill, 25 MB
+  read + 50 MB write per layer per chunk) is gone. The answer travels with the launch: `set_q_fp8(q_scale)`
+  is a caller-owned toggle (0 = bf16, default; `r4d_q_fp8()` is what `prefill_launch` reads) pushed by the
+  glue from the same decision that decides the cast; only a contiguous `float8_e4m3fn` query with a finite
+  positive scale qualifies, a libr4d without the binding never gets the path, and the first firing and
+  each decline reason are logged once. CPU-gated by `sly/tests/test_attn_q_fp8_cpu.py` (kernel formula vs
+  `q.to(bfloat16) * q_scale` bit for bit over all 256 codes x 300+ scales; toggle logic; patch wiring).
+  The instance is an extra bit on the existing masks, so every shipped instance keeps its exact code
+  object. Off by default; the device check is the microbench gate (`gate_v4.sh`), prepared, not run.
 - **`RADIANCE_MXFP4_TALL=1`** (+ `RADIANCE_MXFP4_TALL_MIN_M`, default `2048`): an opt-in 512x64x64
   A-tiled prefill tile (TMT=8, TN=2, LBK=64; 8 waves of 128x32, 234 VGPR, 4,736 B LDS, no spill) for
   **gate_up only (N 34,816)**, WPERM e4m3 fragment-order weights, at M >= `RADIANCE_MXFP4_TALL_MIN_M`.
@@ -122,21 +128,8 @@ are one-layer microbenches. See
 - `VERSION` 1.7.0 → 1.8.0.
 
 ### Fixed
-- **`RADIANCE_ATTN_Q_FP32` could hand a bf16 query to the fp32 kernel path** — a `Memory access fault` in
-  `r4d_attn_prefill_kernel<24,16,256,6,16,0,24926827>` (O_QF32, bit 24) on the first 1,515-token prefill,
-  followed by a host reset. The kernel decided the query type itself, per launch, from
-  `getenv("RADIANCE_ATTN_Q_FP32")`, while the glue skipped its bf16 cast only for a query that qualified
-  (`fp32`, `q_scale == 1`, knob on): the env is process-wide and that answer is per query, so on exactly
-  the queries the glue declined, libr4d read 4 bytes per element out of a 2-byte buffer. libr4d no longer
-  looks at the environment: `set_q_fp32(int)` is a caller-owned toggle (default 0, `r4d_q_fp32()` is what
-  `prefill_launch` reads), and `radiance_r4d_hybrid_attn.py` pushes it right before every launch from the
-  same decision that decides the cast, so bf16 q can never take the fp32 path. A libr4d without the
-  binding (older `.so`) is detected with `getattr` and never gets the fp32 path; non-contiguous queries are
-  declined as well; the first decline logs its reason once. CPU-gated by
-  `sly/tests/test_attn_q_fp32_cpu.py` (fp32+contiguous+`q_scale` 1 only; bf16 / fp8 / scaled /
-  non-contiguous / env-off / old-lib arms).
 - **One-time proof lines for the three 1.8.0 knobs**, printed when the path actually takes effect in a
-  served run: `RADIANCE_ATTN_Q_FP32` (first fp32 prefill launch, or once with the decline reason),
+  served run: `RADIANCE_ATTN_Q_FP8` (first e4m3 prefill launch, or once with the decline reason),
   `RADIANCE_GDN_GATE_INPLACE` (first prefill chunk on the in-place h0 path, with `zeros`/`nomask`) and
   `RADIANCE_MXFP4_TALL` (first tall dispatch, with M, N and `tn_m`). Default-off knobs that change the
   kernel are only proven by what the process says it dispatched.

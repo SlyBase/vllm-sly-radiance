@@ -32,15 +32,15 @@ is b*(S0/(16*C)) + j. The step builds that expanded 16-slot block table once (a 
 only on steps that have a long run) and shares it across the 16 attention layers.
 
 QUERY. The attention layer quantises q to fp8 (static scale) before the op for every impl that sets
-supports_quant_query_input, and the AITER decode path needs that. libr4d has no 8-bit query variant, so
-for the R4D runs q is widened back to bf16 (exact: e4m3 values are bf16-representable, times the static
-q scale). It carries the same fp8 rounding the AITER kernel has anyway; the R4D kernel then runs its
-f16 legs (R4D_ATTN_FP8=0), i.e. is more accurate than the kernel it replaces for the rest of the chain.
-With RADIANCE_ATTN_Q_FP32=1 the fp32 query that Gemma's rms_norm leaves behind is not copied at
-all: the prefill kernel rounds it to bf16 in its own prologue, bit-identically, which removes a 54 ms
-copy per 47k-token prefill (see _q_fp32_ok). That decision is pushed into libr4d per launch
-(`set_q_fp32`), so a query it declines -- bf16, scaled, non-contiguous -- can never reach the fp32
-path, and a libr4d without the toggle never gets the fp32 path at all.
+supports_quant_query_input, and the AITER decode path needs that. libr4d's default prefill path takes a
+bf16 query, so q is widened back (exact: e4m3 values are bf16-representable, times the static q scale).
+It carries the same fp8 rounding the AITER kernel has anyway; the R4D kernel then runs its f16 legs
+(R4D_ATTN_FP8=0), i.e. is more accurate than the kernel it replaces for the rest of the chain.
+With RADIANCE_ATTN_Q_FP8=1 that widening copy (176 launches, ~57 ms per 47k-token prefill) is not run:
+the prefill kernel reads the contiguous e4m3 query itself and applies q_scale, bit-identically
+(see _q_fp8_ok). That decision is pushed into libr4d per launch (`set_q_fp8`), so a query it declines
+-- bf16, fp32, non-contiguous -- can never reach the e4m3 path, and a libr4d without the toggle never
+gets the e4m3 path at all.
 
 Anything libr4d cannot take falls back to the AITER path on the whole step: no libr4d, geometry other
 than head_dim 256 / GQA 6, sliding window, alibi, sinks, logits soft cap, non-causal, a fused output
@@ -64,6 +64,7 @@ Knobs (read at import):
 """
 
 import dataclasses
+import math
 import os
 import sys
 
@@ -86,10 +87,9 @@ GQA = _r4d_attn.GQA
 _PREFILL = _r4d_attn._PREFILL              # (fp8 KV, bf16 KV)
 _KV_DTYPE_NAMES = _r4d_attn._KV_DTYPE_NAMES
 USE_R4D = _r4d_attn.USE_R4D
-# The prefill query-type toggle, pushed per launch (`_q_kernel`). None on a libr4d built before it
-# existed: that library still reads RADIANCE_ATTN_Q_FP32 from the environment, so it must never be
-# handed an fp32 pointer here (_q_fp32_ok refuses) -- and the knob should stay unset with it.
-_set_q_fp32 = getattr(r4d, "set_q_fp32", None)
+# The prefill query-format toggle, pushed per launch (`_q_kernel`). None on a libr4d built before it
+# existed: such a library has no e4m3 query path, so it must never be handed an e4m3 pointer here.
+_set_q_fp8 = getattr(r4d, "set_q_fp8", None)
 
 ROUTE = os.environ.get("RADIANCE_R4D_HYBRID_ROUTE", "1") != "0"
 MIN_Q = max(16, int(os.environ.get("RADIANCE_R4D_PREFILL_MIN_Q", "512")))
@@ -132,59 +132,53 @@ def _o_db_say(kernel: str, fp8: str) -> None:
         _say_once("o_db", msg)
 
 
-def _q_fp32_ok(q: torch.Tensor, q_scale: float) -> bool:
-    """True when libr4d can read this query as fp32 instead of a bf16 copy of it.
+def _q_fp8_ok(q: torch.Tensor, q_scale: float) -> bool:
+    """True when libr4d can read this query as e4m3 instead of a bf16 copy of it.
 
-    `RADIANCE_ATTN_Q_FP32=1` makes the prefill kernel round the query to bf16 in its own prologue
-    (round-to-nearest-even, exactly what `.to(torch.bfloat16)` below would have produced), so the
-    attention output stays bit-identical while the 50 MB read + 25 MB write copy per (layer, chunk)
-    -- 54 ms over a 47k-token prefill -- disappears.
+    `RADIANCE_ATTN_Q_FP8=1` makes the prefill kernel widen the query and apply `q_scale` in its own
+    prologue (e4m3 -> fp32 exactly, times the fp32 scale, one round-to-nearest-even to bf16: what
+    `q.to(torch.bfloat16) * q_scale` below computes), so the attention output stays bit-identical
+    while the widening copy -- 25 MB read + 50 MB write per (layer, chunk), ~57 ms over a 47k-token
+    prefill -- disappears.
 
-    The answer is PUSHED into libr4d (`set_q_fp32`) immediately before the launch. It used to be
-    read from the environment by both sides on the assumption that the two could only agree; they
-    cannot. The env is process-wide while this decision is per query, so a step with the knob
-    exported and a bf16 q (q_scale != 1, fp8 origin, a non-contiguous slice) had libr4d read 4
-    bytes per element out of a 2-byte buffer -- an out-of-bounds read that reset the host on a
-    1515-token prefill. A libr4d without the toggle cannot be told, so it does not get the path.
+    The answer is PUSHED into libr4d (`set_q_fp8`) immediately before the launch, never read from
+    the environment by both sides: the env is process-wide and this decision is per query, and a
+    libr4d that disagrees reads a bf16 buffer as e4m3 (or the reverse) -- an out-of-bounds read.
+    A libr4d without the toggle cannot be told, so it does not get the path.
 
-    Only an fp32 query qualifies, and only contiguous: the kernel assumes [tokens, heads, 256]
-    with the head dim innermost. Only q_scale == 1 qualifies: the cast below folds q_scale into the
-    *bf16* values, the kernel path does not fold it at all. When the knob is on and this declines,
-    the reason is logged once.
+    Only an e4m3 (OCP, float8_e4m3fn) query qualifies, only contiguous (the kernel assumes
+    [tokens, heads, 256] with the head dim innermost), and only a finite positive q_scale. When the
+    knob is on and this declines, the reason is logged once.
     """
-    if os.environ.get("RADIANCE_ATTN_Q_FP32", "0") != "1":
+    if os.environ.get("RADIANCE_ATTN_Q_FP8", "0") != "1":
         return False
     why = (
-        "this libr4d has no set_q_fp32, so the kernel cannot be told" if _set_q_fp32 is None else
-        f"q is {q.dtype}, not fp32" if q.dtype != torch.float32 else
+        "this libr4d has no set_q_fp8, so the kernel cannot be told" if _set_q_fp8 is None else
+        f"q is {q.dtype}, not e4m3" if q.dtype != torch.float8_e4m3fn else
         "q is not contiguous" if not q.is_contiguous() else
-        f"q_scale is {q_scale}, not 1" if q_scale != 1.0 else None
+        f"q_scale is {q_scale}, not finite and positive" if not 0.0 < q_scale < math.inf else None
     )
     if why is not None:
-        _say_once(f"qf32:{why}", f"RADIANCE_ATTN_Q_FP32: declined ({why}); the query is cast to bf16")
+        _say_once(f"qf8:{why}", f"RADIANCE_ATTN_Q_FP8: declined ({why}); the query is cast to bf16")
         return False
-    _say_once(
-        "qf32",
-        "RADIANCE_ATTN_Q_FP32: the prefill kernel takes the query as fp32 (no bf16 copy)",
-    )
+    _say_once("qf8", "RADIANCE_ATTN_Q_FP8: the prefill kernel takes the query as e4m3 (no bf16 copy)")
     return True
 
 
 def _q_kernel(q: torch.Tensor, q_scale: float) -> torch.Tensor:
-    """The query to hand the prefill kernel, with the matching set_q_fp32 answer pushed first.
+    """The query to hand the prefill kernel, with the matching set_q_fp8 answer pushed first.
 
-    The kernel cannot ask "is this pointer fp32?" and must not infer it from the environment: the
-    env is process-wide, this answer is per query, and the two disagree on every query that does
-    not qualify -- where a bf16 buffer read as fp32 is 4 bytes per element out of 2. So the answer
-    travels with the launch.
+    The kernel cannot ask "is this pointer e4m3?" and must not infer it from the environment: the
+    env is process-wide, this answer is per query. So the answer travels with the launch: the
+    q_scale the kernel applies, or 0.0 for a bf16 query.
     """
-    keep = q.dtype == torch.float32 and _q_fp32_ok(q, q_scale)
+    keep = _q_fp8_ok(q, q_scale)
     if not keep and q.dtype != torch.bfloat16:
         q = q.to(torch.bfloat16)
         if q_scale != 1.0:
             q = q * q_scale
-    if _set_q_fp32 is not None:
-        _set_q_fp32(1 if keep else 0)
+    if _set_q_fp8 is not None:
+        _set_q_fp8(q_scale if keep else 0.0)
     return q
 
 
