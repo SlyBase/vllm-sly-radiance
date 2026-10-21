@@ -59,7 +59,7 @@ from tile_layout import untile
 # K % 128 == 0 (the fragment layout) and K <= 10240 (the launcher's _ADD_RMS_MAX_K).
 SHAPES = [
     ("gate_up", 34816, 5120),
-    ("in_proj", 16480, 5120),   # merged GDN qkvz + ba (tall-tile shape); not in the default sweep
+    ("in_proj", 16480, 5120),   # merged GDN qkvz + ba; not in the default sweep
     ("qkvz",    16384, 5120),
     ("qkv",     14336, 5120),
     ("o_proj",   5120, 6144),

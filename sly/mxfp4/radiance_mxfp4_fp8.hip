@@ -2030,10 +2030,11 @@ static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_P
 static void set_at_psw(int v) { g_at_psw = v; }
 static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
 // TALL (RADIANCE_MXFP4_TALL=1, default off): 512x64x64 tile (TMT=8, TN=2, LBK=64, 8 waves of 128x32)
-// for the two shapes where it halves the weight-side work per MAC -- gate_up (N 34816) and the merged
-// GDN in_proj (N 16480) -- at tn_m >= RADIANCE_MXFP4_TALL_MIN_M (default 2048). Same K order and WMMA
-// chain per output as TN=2/TN=4, so the bytes match them (gated by the DIGEST lines of
-// bench_prefill_cells.py --check). Fragment-order e4m3 weights, no PSW/E6 only.
+// for gate_up (N 34816) only -- the one shape where it measures faster -- at
+// tn_m >= RADIANCE_MXFP4_TALL_MIN_M (default 2048). The merged GDN in_proj (N 16480) keeps TN2/TN4:
+// the same tile measured up to 2 % slower there. Same K order and WMMA chain per output as
+// TN=2/TN=4, so the bytes match them (gated by the DIGEST lines of bench_prefill_cells.py --check).
+// Fragment-order e4m3 weights, no PSW/E6 only.
 static int g_at_tall = [] { const char *e = getenv("RADIANCE_MXFP4_TALL"); return e ? atoi(e) : 0; }();
 static int g_at_tall_min_m = [] { const char *e = getenv("RADIANCE_MXFP4_TALL_MIN_M"); return e ? atoi(e) : 2048; }();
 static void set_at_tall(int v, int min_m) { g_at_tall = v; g_at_tall_min_m = min_m; }
@@ -2084,7 +2085,7 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
     if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
 #undef RAD_AT_P
   } else
-  if (g_at_tall && wperm && !wh && (N == 34816 || N == 16480) && tn_m >= g_at_tall_min_m) {
+  if (g_at_tall && wperm && !wh && N == 34816 && tn_m >= g_at_tall_min_m) {   // gate_up only
     RAD_AT_TM(2, true, false, 8);
   } else
   if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {

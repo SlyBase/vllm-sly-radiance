@@ -9,7 +9,9 @@
 # BENCH_DIR must hold bench_prefill_cells.py and tile_layout.py (sly/mxfp4/).
 # Arms (one container each, same weights/seed):  tn2 = TN4_MIN_M huge; tn4 = TN4_MIN_M 513 (production);
 #   tall = tn4 + RADIANCE_MXFP4_TALL=1 + TALL_MIN_M=0 (so the 1514 cell is exercised too).
-# Phase 1 (DIGEST): --check at M=1514,2048,4089,4096, gate_up + in_proj; the DIGEST lines (sha256 of the bf16
+# Shape: gate_up only (the tall tile is dispatched for N 34816 alone; in_proj measured up to 2 % slower,
+#   so that shape keeps TN2/TN4 and gets no cell here).
+# Phase 1 (DIGEST): --check at M=1514,2048,4089,4096, gate_up; the 4 DIGEST lines (sha256 of the bf16
 #   output) of tall must equal tn2 (and tn4: same K order and WMMA chain per output, so expected equal).
 # Phase 2 (ABBA): tall tn4 tn2 tn2 tn4 tall at M=1514,2048,4089; median us per cell over the 2 runs per arm.
 set -uo pipefail
@@ -33,7 +35,7 @@ run() {   # run <arm> <tag> <bench args...>
     --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 993 --security-opt seccomp=unconfined --ipc=host \
     $COMMON $(armenv "$arm") -v "$SO":$SP/radiance_mxfp4_fp8.so:ro \
     -v "$BENCH_DIR/bench_prefill_cells.py":/w/bench_prefill_cells.py:ro -v "$BENCH_DIR/tile_layout.py":/w/tile_layout.py:ro \
-    -v "$OUT":/out --entrypoint python3 "$IMG" /w/bench_prefill_cells.py --shapes gate_up,in_proj "$@" > "$tag.log" 2>&1
+    -v "$OUT":/out --entrypoint python3 "$IMG" /w/bench_prefill_cells.py --shapes gate_up "$@" > "$tag.log" 2>&1
   local rc=$?; echo "$tag rc=$rc"; return $rc
 }
 FAIL=0
@@ -44,10 +46,10 @@ for arm in tn2 tn4 tall; do
   grep -E '^DIGEST' dig-$arm.log | sort > dig-$arm.txt
 done
 NW=$(cat dig-*.log | grep -c WRONG); echo "WRONG lines: $NW"
-echo "DIGEST lines per arm: $(wc -l < dig-tn2.txt) $(wc -l < dig-tn4.txt) $(wc -l < dig-tall.txt) (expect 8 each)"
+echo "DIGEST lines per arm: $(wc -l < dig-tn2.txt) $(wc -l < dig-tn4.txt) $(wc -l < dig-tall.txt) (expect 4 each)"
 # Never pass vacuously: two empty digest files diff clean, so demand the full line count per arm.
 [ "$NW" = 0 ] || FAIL=1
-for arm in tn2 tn4 tall; do [ "$(wc -l < dig-$arm.txt)" = 8 ] || { echo "FAIL: dig-$arm.txt not 8 DIGEST lines"; FAIL=1; }; done
+for arm in tn2 tn4 tall; do [ "$(wc -l < dig-$arm.txt)" = 4 ] || { echo "FAIL: dig-$arm.txt not 4 DIGEST lines"; FAIL=1; }; done
 if [ $FAIL = 0 ] && diff dig-tn2.txt dig-tall.txt; then echo "tall == tn2: IDENTICAL"; else echo "tall != tn2: DIFFERENT or INVALID"; FAIL=1; fi
 [ $FAIL = 0 ] || { echo "GATE FAIL (phase 1); skipping timing"; exit 1; }
 diff dig-tn4.txt dig-tall.txt > /dev/null && echo "tall == tn4: identical" || echo "tall != tn4: different (informational)"

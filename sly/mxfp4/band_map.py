@@ -73,7 +73,7 @@ def wide_cfg(M, N, K):
     return 1
 
 
-TALL_NS = (34816, 16480)   # gate_up, merged GDN in_proj: the only shapes the tall tile serves
+TALL_N = 34816   # gate_up: the only shape the tall tile serves (in_proj measured slower on it)
 
 
 def label(M, N, K, tiled_prod, decode_max, wide_max, tn4_min, a_tiled_min, scratch_bytes,
@@ -89,7 +89,7 @@ def label(M, N, K, tiled_prod, decode_max, wide_max, tn4_min, a_tiled_min, scrat
             return f"WIDE d{dks}/b64/tm{tm}", 0
     tn = 4 if (M >= tn4_min and N >= 128) else 2
     kind = "atiled" if (a_tiled_min and M >= a_tiled_min and tiled_prod) else "folded"
-    if kind == "atiled" and tall and N in TALL_NS and M >= tall_min:   # RADIANCE_MXFP4_TALL
+    if kind == "atiled" and tall and N == TALL_N and M >= tall_min:   # RADIANCE_MXFP4_TALL
         return "atiled TALL TMT8/TN2 (BMF512)", -(-M // 512) * 512 - M
     pad = -(-M // BMF) * BMF - M
     return f"{kind} TN{tn} (BMF256)", pad

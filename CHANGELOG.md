@@ -28,6 +28,16 @@ are one-layer microbenches. See
   earlier tile-16 attempt lost; DB is what pays for the smaller tile. End to end at 300 W (together with
   the s3 scan variant and `RADIANCE_DFLASH_FC_TILED_MIN_M=513`) the effect is **within single-start noise**
   (E1 vs A1 −1.8 .. +0.9 % over 2K-64K prefill). Off by default.
+- **`RADIANCE_MXFP4_TALL=1`** (+ `RADIANCE_MXFP4_TALL_MIN_M`, default `2048`): an opt-in 512x64x64
+  A-tiled prefill tile (TMT=8, TN=2, LBK=64; 8 waves of 128x32, 234 VGPR, 4,736 B LDS, no spill) for
+  **gate_up only (N 34,816)**, WPERM e4m3 fragment-order weights, at M >= `RADIANCE_MXFP4_TALL_MIN_M`.
+  It halves the weight-side work per MAC, and its result is **bit-identical** to the existing tiles
+  (same K order and WMMA chain per output; the DIGEST lines of `sly/mxfp4/bench_prefill_cells.py
+  --check` match TN2 and TN4 at M 1,514 / 2,048 / 4,089 / 4,096). One layer, cell bench at 300 W:
+  **1.5-1.8 % faster** than TN4 on gate_up at M 1,514 / 2,048 / 4,089. It is not used for the merged
+  GDN in_proj (N 16,480) because it measured up to **2 % slower** there, so that shape keeps TN2/TN4.
+  Off by default; CPU-gated by `sly/tests/test_tall_tile_cpu.py`, cell gate `ci/tall_gate.sh`. No
+  end-to-end (serve-level) number yet, so the knob stays opt-in.
 - **`RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3`**: build-time variants of the GDN chunk scan in the same `r4d.so`,
   selectable per process (`unset` = stock entry point): `s1` = workgroup-processor mode (unit built without
   `-mcumode`), `s2` = `s1` + LDS diet (state mirror aliases sA + W), `s3` = `s2` + the next chunk's staging

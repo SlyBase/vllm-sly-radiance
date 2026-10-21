@@ -23,11 +23,19 @@ def test_default_off():
         assert "TALL" not in lab(M, IN_PROJ)
 
 
-def test_on_only_for_two_shapes_and_large_m():
+def test_on_only_for_gate_up_and_large_m():
     assert lab(2048, GATE_UP, tall=1) == "atiled TALL TMT8/TN2 (BMF512)"
-    assert lab(4089, IN_PROJ, tall=1) == lab(2048, GATE_UP, tall=1)
+    assert lab(4089, GATE_UP, tall=1) == lab(2048, GATE_UP, tall=1)
     assert "TALL" not in lab(2047, GATE_UP, tall=1)      # below the default min M
     assert "TALL" not in lab(1514, GATE_UP, tall=1)
+
+
+def test_in_proj_keeps_tn2_tn4():
+    # The tall tile measured up to 2 % slower on the merged GDN in_proj, so it is gate_up only:
+    # the knob must leave that shape on the TN2/TN4 tile at every M.
+    for M in (1514, 2048, 4089, 4096):
+        assert "TALL" not in lab(M, IN_PROJ, tall=1)
+        assert "TALL" not in lab(M, IN_PROJ, tall=1, tall_min=0)
     for N in (16384, 14336, 5120, 96):                   # qkvz, qkv, down/out_proj, ba
         assert "TALL" not in lab(4096, N, tall=1)
 
@@ -41,4 +49,4 @@ def test_hip_knob_and_defaults_match():
     src = open(HIP).read()
     assert re.search(r'getenv\("RADIANCE_MXFP4_TALL"\);\s*return e \? atoi\(e\) : 0;', src)
     assert re.search(r'getenv\("RADIANCE_MXFP4_TALL_MIN_M"\);\s*return e \? atoi\(e\) : 2048;', src)
-    assert "34816" in src and "16480" in src
+    assert re.search(r"g_at_tall && wperm && !wh && N == 34816 && tn_m >= g_at_tall_min_m", src)
