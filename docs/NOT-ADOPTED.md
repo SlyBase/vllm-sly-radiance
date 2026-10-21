@@ -260,3 +260,25 @@ Revisit when: (a) a measured register-resident microbenchmark shows the sparse F
 MAC rate of the dense one (the only cheap decisive test, ~30 min in a GPU window, and the reason to run it first);
 (b) a consumer for sparse weights exists in vLLM again, or we are willing to carry our own loader; (c) pruning with
 recovery training is on the table, because one-shot 2:4 is what fails here, not sparsity as such.
+
+## EAGLE-4 ([eagle-hq/EAGLE-4](https://github.com/eagle-hq/EAGLE-4), reviewed 2026-10-21, source read, nothing run)
+
+`eagle-harness`: a speculative-decoding plugin that runs a trained 1-layer EAGLE-4 draft inside pinned SGLang /
+vLLM / TokenSpeed builds. Measured: 4x B300 (3.40x SGLang / 2.99x vLLM, conc 1, Qwen3.8-27B BF16) and 1x MI355X
+SGLang (2.07x conc 8, 1.56x conc 32). Their HF card compares EAGLE-4 3.59x to DFlash2 2.80x at T = 0 on 4x B300.
+
+| Item | Why not |
+|---|---|
+| gfx1201 support | None. The kernel tiers are NVIDIA sm_80+ and AMD CDNA2/3/4 (gfx90a, gfx942, gfx950); `kernels/arch.py` refuses `EAGLE_HARNESS` at startup on any other GPU. No serving measurement on any RDNA4. |
+| License | "Eagle 4 Source-Available License", not OSI open source. Commercial Use of a Competing Offering requires a separate written commercial license; other commercial use is gated at a US $20M aggregate-revenue threshold. The Radiance image on DockerHub cannot ship it without a commercial license from licensing@eagle.ai. |
+| vLLM verify path | Tree verification needs an unquantized KV cache (`known-limits.md`); this image serves fp8 KV. The GDN tree-verify Gluon kernel is B300-only; the Triton fallback tier does not cover gfx1201 (row above). |
+| Engine coupling | The plugin pins specific engine builds (sglang `0.5.23.dev252+eagle.5`, a vLLM with `suspend_drafting` / `verify_budget` hooks and the `CUSTOM` attention-backend slot) and registers through a generic hook list that refuses to load on any name mismatch. This image's vLLM is patched (MXFP4, DFlash2, R4D_HYBRID); the port surface is the whole hook list, not a flag. |
+| Draft model | 1 layer, hidden 5120, 40 heads, low-rank candidate head (rank 128, 128 candidates), reads 3 target hidden states (layers 3/31/59), sliding window 4096, BF16, ~1.5 GB. Smaller than this image's DFlash2 W4A16 full-model drafter; quantization is not an algorithmic requirement (their runs are BF16) but a VRAM-budget question. |
+| Numbers transfer | Every speedup is B300 / MI355X at a BF16 target, conc 1-32; on SGLang above conc 64 they fall to 0.61x-1.35x. Nothing on gfx1201, nothing MXFP4, nothing fp8 KV. This image's DFlash2 does 4.5-5.09 tokens per step on this card; there is no A/B to compare against. |
+
+Ideas to take (no code, the license blocks reuse): a low-rank candidate head for the drafter's LM-head cost
+(rank 128 / 128 candidates instead of the full-vocab head), and cost-model-driven verify widths that narrow at
+high batch (their conc-64 rows: width 16 = 0.76x, width 4 = 1.16x) -- the same direction as `RADIANCE_ADAPTIVE_WIDTH`.
+
+Revisit when: (a) a gfx1201 (or other RDNA4) tier ships and compiles; (b) the license becomes OSI open source, or
+a commercial license is granted; (c) the vLLM tree verify works with a quantized KV cache.
