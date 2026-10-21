@@ -38,6 +38,21 @@ are one-layer microbenches. See
   GDN in_proj (N 16,480) because it measured up to **2 % slower** there, so that shape keeps TN2/TN4.
   Off by default; CPU-gated by `sly/tests/test_tall_tile_cpu.py`, cell gate `ci/tall_gate.sh`. No
   end-to-end (serve-level) number yet, so the knob stays opt-in.
+- **`RADIANCE_GDN_GATE_INPLACE=1`**: build the GDN chunk scan's fp32 initial state without the copies
+  that only reshape the paged mamba cache. Per (GDN layer, prefill chunk) the stock glue runs six copy
+  kernels — gather `ssm_state[prefill_state_indices]` (`index_elementwise`, 16.23 ms / 576 launches at a
+  47k-token prefill), widen to fp32 (`direct_copy`, 1.46 ms), `~mask` (1.49 ms), the row fill (6.07 ms),
+  the `ht` scatter (16.12 ms) and the narrow (`direct_copy`, 1.49 ms). Three of the six exist only to
+  shape a state that is already zero or already dense: a row without an initial state *is* zero (a
+  shared zero buffer replaces gather + widen + fill), and a batch where every row carries one needs no
+  fill and no `~mask`. Same bytes by construction — the expression is only reordered, never recomputed;
+  CPU-gated by `sly/tests/test_gdn_gate_inplace_cpu.py`, which compares against the stock expression bit
+  for bit on a bf16 and an fp32 cache with all three mask patterns. Expected **≈9.0 ms** of a 47k-token
+  prefill from the profiler's per-kernel times (6.9 ms if the first chunk is already marked as carrying
+  state, i.e. only the all-present half fires). Off by default; the GPU gate (identity over all 48 GDN
+  layers at T = 880 / 1,760 / 4,089 + ABBA kernel timing) is prepared and not yet run. Note that the
+  gate (`a`, `b`) slices of the merged in_proj are **already** read in place (`RADIANCE_GDN_STRIDED_GATES`
+  + `a.stride(0)` in `conv_prep`): a trace of this stack shows no copy for them.
 - **`RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3`**: build-time variants of the GDN chunk scan in the same `r4d.so`,
   selectable per process (`unset` = stock entry point): `s1` = workgroup-processor mode (unit built without
   `-mcumode`), `s2` = `s1` + LDS diet (state mirror aliases sA + W), `s3` = `s2` + the next chunk's staging
