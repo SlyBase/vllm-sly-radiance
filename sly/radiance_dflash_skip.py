@@ -8,7 +8,7 @@ chunk that ends `window + margin` tokens before the end of the prompt needs no `
 fill and no draft step: `propose` returns early. The final chunks, decode and spec-verify steps
 never match the rule and run unchanged.
 
-margin = max(RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN, 2 KV blocks): the block that holds the
+margin = max(RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN, 2 drafter KV blocks): the block that holds the
 last skipped position (partly unwritten) must lie wholly below the first block the attention can
 touch, whatever its tile size is.
 
@@ -24,6 +24,20 @@ import os
 import sys
 
 _SW = "sliding_attention"
+
+
+def _drafter_block(spec):
+    """Block size of the KV group(s) holding the drafter's attention layers. The target's hybrid
+    (mamba-aligned) group can have a 64k block and says nothing about the drafter's window. Without
+    a reliable match: the smallest sliding-window group, else 0 (the env margin alone)."""
+    groups = spec.kv_cache_config.kv_cache_groups
+    mine = getattr(spec, "draft_attn_layer_names", None) or ()
+    sizes = [g.kv_cache_spec.block_size for g in groups if set(g.layer_names) & set(mine)]
+    if not sizes:
+        sizes = [g.kv_cache_spec.block_size for g in groups
+                 if getattr(g.kv_cache_spec, "sliding_window", None)]
+        sys.stderr.write(f"[radiance.dflash_skip] drafter KV group not identified; sliding-group blocks {sizes}\n")
+    return max(sizes, default=0)
 
 
 def _config(spec):
@@ -45,7 +59,7 @@ def _config(spec):
         sys.stderr.write(f"[radiance.dflash_skip] RADIANCE_DFLASH_PREFILL_WINDOW_SKIP ignored: {why}\n")
         return ()
     window = int(window or 0)  # checked above; the `or` narrows the config's Optional type
-    block = max(g.kv_cache_spec.block_size for g in spec.kv_cache_config.kv_cache_groups)
+    block = _drafter_block(spec)
     margin = max(int(os.environ.get("RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN", "512")), 2 * block)
     sys.stderr.write(f"[radiance.dflash_skip] ON: window {window}, margin {margin}, "
                      f"chunks >= {window + margin} tokens\n")

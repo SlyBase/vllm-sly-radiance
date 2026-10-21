@@ -34,7 +34,8 @@ def _spec(layer_types=("sliding_attention",) * 5, window=2048, prefix_caching=Fa
     return NS(
         draft_model_config=NS(hf_config=hf),
         vllm_config=NS(cache_config=NS(enable_prefix_caching=prefix_caching)),
-        kv_cache_config=NS(kv_cache_groups=[NS(kv_cache_spec=NS(block_size=block))]),
+        kv_cache_config=NS(kv_cache_groups=[NS(layer_names=["d0"], kv_cache_spec=NS(block_size=block))]),
+        draft_attn_layer_names={"d0"},
         dp_size=dp,
     )
 
@@ -117,6 +118,22 @@ def test_margin_covers_two_kv_blocks():
     # margin = max(512, 2 * 1056) = 2112: a chunk ending at L - 2048 - 512 must NOT skip
     assert _with_knob("1", lambda: skip.skip_context(s, _batch([0], [47000 - 2560], [47000]))) is False
     assert skip.skip_context(s, _batch([0], [47000 - 2048 - 2112], [47000])) is True
+
+
+def test_margin_ignores_the_targets_hybrid_group():
+    def spec(block, names=("d0",), sw=None):
+        s = _spec(block=block)
+        s.draft_attn_layer_names = set(names)
+        s.kv_cache_config.kv_cache_groups.insert(
+            0, NS(layer_names=["t0"], kv_cache_spec=NS(block_size=65536, sliding_window=None)))
+        s.kv_cache_config.kv_cache_groups[1].kv_cache_spec.sliding_window = sw
+        return s
+    for block, margin in ((16, 512), (1024, 2048)):
+        cfg = _with_knob("1", lambda: skip._config(spec(block)))
+        assert cfg == (2048, margin), cfg
+    # drafter group not identifiable: smallest sliding-window group, never the 65536 hybrid one
+    assert _with_knob("1", lambda: skip._config(spec(16, names=("x",), sw=2048))) == (2048, 512)
+    assert _with_knob("1", lambda: skip._config(spec(16, names=("x",)))) == (2048, 512)
 
 
 def test_unsafe_configs_disable_the_knob():
