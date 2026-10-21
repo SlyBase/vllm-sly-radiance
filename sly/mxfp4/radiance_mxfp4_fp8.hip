@@ -2147,6 +2147,10 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
       if (tn4) { if (sp) RAD_AT_X(4, true, false, TM, true, PSW_); else RAD_AT_X(4, true, false, TM, false, PSW_); } \
       else     { if (sp) RAD_AT_X(2, true, false, TM, true, PSW_); else RAD_AT_X(2, true, false, TM, false, PSW_); } \
     } while (0)
+    // The tall tile (gate_up only) is a template-arg twin of TN=2: it reads the same PSW bytes.
+    if (g_at_tall && N == 34816 && tn_m >= g_at_tall_min_m) {
+      if (g_at_psw == 1) RAD_AT_X(2, true, false, 8, false, 1); else RAD_AT_X(2, true, false, 8, false, 2);
+    } else
     if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
 #undef RAD_AT_P
   } else
