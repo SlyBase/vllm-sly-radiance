@@ -85,24 +85,26 @@ measured on both stacks under the same conditions; the full BetterBench run was 
 | Concurrency 2, aggregate tok/s | 210.9 | 197.5 | +6.8 % |
 | Concurrency 4, aggregate tok/s | 340.3 | 304.6 | +11.7 % |
 
-**Full BetterBench 0.4.0 run (ours only; the reference stack was not run through it)**
+**Full BetterBench 0.4.0 run (shipping config, ours only; the reference stack was not run through it)**
 
 | | **ours (1.8.0 stack)** | **reference stack** |
 |---|---|---|
-| Decode, single stream (weighted median) | 153.1 tok/s | not measured (prefill sweep and decode only) |
+| Decode, single stream (median of 160 runs, 20 per category) | 158.4 tok/s | not measured (prefill sweep and decode only) |
+| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.0 / 185.1 / 172.1 / 209.3 / 190.0 / 89.8 / 106.5 / 142.8 tok/s | not measured (prefill sweep and decode only) |
 | update gap p50 (per category) | 33.8-34.2 ms | not measured (prefill sweep and decode only) |
-| update gap p99 | 35.3 ms | not measured (prefill sweep and decode only) |
-| tokens per update (chat / code / file_edit / json / math / prose / reasoning / summarization) | 4.25 / 5.75 / 5.32 / 6.24 / 6.35 / 3.09 / 3.92 / 4.59 | not measured (prefill sweep and decode only) |
-| time to first token p50 (short prompts) | 88 ms | not measured (prefill sweep and decode only) |
-| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 136.1 / 231.0 / 355.0 / 479.0 / 481.0 | not measured (prefill sweep and decode only) |
-| Prefill, 2K / 8K / 16K / 32K / 64K prompt tok/s (inside the full run) | 3,249.4 / 3,398.6 / 3,411.4 / 3,303.8 / 3,045.7 | not measured (prefill sweep and decode only) |
+| update gap p99 | 35.2 ms | not measured (prefill sweep and decode only) |
+| tokens per update (chat / code / file_edit / json / math / prose / reasoning / summarization) | 4.18 / 6.19 / 5.67 / 6.48 / 6.37 / 3.06 / 3.62 / 4.67 | not measured (prefill sweep and decode only) |
+| time to first token p50 (short prompts) | 57.3 ms | not measured (prefill sweep and decode only) |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 137.8 / 233.2 / 365.8 / 466.4 / 517.3 | not measured (prefill sweep and decode only) |
+| Prefill, 2K / 8K / 16K / 32K / 64K prompt tok/s (inside the full run) | 3,540.0 / 3,508.4 / 3,500.1 / 3,355.4 / 3,092.2 | not measured (prefill sweep and decode only) |
+| KV pool (tokens, this start) | 341,041 | not measured (prefill sweep and decode only) |
 | GSM8K 200 (greedy) | not run (no numerics default changes in 1.8.0) | not run |
 
-full run re-measured with the shipping config: TBD (running)
-
-The full-run prefill is lower than the sweep because prefill is the last phase of the full run, on a card
-that is already hot (junction 110 °C). The full-run numbers above predate the scheduling default and are
-being re-measured; the sweep and c1/c2/c4 tables are the shipping launcher configuration.
+The full-run prefill is lower than the sweep (3,540 / 3,508 / 3,500 / 3,355 / 3,092 vs 3,789 / 3,803 / 3,704 /
+3,487 / 3,171 tok/s) because prefill is the last phase of the full run, on a card that is already hot (junction
+~110 °C), not because of a config difference: the same shipping launcher produced both. All 48 requests at every
+concurrency level finished without error; the 341,041-token KV pool is this start's allocation (the sweep start
+gave 332,960, the reference stack 174,634).
 
 Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
 `r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
