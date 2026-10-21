@@ -220,3 +220,43 @@ the GEMM cell check stayed bit-identical (24 digests, 0 WRONG) but the clock und
 so this is "no gain", not a measured loss). -100 mV and GSM8K at -75 mV were not run. The assumption that the power cap
 turns less voltage into more clock (about +2 % per 25 mV from P ~ f V^2) did not hold on this card.
 
+
+## 2:4 structured sparsity on the weights via FP8 SWMMAC (RDNA4), reviewed 2026-10-21
+
+The idea: prune every layer to 2:4 (two of each four weights along K are zero) in one shot with SparseGPT or Wanda,
+store the weights as compressed FP8 plus a sparsity index, and let the card's sparse matrix instruction do the MACs.
+Carrot: the prefill GEMM is 66 % of the 47k prefill span, so halving its compute would be about +22 % prefill.
+
+The hardware is there, the payoff is not.
+
+| Item | Finding |
+|---|---|
+| Sparse FP8 instruction on gfx1201 | Exists and is reachable from the toolchain we ship. `clang++ -x hip --offload-arch=gfx1201 -S` emits `v_swmmac_f32_16x16x32_fp8_fp8 v[0:7], v[12:13], v[8:11], v15`; the builtin is `__builtin_amdgcn_swmmac_f32_16x16x32_fp8_fp8_w32` (ROCm 10.1, image 1.6.0). |
+| Rate gain per instruction | Not documented by AMD. The page states the gain as *"halves the storage and bandwidth required for A"* and says nothing about throughput. Arithmetic: 16x16x32 with 16 non-zeros holds the same 4,096 useful MACs as the dense 16x16x16 FP8 instruction, so a gain can only come from issuing 2x the B operand per cycle. Unmeasured. |
+| Dense FP8 reference width | `v_wmma_f32_16x16x32_fp8_fp8` does not exist on gfx1201 ("invalid instruction"), so the sparse form cannot simply be compared to a wider dense form. |
+| Headroom left in the kernel | Small. The A-tiled FP8 GEMM already runs at 270 TF/s effective at 47k (2.54 PFLOP over 9,425 ms) against 325 TF/s measured register-resident peak = 83 % of the card. WMMA alone is 55 % of the GEMM time; the other 45 % is unpack, LDS and barriers and stays. |
+| Best case end to end | +22 % prefill at 47k and +24 % at 2k **if** the sparse instruction doubles the rate and the operand path is free. If the rate is at parity the gain is 0, because prefill is compute-bound and A-bandwidth buys nothing. |
+| Serving path | None. vLLM 0.31 refuses a sparse checkpoint outright: `compressed_tensors/compressed_tensors.py:311` raises *"Sparsity support has been removed from compressed-tensors. Please use a model without sparsity configuration."* A sparse model here means our own quant config, loader, checkpoint converter and kernel. |
+| Pruning tool | Present but not the bottleneck: `llmcompressor/modifiers/pruning/sparsegpt/base.py` takes `sparsity: 0.5` and `mask_structure: "2:4"`. |
+| Dense base checkpoint | Not on the host. What is served is the MXFP4 checkpoint (19 GB); one-shot pruning needs the dense BF16 model plus a calibration set. |
+| Operand slot | The sparse operand is SWMMAC's A slot, and our GEMM keeps the weights in B (`C[M,N] = A[M,K] . W[N,K]^T`). Pruning the weights means transposing the formulation to `C^T[N,M] = W . A^T`, which changes the epilogue, the store layout and the scale axis. That is a new kernel, not a change to the existing one. |
+
+Accuracy is the deciding item, and it is not close. 2:4 in one shot was validated on 2023-scale models; on current
+models it costs a factor of three.
+
+| Model | Dense | SparseGPT 2:4 | Change |
+|---|---:|---:|---:|
+| OPT-13B (WikiText2) | 10.13 | 12.96 | +28 % |
+| OPT-175B (WikiText2) | 8.35 | 8.74 | +5 % |
+| LLaMA-7B (WikiText2) | 5.68 | 11.00 | +94 % |
+| Llama-3.1-8B Instruct (Wiki) | 7.27 | 26.19 | 3.6x |
+| Llama-3.1-70B (Wiki) | 3.34 | 10.93 | 3.3x |
+
+Sources: Frantar et al., SparseGPT (ICML 2023) Table 1; PGZ (ICLR 2024) Table 1; arXiv 2501.18015 Table 1.
+Our model is already 4-bit group-quantized and an abliterated variant, so 2:4 would be the third degradation stacked
+on it. A 22 % prefill gain does not buy a 3x perplexity loss.
+
+Revisit when: (a) a measured register-resident microbenchmark shows the sparse FP8 instruction above 1.6x the useful
+MAC rate of the dense one (the only cheap decisive test, ~30 min in a GPU window, and the reason to run it first);
+(b) a consumer for sparse weights exists in vLLM again, or we are willing to carry our own loader; (c) pruning with
+recovery training is on the table, because one-shot 2:4 is what fails here, not sparsity as such.
