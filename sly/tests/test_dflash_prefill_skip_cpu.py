@@ -138,7 +138,8 @@ def test_margin_ignores_the_targets_hybrid_group():
 
 def test_unsafe_configs_disable_the_knob():
     b = _batch([0], [4096], [47000])
-    # prefix caching: cached drafter blocks of skipped positions would hold garbage
+    # prefix caching: cached drafter blocks of skipped positions would hold garbage, unless the
+    # scheduler side keeps them out of the cache (APC sub-knob, tests below)
     assert _with_knob("1", lambda: skip.skip_context(_spec(prefix_caching=True), b)) is False
     # any full-attention drafter layer reads the whole prompt
     mixed = ("sliding_attention",) * 4 + ("full_attention",)
@@ -147,6 +148,151 @@ def test_unsafe_configs_disable_the_knob():
     assert _with_knob("1", lambda: skip.skip_context(_spec(window=None), b)) is False
     # data parallel: the draft step is a collective
     assert _with_knob("1", lambda: skip.skip_context(_spec(dp=2), b)) is False
+
+
+# ---- prefix caching: the skipped drafter blocks never become cache hits -------------------------
+
+APC = "RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_APC"
+
+
+def _env(**kv):
+    """Run fn with the env vars set (None unsets); restores them."""
+    def run(fn):
+        old = {k: os.environ.get(k) for k in kv}
+        for k, v in kv.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+        try:
+            return fn()
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+    return run
+
+
+def _kvm(block=16, window=2048):
+    """Scheduler-side KVCacheManager stand-in: a target hybrid group and the drafter's SWA group."""
+    groups = [NS(layer_names=["t0"], kv_cache_spec=NS(block_size=65536, sliding_window=None)),
+              NS(layer_names=["d0"], kv_cache_spec=NS(block_size=block, sliding_window=window))]
+    return NS(kv_cache_config=NS(kv_cache_groups=groups))
+
+
+def _swa_manager(block=16, window=2048):
+    return NS(kv_cache_spec=NS(block_size=block, sliding_window=window))
+
+
+def test_apc_sub_knob_enables_the_worker_side():
+    s = _spec(prefix_caching=True)
+    b = _batch([0], [4096], [47000])
+    on = {KNOB: "1", APC: "1"}
+    assert _env(**on)(lambda: skip.skip_context(s, b)) is True
+    s2 = _spec(prefix_caching=True)
+    assert _env(**{KNOB: "1", APC: "0"})(lambda: skip.skip_context(s2, b)) is False
+    s3 = _spec(prefix_caching=True)
+    assert _env(**{KNOB: "0", APC: "1"})(lambda: skip.skip_context(s3, b)) is False   # needs the main knob
+    s4 = _spec(prefix_caching=False)   # APC off: the sub-knob changes nothing
+    assert _env(**{KNOB: "1", APC: None})(lambda: skip.skip_context(s4, b)) is True
+
+
+def test_note_chunk_is_inert_without_both_knobs():
+    for env in ({KNOB: "1", APC: None}, {KNOB: None, APC: "1"}, {KNOB: "0", APC: "1"}):
+        r = NS(num_tokens=47000)
+        k = _kvm()
+        _env(**env)(lambda k=k, r=r: skip.note_chunk(k, r, 4096))
+        assert not hasattr(r, "radiance_pf_skip_end"), env
+
+
+def test_note_chunk_marks_exactly_the_chunks_the_worker_may_skip():
+    L, w, m = 47000, 2048, 512
+    k = _kvm()
+    r = NS(num_tokens=L)
+    _env(**{KNOB: "1", APC: "1"})(lambda: skip.note_chunk(k, r, 4096))
+    assert r.radiance_pf_skip_end == 4096
+    skip.note_chunk(k, r, L - w - m)                 # last chunk the worker may skip
+    assert r.radiance_pf_skip_end == L - w - m
+    skip.note_chunk(k, r, L - w - m + 1)             # a tail chunk: the mark does not move
+    assert r.radiance_pf_skip_end == L - w - m
+    # the worker skips a small chunk whenever a batch-mate is big, so there is no size gate here
+    r2 = NS(num_tokens=L)
+    _env(**{KNOB: "1", APC: "1"})(lambda: skip.note_chunk(k, r2, 100))
+    assert r2.radiance_pf_skip_end == 100
+
+
+def test_note_chunk_margin_follows_the_smallest_swa_block():
+    k = _kvm(block=1056)                              # margin = max(512, 2 * 1056) = 2112
+    r = NS(num_tokens=47000)
+    _env(**{KNOB: "1", APC: "1"})(lambda: skip.note_chunk(k, r, 47000 - 2048 - 2112))
+    assert r.radiance_pf_skip_end == 47000 - 2048 - 2112
+    r2 = NS(num_tokens=47000)
+    skip.note_chunk(k, r2, 47000 - 2048 - 2112 + 1)
+    assert not hasattr(r2, "radiance_pf_skip_end")
+    # no SWA group at all: nothing to protect
+    r3 = NS(num_tokens=47000)
+    k2 = NS(kv_cache_config=NS(kv_cache_groups=[_kvm().kv_cache_config.kv_cache_groups[0]]))
+    _env(**{KNOB: "1", APC: "1"})(lambda: skip.note_chunk(k2, r3, 4096))
+    assert not hasattr(r3, "radiance_pf_skip_end")
+
+
+def test_mask_unwritten_drops_the_blocks_below_the_mark():
+    r = NS(radiance_pf_skip_end=100)                  # block 16: blocks 0..6 hold a skipped position
+    mgr = _swa_manager()
+    assert skip.mask_unwritten(mgr, r, 0, 10, None) == [False] * 7 + [True] * 3
+    assert skip.mask_unwritten(mgr, r, 5, 10, None) == [False, False, True, True, True]
+    assert skip.mask_unwritten(mgr, r, 7, 10, None) is None          # nothing below the mark: untouched
+    base = [True, False, True, True, True]                           # an existing mask stays ANDed
+    assert skip.mask_unwritten(mgr, r, 5, 10, base) == [False, False, True, True, True]
+    assert skip.mask_unwritten(mgr, r, 7, 12, [True, False, True, True, True]) == [True, False, True, True, True]
+    # exact multiple: block 5 (80..95) is below 96, block 6 (96..111) holds position 96..99 only if mark>96
+    assert skip.mask_unwritten(mgr, NS(radiance_pf_skip_end=96), 0, 8, None) == [False] * 6 + [True] * 2
+
+
+def test_mask_unwritten_ignores_other_groups_and_unmarked_requests():
+    r = NS(radiance_pf_skip_end=100)
+    full = NS(kv_cache_spec=NS(block_size=16, sliding_window=None))   # full attention / mamba group
+    assert skip.mask_unwritten(full, r, 0, 10, None) is None
+    assert skip.mask_unwritten(_swa_manager(), NS(), 0, 10, None) is None
+    base = [True] * 3
+    assert skip.mask_unwritten(_swa_manager(), NS(), 0, 3, base) is base
+
+
+def test_a_registered_drafter_block_is_always_written():
+    _env(**{KNOB: "1", APC: "1"})(_registered_blocks_are_written)
+
+
+def _registered_blocks_are_written():
+    """Simulate scheduler (note_chunk + mask_unwritten) and worker (skip_context) over many shapes:
+    a block the scheduler lets into the prefix cache must hold only drafter-KV the worker wrote."""
+    rng = np.random.default_rng(7)
+    skipped_runs = 0
+    for _ in range(300):
+        L = int(rng.integers(500, 90000))
+        chunk = int(rng.choice([1024, 2048, 4096, 8192]))
+        block = int(rng.choice([8, 16, 1056]))
+        s = _spec(block=block, prefix_caching=True)
+        k = _kvm(block=block)
+        mgr = _swa_manager(block=block)
+        r = NS(num_tokens=L)
+        written = np.zeros(L, dtype=bool)
+        registered, cached, pos = [], 0, 0
+        while pos < L:
+            n = min(chunk, L - pos)
+            end = pos + n
+            skip.note_chunk(k, r, end)
+            if not skip.skip_context(s, _batch([pos], [n], [L])):
+                written[pos:end] = True
+            nf = end // block
+            mask = skip.mask_unwritten(mgr, r, cached, nf, None)
+            registered += [i for j, i in enumerate(range(cached, nf)) if mask is None or mask[j]]
+            cached, pos = max(cached, nf), end
+        for i in registered:
+            assert written[i * block:(i + 1) * block].all(), (L, chunk, block, i)
+        if not written.all():       # not vacuous: the skip fired, and the tail stays cacheable
+            skipped_runs += 1
+            assert any(i * block >= L - 4096 for i in registered), (L, chunk, block)
+    assert skipped_runs > 30, skipped_runs
 
 
 PROPOSE_HEAD = '''class DFlashSpeculator:
@@ -169,6 +315,9 @@ def test_patch_hooks_propose_once_and_is_idempotent():
         f = Path(td) / "vllm/v1/worker/gpu/spec_decode/dflash/speculator.py"
         f.parent.mkdir(parents=True)
         f.write_text(PROPOSE_HEAD)
+        for name, src in (("kv_cache_manager.py", KVM_TAIL), ("single_type_kv_cache_manager.py", MGR_TAIL)):
+            (Path(td) / "vllm/v1/core" / name).parent.mkdir(parents=True, exist_ok=True)
+            (Path(td) / "vllm/v1/core" / name).write_text(src)
         r = _run_patch(td)
         assert r.returncode == 0, r.stdout + r.stderr
         out = f.read_text()
@@ -181,6 +330,71 @@ def test_patch_hooks_propose_once_and_is_idempotent():
         r2 = _run_patch(td)
         assert r2.returncode == 0 and "NOOP" in r2.stdout, r2.stdout
         assert f.read_text() == out
+
+
+KVM_TAIL = """class K:
+    def allocate_slots(self):
+        num_tokens_to_cache = min(total_computed_tokens + num_new_tokens, request.num_tokens)
+        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+
+        return self.create_kv_cache_blocks(new_blocks)
+"""
+MGR_TAIL = """class M:
+    def cache_blocks(self):
+        block_mask = self.reachable_block_mask(
+            dcp_world_size=self.dcp_world_size,
+        )
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=self.req_to_blocks[request.request_id],
+            num_cached_blocks=num_cached_blocks,
+            block_mask=block_mask,
+        )
+"""
+CORE = "vllm/v1/core/"
+
+
+def _real(name):
+    f = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "core" / name
+    return f.read_text() if f.exists() else None
+
+
+def _patch_sources(kvm_src, mgr_src):
+    with tempfile.TemporaryDirectory() as td:
+        for name, src in (("kv_cache_manager.py", kvm_src), ("single_type_kv_cache_manager.py", mgr_src),
+                          ("spec_decode/dflash/speculator.py", PROPOSE_HEAD)):
+            f = Path(td) / ("vllm/v1/core/" + name if "/" not in name else "vllm/v1/worker/gpu/" + name)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(src)
+        r = _run_patch(td)
+        r2 = _run_patch(td)
+        return r, r2, (Path(td) / "vllm/v1/core/kv_cache_manager.py").read_text(), \
+            (Path(td) / "vllm/v1/core/single_type_kv_cache_manager.py").read_text()
+
+
+def _check_cache_hooks(kvm_src, mgr_src):
+    r, r2, kvm, mgr = _patch_sources(kvm_src, mgr_src)
+    assert r.returncode == 0, r.stdout + r.stderr
+    compile(kvm, "kv_cache_manager.py", "exec")
+    compile(mgr, "single_type_kv_cache_manager.py", "exec")
+    # the mark is set before the chunk is cached, the mask before the blocks are hashed
+    assert kvm.index("note_chunk(") < kvm.index("coordinator.cache_blocks(request, num_tokens_to_cache)")
+    assert mgr.index("mask_unwritten(") < mgr.index("self.block_pool.cache_full_blocks(")
+    assert "block_mask=block_mask" in mgr
+    assert "NOOP" in r2.stdout and r2.returncode == 0, r2.stdout
+    assert (kvm, mgr) == _patch_sources(kvm_src, mgr_src)[2:]
+
+
+def test_patch_hooks_the_cache_path_once_and_is_idempotent():
+    _check_cache_hooks(KVM_TAIL, MGR_TAIL)
+
+
+def test_patch_hooks_apply_to_the_pinned_vllm_tree():
+    kvm, mgr = _real("kv_cache_manager.py"), _real("single_type_kv_cache_manager.py")
+    if kvm is None or mgr is None:
+        import pytest
+        pytest.skip("pinned vLLM tree absent (run ci/patch_dryrun.sh)")
+    _check_cache_hooks(kvm, mgr)
 
 
 def test_wiring_loop_copy_and_docs():
@@ -207,3 +421,4 @@ if __name__ == "__main__":
             fn()
             print("ok", name)
     print("dflash prefill skip tests OK")
+

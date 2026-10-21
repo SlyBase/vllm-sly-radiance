@@ -94,7 +94,12 @@ are one-layer microbenches. See
   anyway; the knob skips its `fc`, context-K/V fill and draft step for chunks whose end lies at least
   `window + margin` below the prompt length. Gate: prefix caching must be **off** (with APC on the knob
   warns once and does nothing), all drafter layers must be sliding, and DP must be 1. CPU-gated by
-  `sly/tests/test_dflash_prefill_skip_cpu.py`. End to end at 300 W (E2 vs E1, working skip with margin 1760,
+  `sly/tests/test_dflash_prefill_skip_cpu.py`. **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_APC=1`** (default 0) lets the
+  skip act with prefix caching on: the scheduler marks the chunks the worker may skip (`allocate_slots`) and keeps
+  every sliding-window drafter block that touches a skipped position out of the prefix-cache hash map
+  (`cache_blocks`), so a hit (which needs the whole window of blocks below its end) can never read unwritten
+  drafter K/V. Cost: prefixes ending within the window of a skipped position, or before it, stop hitting; a
+  conversation continuing past its last turn still hits. GPU verification: not run yet. End to end at 300 W (E2 vs E1, working skip with margin 1760,
   chunks >= 3808 tokens): **+2.1 % at 16K, +3.6 % at 32K, +3.2 % at 64K** prefill tok/s (3,697 vs 3,621,
   3,475 vs 3,355, 3,167 vs 3,068). GPU identity test: see Changed.
 
