@@ -99,7 +99,8 @@ if WIDE_MAX_M:
         _why.append("RADIANCE_MXFP4_DECODE_MAX_M < 128 (bands would not be contiguous)")
     sys.stderr.write(f"[radiance.mxfp4] wide decode band M in (128, {min(WIDE_MAX_M, 256)}]"
                      + (f" INACTIVE: {'; '.join(_why)}\n" if _why else " ON\n"))
-# PSW weight layout in production (RADIANCE_MXFP4_AT_PSW=2, default 0 = off). At load every
+# PSW weight layout in production (RADIANCE_MXFP4_AT_PSW, default "auto": 2 when nothing below
+# conflicts, else off with the reasons logged; 2 = on and refused on a conflict, 0 = off). At load every
 # layer our kernel serves is repacked IN PLACE (psw_pack_w mode 2 on the fragment-order bytes,
 # psw_fold_ws on the [K/32, N] scale; same shapes, same storage, zero extra memory) and the .so is
 # switched with set_at_psw(2), after which every MXFP4 e4m3 kernel (A-tiled, folded, decode, wide
@@ -107,7 +108,8 @@ if WIDE_MAX_M:
 # wrong -- wherever a reader of layer.weight / weight_scale has no PSW unpack: the r4d decode
 # kernel, the Python reference / debug paths, the per-block path, NT decode loads, an .so without
 # the decode reader. Mode 1 exists for the A-tiled cell bench only.
-AT_PSW = int(os.environ.get("RADIANCE_MXFP4_AT_PSW", "0"))
+_psw_auto = os.environ.get("RADIANCE_MXFP4_AT_PSW", "auto") == "auto"
+AT_PSW = 2 if _psw_auto else int(os.environ["RADIANCE_MXFP4_AT_PSW"])
 if AT_PSW:
     _why = []
     if AT_PSW != 2:
@@ -122,10 +124,16 @@ if AT_PSW:
                "RADIANCE_MXFP4_REFLINEAR", "RADIANCE_MXFP4_SHADOW", "RADIANCE_MXFP4_PERBLOCK_NK"):
         if os.environ.get(_k, "0").strip() not in ("", "0"):
             _why.append(f"{_k} reads the checkpoint byte layout")
-    if _why:
+    if _psw_auto and os.environ.get("RADIANCE_PAROQUANT", "0") not in ("", "0"):
+        _why.append("RADIANCE_PAROQUANT loads its own weight layout")
+    if _why and _psw_auto:
+        AT_PSW = 0
+        sys.stderr.write("[radiance.mxfp4] PSW weight layout off (auto): " + "; ".join(_why) + "\n")
+    elif _why:
         raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW refused: " + "; ".join(_why))
-    sys.stderr.write("[radiance.mxfp4] weight layout: PSW mode 2 (RADIANCE_MXFP4_AT_PSW=2), "
-                     "repacked in place at load\n")
+    else:
+        sys.stderr.write("[radiance.mxfp4] weight layout: PSW mode 2 (RADIANCE_MXFP4_AT_PSW="
+                         + ("auto" if _psw_auto else "2") + "), repacked in place at load\n")
 _psw_on = [False]
 
 

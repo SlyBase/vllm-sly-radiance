@@ -56,6 +56,31 @@ tokens per update, step gap, conc 1/8, the KV pool from the log.
 and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
 (recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
 
+## 1.8.0
+
+### Prefill, image default vs reference stack (2026-10-22 night, 300 W)
+
+One R9700, one start per arm, order ABBA, BetterBench prefill, 8 runs median per depth, prefix cache off, chunk 4096,
+`--max-model-len 65536`, thinking off, junction 108 C at the end of each arm. Each row is the mean of its two starts.
+"previous stack" = image 1.6.0 prefill stack with the drafter skip, `--no-async-scheduling` and the DB16/s3 kernels
+bind-mounted; "stack without PSW" = the same plus `RADIANCE_ATTN_Q_FP8=1` and `RADIANCE_MXFP4_TALL=1`; "1.8.0 default" =
+that plus `RADIANCE_MXFP4_AT_PSW=2` (what the image now does without any flag).
+
+| prefill tok/s | 2K | 8K | 16K | 32K | 64K |
+|---|--:|--:|--:|--:|--:|
+| previous stack | 3,798.0 | 3,825.0 | 3,783.3 | 3,513.0 | 3,152.1 |
+| stack without PSW | 3,810.3 | 3,871.7 | 3,732.9 | 3,589.6 | 3,258.0 |
+| **1.8.0 default (PSW on)** | **3,926.8** | **3,964.9** | **3,889.9** | **3,692.2** | **3,370.5** |
+| reference stack | 3,758.5 | 3,863.8 | 3,871.6 | 3,698.6 | 3,395.6 |
+| 1.8.0 default vs stack without PSW | +3.1 % | +2.4 % | +4.2 % | +2.9 % | +3.5 % |
+| 1.8.0 default vs reference stack | +4.5 % | +2.6 % | +0.5 % | -0.2 % | -0.7 % |
+| 1.8.0 default vs previous stack | +3.4 % | +3.7 % | +2.8 % | +5.1 % | +6.9 % |
+
+Start-to-start spread within an arm pair is 0.0-0.6 % except: stack without PSW 3.7 / 1.5 / 3.0 % at 16K / 32K / 64K,
+previous stack 3.5 % at 32K. Deltas below ~2 % between single arms are therefore noise; the PSW row is
+consistent over all five depths. Correctness: 210 W, 1,093 greedy digests identical (0 wrong), GSM8K-200 0.835 vs 0.835
+with PSW off.
+
 ## 1.0.0
 
 ### Reference run (2026-10-07, 300 W)
