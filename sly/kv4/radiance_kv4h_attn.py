@@ -225,7 +225,8 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             0, 0, self._kv4i_scratch.data_ptr(),
             int(table.shape[0]), int(m.max_query_len), self.num_heads, self.num_kv_heads, self.head,
             16, int(table.shape[1]), kv_cache.stride(0), kv_cache.stride(1),
-            self.scale, 0, int(m.max_seq_len), torch.cuda.current_stream().cuda_stream, H.GROUP,
+            self.scale / self.head,   # K and q are both rotated (x16 each): fold it, as kv4h_attention does
+            0, int(m.max_seq_len), torch.cuda.current_stream().cuda_stream, H.GROUP,
         )
         # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
         output[:n].copy_(F.unrotate(out_rot.float()))

@@ -104,3 +104,29 @@ def test_forward_reads_no_host_value_during_capture(attn, monkeypatch):
     out = torch.zeros(8, 24, 256, dtype=torch.bfloat16)
     impl.forward(None, torch.zeros(8, 24, 256), None, None, None, meta, out)
     assert len(calls) == 1   # reached the Tetra kernel
+
+
+def test_the_routed_launch_passes_the_rotation_folded_scale(attn, monkeypatch):
+    """The cache holds ROTATED K and the query is rotated too, so q.k is inflated by HEAD (16 x 16):
+    the kernel takes scale / HEAD, exactly as TetraAttention's own launch folds it
+    (radiance_kv4h_kernel: scale_log2 = scale / head * log2e) and as the bench arm does. The route
+    once passed `scale` unfolded: softmax 256x too sharp, KL 2.1 at >16k context, top-1 agreement 40 %,
+    invisible to every CPU test and to the throughput sweep."""
+    seen = []
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
+    monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: seen.append(a))
+    monkeypatch.setattr(attn._r4d, "set_q_fp8", lambda s: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: types.SimpleNamespace(cuda_stream=0))
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 0.0625
+    impl._kv4i_scratch = None
+    kv = torch.zeros(2, 4, 1664, 272, dtype=torch.uint8)
+    meta = types.SimpleNamespace(
+        num_actual_tokens=512, max_query_len=512, max_seq_len=1024, causal=True,
+        seq_lens=torch.tensor([1024], dtype=torch.int32), block_table=torch.tensor([[1]], dtype=torch.int32))
+    out = torch.zeros(512, 24, 256, dtype=torch.bfloat16)
+    impl.forward(types.SimpleNamespace(), torch.randn(512, 24, 256), None, None, kv, meta, out)
+    assert len(seen) == 1, "the route did not fire"
+    assert seen[0][17] == pytest.approx(0.0625 / 256)      # the kernel `scale` argument
