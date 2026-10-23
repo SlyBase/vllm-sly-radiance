@@ -10,6 +10,46 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.8.1] - 2026-10-23
+
+TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
+
+### Fixed
+- **`--attention-backend TETRA` (and `KV4`) crashed at the first forward on vLLM 0.31**: the backends asserted
+  `attn_metadata.use_cascade is False`, a field `RocmAttentionMetadata` no longer has. The assert is gone (cascade
+  attention was never used by these backends); `KV4` keeps its `causal` assert. Measured on the R9700: the engine
+  starts, KV pool 528,722 tokens at 65k context (fp8: 340,723), and the prefill sweep runs.
+
+### Measured, not adopted
+- **`RADIANCE_KV4H_PIPE` (schedule variants of the TetraAttention prefill kernel) was built and removed again.**
+  Bit 1 (block-table entry fetched one tile ahead) and bit 3 (plus double-buffered LDS tile) were neutral in the
+  kernel microbench (2.41-2.44x of the libr4d fp8 kernel against 2.43x stock, tile 16), and bit 4 (one wave per
+  row tile) was **40-55 % slower** (3.4-3.7x), so the knob ships nothing. The 1.8.0 fp8 schedule ideas do not
+  transfer to this kernel: at tile 64 (the shipped prefill instance, 1.81x of libr4d) the stock schedule is already
+  the better one, and tile 16 costs 2.43x. The remaining gap to the fp8 path is the kernel itself, not its
+  schedule; `sly/bench_attn_r4d_vs_tetra.py` measures the two backends at the serve shapes (see
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23)).
+- **Reading the int4 cache in the libr4d prefill kernel (`R4D_KV4I`) was built, measured and parked** on branch
+  `exp/kv4-int4-libr4d`, not shipped. Kernel microbench at the serve shapes: 1.01x of the fp8 libr4d kernel at past
+  49152 (TetraAttention 1.81x); engine sweep at 210 W with a context gate (16384 keys): +8.1 % prefill at 47k
+  against TetraAttention, +0.8..2.7 % below. **It fails its accuracy gate**: KL against TetraAttention over 3 x 60k
+  tokens is 0.0034 / 0.020 / 1.84 (cpp / novel / Python), top-1 agreement 99.4 / 93.4 / 59.1 %, all error beyond
+  16k context (KL 0.00 below 4k). Three bugs were found on the way, each invisible to the CPU tests of that time
+  (an unfolded softmax scale, a per-layer device->host read in the route guard, a graph-capture read). Explained
+  since: the route's per-layer error is **not larger than TetraAttention's, but coherent (biased)**. On dumps
+  (Python text, ctx 20445, fp32 truth from the same int4 bytes, 256 rows x 24 heads), rel-L2 Tetra / route and
+  bias share Tetra / route: layer 3 3.6 / 3.8 %, 0.33 / 1.96 %; layer 47 7.8 / 6.2 %, 0.06 / 1.92 %; layer 55
+  9.0 / 6.8 %, 0.11 / 0.86 %. Projected on the output the error is -0.0031 / -0.0047 / -0.0056 (Tetra) against
+  -0.0119 / -0.0134 / -0.0084 (route). A coherent error does not average out over 20k keys and 16 layers; white
+  noise of the same size does. Two rounding fixes (no query fold, denominator from the packed P) cut rel-L2 by
+  25 % and moved the gate by nothing (Python ppl 18.26 -> 18.41 vs reference 1.750; KL 1.836 -> 1.843; top-1
+  59.2 -> 59.1 %), and a query-headroom gain of 16 changed nothing, so it is not e4m3 saturation. Likely
+  mechanism (hypothesis, not isolated): `rne_e4m3(code*scale)` - a 3-bit code times a per-token scale does not
+  fit losslessly in a 3-bit mantissa, a deterministic grid distortion. The only exact path is staging bare int4
+  codes in int8 and folding the per-token scale per score (int8 WMMA), estimated 3-5 days, which removes the
+  +8 % prefill gain.
+- `VERSION` 1.8.0 → 1.8.1.
+
 ## [1.8.0] - 2026-10-23
 
 The measured prefill stack is the **image default**: every knob below is on without any `-e` (Dockerfile ENV,

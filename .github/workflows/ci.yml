@@ -104,6 +104,12 @@ jobs:
             python3 ci/check_aiter_contract.py --aiter-src .dryrun/src/aiter
           fi
 
+      - name: attention-metadata contract vs the pinned vLLM (AST, CPU-only)
+        # every attn_metadata.<attr> our back ends read must exist on the pinned metadata dataclass
+        # (vLLM 0.31 dropped RocmAttentionMetadata.use_cascade; found only by a GPU start). Skips
+        # itself when the dry-run left no vllm tree.
+        run: python3 ci/check_attn_metadata_contract.py --vllm-src .dryrun/src/vllm
+
       - name: upload logs
         if: always()
         uses: actions/upload-artifact@v7

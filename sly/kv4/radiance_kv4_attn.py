@@ -150,7 +150,7 @@ class KV4AttentionImpl(RocmAiterUnifiedAttentionImpl):
             raise NotImplementedError("KV4: fused output quantization is not supported")
         if attn_metadata is None:
             return output.fill_(0)     # profiling run
-        assert attn_metadata.use_cascade is False and attn_metadata.causal
+        assert attn_metadata.causal
         n = attn_metadata.num_actual_tokens
         q8, q_descale = quantize_query(query[:n])
         out_rot = torch.empty_like(output[:n])

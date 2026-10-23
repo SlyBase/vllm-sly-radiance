@@ -128,6 +128,7 @@ logged at the first real decode step and is not required: the gate's smoke reque
 ```
 profiles/vllm7-mxfp4.json   production MXFP4 + DFlash2 k=7: markers, smoke cases, thresholds
 profiles/vllm5-int4.json    the INT4 fallback service (same LXC, disabled unit)
+profiles/vllm7-kv4.json     KV4/TETRA start smoke (needs a unit carrying launch_args; baselines/vllm7-kv4.json = KV pool floor)
 baselines/*.json            the numbers of the image currently in production
 configs/{fast,full}.json    BetterBench configs (full == betterbench config/default.json)
 accept.py                   orchestrator: window, checks, verdict, report.json + report.md
