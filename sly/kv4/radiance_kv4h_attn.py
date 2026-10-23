@@ -174,6 +174,11 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
     # -- the int4 libr4d prefill route (R4D_KV4I=1, opt-in) ------------------------------------
     def _kv4i_decline(self, query, kv_cache, m, output, output_scale, output_block_scale) -> str | None:
         """Why this launch must stay on TetraAttention, or None when the int4 libr4d kernel takes it."""
+        # during graph capture a device->host copy is illegal, so decline before reading any tensor
+        if not KV4I_ON:
+            return "R4D_KV4I unset"
+        if torch.cuda.is_current_stream_capturing():
+            return "graph capture"
         nseq = int(m.seq_lens.shape[0])
         runs = (m.query_start_loc[1 : nseq + 1] - m.query_start_loc[:nseq]).tolist()
         return R4.decline(
@@ -186,7 +191,7 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             window=int(self.window), causal=m.causal,
             fused_out=output_scale is not None or output_block_scale is not None,
             out_dtype=str(output.dtype).replace("torch.", ""),
-            capturing=torch.cuda.is_current_stream_capturing(),
+            capturing=False,   # already declined above, before the host copy
             max_query_len=int(m.max_query_len), runs=runs, min_q=KV4I_MIN_Q,
         )
 
