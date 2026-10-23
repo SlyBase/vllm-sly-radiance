@@ -142,3 +142,27 @@ averaging out. With the fold off the shrink halves (signed radial error -0.0126 
 
 The launcher therefore builds `(P_OPT & ~O_FOLDQ) | O_QK8 | O_PV8 | O_DB | O_KV4I`; the fold's job
 (8 f32 multiplies per m-tile, `sc[e] = s[e] * mul`) is cheap and exact where it now happens.
+
+## Result of the two fixes (gate, 2026-10-23 night): not enough
+
+Kernel variants built from the patched tree (hipcc in the 1.8.1-kv4i-test image, `.so` bind-mounted),
+compile gate green both times (30 shipped kernels instruction-identical, KV4I tiles 16/32/48 spill-free),
+KL against KV4-without-route, python text:
+
+| arm | ppl cpp | ppl mobydick | ppl python | KL python | top-1 |
+|---|--:|--:|--:|--:|--:|
+| reference (KV4, no route) | 1.297 | 7.475 | 1.750 | — | — |
+| as shipped (fold on, exact l) | 1.297 | 7.507 | 18.26 | 1.836 | 59.2 % |
+| fold off, exact l | 1.297 | 7.507 | 18.26 | 1.836 | 59.2 % |
+| fold off, l from the packed P | 1.297 | 7.461 | 18.41 | 1.843 | 59.1 % |
+
+GSM8K-200 0.845 both times (route never fires on short prompts), so it proves nothing about the route.
+
+Per-layer rel-L2 against the Tetra kernel did improve (layer 3 5.4 % -> 4.2 %, layer 47 ~10-12 % -> 8.7 %,
+layer 55 -> 9.0 %), i.e. both changes took effect in the engine — the model does not care. Conclusion:
+neither the query fold nor the P numerator/denominator mismatch explains the break. The per-layer error
+is dominated by rare sharp rows (offline: max row 34 % on the shipped kernel, 49 % on the emulated one,
+against Tetra's 54 %) — Tetra's error is *larger* on average and harmless, so magnitude per layer is not
+the property that predicts model damage. Next diagnostic: dump several consecutive full-attention layers
+of one run and measure whether the errors are aligned across layers (compounding), which needs the
+16-layer dump rather than another rounding fix.
