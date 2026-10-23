@@ -35,10 +35,19 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   against TetraAttention, +0.8..2.7 % below. **It fails its accuracy gate**: KL against TetraAttention over 3 x 60k
   tokens is 0.0034 / 0.020 / 1.84 (cpp / novel / Python), top-1 agreement 99.4 / 93.4 / 59.1 %, all error beyond
   16k context (KL 0.00 below 4k). Three bugs were found on the way, each invisible to the CPU tests of that time
-  (an unfolded softmax scale, a per-layer device->host read in the route guard, a graph-capture read). Not
-  explained yet: per-layer rel-L2 of the routed output against the Tetra kernel is 5-12 % (fp8 libr4d against
-  fp32: 5-6 %), rising with depth in layers 27-55; a query-headroom gain of 16 changed nothing, so it is not e4m3
-  saturation of the rotated query.
+  (an unfolded softmax scale, a per-layer device->host read in the route guard, a graph-capture read). Explained
+  since: the route's per-layer error is **not larger than TetraAttention's, but coherent (biased)**. On dumps
+  (Python text, ctx 20445, fp32 truth from the same int4 bytes, 256 rows x 24 heads), rel-L2 Tetra / route and
+  bias share Tetra / route: layer 3 3.6 / 3.8 %, 0.33 / 1.96 %; layer 47 7.8 / 6.2 %, 0.06 / 1.92 %; layer 55
+  9.0 / 6.8 %, 0.11 / 0.86 %. Projected on the output the error is -0.0031 / -0.0047 / -0.0056 (Tetra) against
+  -0.0119 / -0.0134 / -0.0084 (route). A coherent error does not average out over 20k keys and 16 layers; white
+  noise of the same size does. Two rounding fixes (no query fold, denominator from the packed P) cut rel-L2 by
+  25 % and moved the gate by nothing (Python ppl 18.26 -> 18.41 vs reference 1.750; KL 1.836 -> 1.843; top-1
+  59.2 -> 59.1 %), and a query-headroom gain of 16 changed nothing, so it is not e4m3 saturation. Likely
+  mechanism (hypothesis, not isolated): `rne_e4m3(code*scale)` - a 3-bit code times a per-token scale does not
+  fit losslessly in a 3-bit mantissa, a deterministic grid distortion. The only exact path is staging bare int4
+  codes in int8 and folding the per-token scale per score (int8 WMMA), estimated 3-5 days, which removes the
+  +8 % prefill gain.
 - `VERSION` 1.8.0 → 1.8.1.
 
 ## [1.8.0] - 2026-10-23
