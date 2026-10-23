@@ -16,7 +16,7 @@ diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
 index a10d16c..ae925d6 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
-@@ -136,6 +136,36 @@ extern "C" int r4d_attn_prefill_h256_gqa6_bf16kv(const R4DArgs* a, hipStream_t s
+@@ -136,6 +136,40 @@ extern "C" int r4d_attn_prefill_h256_gqa6_bf16kv(const R4DArgs* a, hipStream_t s
      return prefill_launch<1>(a, s);
  }
  
@@ -34,7 +34,11 @@ index a10d16c..ae925d6 100644
 +    ab.q_scale = qs;
 +    const char* et = getenv("R4D_ATTN_TILE");
 +    const int t = et ? atoi(et) : P_TILE;
-+    constexpr int B = P_OPT | O_QK8 | O_PV8 | O_DB | O_KV4I;
++    // No O_FOLDQ: the fold multiplies scale/HEAD*log2e into the query BEFORE the e4m3 pack, which puts
++    // 98 % of the elements under e4m3's 2^-6 (subnormal, <= 3 bits usable, flushing to 0 at 2^-9) --
++    // measured on a dumped launch: rel-L2 6.2 % -> 4.6 % and half the output shrink with the fold off,
++    // the scale costs 8 f32 multiplies per m-tile instead. See docs/R4D-INT4-PREFILL.md.
++    constexpr int B = (P_OPT & ~O_FOLDQ) | O_QK8 | O_PV8 | O_DB | O_KV4I;
 +#define K4_L(TILEX)                                                                               \
 +    do {                                                                                          \
 +        if (qs > 0.0f)                                                                            \

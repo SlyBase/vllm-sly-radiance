@@ -49,6 +49,31 @@ def attend(qf, k, v, qpos, kround=False, pround=False, vround=False, kgain=1.0):
     return ((e4m3(p) if pround else p) @ v) / p.sum(-1, keepdim=True)
 
 
+def attend_lazy(qf, k, v, qpos, pshift=0.0, pgrow=8.0, lq=False, vround=True, kround=True, pround=True):
+    """The kernel's softmax: 16-key steps, reference max m_ref moved only when a row exceeds it by more
+    than pgrow octaves, p = 2^(s - m_ref + pshift) packed e4m3, l sums p (lq: the packed p) in f32.
+    ponytail: the rescale decision is per row, the kernel's is per wave (wave_any) -- same m_ref values
+    for a row that triggers, a row that does not may keep an older (smaller) m_ref in the kernel."""
+    k = e4m3(k) if kround else k
+    v = e4m3(v) if vround else v
+    R = qf.shape[0]
+    m = torch.full((R, 1), -3.0e38)
+    acc, l = torch.zeros(R, v.shape[1]), torch.zeros(R, 1)
+    keys = torch.arange(k.shape[0])
+    for k0 in range(0, k.shape[0], 16):
+        s = (qf @ k[k0:k0 + 16].T).masked_fill(keys[None, k0:k0 + 16] > qpos[:, None], -math.inf)
+        rmax = s.amax(-1, keepdim=True)
+        up = rmax > m + pgrow
+        mnew = torch.where(up, torch.maximum(m, rmax).clamp_min(-3.0e38), m)
+        a = torch.exp2(m - mnew)
+        acc, l, m = acc * a, l * a, mnew
+        p = torch.exp2(s - m + pshift)
+        p8 = e4m3(p) if pround else p
+        l = l + (p8 if lq else p).sum(-1, keepdim=True)
+        acc = acc + p8 @ v[k0:k0 + 16]
+    return acc / l
+
+
 ARMS = {   # name: (q fold e4m3, K e4m3, P e4m3, V e4m3, K gain)
     "Q only": (1, 0, 0, 0, 1.0), "K only": (0, 1, 0, 0, 1.0), "P only": (0, 0, 1, 0, 1.0),
     "V only": (0, 0, 0, 1, 1.0), "kernel (all)": (1, 1, 1, 1, 1.0),

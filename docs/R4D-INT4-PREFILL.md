@@ -118,3 +118,27 @@ Go/no-go, one measure: extend `sly/bench_attn_r4d_vs_tetra.py` so the int4 libr4
 against the fp8 libr4d kernel at the same shapes. **If the int4 kernel is within ~1.15x of the fp8
 one at past 49152, the port goes ahead; above that, the unpack cost eats the gain and the work stops
 there.** Everything above that line is a plan, not a result.
+
+## Query fold: FOLDQ must stay OFF for the int4 route (measured 2026-10-23)
+
+`O_FOLDQ` multiplies `scale / HEAD * log2e` into the query **before** the e4m3 pack. That fold is right
+for the fp8 path (a ~0.1-0.5 query sits in e4m3's normal range) and wrong here: the query is stored as
+`rotate(q) / q_scale`, the kernel multiplies `q_scale` back in f32, and the extra `scale / 256` then
+pushes **98 % of the elements under 2^-6** — e4m3 subnormal, three bits or fewer, flushing to 0 at 2^-9.
+
+Measured on three dumped launches (python text, ctx 20445, q 4089, `R4D_KV4I_DUMP`, `sly/kv4/kv4i_offline.py`,
+fp32 truth rebuilt from the int4 bytes):
+
+| rounding alone (layer 47) | rel-L2 | | arm | rel-L2 L47 | rel-L2 L3 |
+|---|--:|---|---|--:|--:|
+| Q folded -> e4m3 | 4.5 % | | fold on (as shipped) | 6.2 % | 3.8 % |
+| K -> e4m3 (variant A) | 3.9 % | | fold off | **4.6 %** | **2.7 %** |
+| P -> e4m3 | 1.2 % | | | | |
+| V -> e4m3 | 0.9 % | | | | |
+
+The route output also **shrinks** (`|out| / |truth|` 0.988-0.991 against Tetra's 0.997-0.999) — a
+systematic loss of attention mass, which is what compounds over 16 full-attention layers instead of
+averaging out. With the fold off the shrink halves (signed radial error -0.0126 -> -0.0076 in layer 47).
+
+The launcher therefore builds `(P_OPT & ~O_FOLDQ) | O_QK8 | O_PV8 | O_DB | O_KV4I`; the fold's job
+(8 f32 multiplies per m-tile, `sc[e] = s[e] * mul`) is cheap and exact where it now happens.
