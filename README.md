@@ -64,11 +64,13 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1
 |---|---|---|---|---|
 | Date | **2026-10-23** | 2026-10-17 | 2026-10-07 | 2026-09-25 |
 | **Decode, single stream** (weighted) | **154.4 tok/s** | 149.6 | 135.8 | 133.2 |
+| Decode by category: code / json / math / file_edit / summarization / chat / reasoning / prose, tok/s | 186.5 / 210.8 / 191.4 / 173.4 / 144.0 / 131.9 / 107.5 / 90.5 | – | – | – |
+| update gap p99 / TTFT p50 (short prompts) | 35.0 ms / 57 ms | 35.7 ms / – | 35.2 ms / – | – |
 | **Prefill, prefill-only run**¹ 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | **3,927 / 3,965 / 3,890 / 3,692 / 3,370** | – | – | – |
 | **Prefill, inside the full run**² 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | 3,645 / 3,668 / 3,619 / 3,505 / 3,196 | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | 3,166 / 3,161 / – / 2,903 / 2,512 |
 | **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | **139 / 240 / 361 / 480 / 512** | 135 / 237 / 373 / 503 / 507 | 120 / 213 / 338 / 461 / 466 | 121 / 214 / 332 / 410 / 406 |
 | GSM8K 200 (greedy) | 0.82 | 0.845 | 0.84\* | 0.855 |
-| KV pool | 340,723 (65k context) | 439,031 (262k) | 436,906 (262k) | 384,316 (262k) |
+| **KV pool**, tokens (fp8 KV) | 340,723 (65k context) | 439,031 (262k); 767,557 with the opt-in KV4 cache | 436,906 (262k) | 384,316 (262k) |
 | Context / prefill chunk | 65,536 / 4,096 | 262,144 / 2,048 | 262,144 / 2,048 | 262,144 / 2,048 |
 | Checkpoint | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 | Quark MXFP4 |
 | Runs | 2 fresh starts, mean | 1 (+ c1/GSM8K window) | 1 | 1 |
@@ -92,21 +94,6 @@ cache, `--max-model-len 65536`, prefill chunk 4096 (`--max-num-batched-tokens`),
 `--no-async-scheduling`, GPU KV pool 340,723 tokens. Sampling in the benchmark: seed 42, temperature 0.7,
 top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 300 W and a voltage offset of
 -50 mV set with LACT, core clock offset 0 (both optional, see the launch example below).
-
-**Full BetterBench 0.4.0 at 300 W, 2026-10-23, two fresh starts (run a / run b).**
-
-| | **run a** | **run b** |
-|---|---|---|
-| Decode, single stream (weighted median) | **154.6 tok/s** | **154.1 tok/s** |
-| update gap p99 | 34.9 ms | 35.1 ms |
-| time to first token p50 (short prompts) | 57 ms | 57 ms |
-| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s | within 0.5 % of run a |
-| tokens per update (same order) | 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 | |
-| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 139 / 236 / 365 / 478 / 516 | 64\* / 244 / 357 / 481 / 508 |
-| Prefill 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens, tok/s (inside the full run) | 3,661 / 3,694 / 3,638 / 3,526 / 3,261 | 3,628 / 3,641 / 3,599 / 3,483 / 3,130 |
-| GSM8K 200 (greedy, flexible-extract) | 0.82 | 0.82 |
-
-\* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
 
 **Prefill-only run vs prefill inside the full run.** Both come from BetterBench 0.4.0 with the same protocol (2 warmup
 + 8 runs per depth, median) and the same prompts; the only difference is how BetterBench is started. The prefill-only
@@ -183,67 +170,9 @@ default, plus `RADIANCE_ATTN_Q_FP8=1`, `RADIANCE_MXFP4_TALL=1` (gate_up) and the
 reference stack **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**; PSW alone (vs the same stack without it) +2.4 .. +4.2 %.
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-### 1.5.1 (2026-10-17)
-
-Reference run of image **1.5.1** on 2026-10-17, 300 W (firmware fan curve), production arguments, BetterBench
-0.4.0 default config, Cactus delta 0.5 (the image default). Two arms: the fp8 KV cache with `R4D_HYBRID`, and the
-4-bit KV cache (`KVCACHE_DTYPE=kv4`, backend `TETRA`). The 1.0.0 column is the 1.0.0 reference run of 2026-10-07
-(300 W, same method, a different GPU window and day; details in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
-Decode, prefill and concurrency 2-16 were measured on the pre-release build `1.5.1-cactus-pr153` (same kernels, delta
-set by environment variable). Concurrency 1 and GSM8K come from a second window on the release image
-`1.5.1-rocm10.1`, after a GSM8K warm-up.
-
-| | **1.5.1 fp8 KV** | **1.5.1 KV4** | 1.0.0 | Δ fp8 | Δ KV4 |
-|---|---|---|---|---|---|
-| **Decode, single stream** (weighted) | **149.6 tok/s** | 145.2 tok/s | 135.8 tok/s | **+10.2 %** | +6.9 % |
-| update gap p50 / p99 | 34.6 / 35.7 ms | 34.8 / 35.9 ms | 34.4 / 35.2 ms | ± 0 | ± 0 |
-| tokens per update: code / reasoning / prose | 5.71 / 4.08 / 3.45 | 5.56 / 4.22 / 3.26 | 5.07 / 3.57 / 2.88 | +13 / +14 / +20 % | +10 / +18 / +13 % |
-| tokens per update: json / file_edit / summarization | 5.83 / 6.16 / 5.45 | 5.71 / 6.07 / 5.17 | 5.60 / 5.98 / 4.79 | +4 / +3 / +14 % | +2 / +2 / +8 % |
-| **Prefill** 1.5k / 6k / 12k / 24k / 47k prompt tokens | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,065 / 2,977 / 2,913 / 2,757 / 2,440 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | −3 / −3 / −4 / −6 / **−8 %** | −2 / −5 / −6 / −7 / **−7 %** |
-| time to first token, 47k tokens | 19.4 s | 19.3 s | 17.9 s | +8 % | +8 % |
-| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **135**\* / 237 / 373 / **503 / 507** tok/s | 134\* / 243 / 373 / 483 / 506 | 120 / 213 / 338 / 461 / 466 | +12 / +12 / +10 / **+9 / +9 %** | +11 / +14 / +10 / +5 / +8 % |
-| KV pool (262k context) | 439,031 tokens | **767,557 tokens** | 436,906 | +0.5 % | **+76 %** |
-| GSM8K 200 (greedy)\*\* | 0.845 | 0.855 | 0.84 | tie | tie |
-
-\* Concurrency 1, warm engine, release image: fp8 136.2 and 133.7 tok/s in two runs (mean 135, TTFT p50 88 ms,
-p99 121 ms); KV4 133.7 from the first window. The first fp8 run in that window gave 115 tok/s with a TTFT p99 of
-2.7 s because its first requests ran cold, so it was discarded.
-
-\*\* lm-eval `gsm8k_cot_zeroshot`, 200 questions, `temperature=0`, 16 concurrent requests, flexible-extract,
-standard error 0.026 (so all three values tie). Run at 300 W on the release image; the 200 requests took 1:31
-(fp8) and 1:29 (KV4) minutes. The 1.0.0 value was taken at 210 W. Cactus leaves greedy requests untouched, so this
-figure checks the engine and the KV format, not delta 0.5.
-
-What that means: the gain over 1.0.0 is acceptance (Cactus), not speed. The step time is unchanged, tokens per
-update rise by 2-20 %, and decode and concurrency 2-16 follow. KV4 gives up about 3 % decode against fp8 and
-gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that run was taken in another window
-and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
-The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
-
-### 0.4.0 (2026-09-25, Quark checkpoint, 300 W and 210 W)
-
-Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
-(`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
-BetterBench 0.4.0 default config: single-stream decode
-3 warmup + 20 passes per category, prefill sweep with unique prompts, concurrency 1–16 × 48 requests,
-sampling temperature 0.7 / top_p 0.95 / top_k 20. Two power settings, no other traffic:
-**300 W** (firmware fan curve) and **210 W** (fan capped at 2,800 rpm, what this card runs 24/7).
-
-| | 300 W | 210 W |
-|---|---|---|
-| **Decode, single stream** (weighted over 8 task categories) | **133.2 tok/s** | 124.5 tok/s |
-| step gap (one target forward + draft) | 34.8 ms | 37.0 ms |
-| **Prefill** 1.5k / 6k / 24k / 47k prompt tokens | **3,166 / 3,161 / 2,903 / 2,512** tok/s | 2,527 / 2,498 / 2,311 / 2,027 tok/s |
-| time to first token, 1.5k / 47k tokens | 0.48 s / 18.7 s | 0.60 s / 23.2 s |
-| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **121 / 214 / 332 / 410 / 406** tok/s | 111 / 197 / 312 / 362 / 369 tok/s |
-| GSM8K (200, cot zero-shot, greedy) | 0.855 ± 0.025 | |
-| board power / junction / fan (avg) | 296 W / 98 °C / 3,710 rpm | 210 W / 93 °C / 2,321 rpm |
-
-What that means: code, JSON, math and edits decode at 140–175 tok/s (the drafter lands 5–6 tokens per step),
-free prose at ~85; long contexts stay fast (99k tokens of context cost ~7 ms per step instead of 83).
-Per-category tables, the measurement method and every earlier release are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md). Decode differences below ~5 % between single runs are noise;
-see there for why.
+Per-category tables, the measurement method and every earlier release (incl. the 1.5.1 KV4 arm and the old 300 W /
+210 W comparison) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Decode differences below ~5 % between single
+runs are noise; see there for why.
 
 ## Quickstart
 
@@ -303,7 +232,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 - **First start** compiles kernels and CUDA graphs (~10 min) and reports a ~2 GiB smaller KV pool;
   **restart once** — the warm start takes 4–6 min and gets the full 436k-token KV pool. Keep the cache
   volumes.
-- **Power:** 210 W costs ~6.5 % decode and ~20 % prefill against 300 W (table above). The card allows
+- **Power:** 210 W costs ~6.5 % decode and ~20 % prefill against 300 W ([0.4.0 measurement](docs/BENCHMARKS.md#earlier-readme-reference-runs)). The card allows
   up to 330 W: +4 … +8 % prefill and ~+1 % step time over 300 W, but the junction runs at 102 °C average
   (106 °C peak) and the fan at ~4,200 rpm — not worth it for 24/7 use.
 - **iGPU:** `HIP_VISIBLE_DEVICES=0` keeps ROCm off an integrated GPU next to the R9700.
@@ -360,7 +289,7 @@ measurements. For a long-context or multi-turn setup use the [quickstart](#quick
 262k context) instead; the two trade prefill speed for cache reuse.
 
 **Optional host tuning** (not part of the image, measured with it): power cap 300 W (LACT), voltage offset -50 mV (LACT), core clock offset 0. The first is worth ~20 % prefill over 210 W
-(table above); check the junction temperature after changing the voltage offset.
+([docs/BENCHMARKS.md](docs/BENCHMARKS.md#earlier-readme-reference-runs)); check the junction temperature after changing the voltage offset.
 
 ## What this image changes, and why
 
@@ -470,7 +399,7 @@ KV pool (~326k tokens) still holds two full 131k requests. Measured with image 0
 | 131072 / 8192 | 3,367 / 3,486 / 3,290 / 3,022 / 2,579 | ~282k |
 
 Decode and concurrency are unchanged within noise. (These are prefill-only sweeps, which read ~5 % higher
-than the prefill phase of the full run in the table above; compare within one table.)
+than the prefill phase of the full run; compare within one table.)
 
 ### KV-cache offload (opt-in, off by default)
 
