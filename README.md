@@ -64,7 +64,8 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1
 |---|---|---|---|---|
 | Date | **2026-10-23** | 2026-10-17 | 2026-10-07 | 2026-09-25 |
 | **Decode, single stream** (weighted) | **154.4 tok/s** | 149.6 | 135.8 | 133.2 |
-| **Prefill** 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | **3,645 / 3,668 / 3,619 / 3,505 / 3,196** | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | 3,166 / 3,161 / – / 2,903 / 2,512 |
+| **Prefill, prefill-only run**¹ 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | **3,927 / 3,965 / 3,890 / 3,692 / 3,370** | – | – | – |
+| **Prefill, inside the full run**² 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | 3,645 / 3,668 / 3,619 / 3,505 / 3,196 | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | 3,166 / 3,161 / – / 2,903 / 2,512 |
 | **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | **139 / 240 / 361 / 480 / 512** | 135 / 237 / 373 / 503 / 507 | 120 / 213 / 338 / 461 / 466 | 121 / 214 / 332 / 410 / 406 |
 | GSM8K 200 (greedy) | 0.82 | 0.845 | 0.84\* | 0.855 |
 | KV pool | 340,723 (65k context) | 439,031 (262k) | 436,906 (262k) | 384,316 (262k) |
@@ -76,10 +77,13 @@ All columns: one R9700 at 300 W, fp8 KV cache, DFlash2 k = 7, BetterBench 0.4.0 
 passes per category, 8 prefill runs per depth, 48 requests per concurrency level), T 0.7 / top_p 0.95 / top_k 20.
 1.8.0 runs at a 65k context with a 4,096 prefill chunk; the older columns used the 262k production context with a
 2,048 chunk, which is part of the prefill difference. GSM8K standard error is ±0.026, so all values tie.
-1.8.0 concurrency 1 is run a only (run b: 64, cold first requests). \* 1.0.0 GSM8K at 210 W. Full per-release tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+¹ `betterbench --prefill 2000,8000,16000,32000,64000` on a freshly started server: 2 warmup + 8 runs per depth, median,
+2 runs, 2026-10-22 night (the same-conditions comparison with the reference stack below). ² The prefill phase of the
+full BetterBench run (phase order decode -> prefill -> concurrency, same 2 + 8 runs, same prompts), after the decode phase
+on the same server; mean of the 2026-10-23 runs a and b. The older releases were only measured
+this way, so compare them with row ². 1.8.0 concurrency 1 is run a only (run b: 64, cold first requests). \* 1.0.0 GSM8K at 210 W. Full per-release tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### 1.8.0 (2026-10-23)
-
 
 **Test environment (all 1.8.0 numbers below).** One AMD Radeon AI PRO R9700 (32 GB), in an LXC container on
 Proxmox, ROCm 10.1 image `1.8.0-rocm10.1` (`1.6.0-rocm10.1` plus bind-mounted 1.8.0 kernels in the earlier A/B
@@ -104,11 +108,24 @@ top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 30
 
 \* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
 
-Prefill inside the full run is lower than the dedicated prefill sweep (next subsection) because it is the last phase of the
-run, on a card that is already hot.
+**Prefill-only run vs prefill inside the full run.** Both come from BetterBench 0.4.0 with the same protocol (2 warmup
++ 8 runs per depth, median) and the same prompts; the only difference is how BetterBench is started. The prefill-only
+run (`--prefill`) hits a freshly started server; inside the full run the prefill phase follows the
+single-stream decode phase on the same server. The full-run prefill is 5-7 % lower (2K: 3,645 vs 3,927), and the gap
+reproduces at 210 W (-9 %). The junction temperature under load is the same in both (106-108 °C), so heat alone
+does not explain it; the leading candidates are the server state after decode (allocator / KV block layout) and the
+cold card at the start of a prefill-only run. Not resolved yet. Use the prefill-only numbers to compare with the
+reference stack (measured the same way) and the full-run numbers to compare with older releases.
 
-**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, harness prefill
-phase), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
+| Prefill, tok/s (300 W) | 2K | 8K | 16K | 32K | 64K |
+|---|---|---|---|---|---|
+| prefill-only run, 2026-10-22 night (2 runs) | **3,927** | **3,965** | **3,890** | **3,692** | **3,370** |
+| prefill-only run, 2026-10-23 (2 runs) | 3,916 | 3,916 | 3,780 | 3,559 | 3,251 |
+| inside the full run, 2026-10-23 (2 runs) | 3,645 | 3,668 | 3,619 | 3,505 | 3,196 |
+
+Real prompt tokens per nominal depth: 1,515 / 5,918 / 11,794 / 23,543 / 47,056.
+
+**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, prefill-only run), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
 reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396, i.e. **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**.
 
 **Scheduling.** `--no-async-scheduling` stays the default: in the 210 W ABBA of 2026-10-22 it gave prefill
