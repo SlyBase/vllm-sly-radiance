@@ -166,3 +166,33 @@ against Tetra's 54 %) — Tetra's error is *larger* on average and harmless, so 
 the property that predicts model damage. Next diagnostic: dump several consecutive full-attention layers
 of one run and measure whether the errors are aligned across layers (compounding), which needs the
 16-layer dump rather than another rounding fix.
+
+## Verdict (2026-10-23): the route is not salvageable, drop it
+
+Measured on the dumps (python text, ctx 20445, fp32 truth rebuilt from the int4 bytes, 256 rows, all
+24 heads; `data/offline_rel_l2.txt`):
+
+| layer | arm | rel-L2 | bias (share of error energy in the row mean) | error projected on the output |
+|---|---|--:|--:|--:|
+| 3 | Tetra | 3.6 % | 0.33 % | -0.0031 |
+| 3 | route | 3.8 % | **1.96 %** | **-0.0119** |
+| 47 | Tetra | 7.8 % | 0.06 % | -0.0047 |
+| 47 | route | 6.2 % | **1.92 %** | **-0.0134** |
+| 55 | Tetra | 9.0 % | 0.11 % | -0.0056 |
+| 55 | route | 6.8 % | **0.86 %** | **-0.0084** |
+
+The route's error is 6-30x more *coherent* than the incumbent's: a part of it is the same on every query
+row and damps the attention output. A white error of the same size averages out over 20k keys and 16
+layers; a coherent one is added at every position of every layer. That is why a smaller rel-L2 can be
+far worse, and it is why the two rounding fixes (fold, packed-P denominator) moved rel-L2 by 25 % and
+the gate by nothing.
+
+Also ruled out on the dumps: cross-layer alignment of the errors is absent (cos ~0.01 between layers,
+shuffle null 0.00), repetition/copying/rare tokens are *more* common in cpp (which is unharmed), and
+python scored alone in a fresh engine still gives ppl 18.4, so it is not cache or request order.
+
+The mechanism is variant A itself: `rne_e4m3(code * s_token)` cannot hold 3 bits of code times a per-token
+scale in a 3-bit-mantissa byte without a deterministic grid distortion, which is the same for every row.
+The exact alternative stages f16 (exactly representable) and runs the f16 WMMA legs, i.e. it loses the
++8.1 % and becomes another kernel than the one that was ported. Recommendation: keep PR #183 (start fix,
+contract check), keep `[kv4i-check]` with **bias / shrink** next to rel_l2 (added), drop the route.

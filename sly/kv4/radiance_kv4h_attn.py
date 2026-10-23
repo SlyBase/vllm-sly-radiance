@@ -266,10 +266,23 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             sys.stderr.write(f"[kv4i-dump] {name}.{i - 1}.pt n={n} ctx={int(m.max_seq_len)}\n")
         if check:
             _KV4I_CHECKED[0] += 1
+            assert ref is not None
             d = output[:n].float() - ref.float()
-            sys.stderr.write("[kv4i-check] %s n=%d ctx=%d rel_l2=%.4f max_abs=%.3f ref_absmax=%.3f qrot_amax=%.1f\n" % (
-                getattr(layer, "layer_name", "?"), n, int(m.max_seq_len), float(d.norm() / ref.float().norm()),
-                float(d.abs().max()), float(ref.float().abs().max()), float(F.rotate(query[:n].float()).abs().max())))
+            # rel_l2 alone cannot rank two kernels: a smaller error can still be far worse if it is
+            # coherent (the same direction on every row) instead of noise. bias = the share of the error
+            # energy that sits in the row mean (over all rows: the component that does not average out
+            # across keys), shrink = the error projected onto the reference output (a systematic damping
+            # of the attention output). Measured on the python dumps: Tetra 0.06-0.33 % / -0.003-0.005,
+            # the int4 route 0.9-2.0 % / -0.008-0.013 -- and the route is the one that breaks the model.
+            e = d.reshape(n, -1)
+            bias = float(e.mean(0).pow(2).sum() / e.pow(2).sum(-1).mean())
+            shrink = float(((d * ref.float()).sum() / ref.float().pow(2).sum()))
+            sys.stderr.write(
+                "[kv4i-check] %s n=%d ctx=%d rel_l2=%.4f max_abs=%.3f ref_absmax=%.3f qrot_amax=%.1f"
+                " bias=%.4f shrink=%+.4f\n" % (
+                    name, n, int(m.max_seq_len), float(d.norm() / ref.float().norm()),
+                    float(d.abs().max()), float(ref.float().abs().max()),
+                    float(F.rotate(query[:n].float()).abs().max()), bias, shrink))
             sys.stderr.flush()
         _kv4i_say("route", f"[kv4i] prefill runs >= {KV4I_MIN_Q} tokens at context >= {KV4I_MIN_CTX} go to "
                            f"libr4d int4 (head 256, K group 256, block {KV4I_BLOCK}); decode, verify and the "

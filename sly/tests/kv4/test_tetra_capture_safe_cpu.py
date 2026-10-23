@@ -198,3 +198,35 @@ def test_the_dump_writes_one_launch_with_its_reference(attn, monkeypatch, tmp_pa
     assert d["ref"].float().eq(3).all() and d["out_rot"].shape == (512, 24, 256)
     assert d["scale"] == pytest.approx(0.0625) and d["q_scale"] == pytest.approx(attn.KV4I_QGAIN)
     assert d["seq_lens"].tolist() == [1700] and d["query_start_loc"].tolist() == [0, 512]
+
+
+def test_the_check_line_reports_bias_and_shrink(attn, monkeypatch, capsys):
+    """rel_l2 alone cannot rank two kernels against a model: a coherent error (the same direction on
+    every row) does not average out over keys and layers, a white one does. The check must report the
+    row-mean share (bias) and the projection onto the reference (shrink) next to rel_l2."""
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
+    monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: None)
+    monkeypatch.setattr(attn, "KV4I_CHECK", 1)
+    monkeypatch.setattr(attn, "_KV4I_CHECKED", [0])
+    monkeypatch.setattr(attn._r4d, "set_q_fp8", lambda s: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: types.SimpleNamespace(cuda_stream=0))
+    monkeypatch.setattr(attn, "kv4h_attention", lambda *a, output, **k: output.fill_(1))   # ref = 1
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 0.0625
+    impl._kv4i_scratch = None
+    impl._kv4i_dumped = None
+    kv = torch.zeros(1, 4, 1664, 272, dtype=torch.uint8)
+    meta = types.SimpleNamespace(
+        num_actual_tokens=512, max_query_len=512, max_seq_len=1024, causal=True,
+        query_start_loc=torch.tensor([0, 512], dtype=torch.int32),
+        seq_lens=torch.tensor([1024], dtype=torch.int32), block_table=torch.tensor([[0]], dtype=torch.int32))
+    # the routed output is 1 on even rows and 3 on odd ones against a constant ref of 1: the error is
+    # +2 on half the rows and 0 on the other half, so exactly half its energy sits in the row mean
+    # (bias 0.5, shrink +1.0) -- a white error of the same size would score bias ~0.
+    out = torch.zeros(512, 24, 256, dtype=torch.bfloat16)
+    monkeypatch.setattr(attn.F, "unrotate", lambda t: torch.ones_like(t) + (torch.arange(t.shape[0]) % 2).view(-1, 1, 1) * 2)
+    impl.forward(types.SimpleNamespace(layer_name="x"), torch.randn(512, 24, 256), None, None, kv, meta, out)
+    line = capsys.readouterr().err
+    assert "bias=0.5000" in line and "shrink=+1.0000" in line, line
