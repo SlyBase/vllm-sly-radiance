@@ -13,7 +13,7 @@ index e5a827a..4613aa3 100644
  // Bytes of split-KV partial buffer one decode launch of this shape needs. Independent of the cache
  // dtype: the partials are f16 either way.
 diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
-index a10d16c..ae925d6 100644
+index a10d16c..aff8ccb 100644
 --- a/r4d_attn_paged_h256_gqa6.hip
 +++ b/r4d_attn_paged_h256_gqa6.hip
 @@ -136,6 +136,40 @@ extern "C" int r4d_attn_prefill_h256_gqa6_bf16kv(const R4DArgs* a, hipStream_t s
@@ -58,7 +58,7 @@ index a10d16c..ae925d6 100644
  #define D_TILE 16
  #define D_OPT  3430971
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 090be45..c8014fa 100644
+index 090be45..45697d7 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
 @@ -107,6 +107,18 @@
@@ -193,6 +193,33 @@ index 090be45..c8014fa 100644
          if (PART && warp >= TILE / 2) return;
          {
              const int kg = warp / DG, dg = warp - kg * DG;
+@@ -593,13 +683,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+             for (int e = 0; e < 8; ++e) {
+                 const float p = ex2(sc[e] + off);
+                 pf[e] = p;
+-                if (!DOT2) lsum += p;
++                if (!DOT2 && !KV4I) lsum += p;
+             }
+-            if (!DOT2) l_i += lsum;
++            if (!DOT2 && !KV4I) l_i += lsum;
+ 
+             if constexpr (PV8) {
+                 const v2i32_r4d p8 = (v2i32_r4d){(int)pk_fp8x4(pf[0], pf[1], pf[2], pf[3]),
+                                                  (int)pk_fp8x4(pf[4], pf[5], pf[6], pf[7])};
++                if constexpr (KV4I) {
++                    // The denominator must sum the PACKED p, not the exact one: with an exact l the
++                    // numerator loses every p that rounds to 0 (or down) while l keeps it, so the
++                    // output shrinks -- -1.3 % per layer, compounding over 16 layers (offline
++                    // emulation: |out|/|truth| 0.9888 -> 1.0032 with l from the e4m3 bytes).
++                    const v2f b0 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.x, false);
++                    const v2f b1 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.x, true);
++                    const v2f b2 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.y, false);
++                    const v2f b3 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.y, true);
++                    l_i += b0.x + b0.y + b1.x + b1.y + b2.x + b2.y + b3.x + b3.y;
++                }
+                 const uint8_t* vbase8 = &rV8[c * VSTR8 + mt * 16 + 8 * h];
+                 #pragma unroll
+                 for (int g = 0; g < NKS; g += PF) {
 diff --git a/r4d_module.hip b/r4d_module.hip
 index b16b4a0..e4d5b4c 100644
 --- a/r4d_module.hip
