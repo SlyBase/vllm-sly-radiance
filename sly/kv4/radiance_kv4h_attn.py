@@ -180,8 +180,8 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             return "R4D_KV4I unset"
         if torch.cuda.is_current_stream_capturing():
             return "graph capture"
-        nseq = int(m.seq_lens.shape[0])
-        runs = (m.query_start_loc[1 : nseq + 1] - m.query_start_loc[:nseq]).tolist()
+        # Python ints only: this runs in every attention layer of every step, and a device->host read
+        # here is a stream sync per layer (equal query lengths <=> tokens == seqs * longest query).
         return R4.decline(
             enabled=KV4I_ON, has_entry=KV4I_ENTRY is not None,
             head=int(self.head), k_group=int(H.GROUP),
@@ -194,7 +194,8 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             out_dtype=str(output.dtype).replace("torch.", ""),
             capturing=False,   # already declined above, before the host copy
             max_query_len=int(m.max_query_len), max_seq_len=int(m.max_seq_len),
-            runs=runs, min_q=KV4I_MIN_Q, min_ctx=KV4I_MIN_CTX,
+            num_tokens=int(m.num_actual_tokens), num_seqs=int(m.seq_lens.shape[0]),
+            min_q=KV4I_MIN_Q, min_ctx=KV4I_MIN_CTX,
         )
 
     def _kv4i_block_table(self, m) -> torch.Tensor:

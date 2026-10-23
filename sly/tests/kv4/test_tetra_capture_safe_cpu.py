@@ -63,6 +63,32 @@ def attn(monkeypatch):
     return mod
 
 
+def _meta(max_query_len, max_seq_len, n=8, nseq=2):
+    t = lambda *s, dtype=torch.int32: torch.zeros(*s, dtype=dtype).as_subclass(HostRead)
+    return types.SimpleNamespace(
+        num_actual_tokens=n, max_query_len=max_query_len, max_seq_len=max_seq_len, causal=True,
+        query_start_loc=t(nseq + 1), seq_lens=t(nseq), block_table=t(nseq, 4), slot_mapping=t(n))
+
+
+def test_a_declined_launch_reads_no_device_value_at_all(attn, monkeypatch):
+    """Not only during capture: every attention layer of every step goes through the guard, so one
+    device->host read in it is a stream sync per layer (measured: -8 % prefill at 1.5k with the route
+    ON but declining). The guard must decide from Python ints alone."""
+    calls = []
+    monkeypatch.setattr(attn, "kv4h_attention", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_ENTRY", object())
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 1.0
+    kv = torch.zeros(1, 4, 1664, 272, dtype=torch.uint8)
+    out = torch.zeros(4096, 24, 256, dtype=torch.bfloat16)
+    # a long first chunk at shallow context (declined on context), and a deep ragged one (declined on shape)
+    for meta in (_meta(4096, 4096, n=4096, nseq=1), _meta(4096, 49152, n=4100, nseq=2)):
+        impl.forward(None, torch.zeros(meta.num_actual_tokens, 24, 256), None, None, kv, meta, out)
+    assert len(calls) == 2
+
+
 def test_forward_reads_no_host_value_during_capture(attn, monkeypatch):
     calls = []
     monkeypatch.setattr(attn, "kv4h_attention", lambda *a, **k: calls.append(k))

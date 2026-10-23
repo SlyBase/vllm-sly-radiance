@@ -22,8 +22,8 @@ MIN_CTX_DEFAULT = 16384
 
 
 def decline(*, enabled, has_entry, head, k_group, cache_block, cache_shape_ok, cache_strides_ok,
-            window, causal, fused_out, out_dtype, capturing, max_query_len, max_seq_len, runs, min_q,
-            min_ctx) -> str | None:
+            window, causal, fused_out, out_dtype, capturing, max_query_len, max_seq_len, num_tokens,
+            num_seqs, min_q, min_ctx) -> str | None:
     """Why the launch must stay on TetraAttention, or None when libr4d takes it. First hit wins."""
     if not enabled:
         return "R4D_KV4I unset"
@@ -53,13 +53,13 @@ def decline(*, enabled, has_entry, head, k_group, cache_block, cache_shape_ok, c
         return f"max query length {max_query_len} < {min_q}"
     if max_seq_len < min_ctx:
         return f"context {max_seq_len} < {min_ctx} keys (the route's rotation costs more than it wins)"
-    if not runs:
+    if not num_seqs:
         return "no query runs"
-    lo, hi = min(runs), max(runs)
-    if lo < min_q:
-        return f"a sequence carries {lo} < {min_q} new tokens"
-    if lo != hi:
-        return f"ragged query lengths {lo}..{hi} (the kernel takes one q_len per launch)"
+    # every run <= max_query_len, so the total equals seqs * max_query_len only if ALL runs are equal
+    # to it (and max_query_len >= min_q was checked above): no device read needed
+    if num_tokens != num_seqs * max_query_len:
+        return (f"ragged or short query runs ({num_tokens} tokens in {num_seqs} sequences, longest "
+                f"{max_query_len}; the kernel takes one q_len per launch)")
     return None
 
 
