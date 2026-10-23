@@ -1,6 +1,7 @@
 # Reading the int4 (KV4) cache in the libr4d prefill attention kernel — design
 
-Status: design + CPU-verified helpers. No kernel is wired, nothing is dispatched, no speed is claimed.
+Status: design + CPU-verified helpers + a compiled, gated-off kernel variant (`O_KV4I`, `sly/r4d/r4d_kv4i.patch`; see
+"What is written" below). Nothing is dispatched, nothing has run on a GPU, no speed is claimed.
 Measured reason for the work, at 210 W and 300 W, is in
 [BENCHMARKS.md](BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23).
 
@@ -76,15 +77,26 @@ Written and CPU-verified (`sly/tests/kv4/test_kv4i_unpack_cpu.py`, host compiler
 signed nibble split, the exact 16-code LUT, e4m3 RNE encoding/saturation, and the scaled variant A
 byte.
 
-TODO, all of it needing the GPU gate before it is worth writing:
+Written as of the `O_KV4I` patch (compile-gated, never run on a GPU): the LDS staging, the nibble → e4m3 unpack, the V
+dim-major gather and the K group-256 case. `r4d.attn_prefill_h256_gqa6_int4kv` (needs `R4D_KV4I=1`) runs the
+double-buffered byte legs; only `fetchKV`/`storeKV` differ (`sly/r4d/r4d_kv4i.patch`). What it does:
 
-- the LDS staging of the packed cells (the byte-tile strides `KSTR8`/`VSTR8` do not match the KV4
-  region layout; a tile is `16 tokens x 128 B` inside a `block_size x 136 B` region),
-- the `v_perm_b32` pair split that turns one packed byte into two e4m3 bytes in element order,
-- the V dim-major → B-operand gather (16 consecutive tokens of one dim are contiguous today, which
-  the iu8 product wants; the byte legs assume the token-major layout),
-- the K scale-group chain (1, 2 or 4 groups per token) and the `O_KV4I` OPT bit that gates all of it
-  off by default.
+- the block table holds 16-token **group** ids (block × 104 + group), strides are bytes; one scalar base per wave plus a
+  32-bit lane offset;
+- K: a thread takes 16 dims of one key = 8 nibble bytes + that key's scale; unpack is `bfe` (signed nibble) +
+  `v_cvt_f32_i32` + `v_mul_f32` by the scale + `v_cvt_pk_fp8_f32` = 3.5 VALU per element, one rounding (the exact-code
+  LUT would still need byte → f32 → mul → e4m3 for variant A, so it is not cheaper);
+- V: a thread takes byte row d of 8 tokens (low nibble → row d, high → row d + 128) and those 8 token scales, held in
+  SGPRs (a VGPR copy spilled); tokens ≥ ctx get scale 0 (stale NaN scales must not reach P·V);
+- QK, softmax, PV and the `O_QF8` query path are the shipped `O_QK8|O_PV8` code.
+
+Compile gate (`ci/kv4i_compile_gate.py`): all 30 shipped kernels of the attention unit instruction-identical, the new
+tile 16/32/48 instances spill-free at 211–216 VGPR. CPU proof of the staged bytes:
+`sly/tests/kv4/test_kv4i_stage_cpu.py`. Not covered: hardware rounding of `v_cvt_pk_fp8_f32` against torch for the
+scaled products, accuracy against the fp32 reference, and any speed.
+
+Still TODO, needing the GPU gate: the `--kv4i` arm of `sly/bench_attn_r4d_vs_tetra.py` (go/no-go below), K scale groups
+128 / 64, block sizes other than 1664, and the engine routing in `TetraAttentionImpl.forward`.
 
 ## Accuracy gate (decides the port, not the speed)
 

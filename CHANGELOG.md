@@ -35,6 +35,13 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   pure-C++ half is written and CPU-tested (`sly/kv4/kv4i_unpack.h`,
   `sly/tests/kv4/test_kv4i_unpack_cpu.py`: signed nibble split, the exact 16-code LUT, e4m3
   round-to-nearest-even against torch for all codes and a scale grid). Nothing is dispatched.
+- **`O_KV4I`, the HIP half of the int4 prefill read, compiles but dispatches nowhere**
+  (`sly/r4d/r4d_kv4i.patch`, applied third in the kernels stage; new `r4d.attn_prefill_h256_gqa6_int4kv`, refuses to run
+  without `R4D_KV4I=1`, K scale group 256 only). Only the load + unpack stage is new (nibbles → `rne_e4m3(code × token scale)`
+  bytes in the existing byte tiles); every shipped libr4d instance is instruction-identical (`ci/kv4i_compile_gate.py`),
+  the new tile 16/32/48 instances compile without spill, the staged byte stream is checked on CPU
+  (`sly/tests/kv4/test_kv4i_stage_cpu.py`). Not run on a GPU, no speed or accuracy claim, no engine routing;
+  `sly/bench_attn_r4d_vs_tetra.py --kv4i` is the go/no-go measurement still to be taken.
 - `VERSION` 1.8.0 → 1.8.1.
 
 ## [1.8.0] - 2026-10-23

@@ -16,6 +16,13 @@ heads, head 256, GQA 6), one sequence, cuda events, median of --reps after warmu
            HIP kernel, un-rotate into the output), block 1664, cache written by kv4h_store; and the HIP
            launch alone (same q8 / descale / knobs, re-launched).
 
+  C  kv4i  (--kv4i, optional) the int4 libr4d prefill kernel (r4d.attn_prefill_h256_gqa6_int4kv, O_KV4I) on the SAME
+           int4 cache as B (block 1664, read as 104 x 16-token groups), e4m3 query, kernel launch only (q is
+           rotated once outside the timing, like B's `kernel` figure). Prints C/A and C/B(kernel) and the
+           go/no-go line: C/A <= 1.15 at the deepest past => the int4 prefill port goes ahead
+           (docs/R4D-INT4-PREFILL.md). Skipped when the image's r4d.so has no int4 entry. Needs R4D_KV4I=1
+           (set here) and, for the fp8 arm's tile, R4D_ATTN_TILE (shared: both kernels run at the same tile).
+
   # inside a container of the runtime image, repo mounted at /w (sly/ and sly/kv4/ found via sys.path)
   python3 /w/sly/bench_attn_r4d_vs_tetra.py
   python3 /w/sly/bench_attn_r4d_vs_tetra.py --tile 16
@@ -36,6 +43,7 @@ NQ, NKV, HEAD = 24, 4, 256
 BS_FP8, BS_INT4 = 880, 1664          # production attention blocks: fp8 KV (fp16 ssm state), int4 cells
 IMAGE_ENV = {"R4D_ATTN_FP8": "3", "R4D_ATTN_DB": "1", "R4D_ATTN_TILE": "16", "RADIANCE_ATTN_Q_FP8": "1"}
 THRESHOLD = 1.3
+KV4I_THRESHOLD = 1.15          # docs/R4D-INT4-PREFILL.md go/no-go: int4 kernel / fp8 kernel at the deepest past
 dev = "cuda"
 
 
@@ -53,6 +61,15 @@ def verdict(ratios: dict, threshold: float = THRESHOLD) -> str:
     if r > threshold:
         return f"VERDICT: tetra {r:.2f}x r4d at past {deep} > {threshold}x -> attention explains the gap, port worth it"
     return f"VERDICT: tetra {r:.2f}x r4d at past {deep} <= {threshold}x -> attention alone does not explain the gap"
+
+
+def verdict_kv4i(ratios: dict, threshold: float = KV4I_THRESHOLD) -> str:
+    """ratios: past -> int4 libr4d / fp8 libr4d time. Judged at the deepest past."""
+    deep = max(ratios)
+    r = ratios[deep]
+    if r <= threshold:
+        return f"KV4I VERDICT: int4 libr4d {r:.2f}x fp8 libr4d at past {deep} <= {threshold}x -> port goes ahead"
+    return f"KV4I VERDICT: int4 libr4d {r:.2f}x fp8 libr4d at past {deep} > {threshold}x -> the unpack cost eats the gain, stop"
 
 
 def ints(s: str) -> list:
@@ -144,6 +161,40 @@ def tetra_arm(q, k, v, seq, chunk, scale, knobs):
     return fn, kernel, output, c
 
 
+def kv4i_arm(q, k, v, seq, chunk, scale, q_scale, entry):
+    """-> (fn, out_rot). The int4 libr4d prefill on the Tetra cache. K/V are stored rotated, so the query is
+    rotated (q @ R, magnitude x16) and the kernel scale is scale / HEAD, exactly as TetraAttention does;
+    out_rot is the ROTATED output (`kv4i_unrotate` gives the attention output for --check)."""
+    import torch
+    import radiance_kv4_format as F4
+    import radiance_kv4h_format as H
+    import radiance_r4d_hybrid_attn as HY
+    from radiance_kv4h_store import kv4h_store
+    assert H.GROUP == 256, "O_KV4I unpacks K scale group 256 only (RADIANCE_KV4H_K_GROUP)"
+    nb = -(-seq // BS_INT4)
+    cache = torch.zeros(nb + 1, NKV, BS_INT4, 2 * H.TPT, dtype=torch.uint8, device=dev)
+    kv4h_store(k, v, cache, torch.arange(BS_INT4, BS_INT4 + seq, device=dev, dtype=torch.int64))
+    gpb = BS_INT4 // 16                                          # 16-token groups per block (104)
+    table = (torch.arange(nb * gpb, device=dev) + gpb).view(1, -1).to(torch.int32)   # block 0 is the null block
+    table = torch.nn.functional.pad(table, (0, 3))      # the last tile's prefetch reads up to 3 entries past the end
+    seq_lens = torch.tensor([seq], dtype=torch.int32, device=dev)
+    query = (F4.rotate(q.float()) / q_scale).to(torch.float8_e4m3fn)
+    out = torch.empty(chunk, NQ, HEAD, dtype=torch.bfloat16, device=dev)
+    scratch = torch.empty(256, dtype=torch.uint8, device=dev)
+
+    def fn():
+        qk = HY._q_kernel(query, q_scale)
+        entry(qk.data_ptr(), cache.data_ptr(), table.data_ptr(), seq_lens.data_ptr(), out.data_ptr(), 0, 0,
+              scratch.data_ptr(), 1, chunk, NQ, NKV, HEAD, 16, table.shape[1], cache.stride(0), cache.stride(1),
+              scale / HEAD, 0, seq, torch.cuda.current_stream().cuda_stream, 256)
+    return fn, out
+
+
+def kv4i_unrotate(out_rot):
+    import radiance_kv4_format as F4
+    return F4.unrotate(out_rot.float())
+
+
 def reference(q, k, v, past, scale):
     """fp32 SDPA of the chunk (query rows at positions past..past+chunk-1), one q head at a time."""
     import torch
@@ -171,19 +222,28 @@ def main():
     ap.add_argument("--q-scale", type=float, default=1.0, help="the layer's static q scale (_q_scale_float)")
     ap.add_argument("--tile", type=int, default=0, help="TetraAttention tokens per tile (0 = env / tune table)")
     ap.add_argument("--no-tune", action="store_true", help="skip installing sly/radiance_attn_decode (production has it)")
+    ap.add_argument("--kv4i", action="store_true", help="arm C: the int4 libr4d prefill kernel (skipped if the image has none)")
     ap.add_argument("--check", action="store_true", help="also compare both outputs to an fp32 SDPA reference")
     a = ap.parse_args()
     for kk, vv in IMAGE_ENV.items():          # before libr4d's first launch: R4D_ATTN_FP8 is read once
         os.environ.setdefault(kk, vv)
     import torch
     from bench_kv4_attn import timeit
+    entry = None
+    if a.kv4i:
+        import r4d
+        entry = getattr(r4d, "attn_prefill_h256_gqa6_int4kv", None)
+        if entry is None:
+            print("--kv4i: this image's r4d.so has no attn_prefill_h256_gqa6_int4kv -> arm C skipped")
+        else:
+            os.environ["R4D_KV4I"] = "1"
     if not a.no_tune:
         import radiance_attn_decode as T
         print("decode tune installed:", T.install())
     print("device:", torch.cuda.get_device_name(), "env:", {kk: os.environ[kk] for kk in IMAGE_ENV},
           "tile:", a.tile or "default")
     scale = 1.0 / math.sqrt(HEAD)
-    ratios = {}
+    ratios, ratios_c = {}, {}
     for past in ints(a.pasts):
         seq = shape(past, a.chunk, BS_FP8)["seq"]
         k, v = make_kv(seq, seed=past)
@@ -206,10 +266,21 @@ def main():
             fb()
             torch.cuda.synchronize()
             print(f"    check tetra: {err(outb, ref)}")
+        if entry is not None:
+            fc, outc = kv4i_arm(q, k, v, seq, a.chunk, scale, a.q_scale, entry)
+            tc = timeit(fc, a.reps)
+            ratios_c[past] = tc / ta
+            print(f"    kv4i  int4 libr4d: {tc:9.1f} us  (C/A {tc / ta:4.2f}x, C/B kernel {tc / tk:4.2f}x)")
+            if a.check:
+                fc()
+                torch.cuda.synchronize()
+                print(f"    check kv4i : {err(kv4i_unrotate(outc), ref)}")
         sys.stdout.flush()
         del k, v, ref
         torch.cuda.empty_cache()
     print("  ".join(f"{past}:{x:.2f}x" for past, x in sorted(ratios.items())) + "   " + verdict(ratios))
+    if ratios_c:
+        print("  ".join(f"{past}:{x:.2f}x" for past, x in sorted(ratios_c.items())) + "   " + verdict_kv4i(ratios_c))
 
 
 if __name__ == "__main__":
