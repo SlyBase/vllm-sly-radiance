@@ -49,6 +49,13 @@ import kv4i_route as R4
 KV4I_ON = os.environ.get("R4D_KV4I", "") == "1"
 KV4I_MIN_Q = max(16, int(os.environ.get("RADIANCE_KV4I_MIN_Q", str(R4.MIN_Q_DEFAULT))))
 KV4I_MIN_CTX = max(0, int(os.environ.get("RADIANCE_KV4I_MIN_CTX", str(R4.MIN_CTX_DEFAULT))))
+# rotate(q) is up to 16x the magnitude of q and e4m3 clips at 448: store rotate(q) / GAIN, the kernel
+# multiplies GAIN back in fp32 (its q_scale), so the numbers are the same with 16x the headroom.
+KV4I_QGAIN = float(os.environ.get("RADIANCE_KV4I_QGAIN", "16"))
+# R4D_KV4I_CHECK=N: the first N routed launches also run the TetraAttention kernel and log the relative
+# L2 between the two outputs per layer (host reads: a debug aid for an accuracy hunt, never for serving)
+KV4I_CHECK = int(os.environ.get("R4D_KV4I_CHECK", "0") or 0)
+_KV4I_CHECKED = [0]
 KV4I_GPB, KV4I_BLOCK = R4.KV4_GPB, R4.KV4_BLOCK
 KV4I_ENTRY = getattr(_r4d, "attn_prefill_h256_gqa6_int4kv", None)
 _KV4I_SAID: set = set()
@@ -213,7 +220,7 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
         n = int(m.num_actual_tokens)
         # TetraAttention stores K/V rotated and quantised, so the query is rotated first, scaled and
         # handed over as e4m3 (the kernel's O_QF8 path), exactly as the bench arm does.
-        q_scale = float(getattr(layer, "_q_scale_float", 1.0) or 1.0)
+        q_scale = float(getattr(layer, "_q_scale_float", 1.0) or 1.0) * KV4I_QGAIN
         q = (F.rotate(query[:n].float()) / q_scale).to(torch.float8_e4m3fn)
         _r4d.set_q_fp8(q_scale)
         table = self._kv4i_block_table(m)
@@ -230,6 +237,16 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
         )
         # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
         output[:n].copy_(F.unrotate(out_rot.float()))
+        if _KV4I_CHECKED[0] < KV4I_CHECK:
+            _KV4I_CHECKED[0] += 1
+            ref = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
+            kv4h_attention(query[:n], kv_cache, torch.empty_like(ref), m.query_start_loc, m.max_query_len,
+                           m.seq_lens, m.max_seq_len, self.scale, m.block_table, causal=True, window=0, output=ref)
+            d = output[:n].float() - ref.float()
+            sys.stderr.write("[kv4i-check] %s n=%d ctx=%d rel_l2=%.4f max_abs=%.3f ref_absmax=%.3f qrot_amax=%.1f\n" % (
+                getattr(layer, "layer_name", "?"), n, int(m.max_seq_len), float(d.norm() / ref.float().norm()),
+                float(d.abs().max()), float(ref.float().abs().max()), float(F.rotate(query[:n].float()).abs().max())))
+            sys.stderr.flush()
         _kv4i_say("route", f"[kv4i] prefill runs >= {KV4I_MIN_Q} tokens at context >= {KV4I_MIN_CTX} go to "
                            f"libr4d int4 (head 256, K group 256, block {KV4I_BLOCK}); decode, verify and the "
                            f"drafter stay on TETRA")

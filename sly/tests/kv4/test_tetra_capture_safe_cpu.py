@@ -130,3 +130,36 @@ def test_the_routed_launch_passes_the_rotation_folded_scale(attn, monkeypatch):
     impl.forward(types.SimpleNamespace(), torch.randn(512, 24, 256), None, None, kv, meta, out)
     assert len(seen) == 1, "the route did not fire"
     assert seen[0][17] == pytest.approx(0.0625 / 256)      # the kernel `scale` argument
+
+
+def test_the_routed_query_has_headroom_below_the_e4m3_ceiling(attn, monkeypatch):
+    """The rotated query is |sum of 256 signed terms| ~ ||q||_2, up to 16x the unrotated magnitude, and
+    e4m3 saturates at 448 (a clipped head is a wrong head). The route stores rotate(q) / GAIN and tells
+    the kernel q_scale = GAIN, which it multiplies back in fp32: same numbers, 16x more headroom.
+    A head with ||q||_2 ~ 1000 must come through unclipped."""
+    seen, qscale = [], []
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
+    monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: seen.append(a))
+    monkeypatch.setattr(attn._r4d, "set_q_fp8", qscale.append, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: types.SimpleNamespace(cuda_stream=0))
+    stored = []
+    real_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **k: (
+        stored.append(real_to(self, torch.float32).abs().max().item()) if a and a[0] == torch.float8_e4m3fn
+        else None) or real_to(self, *a, **k))
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 0.0625
+    impl._kv4i_scratch = None
+    kv = torch.zeros(2, 4, 1664, 272, dtype=torch.uint8)
+    meta = types.SimpleNamespace(
+        num_actual_tokens=512, max_query_len=512, max_seq_len=1024, causal=True,
+        seq_lens=torch.tensor([1024], dtype=torch.int32), block_table=torch.tensor([[1]], dtype=torch.int32))
+    q = torch.zeros(512, 24, 256)
+    q[:, 0, :] = 62.5            # ||q||_2 = 1000 on one head, all signs equal: rotated peak ~1000 > 448
+    impl.forward(types.SimpleNamespace(), q, None, None, kv, meta, torch.zeros(512, 24, 256, dtype=torch.bfloat16))
+    assert len(seen) == 1 and qscale, "the route did not fire"
+    assert qscale[-1] == pytest.approx(attn.KV4I_QGAIN)
+    assert stored[-1] * qscale[-1] > 448, "test input does not exceed the ceiling"
+    assert stored[-1] <= 448, f"stored query {stored[-1]} saturates e4m3"
