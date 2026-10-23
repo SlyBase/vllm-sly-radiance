@@ -26,7 +26,18 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import radiance_gdn as G  # noqa: E402
+# Other test modules put `sly/` on sys.path, where the directory sly/r4d imports as an empty namespace
+# package named `r4d` and shadows the (absent on CPU) native library. Mask it so radiance_gdn takes its
+# documented "no r4d" branch whatever the collection order is.
+_saved_r4d = sys.modules.get("r4d")
+sys.modules["r4d"] = None  # `import r4d` raises ImportError
+try:
+    import radiance_gdn as G  # noqa: E402
+finally:
+    if _saved_r4d is None:
+        sys.modules.pop("r4d", None)
+    else:
+        sys.modules["r4d"] = _saved_r4d
 
 
 def _stock(ssm_state, indices, mask):

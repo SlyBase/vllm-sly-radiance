@@ -60,10 +60,50 @@ gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that r
 and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
 The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
 
+### 1.8.0 final run at 300 W (2026-10-23)
+
+**Test environment (all 1.8.0 numbers below).** One AMD Radeon AI PRO R9700 (32 GB), in an LXC container on
+Proxmox, ROCm 10.1 image `1.8.0-rocm10.1` (`1.6.0-rocm10.1` plus bind-mounted 1.8.0 kernels in the earlier A/B
+arms). Model: Swift-1.5 Qwen3.8-27B heretic, MXFP4 (GPTQ checkpoint) with the DFlash2 drafter (k = 7). FP8 KV
+cache, `--max-model-len 65536`, prefill chunk 4096 (`--max-num-batched-tokens`), prefix caching off,
+`--no-async-scheduling`, GPU KV pool 340,723 tokens. Sampling in the benchmark: seed 42, temperature 0.7,
+top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 300 W and a voltage offset of
+-50 mV set with LACT, core clock offset 0 (both optional, see the launch example below).
+
+**Full BetterBench 0.4.0 at 300 W, 2026-10-23, two fresh starts (run a / run b).**
+
+| | **run a** | **run b** |
+|---|---|---|
+| Decode, single stream (weighted median) | **154.6 tok/s** | **154.1 tok/s** |
+| update gap p99 | 34.9 ms | 35.1 ms |
+| time to first token p50 (short prompts) | 57 ms | 57 ms |
+| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s | within 0.5 % of run a |
+| tokens per update (same order) | 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 | |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 139 / 236 / 365 / 478 / 516 | 64\* / 244 / 357 / 481 / 508 |
+| Prefill 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens, tok/s (inside the full run) | 3,661 / 3,694 / 3,638 / 3,526 / 3,261 | 3,628 / 3,641 / 3,599 / 3,483 / 3,130 |
+| GSM8K 200 (greedy, flexible-extract) | 0.82 | 0.82 |
+
+\* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
+
+Prefill inside the full run is lower than the dedicated prefill sweep below because it is the last phase of the
+run, on a card that is already hot.
+
+**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, harness prefill
+phase), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
+reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396, i.e. **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**.
+
+**Scheduling.** `--no-async-scheduling` stays the default: in the 210 W ABBA of 2026-10-22 it gave prefill
++1.2 .. +7.7 % and no measurable decode difference. **Speculative depth:** k = 7 is the best measured value
+(concurrency 1: 124 tok/s at k = 7, 114 at k = 5, 92 at k = 3).
+
+**Quality.** KL divergence against a bf16 layer-by-layer reference over 15,177 positions: **0.0527**, top-1
+agreement 93.1 %, perplexity +2.2 %. 1.8.0 is bit-identical to 1.6.0 (KL divergence 0 between them); the
+weights-only exact path scores 0.0403.
+
 ### 1.8.0 acceptance run at 300 W
 
-Three blocks, each only with what was measured: the prefill sweep and the c1/c2/c4 decode run were
-measured on both stacks under the same conditions; the full BetterBench run was done on our stack only.
+Two blocks measured on both stacks under the same conditions (prefill sweep, c1/c2/c4 decode); the final full
+BetterBench run of 2026-10-23 is the next subsection.
 
 **Prefill sweep (same conditions, both stacks)**
 
@@ -84,27 +124,6 @@ measured on both stacks under the same conditions; the full BetterBench run was 
 | Concurrency 1, aggregate tok/s | 129.0 | 114.0 | +13.2 % |
 | Concurrency 2, aggregate tok/s | 210.9 | 197.5 | +6.8 % |
 | Concurrency 4, aggregate tok/s | 340.3 | 304.6 | +11.7 % |
-
-**Full BetterBench 0.4.0 run (shipping config, ours only; the reference stack was not run through it)**
-
-| | **ours (1.8.0 stack)** | **reference stack** |
-|---|---|---|
-| Decode, single stream (median of 160 runs, 20 per category) | 158.4 tok/s | not measured (prefill sweep and decode only) |
-| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.0 / 185.1 / 172.1 / 209.3 / 190.0 / 89.8 / 106.5 / 142.8 tok/s | not measured (prefill sweep and decode only) |
-| update gap p50 (per category) | 33.8-34.2 ms | not measured (prefill sweep and decode only) |
-| update gap p99 | 35.2 ms | not measured (prefill sweep and decode only) |
-| tokens per update (chat / code / file_edit / json / math / prose / reasoning / summarization) | 4.18 / 6.19 / 5.67 / 6.48 / 6.37 / 3.06 / 3.62 / 4.67 | not measured (prefill sweep and decode only) |
-| time to first token p50 (short prompts) | 57.3 ms | not measured (prefill sweep and decode only) |
-| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 137.8 / 233.2 / 365.8 / 466.4 / 517.3 | not measured (prefill sweep and decode only) |
-| Prefill, 2K / 8K / 16K / 32K / 64K prompt tok/s (inside the full run) | 3,540.0 / 3,508.4 / 3,500.1 / 3,355.4 / 3,092.2 | not measured (prefill sweep and decode only) |
-| KV pool (tokens, this start) | 341,041 | not measured (prefill sweep and decode only) |
-| GSM8K 200 (greedy) | not run (no numerics default changes in 1.8.0) | not run |
-
-The full-run prefill is lower than the sweep (3,540 / 3,508 / 3,500 / 3,355 / 3,092 vs 3,789 / 3,803 / 3,704 /
-3,487 / 3,171 tok/s) because prefill is the last phase of the full run, on a card that is already hot (junction
-~110 °C), not because of a config difference: the same shipping launcher produced both. All 48 requests at every
-concurrency level finished without error; the 341,041-token KV pool is this start's allocation (the sweep start
-gave 332,960, the reference stack 174,634).
 
 Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
 `r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
@@ -217,6 +236,58 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 - **iGPU:** `HIP_VISIBLE_DEVICES=0` keeps ROCm off an integrated GPU next to the R9700.
 - Other checkpoints: [NVFP4, INT4, ParoQuant](docs/BENCHMARKS.md#other-checkpoints-on-one-r9700-036-2026-09-24);
   several GPUs: [docs/MULTI-GPU.md](docs/MULTI-GPU.md).
+
+### Best-performance launch (1.8.0)
+
+The image defaults carry the whole measured stack (the prefill knobs are Dockerfile `ENV`, the PSW weight layout
+is the module default), so this launch needs no kernel `-e` beyond the quantization and memory settings. It is the
+configuration behind the 2026-10-23 numbers above; the model is the Swift-1.5 Qwen3.8-27B heretic MXFP4 (GPTQ)
+checkpoint in a local directory.
+
+```bash
+# GIDs of the GPU groups: getent group video render
+docker run -d --name vllm --restart unless-stopped \
+  --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 109 \
+  --security-opt seccomp=unconfined --ipc=host -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/models/swift-heretic-gptq:/models/swift-mxfp4:ro \
+  -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton -v aiter-cache:/root/.aiter \
+  -e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=1 \
+  -e RADIANCE_MXFP4=1 -e RADIANCE_MXFP4_W4A8=1 -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
+  -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_SANITIZE=0 \
+  -e RADIANCE_LMHEAD_FP8=1 -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
+  -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
+  -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 -e RADIANCE_MXFP4_WIDE_MAX_M=192 \
+  -e RADIANCE_ADAPTIVE_WIDTH=perseq -e RADIANCE_CACTUS_DELTA=0.5 \
+  ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1 \
+  --model /models/swift-mxfp4 --served-model-name swift-1.5 \
+  --max-model-len 65536 --gpu-memory-utilization 0.98 \
+  --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
+  --speculative-config.method dflash \
+  --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
+  --speculative-config.num_speculative_tokens 7 \
+  --speculative-config.draft_sample_method probabilistic \
+  --speculative-config.attention_backend TRITON_ATTN \
+  --attention-backend R4D_HYBRID \
+  --max-num-seqs 8 --max-num-batched-tokens 4096 \
+  --compilation-config.cudagraph_mode FULL_DECODE_ONLY \
+  --compilation-config.cudagraph_capture_sizes '[8,16,24,32,40,48,56,64]' \
+  --no-enable-prefix-caching --no-async-scheduling \
+  --skip-mm-profiling --enable-mm-embeds \
+  --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
+  --chat-template /opt/qwen-fixed.jinja \
+  --default-chat-template-kwargs '{"enable_thinking": false}' \
+  --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}'
+```
+
+What the flags buy: prefix caching off and `--no-async-scheduling` give the best prefill (and let the drafter
+prefill skip act, which needs prefix caching off); chunk 4096 with a 65,536 context is the shape of the
+measurements. For a long-context or multi-turn setup use the [quickstart](#quickstart) (prefix caching on,
+262k context) instead; the two trade prefill speed for cache reuse.
+
+**Optional host tuning** (not part of the image, measured with it): power cap 300 W (LACT), voltage offset -50 mV (LACT), core clock offset 0. The first is worth ~20 % prefill over 210 W
+(table above); check the junction temperature after changing the voltage offset.
 
 ## What this image changes, and why
 

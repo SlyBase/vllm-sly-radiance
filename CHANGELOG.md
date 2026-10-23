@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.8.0] - 2026-10-21
+## [1.8.0] - 2026-10-23
 
 The measured prefill stack is the **image default**: every knob below is on without any `-e` (Dockerfile ENV,
 or the module default for the PSW weight layout), and each reverts with an explicit `-e`. At 300 W the
@@ -146,11 +146,25 @@ are one-layer microbenches. See
   other (known start-to-start nondeterminism). The skip line was logged only in the ON arm (margin 1760,
   chunks >= 3,808 tokens). It disables itself with prefix caching (the production default), so it only acts
   with APC off.
-- Full BetterBench 0.4.0 run at 300 W of this stack (ours only): decode weighted median **153.1 tok/s**,
-  update gap p50 33.8-34.2 ms per category, p99 35.3 ms, tokens per update 3.09 (prose) to 6.35 (math), TTFT
-  p50 88 ms, concurrency 1/2/4/8/16 aggregate 136.1 / 231.0 / 355.0 / 479.0 / 481.0 tok/s, prefill inside
-  the full run 3,249 / 3,399 / 3,411 / 3,304 / 3,046 tok/s at 2K-64K (lower than the sweep because prefill
-  is the last phase on a hot card, junction 110 °C). GSM8K not run: no numerics default changes.
+- **Final measurement of the 1.8.0 stack, 2026-10-23, 300 W** (one AMD Radeon AI PRO R9700 32 GB in an LXC on
+  Proxmox, ROCm 10.1; Swift-1.5 Qwen3.8-27B heretic MXFP4 (GPTQ) + DFlash2 drafter k = 7; FP8 KV cache;
+  65,536 context; chunk 4096; prefix caching off; `--no-async-scheduling`; BetterBench 0.4.0 full config, seed
+  42, temperature 0.7, top-p 0.95, top-k 20; power cap 300 W, voltage offset -50 mV via LACT, core clock offset
+  0; GPU KV pool 340,723 tokens). Two fresh starts: decode weighted median **154.6 / 154.1 tok/s**, update gap
+  p99 34.9 / 35.1 ms, TTFT p50 57 ms. Run a by category (chat / code / file_edit / json / math / prose /
+  reasoning / summarization): 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s, tokens per
+  update 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 (run b within 0.5 %). Concurrency 1/2/4/8/16
+  aggregate: run a 139 / 236 / 365 / 478 / 516, run b 64 (outlier) / 244 / 357 / 481 / 508 tok/s. Prefill
+  inside the full run at 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens: run a 3,661 / 3,694 /
+  3,638 / 3,526 / 3,261, run b 3,628 / 3,641 / 3,599 / 3,483 / 3,130 tok/s. GSM8K-200 greedy,
+  flexible-extract: 0.82 / 0.82.
+- **Quality of the shipped path**: KL divergence against a bf16 layer-by-layer reference over 15,177 positions
+  0.0527 (top-1 agreement 93.1 %, perplexity +2.2 %); 1.8.0 is bit-identical to 1.6.0 (KL divergence 0
+  between them); the weights-only exact path scores 0.0403. Speculative depth: k = 7 is best (concurrency 1:
+  124 tok/s against 114 at k = 5 and 92 at k = 3). `--no-async-scheduling` stays the default (210 W ABBA,
+  2026-10-22: prefill +1.2 .. +7.7 %, no measurable decode difference).
+- **README: best-performance launch example** for this stack (`docker run` with the image defaults, plus the
+  optional host tuning 300 W / -50 mV), and the full test environment next to the numbers.
 - `VERSION` 1.7.0 → 1.8.0.
 
 ### Fixed
