@@ -29,6 +29,13 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   the better one, and tile 16 costs 2.43x. The remaining gap to the fp8 path is the kernel itself, not its
   schedule; `sly/bench_attn_r4d_vs_tetra.py` measures the two backends at the serve shapes (see
   [docs/BENCHMARKS.md](docs/BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23)).
+- **`R4D_KV4I=1`: an opt-in prefill route for TetraAttention** — launches of the head-256 layers in which
+  EVERY sequence carries at least `RADIANCE_KV4I_MIN_Q` (512) new tokens, with equal query lengths, causal,
+  no window and no graph capture, run on the libr4d int4 kernel (`r4d_attn_prefill_h256_gqa6_int4kv`);
+  decode, verify, the head-128 drafter and every batch the guard declines stay on the TetraAttention kernel.
+  Kernel microbench at the serve shapes: 1.01x of the fp8 libr4d kernel at past 49152 (TetraAttention is
+  1.81x). **No engine number yet, and the route is off by default** — it needs the prefill sweep and the
+  KL/GSM8K gate before it can become a launch option.
 - **Design note for reading the int4 cache in the libr4d prefill kernel** (`docs/R4D-INT4-PREFILL.md`):
   measured gap (whole engine −1.4 % at 1.5k to −11.4 % at 47k at 210 W, kernel 1.7–1.9x), the two
   exactness/cost variants, the routing point, the accuracy gate and the go/no-go criterion. Only the

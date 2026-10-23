@@ -1,7 +1,9 @@
 # Reading the int4 (KV4) cache in the libr4d prefill attention kernel — design
 
-Status: design + CPU-verified helpers + a compiled, gated-off kernel variant (`O_KV4I`, `sly/r4d/r4d_kv4i.patch`; see
-"What is written" below). Nothing is dispatched, nothing has run on a GPU, no speed is claimed.
+Status: kernel compiled and gated off (`O_KV4I`, `sly/r4d/r4d_kv4i.patch`), route written and gated off
+(`R4D_KV4I=1`), CPU-verified end to end. **Kernel microbench on the R9700: the int4 libr4d kernel is 1.01x of
+the fp8 libr4d kernel at past 49152** (TetraAttention is 1.81x), so the go/no-go below passes and the port
+goes ahead. No engine-level number and no accuracy gate yet — both need the next GPU window.
 Measured reason for the work, at 210 W and 300 W, is in
 [BENCHMARKS.md](BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23).
 

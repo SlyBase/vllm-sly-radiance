@@ -24,7 +24,8 @@ MODULES = ("radiance_kv4_format.py", "radiance_kv4_store.py", "radiance_kv4_kern
            # KV4H: the HIP kernel's layout, store, launcher, backend and the kernel source itself
            # (radiance_kv4h_kernel builds it next to the installed module on first use)
            "radiance_kv4h_format.py", "radiance_kv4h_store.py", "radiance_kv4h_kernel.py",
-           "radiance_kv4h_attn.py", "radiance_kv4h.hip", "kv4h_tune.json")
+           "radiance_kv4h_attn.py", "radiance_kv4h.hip", "kv4h_tune.json",
+           "kv4i_route.py")          # the int4 libr4d route decision (imported by radiance_kv4h_attn)
 
 for name in MODULES:
     shutil.copyfile(HERE / name, SP / name)

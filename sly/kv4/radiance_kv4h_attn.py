@@ -35,6 +35,31 @@ from radiance_kv4h_kernel import kv4h_attention
 from radiance_kv4h_store import kv4h_store
 
 logger = init_logger("vllm.radiance_kv4h")   # under vllm.* so the engine log shows it
+import os    # noqa: E402  (the module's own env knobs read below, before the imports further down)
+import sys   # noqa: E402
+
+# R4D_KV4I=1 routes the PREFILL launches of the head-256 layers to the libr4d int4 kernel
+# (r4d_attn_prefill_h256_gqa6_int4kv, sly/r4d/r4d_kv4i.patch): 1.01x of the fp8 libr4d kernel at
+# past 49152 against 1.81x for the TetraAttention kernel itself, see docs/R4D-INT4-PREFILL.md.
+# Decode, verify, the head-128 drafter and every batch this guard declines stay on TetraAttention.
+# ponytail: a whole launch is routed or none of it -- a batch that mixes long prefill runs with decode
+# keeps Tetra for all of it, because the kernel takes ONE q_len per launch.
+import r4d as _r4d
+import kv4i_route as R4
+KV4I_ON = os.environ.get("R4D_KV4I", "") == "1"
+KV4I_MIN_Q = max(16, int(os.environ.get("RADIANCE_KV4I_MIN_Q", str(R4.MIN_Q_DEFAULT))))
+KV4I_GPB, KV4I_BLOCK = R4.KV4_GPB, R4.KV4_BLOCK
+KV4I_ENTRY = getattr(_r4d, "attn_prefill_h256_gqa6_int4kv", None)
+_KV4I_SAID: set = set()
+
+
+def _kv4i_say(key: str, msg: str) -> None:
+    """Log a distinct route/decline reason once (stderr: module loggers outside vllm.* have no handler)."""
+    if key in _KV4I_SAID:
+        return
+    _KV4I_SAID.add(key)
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
 
 assert 2 * H.layout(256).TPT == F.CONTENT, "KV4H head-256 cells must match KV4's 272 bytes"
 HEADS = tuple(H.LAYOUTS)
@@ -119,6 +144,7 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             raise ValueError("TetraAttention: decoder attention only")
         self.window = int(sliding_window) if sliding_window is not None and sliding_window > 0 else 0
         self.head = head_size
+        self._kv4i_scratch = None      # 256-byte libr4d scratch, allocated on the first routed launch
         # the query is quantized here, per (token, head), after the rotation
         self.supports_quant_query_input = False
         logger.info_once("[tetra] TetraAttention installed: HIP iu4/iu8 WMMA kernel, K group %d, V per token",
@@ -145,6 +171,60 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
                            kv_cache: torch.Tensor, slot_mapping: torch.Tensor):
         kv4h_store(key, value, kv_cache, slot_mapping)
 
+    # -- the int4 libr4d prefill route (R4D_KV4I=1, opt-in) ------------------------------------
+    def _kv4i_decline(self, query, kv_cache, m, output, output_scale, output_block_scale) -> str | None:
+        """Why this launch must stay on TetraAttention, or None when the int4 libr4d kernel takes it."""
+        nseq = int(m.seq_lens.shape[0])
+        runs = (m.query_start_loc[1 : nseq + 1] - m.query_start_loc[:nseq]).tolist()
+        return R4.decline(
+            enabled=KV4I_ON, has_entry=KV4I_ENTRY is not None,
+            head=int(self.head), k_group=int(H.GROUP),
+            cache_block=int(kv_cache.shape[2]) if kv_cache is not None and kv_cache.dim() == 4 else -1,
+            cache_shape_ok=kv_cache is not None and kv_cache.dim() == 4,
+            cache_strides_ok=(kv_cache is not None and kv_cache.dim() == 4
+                              and kv_cache.stride(3) == 1 and kv_cache.stride(2) == kv_cache.shape[3]),
+            window=int(self.window), causal=m.causal,
+            fused_out=output_scale is not None or output_block_scale is not None,
+            out_dtype=str(output.dtype).replace("torch.", ""),
+            capturing=torch.cuda.is_current_stream_capturing(),
+            max_query_len=int(m.max_query_len), runs=runs, min_q=KV4I_MIN_Q,
+        )
+
+    def _kv4i_block_table(self, m) -> torch.Tensor:
+        """vLLM block ids -> libr4d's 16-token group ids (group G = block G // 104, group G % 104).
+
+        Padded by 3 entries: the kernel's double-buffered prefetch reads up to three groups past the
+        end of a row (the same padding the bench arm uses).
+        """
+        ids = m.block_table.to(torch.int32) * KV4I_GPB
+        sub = torch.arange(KV4I_GPB, dtype=torch.int32, device=ids.device)
+        table = (ids.unsqueeze(-1) + sub).reshape(ids.shape[0], ids.shape[1] * KV4I_GPB).contiguous()
+        return torch.nn.functional.pad(table, (0, 3))
+
+    def _kv4i_launch(self, layer, query, kv_cache, m, output):
+        n = int(m.num_actual_tokens)
+        # TetraAttention stores K/V rotated and quantised, so the query is rotated first, scaled and
+        # handed over as e4m3 (the kernel's O_QF8 path), exactly as the bench arm does.
+        q_scale = float(getattr(layer, "_q_scale_float", 1.0) or 1.0)
+        q = (F.rotate(query[:n].float()) / q_scale).to(torch.float8_e4m3fn)
+        _r4d.set_q_fp8(q_scale)
+        table = self._kv4i_block_table(m)
+        out_rot = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
+        if self._kv4i_scratch is None:
+            self._kv4i_scratch = torch.empty(256, dtype=torch.uint8, device=query.device)
+        KV4I_ENTRY(
+            q.data_ptr(), kv_cache.data_ptr(), table.data_ptr(), m.seq_lens.data_ptr(), out_rot.data_ptr(),
+            0, 0, self._kv4i_scratch.data_ptr(),
+            int(table.shape[0]), int(m.max_query_len), self.num_heads, self.num_kv_heads, self.head,
+            16, int(table.shape[1]), kv_cache.stride(0), kv_cache.stride(1),
+            self.scale, 0, int(m.max_seq_len), torch.cuda.current_stream().cuda_stream, H.GROUP,
+        )
+        # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
+        output[:n].copy_(F.unrotate(out_rot.float()))
+        _kv4i_say("route", f"[kv4i] prefill runs >= {KV4I_MIN_Q} tokens go to libr4d int4 (head 256, "
+                           f"K group 256, block {KV4I_BLOCK}); decode, verify and the drafter stay on TETRA")
+        return output
+
     # -- attention ----------------------------------------------------------------------------
     def forward(
         self,
@@ -162,6 +242,11 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             raise NotImplementedError("TetraAttention: fused output quantization is not supported")
         if attn_metadata is None:
             return output.fill_(0)     # profiling run
+        if KV4I_ON:
+            why = self._kv4i_decline(query, kv_cache, attn_metadata, output, output_scale, output_block_scale)
+            if why is None:
+                return self._kv4i_launch(layer, query, kv_cache, attn_metadata, output)
+            _kv4i_say(why, f"[kv4i] TETRA, not libr4d int4: {why}")
         n = attn_metadata.num_actual_tokens
         out_rot = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
         kv4h_attention(
