@@ -18,9 +18,9 @@ Read this before changing anything. It keeps the image, the docs and the release
    and why.
 6. Run `python3 ci/check_consistency.py --base origin/main` and `ci/patch_dryrun.sh` before pushing.
 
-## Opt-in attention back ends (KV4/TETRA, R4D_KV4I route)
+## Opt-in attention back ends (KV4/TETRA)
 
-An opt-in back end is invisible to the default start, so a GPU start finds its bugs too late. Each one must be covered by `ci/check_attn_metadata_contract.py` (annotate the `attn_metadata` parameter with the vLLM metadata dataclass so the checker sees it; a new `attn_metadata.<field>` read needs the checker to stay green against the pinned vLLM tree) and by the capture-safety test `sly/tests/kv4/test_tetra_capture_safe_cpu.py` (no device->host read during CUDA graph capture).
+An opt-in back end is invisible to the default start, so a GPU start finds its bugs too late. Each one must be covered by `ci/check_attn_metadata_contract.py` (annotate the `attn_metadata` parameter with the vLLM metadata dataclass so the checker sees it; a new `attn_metadata.<field>` read needs the checker to stay green against the pinned vLLM tree). A new code path in `forward` needs a CPU test with tensors that raise on any device->host read, and an accuracy gate (KL against the path it replaces) before it is called done: the throughput sweep does not see a wrong result.
 
 ## Measuring (anything that claims to be faster)
 

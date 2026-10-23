@@ -508,7 +508,7 @@ ARG R4D_VERSION
 # a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
 # original check was actually protecting against), not the self-reported semver string, which prints
 # only as informational context alongside it.
-COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch sly/r4d/r4d_kv4i.patch /opt/kernels/
+COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch /opt/kernels/
 RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && git init -q && git remote add origin ${R4D_REPO} \
  && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
@@ -517,7 +517,6 @@ RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
     || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
  && git apply /opt/kernels/r4d_extras_rx10.patch \
  && git apply /opt/kernels/r4d_gdn_scan_variants.patch \
- && git apply /opt/kernels/r4d_kv4i.patch \
  && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
  && PYTHONPATH=/out python -c "import sys, torch, r4d; \
 print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \

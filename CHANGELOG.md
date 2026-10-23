@@ -29,28 +29,16 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   the better one, and tile 16 costs 2.43x. The remaining gap to the fp8 path is the kernel itself, not its
   schedule; `sly/bench_attn_r4d_vs_tetra.py` measures the two backends at the serve shapes (see
   [docs/BENCHMARKS.md](docs/BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23)).
-- **`R4D_KV4I=1`: an opt-in prefill route for TetraAttention** — launches of the head-256 layers in which
-  EVERY sequence carries at least `RADIANCE_KV4I_MIN_Q` (512) new tokens, with equal query lengths, causal,
-  no window and no graph capture, run on the libr4d int4 kernel (`r4d_attn_prefill_h256_gqa6_int4kv`);
-  decode, verify, the head-128 drafter and every batch the guard declines stay on the TetraAttention kernel.
-  Kernel microbench at the serve shapes: 1.01x of the fp8 libr4d kernel at past 49152 (TetraAttention is
-  1.81x). The route is **off by default** and additionally gated on `RADIANCE_KV4I_MIN_CTX` (16384 keys):
-  the engine sweep at 210 W measured -5.9 / -5.1 / -3.8 / -1.1 % prefill at 1.5k/5.9k/11.8k/23.5k and
-  **+4.2 % at 47k**, because the route's own query rotation and output un-rotation are two 256x256 matmuls
-  per layer, i.e. cost per token rather than per key. No KL/GSM8K gate yet, so it stays a research knob.
-- **Design note for reading the int4 cache in the libr4d prefill kernel** (`docs/R4D-INT4-PREFILL.md`):
-  measured gap (whole engine −1.4 % at 1.5k to −11.4 % at 47k at 210 W, kernel 1.7–1.9x), the two
-  exactness/cost variants, the routing point, the accuracy gate and the go/no-go criterion. Only the
-  pure-C++ half is written and CPU-tested (`sly/kv4/kv4i_unpack.h`,
-  `sly/tests/kv4/test_kv4i_unpack_cpu.py`: signed nibble split, the exact 16-code LUT, e4m3
-  round-to-nearest-even against torch for all codes and a scale grid). Nothing is dispatched.
-- **`O_KV4I`, the HIP half of the int4 prefill read, compiles but dispatches nowhere**
-  (`sly/r4d/r4d_kv4i.patch`, applied third in the kernels stage; new `r4d.attn_prefill_h256_gqa6_int4kv`, refuses to run
-  without `R4D_KV4I=1`, K scale group 256 only). Only the load + unpack stage is new (nibbles → `rne_e4m3(code × token scale)`
-  bytes in the existing byte tiles); every shipped libr4d instance is instruction-identical (`ci/kv4i_compile_gate.py`),
-  the new tile 16/32/48 instances compile without spill, the staged byte stream is checked on CPU
-  (`sly/tests/kv4/test_kv4i_stage_cpu.py`). Not run on a GPU, no speed or accuracy claim, no engine routing;
-  `sly/bench_attn_r4d_vs_tetra.py --kv4i` is the go/no-go measurement still to be taken.
+- **Reading the int4 cache in the libr4d prefill kernel (`R4D_KV4I`) was built, measured and parked** on branch
+  `exp/kv4-int4-libr4d`, not shipped. Kernel microbench at the serve shapes: 1.01x of the fp8 libr4d kernel at past
+  49152 (TetraAttention 1.81x); engine sweep at 210 W with a context gate (16384 keys): +8.1 % prefill at 47k
+  against TetraAttention, +0.8..2.7 % below. **It fails its accuracy gate**: KL against TetraAttention over 3 x 60k
+  tokens is 0.0034 / 0.020 / 1.84 (cpp / novel / Python), top-1 agreement 99.4 / 93.4 / 59.1 %, all error beyond
+  16k context (KL 0.00 below 4k). Three bugs were found on the way, each invisible to the CPU tests of that time
+  (an unfolded softmax scale, a per-layer device->host read in the route guard, a graph-capture read). Not
+  explained yet: per-layer rel-L2 of the routed output against the Tetra kernel is 5-12 % (fp8 libr4d against
+  fp32: 5-6 %), rising with depth in layers 27-55; a query-headroom gain of 16 changed nothing, so it is not e4m3
+  saturation of the rotated query.
 - `VERSION` 1.8.0 → 1.8.1.
 
 ## [1.8.0] - 2026-10-23

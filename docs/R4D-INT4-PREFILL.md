@@ -1,9 +1,9 @@
 # Reading the int4 (KV4) cache in the libr4d prefill attention kernel — design
 
-Status: kernel compiled and gated off (`O_KV4I`, `sly/r4d/r4d_kv4i.patch`), route written and gated off
-(`R4D_KV4I=1`), CPU-verified end to end. **Kernel microbench on the R9700: the int4 libr4d kernel is 1.01x of
-the fp8 libr4d kernel at past 49152** (TetraAttention is 1.81x), so the go/no-go below passes and the port
-goes ahead. No engine-level number and no accuracy gate yet — both need the next GPU window.
+Status: **parked, not shipped** (branch `exp/kv4-int4-libr4d` holds the kernel, route and tests). The kernel is
+1.01x of the fp8 libr4d kernel at past 49152 and the engine gains +8.1 % prefill at 47k, but the route fails the
+accuracy gate (KL 1.84 on Python text beyond 16k context, see CHANGELOG 1.8.1). The text below is the design as
+written before the measurement.
 Measured reason for the work, at 210 W and 300 W, is in
 [BENCHMARKS.md](BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23).
 
