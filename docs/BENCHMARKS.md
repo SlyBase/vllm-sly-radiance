@@ -56,6 +56,71 @@ tokens per update, step gap, conc 1/8, the KV pool from the log.
 and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
 (recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
 
+## 1.8.0
+
+### Final run at 300 W (2026-10-23)
+
+**Test environment (all 1.8.0 numbers below).** One AMD Radeon AI PRO R9700 (32 GB), in an LXC container on
+Proxmox, ROCm 10.1 image `1.8.0-rocm10.1` (`1.6.0-rocm10.1` plus bind-mounted 1.8.0 kernels in the earlier A/B
+arms). Model: Swift-1.5 Qwen3.8-27B heretic, MXFP4 (GPTQ checkpoint) with the DFlash2 drafter (k = 7). FP8 KV
+cache, `--max-model-len 65536`, prefill chunk 4096 (`--max-num-batched-tokens`), prefix caching off,
+`--no-async-scheduling`, GPU KV pool 340,723 tokens. Sampling in the benchmark: seed 42, temperature 0.7,
+top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 300 W and a voltage offset of
+-50 mV set with LACT, core clock offset 0 (both optional, see the launch example below).
+
+**Full BetterBench 0.4.0 at 300 W, 2026-10-23, two fresh starts (run a / run b).**
+
+| | **run a** | **run b** |
+|---|---|---|
+| Decode, single stream (weighted median) | **154.6 tok/s** | **154.1 tok/s** |
+| update gap p99 | 34.9 ms | 35.1 ms |
+| time to first token p50 (short prompts) | 57 ms | 57 ms |
+| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s | within 0.5 % of run a |
+| tokens per update (same order) | 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 | |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 139 / 236 / 365 / 478 / 516 | 64\* / 244 / 357 / 481 / 508 |
+| Prefill 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens, tok/s (inside the full run) | 3,661 / 3,694 / 3,638 / 3,526 / 3,261 | 3,628 / 3,641 / 3,599 / 3,483 / 3,130 |
+| GSM8K 200 (greedy, flexible-extract) | 0.82 | 0.82 |
+
+\* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
+
+Prefill inside the full run is lower than the dedicated prefill sweep below because it is the last phase of the
+run, on a card that is already hot.
+
+**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, harness prefill
+phase), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
+reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396, i.e. **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**.
+
+**Scheduling.** `--no-async-scheduling` stays the default: in the 210 W ABBA of 2026-10-22 it gave prefill
++1.2 .. +7.7 % and no measurable decode difference. **Speculative depth:** k = 7 is the best measured value
+(concurrency 1: 124 tok/s at k = 7, 114 at k = 5, 92 at k = 3).
+
+**Quality.** KL divergence against a bf16 layer-by-layer reference over 15,177 positions: **0.0527**, top-1
+agreement 93.1 %, perplexity +2.2 %. 1.8.0 is bit-identical to 1.6.0 (KL divergence 0 between them); the
+weights-only exact path scores 0.0403.
+
+### Prefill, image default vs reference stack (2026-10-22 night, 300 W)
+
+One R9700, one start per arm, order ABBA, BetterBench prefill, 8 runs median per depth, prefix cache off, chunk 4096,
+`--max-model-len 65536`, thinking off, junction 108 C at the end of each arm. Each row is the mean of its two starts.
+"previous stack" = image 1.6.0 prefill stack with the drafter skip, `--no-async-scheduling` and the DB16/s3 kernels
+bind-mounted; "stack without PSW" = the same plus `RADIANCE_ATTN_Q_FP8=1` and `RADIANCE_MXFP4_TALL=1`; "1.8.0 default" =
+that plus `RADIANCE_MXFP4_AT_PSW=2` (what the image now does without any flag).
+
+| prefill tok/s | 2K | 8K | 16K | 32K | 64K |
+|---|--:|--:|--:|--:|--:|
+| previous stack | 3,798.0 | 3,825.0 | 3,783.3 | 3,513.0 | 3,152.1 |
+| stack without PSW | 3,810.3 | 3,871.7 | 3,732.9 | 3,589.6 | 3,258.0 |
+| **1.8.0 default (PSW on)** | **3,926.8** | **3,964.9** | **3,889.9** | **3,692.2** | **3,370.5** |
+| reference stack | 3,758.5 | 3,863.8 | 3,871.6 | 3,698.6 | 3,395.6 |
+| 1.8.0 default vs stack without PSW | +3.1 % | +2.4 % | +4.2 % | +2.9 % | +3.5 % |
+| 1.8.0 default vs reference stack | +4.5 % | +2.6 % | +0.5 % | -0.2 % | -0.7 % |
+| 1.8.0 default vs previous stack | +3.4 % | +3.7 % | +2.8 % | +5.1 % | +6.9 % |
+
+Start-to-start spread within an arm pair is 0.0-0.6 % except: stack without PSW 3.7 / 1.5 / 3.0 % at 16K / 32K / 64K,
+previous stack 3.5 % at 32K. Deltas below ~2 % between single arms are therefore noise; the PSW row is
+consistent over all five depths. Correctness: 210 W, 1,093 greedy digests identical (0 wrong), GSM8K-200 0.835 vs 0.835
+with PSW off.
+
 ## 1.0.0
 
 ### Reference run (2026-10-07, 300 W)

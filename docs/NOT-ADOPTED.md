@@ -220,6 +220,36 @@ the GEMM cell check stayed bit-identical (24 digests, 0 WRONG) but the clock und
 so this is "no gain", not a measured loss). -100 mV and GSM8K at -75 mV were not run. The assumption that the power cap
 turns less voltage into more clock (about +2 % per 25 mV from P ~ f V^2) did not hold on this card.
 
+## Prefill levers measured on 2026-10-21/22 (R9700, image 1.6.0 base + the 1.8.0 kernels)
+
+### Drafter prefill-window skip with prefix caching on: FAIL, removed
+
+A sub-knob (`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_APC=1`) let the skip act with prefix caching on. 210 W GPU check,
+greedy, same prompt, only the switch differing: the ON arm's output was no longer identical (text ended `...-bbc52c2`
+instead of `...-bbc`), the accepted-draft count on the 39,622-token prompt went 82 -> 179 (17 -> 33 drafts), the
+prefix-cache query counter 39,622 -> 86,807 and the request took 2.1x as long, which reads as a recompute after
+masking. Over two 10-round sessions TTFT was no better and 0.8-1.8 % slower (the skip does not even fire in 2K
+rounds, gate 3,808). The commit was reverted; the skip stays gated on prefix caching off.
+
+### Tall tile for the merged GDN in_proj: slower in the cell bench, not enabled
+
+`RADIANCE_MXFP4_TALL` is gate_up only (N 34,816): the same tile on in_proj (N 16,480) was up to 2 % slower than
+TN2/TN4 in the cell bench. At serve level the in_proj variant (night arm V8, 300 W) against the gate_up-only stack
+(V6) read -0.1 / 0.0 / +2.1 / +0.9 / +1.7 % at 2K-64K, but the two V6 starts differ from each other by up to 3.7 %,
+so this is noise, not a gain; it is not enabled.
+
+### NVFP4 checkpoint instead of MXFP4: not faster
+
+Same image, same launcher, 210 W, prefill tok/s at 2K/8K/16K/32K/64K: MXFP4 3,051 / 3,006 / 2,922 / 2,746 / 2,488,
+NVFP4 2,968 / 2,901 / 2,833 / 2,687 / 2,445 (-2.7 / -3.5 / -3.0 / -2.1 / -1.7 %). The weight format is not the cause of
+the remaining GEMM gap to the reference stack.
+
+### GEMM / W-stream overlap: already in the kernel
+
+The overlap the reference stack is credited with (the next slab's weight loads issued while the current slab computes)
+is what the A-tiled kernel already does; the explicit software-pipelined variant (`AT_OVL`, section above) was neutral
+to 0-4 % slower. Nothing to port.
+
 
 ## 2:4 structured sparsity on the weights via FP8 SWMMAC (RDNA4), reviewed 2026-10-21
 

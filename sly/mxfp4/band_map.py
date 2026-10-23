@@ -18,6 +18,7 @@ import argparse
 SHAPES = [
     ("gate_up", 34816, 5120, True),
     ("qkvz",    16384, 5120, True),
+    ("in_proj", 16480, 5120, True),   # merged GDN qkvz + ba
     ("qkv",     14336, 5120, True),
     ("o_proj",   5120, 6144, False),   # gdn_norm_quant / attn out: row-major in production
     ("out_proj", 5120, 6144, False),
@@ -72,7 +73,11 @@ def wide_cfg(M, N, K):
     return 1
 
 
-def label(M, N, K, tiled_prod, decode_max, wide_max, tn4_min, a_tiled_min, scratch_bytes):
+TALL_N = 34816   # gate_up: the only shape the tall tile serves (in_proj measured slower on it)
+
+
+def label(M, N, K, tiled_prod, decode_max, wide_max, tn4_min, a_tiled_min, scratch_bytes,
+          tall=0, tall_min=2048):
     if 0 < M <= decode_max and M <= DEC_MTILE * DEC_MAX_TM and N <= DEC_MAX_N:
         dks, bk, tm = decode_cfg(M, N, K)
         if dks == 1 or dks * M * N * 4 <= scratch_bytes:
@@ -84,6 +89,8 @@ def label(M, N, K, tiled_prod, decode_max, wide_max, tn4_min, a_tiled_min, scrat
             return f"WIDE d{dks}/b64/tm{tm}", 0
     tn = 4 if (M >= tn4_min and N >= 128) else 2
     kind = "atiled" if (a_tiled_min and M >= a_tiled_min and tiled_prod) else "folded"
+    if kind == "atiled" and tall and N == TALL_N and M >= tall_min:   # RADIANCE_MXFP4_TALL
+        return "atiled TALL TMT8/TN2 (BMF512)", -(-M // 512) * 512 - M
     pad = -(-M // BMF) * BMF - M
     return f"{kind} TN{tn} (BMF256)", pad
 

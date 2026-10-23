@@ -32,10 +32,15 @@ is b*(S0/(16*C)) + j. The step builds that expanded 16-slot block table once (a 
 only on steps that have a long run) and shares it across the 16 attention layers.
 
 QUERY. The attention layer quantises q to fp8 (static scale) before the op for every impl that sets
-supports_quant_query_input, and the AITER decode path needs that. libr4d has no 8-bit query variant, so
-for the R4D runs q is widened back to bf16 (exact: e4m3 values are bf16-representable, times the static
-q scale). It carries the same fp8 rounding the AITER kernel has anyway; the R4D kernel then runs its
-f16 legs (R4D_ATTN_FP8=0), i.e. is more accurate than the kernel it replaces for the rest of the chain.
+supports_quant_query_input, and the AITER decode path needs that. libr4d's default prefill path takes a
+bf16 query, so q is widened back (exact: e4m3 values are bf16-representable, times the static q scale).
+It carries the same fp8 rounding the AITER kernel has anyway; the R4D kernel then runs its f16 legs
+(R4D_ATTN_FP8=0), i.e. is more accurate than the kernel it replaces for the rest of the chain.
+With RADIANCE_ATTN_Q_FP8=1 that widening copy (176 launches, ~57 ms per 47k-token prefill) is not run:
+the prefill kernel reads the contiguous e4m3 query itself and applies q_scale, bit-identically
+(see _q_fp8_ok). That decision is pushed into libr4d per launch (`set_q_fp8`), so a query it declines
+-- bf16, fp32, non-contiguous -- can never reach the e4m3 path, and a libr4d without the toggle never
+gets the e4m3 path at all.
 
 Anything libr4d cannot take falls back to the AITER path on the whole step: no libr4d, geometry other
 than head_dim 256 / GQA 6, sliding window, alibi, sinks, logits soft cap, non-causal, a fused output
@@ -53,9 +58,13 @@ Knobs (read at import):
                                   then refuses to load like `--attention-backend R4D` does
   R4D_ATTN_FP8                    0 (default) | 1 | 2 | 3: libr4d's own opt-in 8-bit legs of the prefill kernel
                                   (QK8 / PV8 / both). Orthogonal; see docs/TECHNICAL.md (1.0) for what it costs in accuracy.
+  R4D_ATTN_TILE / R4D_ATTN_DB     libr4d's key tile (default 48) and O_DB staging; read per launch, active only
+                                  at R4D_ATTN_FP8=3. Off-default they are logged once per process, with the
+                                  instance name and fp8 mode, so a served run proves which kernel it got.
 """
 
 import dataclasses
+import math
 import os
 import sys
 
@@ -78,6 +87,9 @@ GQA = _r4d_attn.GQA
 _PREFILL = _r4d_attn._PREFILL              # (fp8 KV, bf16 KV)
 _KV_DTYPE_NAMES = _r4d_attn._KV_DTYPE_NAMES
 USE_R4D = _r4d_attn.USE_R4D
+# The prefill query-format toggle, pushed per launch (`_q_kernel`). None on a libr4d built before it
+# existed: such a library has no e4m3 query path, so it must never be handed an e4m3 pointer here.
+_set_q_fp8 = getattr(r4d, "set_q_fp8", None)
 
 ROUTE = os.environ.get("RADIANCE_R4D_HYBRID_ROUTE", "1") != "0"
 MIN_Q = max(16, int(os.environ.get("RADIANCE_R4D_PREFILL_MIN_Q", "512")))
@@ -94,6 +106,80 @@ def _say_once(key: str, msg: str) -> None:
     if key not in _logged:
         _logged.add(key)
         _say(msg)
+
+
+def _o_db_note(kernel: str, fp8: str) -> str | None:
+    """The line for a non-default R4D_ATTN_TILE / R4D_ATTN_DB, or None on the shipped path.
+
+    libr4d reads the pair per launch and only acts on it at fp8mode 3 (both 8-bit legs); the line
+    spells that out rather than implying a kernel that cannot be selected. One line per process is
+    the caller's job (`_say_once`), because forward runs once per layer.
+    """
+    tile = os.environ.get("R4D_ATTN_TILE") or "48"
+    db = os.environ.get("R4D_ATTN_DB", "0") not in ("", "0")
+    if not db and tile == "48":
+        return None
+    msg = (
+        f"R4D_ATTN_DB: prefill instance {kernel} "
+        f"(tile {tile}, O_DB {'on' if db else 'off'}, fp8 legs {fp8})"
+    )
+    return msg if fp8 == "3" else msg + " -- inert: the pair only acts on fp8 legs 3"
+
+
+def _o_db_say(kernel: str, fp8: str) -> None:
+    msg = _o_db_note(kernel, fp8)
+    if msg is not None:
+        _say_once("o_db", msg)
+
+
+def _q_fp8_ok(q: torch.Tensor, q_scale: float) -> bool:
+    """True when libr4d can read this query as e4m3 instead of a bf16 copy of it.
+
+    `RADIANCE_ATTN_Q_FP8=1` makes the prefill kernel widen the query and apply `q_scale` in its own
+    prologue (e4m3 -> fp32 exactly, times the fp32 scale, one round-to-nearest-even to bf16: what
+    `q.to(torch.bfloat16) * q_scale` below computes), so the attention output stays bit-identical
+    while the widening copy -- 25 MB read + 50 MB write per (layer, chunk), ~57 ms over a 47k-token
+    prefill -- disappears.
+
+    The answer is PUSHED into libr4d (`set_q_fp8`) immediately before the launch, never read from
+    the environment by both sides: the env is process-wide and this decision is per query, and a
+    libr4d that disagrees reads a bf16 buffer as e4m3 (or the reverse) -- an out-of-bounds read.
+    A libr4d without the toggle cannot be told, so it does not get the path.
+
+    Only an e4m3 (OCP, float8_e4m3fn) query qualifies, only contiguous (the kernel assumes
+    [tokens, heads, 256] with the head dim innermost), and only a finite positive q_scale. When the
+    knob is on and this declines, the reason is logged once.
+    """
+    if os.environ.get("RADIANCE_ATTN_Q_FP8", "0") != "1":
+        return False
+    why = (
+        "this libr4d has no set_q_fp8, so the kernel cannot be told" if _set_q_fp8 is None else
+        f"q is {q.dtype}, not e4m3" if q.dtype != torch.float8_e4m3fn else
+        "q is not contiguous" if not q.is_contiguous() else
+        f"q_scale is {q_scale}, not finite and positive" if not 0.0 < q_scale < math.inf else None
+    )
+    if why is not None:
+        _say_once(f"qf8:{why}", f"RADIANCE_ATTN_Q_FP8: declined ({why}); the query is cast to bf16")
+        return False
+    _say_once("qf8", "RADIANCE_ATTN_Q_FP8: the prefill kernel takes the query as e4m3 (no bf16 copy)")
+    return True
+
+
+def _q_kernel(q: torch.Tensor, q_scale: float) -> torch.Tensor:
+    """The query to hand the prefill kernel, with the matching set_q_fp8 answer pushed first.
+
+    The kernel cannot ask "is this pointer e4m3?" and must not infer it from the environment: the
+    env is process-wide, this answer is per query. So the answer travels with the launch: the
+    q_scale the kernel applies, or 0.0 for a bf16 query.
+    """
+    keep = _q_fp8_ok(q, q_scale)
+    if not keep and q.dtype != torch.bfloat16:
+        q = q.to(torch.bfloat16)
+        if q_scale != 1.0:
+            q = q * q_scale
+    if _set_q_fp8 is not None:
+        _set_q_fp8(q_scale if keep else 0.0)
+    return q
 
 
 def _plan(query_start_loc_cpu: torch.Tensor, num_reqs: int, min_q: int):
@@ -329,6 +415,7 @@ class R4DHybridAttentionImpl(RocmAiterUnifiedAttentionImpl):
 
         variant, mult, head_stride, ratio = geom
         launch = _PREFILL[variant]
+        _o_db_say(launch.__name__, os.environ.get("R4D_ATTN_FP8", "0"))
         k_descale, v_descale = self._descale_ptrs(layer, query.device)
         table, lo = self._block_table16(attn_metadata, runs, mult, ratio)
         max_blocks = table.shape[1]
@@ -377,11 +464,7 @@ class R4DHybridAttentionImpl(RocmAiterUnifiedAttentionImpl):
                 )
                 continue
             _, first_req, n_seqs, q_len, first_tok = run
-            q = query[first_tok : first_tok + n_seqs * q_len]
-            if q.dtype != torch.bfloat16:
-                q = q.to(torch.bfloat16)
-                if q_scale != 1.0:
-                    q = q * q_scale
+            q = _q_kernel(query[first_tok : first_tok + n_seqs * q_len], q_scale)
             launch(
                 q.data_ptr(),
                 kv_ptr,

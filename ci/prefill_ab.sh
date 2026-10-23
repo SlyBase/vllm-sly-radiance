@@ -74,6 +74,7 @@ QUANT_FLAG=${QUANT_FLAG:-}
 K2_SO=${K2_SO:-}
 O_DIR=${O_DIR:-}
 G_DIR=${G_DIR:-}
+PSW_DIR=${PSW_DIR:-}
 SP=${SP:-/opt/vllm/lib/python3.12/site-packages}   # site-packages inside the image
 if [ "$SHORT" = 1 ]; then
   DEPTHS=${DEPTHS_SHORT:-[2000,21500,64000]}        # ~1.5k / 16k / 47k real prompt tokens
@@ -169,6 +170,15 @@ arm_sed() {
           GS) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 /" ;;
           GT) echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
         esac ;;
+    P0|P0b|P0c|P0d|P1|P1b|P1c|P1d) # PSW through the loader: .so + radiance_mxfp4.py of exp/psw bind-mounted (PSW_DIR), GT knobs on
+        # in all three; P1 adds RADIANCE_MXFP4_AT_PSW=2 (weights repacked in place at load). P0b = control again.
+        [ -r "$PSW_DIR/radiance_mxfp4_fp8.so" ] && [ -r "$PSW_DIR/radiance_mxfp4.py" ] || { echo "$1 needs PSW_DIR=<dir with radiance_mxfp4_fp8.so + radiance_mxfp4.py>" >&2; return 1; }
+        echo "s|-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro |-v /root/swift-heretic-gptq:/models/swift-mxfp4:ro -v $PSW_DIR/radiance_mxfp4_fp8.so:$SP/radiance_mxfp4_fp8.so:ro -v $PSW_DIR/radiance_mxfp4.py:$SP/radiance_mxfp4.py:ro |"
+        if [ "${1#P1}" != "$1" ]; then
+          echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 -e RADIANCE_MXFP4_AT_PSW=2 /"
+        else
+          echo "s/-e GPU_MAX_HW_QUEUES=1 /-e GPU_MAX_HW_QUEUES=1 -e RADIANCE_FUSED_NQ_REG=1 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 -e RADIANCE_MXFP4_TN4_MIN_M=513 /"
+        fi ;;
     T4) # TN4 tile from M>=513 instead of 2048 (env only; cell bench: +3..5% GEMM at M 513..1536, equal at >=2048)
         echo "s/-e RADIANCE_MXFP4_A_TILED_MIN_M=513 /-e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_TN4_MIN_M=513 /" ;;
     OT) # O + T4
@@ -264,7 +274,7 @@ main()
   if [ "$SHORT" = 1 ]; then   # decode guard: 3 sequential 256-token requests, not a BetterBench decode run
     log "$arm: decode sample"
     python3 - "$PORT" "$MODEL" > "$arm.decode.txt" 2>&1 <<'PY'
-import json, sys, time, urllib.request
+import hashlib, json, sys, time, urllib.request
 port, model = sys.argv[1:3]
 for i in range(4):   # first request is a warmup and is not reported as a rate
     body = json.dumps({"model": model, "max_tokens": 256, "temperature": 0, "ignore_eos": True,
@@ -275,7 +285,11 @@ for i in range(4):   # first request is a warmup and is not reported as a rate
         f"http://127.0.0.1:{port}/v1/chat/completions", body, {"Content-Type": "application/json"}), timeout=300))
     dt = time.time() - t0
     n = r["usage"]["completion_tokens"]
-    print(f"run{i} {'warmup' if i == 0 else 'sample'} tokens={n} s={dt:.2f} tps={n / dt:.1f}")
+    msg = r["choices"][0]["message"]
+    txt = (msg.get("reasoning_content") or "") + "\x00" + (msg.get("content") or "")
+    # greedy (temperature 0) text hash: equal across arms <=> same tokens (decode correctness check)
+    print(f"run{i} {'warmup' if i == 0 else 'sample'} tokens={n} s={dt:.2f} tps={n / dt:.1f} "
+          f"gensha={hashlib.sha256(txt.encode()).hexdigest()[:16]}")
 PY
   fi
   docker logs "$NAME" > "$arm.server.log" 2>&1

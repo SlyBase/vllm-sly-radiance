@@ -10,6 +10,170 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.8.0] - 2026-10-23
+
+The measured prefill stack is the **image default**: every knob below is on without any `-e` (Dockerfile ENV,
+or the module default for the PSW weight layout), and each reverts with an explicit `-e`. At 300 W the
+default is **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %** prefill against the reference stack at 2K/8K/16K/32K/64K
+(previous stack: +1.1 / −1.0 / −2.3 / −5.0 / −7.2 %). End-to-end (serve-level) results at 300 W are given per knob below (prefill sweep,
+8 runs median, one start per arm, so differences under ~2 % are single-start noise); the kernel numbers
+are one-layer microbenches. See
+[docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) for the GDN variants.
+
+### Added
+- **`R4D_ATTN_DB=1` (+ `R4D_ATTN_TILE=16|32|48`)**: double-buffered K/V staging with one barrier per key
+  tile in the libr4d prefill attention kernel (O_DB). Output is **bit-identical** to the stock kernel;
+  only the LDS slicing and the issue point of the staging loads move. Gate: `R4D_ATTN_FP8=3`, otherwise the
+  knob is inert. One attention layer (`r4d_attn_prefill_h256_gqa6`, M = 4089): **27.128 → 26.310 ms at
+  ctx 40,890 (−3.0 %)**, 11.763 → 11.313 ms at ctx 16,356 (−3.8 %), 1.687 → 1.571 ms at ctx 0 (−6.9 %).
+  Tile 16 *without* DB is 7.7 % slower than the shipped tile 48 (29.236 ms at 40,890), which is why the
+  earlier tile-16 attempt lost; DB is what pays for the smaller tile. End to end at 300 W (together with
+  the s3 scan variant and `RADIANCE_DFLASH_FC_TILED_MIN_M=513`) the effect is **within single-start noise**
+  (E1 vs A1 −1.8 .. +0.9 % over 2K-64K prefill). **On by default** (image ENV `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`).
+- **`O_DB` prefetch prologue (same knob, `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`)**: the tile-16 double-buffer's
+  per-tile prologue now issues K and V in **one** predicated region, with both addresses derived in one
+  pass off a single block-table entry and the two global loads back to back, and the block-table index for
+  tile *t+2* is fetched after them and consumed in the next iteration. Values are unchanged (the gate
+  hashes D16 against the previous build and against same-tile stock per context); what moves is the
+  schedule: tile loop **386 → 369** instructions, `s_mul_u64` 2 → 1, `s_wait_kmcnt` 3 → 2, exec
+  save/restore 4 → 2 — i.e. the loop the reference stack runs, reached from our own source rather than
+  from a compiler accident. Every other instance (all eight non-`O_QF8` masks, including the shipped
+  tile-48 one) compiles to an **instruction-for-instruction identical** body, so nothing shipped moves.
+  `ci/attn_sched_lint.py` reads the emitted assembly of `r4d_attn_paged_h256_gqa6.hip` and fails the build
+  on a regression of exactly these numbers (386-instruction loop, two load regions, a drain between the
+  loads); it is the CPU-side gate for this class of change and needs no GPU. GPU gate prepared, not run.
+- **`RADIANCE_ATTN_Q_FP8=1`**: the prefill kernel reads the e4m3 query the attention layer already
+  quantised (`--kv-cache-dtype fp8` makes vLLM quantise q for this impl) instead of a bf16 copy of it.
+  `O_QF8` widens each byte exactly, multiplies by the static `q_scale` in fp32 and rounds once to bf16
+  (round-to-nearest-even, torch's NaN handling) inside the kernel prologue, which is exactly what the
+  glue's `q.to(bfloat16)` and `q * q_scale` compute, so the output is **bit-identical** — and the
+  `direct_copy` at `radiance_r4d_hybrid_attn.py` (176 launches, **~57 ms** of a 47k-token prefill, 25 MB
+  read + 50 MB write per layer per chunk) is gone. The answer travels with the launch: `set_q_fp8(q_scale)`
+  is a caller-owned toggle (0 = bf16, default; `r4d_q_fp8()` is what `prefill_launch` reads) pushed by the
+  glue from the same decision that decides the cast; only a contiguous `float8_e4m3fn` query with a finite
+  positive scale qualifies, a libr4d without the binding never gets the path, and the first firing and
+  each decline reason are logged once. CPU-gated by `sly/tests/test_attn_q_fp8_cpu.py` (kernel formula vs
+  `q.to(bfloat16) * q_scale` bit for bit over all 256 codes x 300+ scales; toggle logic; patch wiring).
+  The instance is an extra bit on the existing masks, so every shipped instance keeps its exact code
+  object. **On by default** (image ENV). Part of the 300 W night arm V6/V6P (below).
+- **`RADIANCE_MXFP4_TALL=1`** (+ `RADIANCE_MXFP4_TALL_MIN_M`, default `2048`): a 512x64x64
+  A-tiled prefill tile (TMT=8, TN=2, LBK=64; 8 waves of 128x32, 234 VGPR, 4,736 B LDS, no spill) for
+  **gate_up only (N 34,816)**, WPERM e4m3 fragment-order weights, at M >= `RADIANCE_MXFP4_TALL_MIN_M`.
+  It halves the weight-side work per MAC, and its result is **bit-identical** to the existing tiles
+  (same K order and WMMA chain per output; the DIGEST lines of `sly/mxfp4/bench_prefill_cells.py
+  --check` match TN2 and TN4 at M 1,514 / 2,048 / 4,089 / 4,096). One layer, cell bench at 300 W:
+  **1.5-1.8 % faster** than TN4 on gate_up at M 1,514 / 2,048 / 4,089. It is not used for the merged
+  GDN in_proj (N 16,480) because it measured up to **2 % slower** there, so that shape keeps TN2/TN4.
+  **On by default** (image ENV `RADIANCE_MXFP4_TALL=1`, kernel fallback 0); CPU-gated by
+  `sly/tests/test_tall_tile_cpu.py`, cell gate `ci/tall_gate.sh`. Serve level: part of the V6/V6P night arms
+  (below); the variant that also uses it for in_proj ran slower (docs/NOT-ADOPTED.md).
+- **`RADIANCE_GDN_GATE_INPLACE=1`**: build the GDN chunk scan's fp32 initial state without the copies
+  that only reshape the paged mamba cache. Per (GDN layer, prefill chunk) the stock glue runs six copy
+  kernels — gather `ssm_state[prefill_state_indices]` (`index_elementwise`, 16.23 ms / 576 launches at a
+  47k-token prefill), widen to fp32 (`direct_copy`, 1.46 ms), `~mask` (1.49 ms), the row fill (6.07 ms),
+  the `ht` scatter (16.12 ms) and the narrow (`direct_copy`, 1.49 ms). Three of the six exist only to
+  shape a state that is already zero or already dense: a row without an initial state *is* zero (a
+  shared zero buffer replaces gather + widen + fill), and a batch where every row carries one needs no
+  fill and no `~mask`. Same bytes by construction — the expression is only reordered, never recomputed;
+  CPU-gated by `sly/tests/test_gdn_gate_inplace_cpu.py`, which compares against the stock expression bit
+  for bit on a bf16 and an fp32 cache with all three mask patterns. Expected **≈9.0 ms** of a 47k-token
+  prefill from the profiler's per-kernel times (6.9 ms if the first chunk is already marked as carrying
+  state, i.e. only the all-present half fires). Off by default; the GPU gate (identity over all 48 GDN
+  layers at T = 880 / 1,760 / 4,089 + ABBA kernel timing) is prepared and not yet run. Note that the
+  gate (`a`, `b`) slices of the merged in_proj are **already** read in place (`RADIANCE_GDN_STRIDED_GATES`
+  + `a.stride(0)` in `conv_prep`): a trace of this stack shows no copy for them.
+- **`RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3`**: build-time variants of the GDN chunk scan in the same `r4d.so`,
+  selectable per process (`unset` = stock entry point): `s1` = workgroup-processor mode (unit built without
+  `-mcumode`), `s2` = `s1` + LDS diet (state mirror aliases sA + W), `s3` = `s2` + the next chunk's staging
+  loads issued after barrier (3). DIGEST bit-identical against stock at T = 64 / 65 / 880 / 1760 / 4089 and
+  a varlen split, 5 repeats stable. One layer, T = 4089: stock **0.5720 ms**, s1 0.4860 (**−15.0 %**),
+  s2 0.5366 (−6.2 %), s3 0.4255 (**−25.6 %**). `s3` uses 189 VGPR (no spill) and 43,008 B LDS against stock's
+  256 VGPR with a 4-VGPR spill and 60,928 B. `s2` alone is slower than `s1`, so the useful pair is s1 + s3.
+  End to end at 300 W the gain is **within single-start noise** (E1 vs A1 −1.8 .. +0.9 %, see above).
+  **On by default** (image ENV `RADIANCE_GDN_SCAN_VARIANT=s3`; empty reverts to stock).
+- **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1`** (+ `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_MARGIN`, default 512):
+  the DFlash2 drafter has 5 sliding-attention layers with a 2,048-token window, so in an intermediate
+  prefill chunk it only ever reads the last ~2,048 positions while the scheduler drops its draft tokens
+  anyway; the knob skips its `fc`, context-K/V fill and draft step for chunks whose end lies at least
+  `window + margin` below the prompt length. Gate: prefix caching must be **off** (with APC on the knob
+  warns once and does nothing), all drafter layers must be sliding, and DP must be 1. CPU-gated by
+  `sly/tests/test_dflash_prefill_skip_cpu.py`. End to end at 300 W (E2 vs E1, working skip with margin 1760,
+  chunks >= 3808 tokens): **+2.1 % at 16K, +3.6 % at 32K, +3.2 % at 64K** prefill tok/s (3,697 vs 3,621,
+  3,475 vs 3,355, 3,167 vs 3,068). GPU identity test: see Changed.
+
+- **`RADIANCE_MXFP4_AT_PSW` (default `auto`)**: the PSW weight layout in production. At load every layer the
+  MXFP4 kernels serve is repacked **in place** (preshuffled nibble plane + pre-folded scale, same shape and
+  storage, no extra memory), and the A-tiled, folded, decode, wide-decode and tall kernels unpack it, which
+  removes the in-loop nibble shuffle and the scale fold. Output is **bit-identical** by construction. Wherever
+  a reader of the checkpoint byte order exists (`W4A8_MIN_M>0` hands small M to aiter, no `WPERM`,
+  `DECODE_NT`, `R4D_DECODE_MAX_M`, debug/check/reference knobs, ParoQuant) `auto` stays off and logs why;
+  `=2` keeps refusing loudly on such a launch, `=0` is off. The production launch qualifies. Measured at
+  300 W (night, ABBA, 8 runs median): prefill **+3.1 / +2.4 / +4.2 / +2.9 / +3.5 %** at 2K/8K/16K/32K/64K
+  over the same stack without PSW. 210 W: 1,093 greedy digests identical, 0 wrong; GSM8K-200 0.835 = 0.835.
+  CPU-gated by `sly/tests/test_v6p_defaults_cpu.py`, kernel paths by `ci/check_psw_all_paths.py`.
+
+### Changed
+- **The measured prefill stack is the image default (Dockerfile ENV)**: `RADIANCE_MXFP4_TN4_MIN_M=513`,
+  `RADIANCE_FUSED_NQ_REG=1`, `RADIANCE_MXFP4_AT_SKIP_PAD=1`, `RADIANCE_MXFP4_TILED_OPROJ=1`, `R4D_ATTN_FP8=3`,
+  `R4D_ATTN_DB=1`, `R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`, `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1`,
+  `RADIANCE_DFLASH_FC_TILED_MIN_M=513`, `RADIANCE_ATTN_Q_FP8=1`, `RADIANCE_MXFP4_TALL=1`. Until now the first
+  four lived only in `serve-mxfp4.sh`, so a plain `docker run` of the image (the production unit) did not
+  get them. Kernel-side fallbacks stay at the stock path; `-e NAME=0` (or `RADIANCE_MXFP4_TN4_MIN_M=2048`,
+  `RADIANCE_GDN_SCAN_VARIANT=` empty) reverts one knob without a rebuild. 300 W night, same card, ABBA,
+  8 runs median, prefill tok/s at 2K/8K/16K/32K/64K: previous stack 3,798 / 3,825 / 3,783 / 3,513 / 3,152;
+  stack without PSW (V6) 3,810 / 3,872 / 3,733 / 3,590 / 3,258; **this default 3,927 / 3,965 / 3,890 /
+  3,692 / 3,371**; reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396. Default vs reference stack
+  **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**. Not enabled: tall tile for in_proj, the drafter skip with prefix
+  caching (both in docs/NOT-ADOPTED.md). The drafter skip still disables itself under prefix caching.
+- **`serve-mxfp4.sh` now ships `--no-async-scheduling` by default** (`RADIANCE_NO_ASYNC_SCHED=1`; `=0` drops
+  the flag and lets dflash auto-enable async scheduling, `ASYNC=1` still forces `--async-scheduling`).
+  Measured at 300 W on one R9700, same image, prefix cache off, chunk 4096, `--max-model-len 65536`,
+  thinking off, 8 timed runs per prefill depth, 32 requests per decode level, median; the only difference
+  between the two arms is the flag. Prefill 2K/8K/16K/32K/64K tok/s **3,789.5 / 3,803.3 / 3,704.0 /
+  3,487.3 / 3,170.6** against async's 3,544.1 / 3,759.4 / 3,550.4 / 3,449.8 / 3,199.2 — **+6.9 / +1.2 /
+  +4.3 / +1.1 / −0.9 %**. Decode weighted **unchanged** (159.8 vs 160.0 tok/s, −0.2 %), c1 +1.1 %
+  (129.0 vs 127.6), **c2 −11.7 %** (210.9 vs 239.0, the price of losing the decode overlap), c4 +3.0 %
+  (340.3 vs 330.5). Why: with dflash, async scheduling adds an output-drain engine step whose output is
+  fetched through an event wait; without it the first token is sampled inside the prefill step, which is
+  where the win lands (largest at short prompts). Scheduling-only: no numerics, kernel, or graph change,
+  so there is no accuracy risk. CPU-gated by `sly/tests/test_launcher_async_sched_cpu.py`.
+- **`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` now defaults to `1` in `serve-mxfp4.sh`** (`${VAR:-1}`; the module
+  default stays `0`, `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=0` reverts). It is lossless by construction (all 5
+  drafter layers use a 2,048 sliding window, the masking is exact per position, the scheduler discards
+  prefill drafts) and by GPU test at 210 W: knob on vs off on the same patched image gave **identical text
+  and identical per-position spec-decode acceptance counters for 10 requests** (20k and 40k
+  window-sensitive prompts, 4 short prompts, a mixed batch), while two knob-off starts differed from each
+  other (known start-to-start nondeterminism). The skip line was logged only in the ON arm (margin 1760,
+  chunks >= 3,808 tokens). It disables itself with prefix caching (the production default), so it only acts
+  with APC off.
+- **Final measurement of the 1.8.0 stack, 2026-10-23, 300 W** (one AMD Radeon AI PRO R9700 32 GB in an LXC on
+  Proxmox, ROCm 10.1; Swift-1.5 Qwen3.8-27B heretic MXFP4 (GPTQ) + DFlash2 drafter k = 7; FP8 KV cache;
+  65,536 context; chunk 4096; prefix caching off; `--no-async-scheduling`; BetterBench 0.4.0 full config, seed
+  42, temperature 0.7, top-p 0.95, top-k 20; power cap 300 W, voltage offset -50 mV via LACT, core clock offset
+  0; GPU KV pool 340,723 tokens). Two fresh starts: decode weighted median **154.6 / 154.1 tok/s**, update gap
+  p99 34.9 / 35.1 ms, TTFT p50 57 ms. Run a by category (chat / code / file_edit / json / math / prose /
+  reasoning / summarization): 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s, tokens per
+  update 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 (run b within 0.5 %). Concurrency 1/2/4/8/16
+  aggregate: run a 139 / 236 / 365 / 478 / 516, run b 64 (outlier) / 244 / 357 / 481 / 508 tok/s. Prefill
+  inside the full run at 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens: run a 3,661 / 3,694 /
+  3,638 / 3,526 / 3,261, run b 3,628 / 3,641 / 3,599 / 3,483 / 3,130 tok/s. GSM8K-200 greedy,
+  flexible-extract: 0.82 / 0.82.
+- **Quality of the shipped path**: KL divergence against a bf16 layer-by-layer reference over 15,177 positions
+  0.0527 (top-1 agreement 93.1 %, perplexity +2.2 %); 1.8.0 is bit-identical to 1.6.0 (KL divergence 0
+  between them); the weights-only exact path scores 0.0403. Speculative depth: k = 7 is best (concurrency 1:
+  124 tok/s against 114 at k = 5 and 92 at k = 3). `--no-async-scheduling` stays the default (210 W ABBA,
+  2026-10-22: prefill +1.2 .. +7.7 %, no measurable decode difference).
+- **README: best-performance launch example** for this stack (`docker run` with the image defaults, plus the
+  optional host tuning 300 W / -50 mV), and the full test environment next to the numbers.
+- `VERSION` 1.7.0 → 1.8.0.
+
+### Fixed
+- **One-time proof lines for the three 1.8.0 knobs**, printed when the path actually takes effect in a
+  served run: `RADIANCE_ATTN_Q_FP8` (first e4m3 prefill launch, or once with the decline reason),
+  `RADIANCE_GDN_GATE_INPLACE` (first prefill chunk on the in-place h0 path, with `zeros`/`nomask`) and
+  `RADIANCE_MXFP4_TALL` (first tall dispatch, with M, N and `tn_m`). Default-off knobs that change the
+  kernel are only proven by what the process says it dispatched.
+
 ## [1.7.0] - 2026-10-20
 
 Stack bump to vLLM 0.32.0 (released 2026-10-18). torch / triton / torchvision are unchanged: 0.32.0's own

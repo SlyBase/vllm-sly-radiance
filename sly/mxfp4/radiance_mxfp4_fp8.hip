@@ -31,6 +31,7 @@
 #include <hip/hip_bf16.h>
 #include <pybind11/pybind11.h>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <cstdlib>
 namespace py = pybind11;
@@ -292,6 +293,15 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 #define RAD_TILE_ORIGIN RAD_TILE_ORIGIN_BM(BMF)
 #define BNF BNF_OF(2)
 
+// PSW=2 unpack of one fragment-order lane word (layout: A-tiled kernel comment, psw_pack_w) into
+// the 8 e4m3 bytes the plain path writes; t0/t1 = the kMag row already selected by the folded
+// scale byte (8 * clamp(Wref - Ws, 0, 15)). The A-tiled kernel keeps its own inline copy.
+static __device__ __forceinline__ uint2_t psw2_unpack8(unsigned int wq, unsigned int t0, unsigned int t1) {
+  const unsigned int hi = __builtin_amdgcn_alignbit(wq, wq, 4);
+  return uint2_t{__builtin_amdgcn_perm(t1, t0, wq & 0x07070707u) | (wq & 0x80808080u),
+                 __builtin_amdgcn_perm(t1, t0, hi & 0x07070707u) | (hi & 0x80808080u)};
+}
+
 // TN is templated because the winner depends on M. Widening the N tile (TN=4 -> BNF=128) amortises
 // the A-tile staging, which an ablation prices at 24% of runtime -- A is BMF*BK = 16 KB per K-slab
 // against W's 2 KB, and with BNF=64 it is re-staged across twice as many column blocks. Measured on
@@ -306,7 +316,10 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 // r4d_gemm_mxfp4a8_nt_m64 reads and what makes a wave's weight read 128 contiguous bytes instead
 // of sixteen rows K/2 bytes apart. Both paths produce the SAME sW tile, so everything downstream
 // of the staging loop is untouched.
-template <int TN, bool WPERM, bool EPIFAST = true, bool E6 = false>
+// PSW (0 or 2, WPERM e4m3 only): the PSW=2 weight layout of the A-tiled kernel (see there), so a
+// process whose weights were repacked at load stays correct when a call lands here (M in the
+// 193..512 band, row-major A). Same e4m3 bytes in sW, so the output is bit-identical.
+template <int TN, bool WPERM, bool EPIFAST = true, bool E6 = false, int PSW = 0>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
     const unsigned char *__restrict__ A, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -432,6 +445,11 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
         } else
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
+          if constexpr (PSW != 0) {
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + ((wsw >> (8 * q)) & 0xFF));
+            *(uint2_t *)(&sW[(r + q) * WSTR + kloc]) = psw2_unpack8(wq[q], t[0], t[1]);
+            continue;
+          }
           int d = (int)((refw >> (8 * q)) & 0xFF) - (int)((wsw >> (8 * q)) & 0xFF);
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const unsigned int t0 = kMag[d][0], t1 = kMag[d][1];
@@ -931,8 +949,10 @@ static __device__ __forceinline__ T ld_w(const T *p) {
 // at SPEC=7, which reaches 64 at max_num_seqs=8. DTM 1..4 covers every reachable batch of both.
 // Use the SMALLEST DTM that covers M: measured at M=20, DTM=2 beats DTM=3 by 12% (89.1 vs 99.9 us
 // on gate_up) purely because the wider tile computes rows nobody asked for.
+// PSW (0 or 2, WPERM e4m3 only): weights repacked at load (psw_pack_w / psw_fold_ws), the same
+// layout the A-tiled kernel reads, so decode and prefill share one copy of the weight bytes.
 template <int DWN, int DBK, int DKS, int DTM, bool WPERM, bool DIRECT = true, bool NT = false,
-          bool E6 = false>
+          bool E6 = false, int PSW = 0>
 __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
     const unsigned char *__restrict__ A, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
@@ -1051,6 +1071,12 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
         } else
 #pragma unroll
         for (int q = 0; q < 2; ++q) {
+          if constexpr (PSW != 0) {
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + Ws[(size_t)blk * N + gc + q]);
+            *(uint2_t *)(&sW[(r + q) * DWSTR + kloc]) = psw2_unpack8(wq_dec(wv, q), t[0], t[1]);
+            if constexpr (DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
+            continue;
+          }
           int d = (int)Wref[gc + q] - (int)Ws[(size_t)blk * N + gc + q];
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const unsigned int t0 = kMag[d][0], t1 = kMag[d][1];
@@ -1080,6 +1106,10 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
       }
       const unsigned char *pw = &sW[(wave * 16 + col) * DWSTR + kk];
       wf[0] = *(const int *)pw; wf[1] = *(const int *)(pw + 4);
+      // PSW instantiations only: without the fence LLVM hoists every k-step's fragment loads
+      // above the first WMMA at DTM >= 6, BK=128 (TM=8: 133 -> 254 VGPRs, occupancy 6 -> 5); elsewhere
+      // the fence costs registers (TM=8 BK=64 +4), so it is limited to those cells.
+      if constexpr (PSW != 0 && DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
       for (int i = 0; i < DTM; ++i)
         acc[i] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i], wf, acc[i]);
@@ -1302,6 +1332,13 @@ static void set_decode_scratch(uintptr_t ptr, size_t bytes, uintptr_t cnt) {
   g_decode_cnt = (int *)cnt;        // must be ZEROED by the caller, once
 }
 
+// PSW weight layout (0 = off, 1/2 = psw_pack_w mode). Process-global like WPERM: set once by the
+// loader (radiance_mxfp4.py, RADIANCE_MXFP4_AT_PSW) after it repacked every weight this .so serves,
+// or toggled by the cell benches. Mode 2 is read by every MXFP4 e4m3 fragment-order kernel (A-tiled,
+// folded, decode, wide decode); mode 1 by the A-tiled kernel only. Any other path throws while it
+// is set -- the checkpoint-order, per-block, E6 and streaming-decode kernels do not read PSW bytes.
+static int g_at_psw = 0;
+static void set_at_psw(int v) { g_at_psw = v; }
 static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                         uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
                         uintptr_t stream, uintptr_t wh = 0) {
@@ -1310,6 +1347,9 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
   if ((pb1 < N && pb1 % 128) || (pb2 < N && pb2 % 128))
     throw std::runtime_error("radiance_mxfp4_fp8: partition boundaries must be multiples of 128");
   if (!wref && pb1 < N) throw std::runtime_error("radiance_mxfp4_fp8: partitions need the folded path");
+  if (g_at_psw != 0 && (g_at_psw != 2 || !wref || wh))
+    throw std::runtime_error("radiance_mxfp4_fp8: PSW weights reached a path without a PSW reader "
+                             "(needs mode 2, the folded wref path and MXFP4 e4m3)");
   dim3 block(NWAVE * 32);
   dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
   // the tuned folded kernel wins at every shape measured, so it is the default whenever the
@@ -1344,6 +1384,10 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       const char *e = getenv("RADIANCE_MXFP4_DECODE_NT");
       return e && atoi(e) != 0;
     }();
+    if (g_at_psw != 0 && (!dec_wperm || dec_nt))
+      throw std::runtime_error("radiance_mxfp4_fp8: PSW needs RADIANCE_MXFP4_WPERM=1 and "
+                             "RADIANCE_MXFP4_DECODE_NT=0");
+    const bool psw = g_at_psw != 0;
     dim3 fblock(NTHREADS);
     constexpr int DWN = DEC_DWN;                 // tuned: ~/mxfp4_work/tier5 + tier6/grid.hip
     constexpr int DBND = DWN * 16;
@@ -1427,7 +1471,7 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       if (bkx == 0) bkx = decode_bk64(tm, dks) ? 64 : 128;
 #define RAD_DEC_LAUNCH(BK_, KS_, TM_)                                                         \
       hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, BK_, KS_, TM_, RAD_WPERM, true,  \
-                                                          RAD_NT, RAD_E6>),                   \
+                                                          RAD_NT, RAD_E6, RAD_PSW>),          \
                          dim3(dec_nblk, 1, KS_), dblock,                                       \
                          0, (hipStream_t)stream, (const unsigned char *)a,                     \
                          (const unsigned char *)w, (const unsigned char *)ws,                  \
@@ -1456,6 +1500,7 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       // Two restagings that batch a thread's loads for the whole line (8 B x G, then one 16 B
       // per lane / 4 rows per wave) were STILL 1.4-1.8x under NT and -5..-19% without it, so
       // the row layout keeps plain loads and dec_nt is ignored there.
+#define RAD_PSW 0
       if (wh) {
 #define RAD_E6 true
 #define RAD_WPERM true
@@ -1475,7 +1520,15 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
 #define RAD_E6 false
       if (dec_wperm) {
 #define RAD_WPERM true
-        if (dec_nt) {
+        if (psw) {
+#undef RAD_PSW
+#define RAD_PSW 2
+#define RAD_NT false
+          RAD_DEC_BY_KS;
+#undef RAD_NT
+#undef RAD_PSW
+#define RAD_PSW 0
+        } else if (dec_nt) {
 #define RAD_NT true
           RAD_DEC_BY_KS;
 #undef RAD_NT
@@ -1493,6 +1546,7 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
 #undef RAD_WPERM
       }
 #undef RAD_E6
+#undef RAD_PSW
 #undef RAD_DEC_BY_KS
 #undef RAD_DEC_BY_TM
 #undef RAD_DEC_LAUNCH
@@ -1532,7 +1586,7 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
         const int tm = (M + DEC_MTILE - 1) / DEC_MTILE;          // 9..16
 #define RAD_WIDE_LAUNCH(KS_, TM_, NT_)                                                        \
         hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, 64, KS_, TM_, true, true, NT_, \
-                                                            false>),                          \
+                                                            false, (NT_ ? 0 : RAD_WPSW)>),    \
                            dim3(dec_nblk, 1, KS_), dblock, 0, (hipStream_t)stream,            \
                            (const unsigned char *)a, (const unsigned char *)w,                \
                            (const unsigned char *)ws, (const unsigned char *)wref,            \
@@ -1553,29 +1607,44 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
         if (wks == 1)      { RAD_WIDE_BY_TM(1, NT_); }                                        \
         else if (wks == 2) { RAD_WIDE_BY_TM(2, NT_); }                                        \
         else               { RAD_WIDE_BY_TM(4, NT_); }
-        if (dec_nt) { RAD_WIDE_BY_KS(true); } else { RAD_WIDE_BY_KS(false); }
+        if (psw) {
+#define RAD_WPSW 2
+          RAD_WIDE_BY_KS(false);
+#undef RAD_WPSW
+        } else {
+#define RAD_WPSW 0
+          if (dec_nt) { RAD_WIDE_BY_KS(true); } else { RAD_WIDE_BY_KS(false); }
+#undef RAD_WPSW
+        }
 #undef RAD_WIDE_BY_KS
 #undef RAD_WIDE_BY_TM
 #undef RAD_WIDE_LAUNCH
         return;
       }
     }
-#define RAD_FOLDED_E(TN_, WP_, EF_, E6_)                                                        \
+#define RAD_FOLDED_E(TN_, WP_, EF_, E6_, PSW_)                                                  \
     do {                                                                                        \
       constexpr int B_ = BNF_OF(TN_);                                                           \
       dim3 fgrid((N + B_ - 1) / B_, (M + BMF - 1) / BMF);                                       \
-      hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_folded<TN_, WP_, EF_, E6_>), fgrid, fblock, 0, \
+      hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_folded<TN_, WP_, EF_, E6_, PSW_>), fgrid, fblock, 0, \
                          (hipStream_t)stream, (const unsigned char *)a,                         \
                          (const unsigned char *)w, (const unsigned char *)ws,                   \
                          (const unsigned char *)wref, (const float *)as, (__bf16 *)c, M, N, K, \
                          pb1, pb2, astride, (const unsigned char *)wh);                         \
     } while (0)
 #define RAD_FOLDED(TN_, WP_, E6_)                                                               \
-    do { if (epifast) RAD_FOLDED_E(TN_, WP_, true, E6_); else RAD_FOLDED_E(TN_, WP_, false, E6_); } while (0)
+    do { if (epifast) RAD_FOLDED_E(TN_, WP_, true, E6_, 0); else RAD_FOLDED_E(TN_, WP_, false, E6_, 0); } while (0)
     // TN=4 only when the shape is wide enough to use the 128-wide tile: at N=48 (gdn gate)
     // TN=4 computes 128 columns against 48 real ones and measures 1.8-2x SLOWER than TN=2 at
     // every M >= 2048 (56 vs 101-115 us, ~/mxfp4_work/tier7 tnx). The M crossover itself
     // re-measured within noise of 2048 on all large-N shapes with branchless staging.
+    if (psw) {
+      if (M >= tn4_min_m && N >= BNF_OF(4)) {
+        if (epifast) RAD_FOLDED_E(4, true, true, false, 2); else RAD_FOLDED_E(4, true, false, false, 2);
+      } else {
+        if (epifast) RAD_FOLDED_E(2, true, true, false, 2); else RAD_FOLDED_E(2, true, false, false, 2);
+      }
+    } else
     if (M >= tn4_min_m && N >= BNF_OF(4)) {
       if (wh) RAD_FOLDED(4, true, true);
       else if (dec_wperm) RAD_FOLDED(4, true, false); else RAD_FOLDED(4, false, false);
@@ -2022,13 +2091,18 @@ static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintpt
 // GEMM on a fragment-tiled activation (see radiance_mxfp4_fp8_gemm_atiled). The caller decides
 // the layout per tensor (radiance_mxfp4.py a_tiled_*); this only dispatches. Prefill-class M
 // only: the decode kernel reads row-major A, so the Python side never tiles below its band.
-// PSW layout of the A-tiled kernel (0/1/2, default 0 = off). Runtime knob set_at_psw only, no env
-// var: the caller must own the matching weight layout (psw_pack_w / psw_fold_ws), and the decode
-// and row-major-A kernels do not read PSW weights, so production cannot switch it on by env.
-static int g_at_psw = 0;
+// PSW layout: g_at_psw / set_at_psw, defined above launch_impl (mode 2 covers every reader).
 static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e ? atoi(e) : 0; }();
-static void set_at_psw(int v) { g_at_psw = v; }
 static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
+// TALL (RADIANCE_MXFP4_TALL=1, default off): 512x64x64 tile (TMT=8, TN=2, LBK=64, 8 waves of 128x32)
+// for gate_up (N 34816) only -- the one shape where it measures faster -- at
+// tn_m >= RADIANCE_MXFP4_TALL_MIN_M (default 2048). The merged GDN in_proj (N 16480) keeps TN2/TN4:
+// the same tile measured up to 2 % slower there. Same K order and WMMA chain per output as
+// TN=2/TN=4, so the bytes match them (gated by the DIGEST lines of bench_prefill_cells.py --check).
+// Fragment-order e4m3 weights, no PSW/E6 only.
+static int g_at_tall = [] { const char *e = getenv("RADIANCE_MXFP4_TALL"); return e ? atoi(e) : 0; }();
+static int g_at_tall_min_m = [] { const char *e = getenv("RADIANCE_MXFP4_TALL_MIN_M"); return e ? atoi(e) : 2048; }();
+static void set_at_tall(int v, int min_m) { g_at_tall = v; g_at_tall_min_m = min_m; }
 // tn_m: the M that picks the tile variant (TN / short-M tile). Equal to M except for the pieces of an
 // M-split launch (launch_at_impl below), which keep the variant of the full M.
 static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
@@ -2052,7 +2126,7 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
     dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 && TM_ != 8 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
@@ -2073,8 +2147,24 @@ static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref
       if (tn4) { if (sp) RAD_AT_X(4, true, false, TM, true, PSW_); else RAD_AT_X(4, true, false, TM, false, PSW_); } \
       else     { if (sp) RAD_AT_X(2, true, false, TM, true, PSW_); else RAD_AT_X(2, true, false, TM, false, PSW_); } \
     } while (0)
+    // The tall tile (gate_up only) is a template-arg twin of TN=2: it reads the same PSW bytes.
+    if (g_at_tall && N == 34816 && tn_m >= g_at_tall_min_m) {
+      if (g_at_psw == 1) RAD_AT_X(2, true, false, 8, false, 1); else RAD_AT_X(2, true, false, 8, false, 2);
+    } else
     if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
 #undef RAD_AT_P
+  } else
+  if (g_at_tall && wperm && !wh && N == 34816 && tn_m >= g_at_tall_min_m) {   // gate_up only
+    // Proof line for the serving log: the tall tile is only ever a measurement claim until a
+    // served run shows it was actually dispatched, and with which shape.
+    static bool said_tall = false;
+    if (!said_tall) {
+      said_tall = true;
+      fprintf(stderr, "[radiance.mxfp4] RADIANCE_MXFP4_TALL: tall tile dispatched (M %d, N %d, tn_m %d)\n",
+              M, N, tn_m);
+      fflush(stderr);
+    }
+    RAD_AT_TM(2, true, false, 8);
   } else
   if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {
     if (tms == 2) {
@@ -2145,7 +2235,11 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
-  m.def("set_at_psw", &set_at_psw, "select the A-tiled PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_tall", &set_at_tall, "bench: toggle the tall tile in-process (default from RADIANCE_MXFP4_TALL / _TALL_MIN_M)");
+  // Capability probe for the loader: 2 = mode 2 is read by the decode, wide-decode and folded
+  // kernels too (an older .so only had it in the A-tiled kernel and would decode PSW bytes wrong).
+  m.def("psw_reader_mode", [] { return 2; }, "highest PSW mode every e4m3 fragment-order kernel reads");
   m.def("set_at_skip_pad", &set_at_skip_pad, "bench: toggle SKIPPAD in-process (default from RADIANCE_MXFP4_AT_SKIP_PAD)");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");

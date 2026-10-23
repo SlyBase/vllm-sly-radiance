@@ -60,6 +60,93 @@ gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that r
 and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
 The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section).
 
+### 1.8.0 final run at 300 W (2026-10-23)
+
+**Test environment (all 1.8.0 numbers below).** One AMD Radeon AI PRO R9700 (32 GB), in an LXC container on
+Proxmox, ROCm 10.1 image `1.8.0-rocm10.1` (`1.6.0-rocm10.1` plus bind-mounted 1.8.0 kernels in the earlier A/B
+arms). Model: Swift-1.5 Qwen3.8-27B heretic, MXFP4 (GPTQ checkpoint) with the DFlash2 drafter (k = 7). FP8 KV
+cache, `--max-model-len 65536`, prefill chunk 4096 (`--max-num-batched-tokens`), prefix caching off,
+`--no-async-scheduling`, GPU KV pool 340,723 tokens. Sampling in the benchmark: seed 42, temperature 0.7,
+top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 300 W and a voltage offset of
+-50 mV set with LACT, core clock offset 0 (both optional, see the launch example below).
+
+**Full BetterBench 0.4.0 at 300 W, 2026-10-23, two fresh starts (run a / run b).**
+
+| | **run a** | **run b** |
+|---|---|---|
+| Decode, single stream (weighted median) | **154.6 tok/s** | **154.1 tok/s** |
+| update gap p99 | 34.9 ms | 35.1 ms |
+| time to first token p50 (short prompts) | 57 ms | 57 ms |
+| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s | within 0.5 % of run a |
+| tokens per update (same order) | 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 | |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 139 / 236 / 365 / 478 / 516 | 64\* / 244 / 357 / 481 / 508 |
+| Prefill 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens, tok/s (inside the full run) | 3,661 / 3,694 / 3,638 / 3,526 / 3,261 | 3,628 / 3,641 / 3,599 / 3,483 / 3,130 |
+| GSM8K 200 (greedy, flexible-extract) | 0.82 | 0.82 |
+
+\* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
+
+Prefill inside the full run is lower than the dedicated prefill sweep below because it is the last phase of the
+run, on a card that is already hot.
+
+**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, harness prefill
+phase), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
+reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396, i.e. **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**.
+
+**Scheduling.** `--no-async-scheduling` stays the default: in the 210 W ABBA of 2026-10-22 it gave prefill
++1.2 .. +7.7 % and no measurable decode difference. **Speculative depth:** k = 7 is the best measured value
+(concurrency 1: 124 tok/s at k = 7, 114 at k = 5, 92 at k = 3).
+
+**Quality.** KL divergence against a bf16 layer-by-layer reference over 15,177 positions: **0.0527**, top-1
+agreement 93.1 %, perplexity +2.2 %. 1.8.0 is bit-identical to 1.6.0 (KL divergence 0 between them); the
+weights-only exact path scores 0.0403.
+
+### 1.8.0 acceptance run at 300 W
+
+Two blocks measured on both stacks under the same conditions (prefill sweep, c1/c2/c4 decode); the final full
+BetterBench run of 2026-10-23 is the next subsection.
+
+**Prefill sweep (same conditions, both stacks)**
+
+| | **ours (shipping config)** | **reference stack** | **delta** |
+|---|---|---|---|
+| Prefill, 2K prompt tok/s | 3,789.5 | 3,695.0 | +2.6 % |
+| Prefill, 8K prompt tok/s | 3,803.3 | 3,773.8 | +0.8 % |
+| Prefill, 16K prompt tok/s | 3,704.0 | 3,752.9 | −1.3 % |
+| Prefill, 32K prompt tok/s | 3,487.3 | 3,578.8 | −2.6 % |
+| Prefill, 64K prompt tok/s | 3,170.6 | 3,284.0 | −3.4 % |
+| KV pool (tokens) | 332,960 | 174,634 |  |
+
+**Decode c1/c2/c4 (32 requests per level, both stacks)**
+
+| | **ours (shipping config)** | **reference stack** | **delta** |
+|---|---|---|---|
+| Decode, single stream (weighted) | 159.8 tok/s | 144.3 tok/s | +10.7 % |
+| Concurrency 1, aggregate tok/s | 129.0 | 114.0 | +13.2 % |
+| Concurrency 2, aggregate tok/s | 210.9 | 197.5 | +6.8 % |
+| Concurrency 4, aggregate tok/s | 340.3 | 304.6 | +11.7 % |
+
+Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
+`r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
+thinking off, one start per arm. Sweep and full run: BetterBench 0.4.0, 8 prefill runs median, 3 warmup + 20
+passes per decode category, 48 requests per concurrency level in the full run. Prefill depths are nominal
+2K/8K/16K/32K/64K (1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens in the sweep). Ours = the
+shipping launcher config: the 1.6.0 prefill stack (`RADIANCE_MXFP4_TN4_MIN_M=513`,
+`RADIANCE_FUSED_NQ_REG=1`, `RADIANCE_MXFP4_AT_SKIP_PAD=1`, `RADIANCE_MXFP4_TILED_OPROJ=1`,
+`R4D_ATTN_FP8=3`) plus `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`,
+`RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the drafter skip, and **the shipping launcher now appends
+`--no-async-scheduling` by default** (`serve-mxfp4.sh`, `RADIANCE_NO_ASYNC_SCHED=1`; `=0` drops the flag,
+which lets dflash auto-enable async scheduling — that is the N1 arm of the A/B, and it cost 1.2-6.9 % prefill
+and bought 11.7 % concurrency-2 decode while weighted decode was unchanged). Prefill with the flag is now
+2.6 % / 0.8 % ahead at 2K / 8K and 1.3-3.4 % behind at 16K-64K (it also runs at a lower clock, 2,296 MHz vs
+2,374-2,439 MHz; the remaining gap is in the W4A8 GEMM).
+
+**Image defaults (1.8.0, 300 W night, ABBA, 8 runs median, prefix cache off).** The stack above is now the image
+default, plus `RADIANCE_ATTN_Q_FP8=1`, `RADIANCE_MXFP4_TALL=1` (gate_up) and the PSW weight layout. Prefill tok/s at
+2K/8K/16K/32K/64K, mean of two arms each: previous stack 3,798 / 3,825 / 3,783 / 3,513 / 3,152; 1.8.0 default
+(PSW on) **3,927 / 3,965 / 3,890 / 3,692 / 3,371**; reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396. 1.8.0 vs
+reference stack **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**; PSW alone (vs the same stack without it) +2.4 .. +4.2 %.
+See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
 The older reference run of image **0.4.0** (Quark checkpoint, 300 W and 210 W) is kept below for comparison.
 
 Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](#quickstart)
@@ -150,6 +237,58 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 - Other checkpoints: [NVFP4, INT4, ParoQuant](docs/BENCHMARKS.md#other-checkpoints-on-one-r9700-036-2026-09-24);
   several GPUs: [docs/MULTI-GPU.md](docs/MULTI-GPU.md).
 
+### Best-performance launch (1.8.0)
+
+The image defaults carry the whole measured stack (the prefill knobs are Dockerfile `ENV`, the PSW weight layout
+is the module default), so this launch needs no kernel `-e` beyond the quantization and memory settings. It is the
+configuration behind the 2026-10-23 numbers above; the model is the Swift-1.5 Qwen3.8-27B heretic MXFP4 (GPTQ)
+checkpoint in a local directory.
+
+```bash
+# GIDs of the GPU groups: getent group video render
+docker run -d --name vllm --restart unless-stopped \
+  --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 109 \
+  --security-opt seccomp=unconfined --ipc=host -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/models/swift-heretic-gptq:/models/swift-mxfp4:ro \
+  -v vllm-cache:/root/.cache/vllm -v triton-cache:/root/.triton -v aiter-cache:/root/.aiter \
+  -e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=1 \
+  -e RADIANCE_MXFP4=1 -e RADIANCE_MXFP4_W4A8=1 -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
+  -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_SANITIZE=0 \
+  -e RADIANCE_LMHEAD_FP8=1 -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
+  -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
+  -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 -e RADIANCE_MXFP4_WIDE_MAX_M=192 \
+  -e RADIANCE_ADAPTIVE_WIDTH=perseq -e RADIANCE_CACTUS_DELTA=0.5 \
+  ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1 \
+  --model /models/swift-mxfp4 --served-model-name swift-1.5 \
+  --max-model-len 65536 --gpu-memory-utilization 0.98 \
+  --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
+  --speculative-config.method dflash \
+  --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
+  --speculative-config.num_speculative_tokens 7 \
+  --speculative-config.draft_sample_method probabilistic \
+  --speculative-config.attention_backend TRITON_ATTN \
+  --attention-backend R4D_HYBRID \
+  --max-num-seqs 8 --max-num-batched-tokens 4096 \
+  --compilation-config.cudagraph_mode FULL_DECODE_ONLY \
+  --compilation-config.cudagraph_capture_sizes '[8,16,24,32,40,48,56,64]' \
+  --no-enable-prefix-caching --no-async-scheduling \
+  --skip-mm-profiling --enable-mm-embeds \
+  --limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
+  --chat-template /opt/qwen-fixed.jinja \
+  --default-chat-template-kwargs '{"enable_thinking": false}' \
+  --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}'
+```
+
+What the flags buy: prefix caching off and `--no-async-scheduling` give the best prefill (and let the drafter
+prefill skip act, which needs prefix caching off); chunk 4096 with a 65,536 context is the shape of the
+measurements. For a long-context or multi-turn setup use the [quickstart](#quickstart) (prefix caching on,
+262k context) instead; the two trade prefill speed for cache reuse.
+
+**Optional host tuning** (not part of the image, measured with it): power cap 300 W (LACT), voltage offset -50 mV (LACT), core clock offset 0. The first is worth ~20 % prefill over 210 W
+(table above); check the junction temperature after changing the voltage offset.
+
 ## What this image changes, and why
 
 On top of vLLM, [StillDeadcode/vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance) (the RDNA4
@@ -199,6 +338,14 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_NSD` + `RADIANCE_NSD_THETA` | `0` (off) + `0.95` (opt-in, **unmeasured**) | Nucleus Speculative Decoding ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) in the rejection sampler: a draft token inside the target nucleus (mass of strictly higher target logits <= theta) is accepted besides the usual test; residual and bonus token unchanged. Only for sampling (temperature > 0), greedy is untouched. Trades a bounded deviation from the target distribution for acceptance; theta 0.95 is the paper's default, 0.90 is the second value to test. Excludes `RADIANCE_CACTUS_DELTA` (both set = startup error). Details: [sly/README.md](sly/README.md) `patch_nsd.py` |
 | `RADIANCE_R4D_PREFILL_MIN_Q` | `512` | with `--attention-backend R4D_HYBRID`: smallest per-request chunk that goes to libr4d's prefill kernel; smaller chunks (decode, TTFT of short prompts) stay on AITER |
 | `RADIANCE_R4D_HYBRID_ROUTE` | `1` | `0` = the hybrid backend never routes to libr4d (= AITER, for A/Bs) |
+| `R4D_ATTN_DB` (+ `R4D_ATTN_TILE`) | `1` + `16` (image ENV; `R4D_ATTN_DB=0` reverts) | 1.8.0: double-buffered K/V staging, one barrier per key tile (O_DB), only with `R4D_ATTN_FP8=3` — otherwise inert. Bit-identical output, one layer M = 4089: 27.128 → 26.310 ms at ctx 40,890 (−3.0 %), 11.763 → 11.313 ms at 16,356 (−3.8 %), 1.687 → 1.571 ms at 0 (−6.9 %). `R4D_ATTN_TILE=16/32/48` (default 48) picks the key tile; tile 16 *without* DB is 7.7 % slower than tile 48, which is why the earlier tile-16 attempt lost |
+| `RADIANCE_GDN_SCAN_VARIANT` | `s3` (image ENV; empty reverts to stock) | 1.8.0: `s1` / `s2` / `s3` select build-time variants of the GDN chunk scan in the same `r4d.so` (`s1` = no `-mcumode`, `s2` = + LDS diet, `s3` = + late staging). DIGEST bit-identical at T = 64/65/880/1760/4089 and varlen; one layer T = 4089 stock 0.5720 ms, s1 0.4860 (−15.0 %), s2 0.5366 (−6.2 %), s3 0.4255 (−25.6 %); s3 189 VGPR / 43,008 B LDS vs stock 256 / 4-VGPR spill / 60,928 B. s1+s3 is the pair, s2 alone is worse than s1. Details: [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) |
+| `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `1` (image ENV, module default `0`; `=0` reverts) | 1.8.0: lossless (GPU identity test: identical text and per-position acceptance counters, knob on vs off, 10 requests). Skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1, so it only acts with prefix caching off. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; +2.1 / +3.6 / +3.2 % prefill at 16K / 32K / 64K |
+| `RADIANCE_MXFP4_AT_PSW` | `auto` (module default; `0` = off, `2` = on and refused on a conflict) | 1.8.0: PSW weight layout. At load every MXFP4 layer's nibble plane is repacked in place (preshuffled nibbles, pre-folded scale; same shapes, no extra memory) and the GEMM kernels read it directly; output bit-identical. `auto` = on unless the launch has a knob whose reader needs the checkpoint byte order (`W4A8_MIN_M>0`, no `WPERM`, `DECODE_NT`, `R4D_DECODE_MAX_M`, debug/check knobs, ParoQuant), then off and the reason is logged. The production launch qualifies. 300 W night A/B, only PSW differing: prefill **+3.1 / +2.4 / +4.2 / +2.9 / +3.5 %** at 2K/8K/16K/32K/64K; 210 W: 1,093 greedy digests identical / 0 wrong, GSM8K-200 0.835 = 0.835 |
+| `RADIANCE_MXFP4_TALL` (+ `..._TALL_MIN_M`) | `1` (image ENV; default `2048`; `=0` reverts) | 1.8.0: gate_up only (N 34,816), M >= 2048, bit-identical to TN4, 1.5-1.8 % faster on that GEMM. Not for the merged GDN in_proj (measured slower) |
+| `RADIANCE_ATTN_Q_FP8` | `1` (image ENV; `=0` reverts) | 1.8.0: the prefill attention kernel reads the e4m3 query directly, the 57 ms bf16 widening copy of a 47k prefill is gone; bit-identical |
+| `RADIANCE_MXFP4_TN4_MIN_M`, `RADIANCE_FUSED_NQ_REG`, `RADIANCE_MXFP4_AT_SKIP_PAD`, `RADIANCE_MXFP4_TILED_OPROJ`, `R4D_ATTN_FP8`, `RADIANCE_DFLASH_FC_TILED_MIN_M` | `513`, `1`, `1`, `1`, `3`, `513` (image ENV since 1.8.0; the first four were launcher-only before) | the 1.6.0 prefill stack and the drafter `fc` tile, now defaults of the image itself, not only of `serve-mxfp4.sh` |
+| `RADIANCE_NO_ASYNC_SCHED` | `1` in `serve-mxfp4.sh` (ship it; `=0` drops the flag, `ASYNC=1` forces async) | 1.8.0: append `--no-async-scheduling`. With dflash, async scheduling adds an output-drain engine step whose output is fetched through an event wait; without the flag the first token is sampled inside the prefill step. 300 W A/B, only the flag differing: prefill 2K/8K/16K/32K/64K **+6.9 / +1.2 / +4.3 / +1.1 / −0.9 %**, decode weighted unchanged (−0.2 %), c1 +1.1 %, c2 **−11.7 %** (the lost decode overlap), c4 +3.0 %. Scheduling-only: no numerics change. CPU test `sly/tests/test_launcher_async_sched_cpu.py` |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
