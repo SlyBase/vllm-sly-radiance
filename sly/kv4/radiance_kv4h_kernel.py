@@ -51,35 +51,29 @@ WINDOW_TPS = _env_int("RADIANCE_KV4H_WINDOW_TPS", 8)        # tiles per segment 
 REDUCE_WARPS = _env_int("RADIANCE_KV4H_REDUCE_WARPS", 0)    # merge kernel warps (0 = auto: by segments x head)
 P_REF = _env_int("RADIANCE_KV4H_PREF", 1)                   # P's uint8 reference: 1 the tile's max (default: KL vs bf16
 #                                                             0.0170 -> 0.0139), 0 the running max (KV4H_PREF)
-# ponytail: prefill-only schedule mask (KV4H_PIPE in the .hip), default 0 = the stock kernel until the GPU gate
-# (sly/kv4/gate_kv4h_pipe.py) has timed it: 1 global staging loads + block-table entry one tile ahead, 2 double-
-# buffered LDS tile (one barrier per tile), 4 one wave per row tile (no duplicated scores). Bit-identical by
-# construction. Ceiling: head 256 compiles without spill only at tile 16 / 32 for bit 2 and tile 16 for bit 4
-# (hipcc -S, clang 20), so set RADIANCE_KV4H_PREFILL_TILE with it; decode / verify launches never take it.
-PIPE = _env_int("RADIANCE_KV4H_PIPE", 0)
 
 
-def _ext(row_tiles=None, q_planes=None, k_groups=None, p_ref=None, pipe=0):
-    """The extension built for (row tiles, query planes, K scale groups, P reference, schedule mask);
-    one .so per combination, built with hipcc on first use and cached under RADIANCE_KV4H_BUILD_DIR."""
+def _ext(row_tiles=None, q_planes=None, k_groups=None, p_ref=None):
+    """The extension built for (row tiles, query planes, K scale groups, P reference); one .so per
+    combination, built with hipcc on first use and cached under RADIANCE_KV4H_BUILD_DIR."""
     key = (row_tiles or ROW_TILES, q_planes or Q_PLANES, k_groups or H.HEAD // min(K_GROUP, H.HEAD),
-           P_REF if p_ref is None else p_ref, int(pipe))
+           P_REF if p_ref is None else p_ref)
     if key in _EXT:
         return _EXT[key]
-    nrt, qp, ns, pref, pipe = key
-    assert nrt in (2, 4) and qp in (1, 2) and ns in (1, 2, 4) and pref in (0, 1) and 0 <= pipe < 8, key
+    nrt, qp, ns, pref = key
+    assert nrt in (2, 4) and qp in (1, 2) and ns in (1, 2, 4) and pref in (0, 1), key
     src = Path(__file__).resolve().parent / "radiance_kv4h.hip"
     if not src.exists():  # installed copy in site-packages: the .hip sits next to it
         src = Path(__file__).resolve().with_suffix(".hip")
     bdir = Path(os.environ.get("RADIANCE_KV4H_BUILD_DIR", "/tmp/radiance_kv4h"))
     bdir.mkdir(parents=True, exist_ok=True)
-    tag = f"r{nrt}q{qp}s{ns}" + (f"p{pref}" if pref else "") + (f"x{pipe}" if pipe else "")
+    tag = f"r{nrt}q{qp}s{ns}" + (f"p{pref}" if pref else "")
     modname = f"radiance_kv4h_{tag}"
     so = bdir / f"{modname}.so"
     stamp = bdir / f"{modname}.stamp"
     cflags = os.environ.get("RADIANCE_KV4H_CFLAGS", "").split()
     cflags += [f"-DKV4H_NRT={nrt}", f"-DKV4H_QP={qp}", f"-DKV4H_NS={ns}", f"-DKV4H_PREF={pref}",
-               f"-DKV4H_PIPE={pipe}", f"-DKV4H_MODNAME={modname}"]
+               f"-DKV4H_MODNAME={modname}"]
     # keyed on the source CONTENT (install_kv4 re-copies the file at every container start, so an
     # mtime key never hits a persistent build dir) and the flags; built under a lock into a temp
     # file and renamed, so two processes never load a half-written .so
@@ -345,14 +339,13 @@ def tuned_knobs(q_planes, k_group, head, window, max_seqlen_q, max_seqlen_k, num
 def kv4h_attention(query, kv_cache, out, cu_seqlens_q, max_seqlen_q, seqused_k,
                    max_seqlen_k, softmax_scale, block_table, num_segments=None, causal=True,
                    window=0, output=None, tile=None, row_tiles=None, q_planes=None, k_group=None,
-                   window_tps=None, reduce_warps=None, p_ref=None, pipe=None):
+                   window_tps=None, reduce_warps=None, p_ref=None):
     """query: bf16 (num_tokens, num_q_heads, head); rotated and quantized to int8 here.
     out: bf16 scratch of the same shape (the rotated result when the launch has one segment).
     output: when given, the un-rotated result is written there (any strides) -- fused into the
     segment merge for split launches -- and returned; without it the caller un-rotates `out`.
     window > 0: sliding window of that many keys (vLLM's convention: key t of query at qabs is
-    allowed iff qabs - t < window, and t - qabs < window too when non-causal).
-    pipe: the kernel's schedule mask (see PIPE); None = RADIANCE_KV4H_PIPE for prefill chunks, 0 otherwise."""
+    allowed iff qabs - t < window, and t - qabs < window too when non-causal)."""
     num_tokens, num_q_heads, head = query.shape
     k_group = min(k_group or K_GROUP, head)      # a 256-dim scale group is one per token at head 128
     L = H.layout(head, k_group)
@@ -374,9 +367,7 @@ def kv4h_attention(query, kv_cache, out, cu_seqlens_q, max_seqlen_q, seqused_k,
         elif tuned and not prefill:
             num_segments = tuned[2]
     p_ref = P_REF if p_ref is None else p_ref
-    if pipe is None:
-        pipe = PIPE if prefill else 0
-    ext = _ext(row_tiles, q_planes, head // k_group, p_ref, pipe)
+    ext = _ext(row_tiles, q_planes, head // k_group, p_ref)
     assert query.dtype == torch.bfloat16 and kv_cache.dtype == torch.uint8
     assert tile in ext.TILES, (tile, ext.TILES)
     q8, q_descale = quantize_query(query, 127.0 if q_planes == 2 else 7.0)   # one Triton launch (a
@@ -443,7 +434,7 @@ def kv4h_attention(query, kv_cache, out, cu_seqlens_q, max_seqlen_q, seqused_k,
                nseg, num_seqs, int(bool(causal)), window, torch.cuda.current_stream().cuda_stream)
     LAST_LAUNCH["cfg"] = dict(nseg=nseg, block_q=block_q, q_blocks=num_q_blocks, head=head, window=window, tile=tile,
                               row_tiles=row_tiles, q_planes=q_planes, k_group=k_group, reduce_warps=reduce_warps,
-                              p_ref=p_ref, pipe=pipe)
+                              p_ref=p_ref)
     if nseg == 1:
         return unrotate_output(out, output) if output is not None else out
     if output is not None:

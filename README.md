@@ -412,7 +412,6 @@ attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the p
 | Variable | Recommended | What it does |
 |---|---|---|
 | `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79). Decode 4-5 % faster per step at 1 and 4 streams (same-window A/B), prefill 3-4 % faster with `CHUNK` >= 3456 (the attention block is 1664 tokens, fp8: 880, so a turn recomputes up to 1,663 tokens on a prefix hit). Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
-| `RADIANCE_KV4H_PIPE` | `0` | kv4 only, prefill chunks only (1.8.1): schedule mask of the TetraAttention kernel, `1` global staging loads with the block-table entry one tile ahead, `2` double-buffered LDS tile (one barrier per tile), `4` one wave per row tile (no duplicated softmax). Bit-identical by construction, **not yet timed** (GPU gate `sly/kv4/gate_kv4h_pipe.py`); with `2` set `RADIANCE_KV4H_PREFILL_TILE=16` or `32`, with `4` tile `16` |
 
 From vLLM 0.32.0 (image 1.7.0) there is also a **native** ROCm 4-bit KV cache, `--kv-cache-dtype
 ultraquant_4bit` (vllm#57057): Hadamard rotation plus one power-of-two scale per 32 channels instead of

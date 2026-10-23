@@ -12,35 +12,29 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [1.8.1] - 2026-10-23
 
-TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31, and its prefill kernel gets the schedule
-ideas of the 1.8.0 fp8 prefill as an opt-in knob, off until the GPU gate has timed it.
+TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
 
 ### Fixed
 - **`--attention-backend TETRA` (and `KV4`) crashed at the first forward on vLLM 0.31**: the backends asserted
   `attn_metadata.use_cascade is False`, a field `RocmAttentionMetadata` no longer has. The assert is gone (cascade
-  attention was never used by these backends); `KV4` keeps its `causal` assert.
+  attention was never used by these backends); `KV4` keeps its `causal` assert. Measured on the R9700: the engine
+  starts, KV pool 528,722 tokens at 65k context (fp8: 340,723), and the prefill sweep runs.
 
-### Added
-- **`RADIANCE_KV4H_PIPE` (bit mask, default `0` = the stock kernel)**: schedule variants of the TetraAttention
-  kernel for **prefill chunks only** (decode / verify launches never take it). Every bit moves only where bytes
-  are staged or which wave computes what; values, WMMA chains and the float op order per output element are
-  unchanged, so the output is meant to be **bit-identical** (GPU test `test_attn_pipe_identity`).
-  - `1`: the tile's K/V staging loads are issued as global loads off a block-table entry fetched one tile
-    ahead. In the stock build the group pointer can be null, so the compiler emits FLAT loads (which also
-    count on the LDS counter, so the first `s_wait_dscnt 0` of the next tile's math waits for them) and
-    drains all loads (`s_wait_loadcnt 0`) on the table entry before issuing the data loads, once per tile.
-  - `2`: double-buffered LDS tile, the next tile is parked into the other buffer; one barrier per tile
-    instead of two (the 1.8.0 `R4D_ATTN_DB` idea).
-  - `4`: one wave per 16-row tile owns all 256 dims; the stock kernel has two waves per row tile that both
-    compute the same scores and softmax and split only the P·V dims.
-  - CPU-side proof (`sly/tests/kv4/test_kv4h_pipe_asm.py`, device assembly, no GPU; clang 20 / HIP 7.1): bit 1
-    leaves no FLAT load in the kernel, bit 2 removes one barrier; head 256 without spill at pipe 1 tile 16/32
-    (158 / 193 VGPR), pipe 3 tile 16/32 (183 / 198 VGPR, 17.9 / 26.6 KB LDS) and pipe 5 tile 16 (225 VGPR).
-    Bit 4 spills from tile 32 on, bit 2 at tile 64, so set `RADIANCE_KV4H_PREFILL_TILE` with it. Note that the
-    shipped prefill instance (tile 64) itself compiles to 256 VGPR with 17 spilled under this compiler.
-  - **No speed claim yet**: the identity and ABBA kernel gate is `sly/kv4/gate_kv4h_pipe.py` (not run).
-- `tune_kv4h.py --prefill-qlen N --pipe M`: sweep the prefill shapes at the serve's chunk (the shipped
-  `kv4h_tune.json` was swept at 2048-token chunks; production runs 4096) and with a schedule mask.
+### Measured, not adopted
+- **`RADIANCE_KV4H_PIPE` (schedule variants of the TetraAttention prefill kernel) was built and removed again.**
+  Bit 1 (block-table entry fetched one tile ahead) and bit 3 (plus double-buffered LDS tile) were neutral in the
+  kernel microbench (2.41-2.44x of the libr4d fp8 kernel against 2.43x stock, tile 16), and bit 4 (one wave per
+  row tile) was **40-55 % slower** (3.4-3.7x), so the knob ships nothing. The 1.8.0 fp8 schedule ideas do not
+  transfer to this kernel: at tile 64 (the shipped prefill instance, 1.81x of libr4d) the stock schedule is already
+  the better one, and tile 16 costs 2.43x. The remaining gap to the fp8 path is the kernel itself, not its
+  schedule; `sly/bench_attn_r4d_vs_tetra.py` measures the two backends at the serve shapes (see
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23)).
+- **Design note for reading the int4 cache in the libr4d prefill kernel** (`docs/R4D-INT4-PREFILL.md`):
+  measured gap (whole engine −1.4 % at 1.5k to −11.4 % at 47k at 210 W, kernel 1.7–1.9x), the two
+  exactness/cost variants, the routing point, the accuracy gate and the go/no-go criterion. Only the
+  pure-C++ half is written and CPU-tested (`sly/kv4/kv4i_unpack.h`,
+  `sly/tests/kv4/test_kv4i_unpack_cpu.py`: signed nibble split, the exact 16-code LUT, e4m3
+  round-to-nearest-even against torch for all codes and a scale grid). Nothing is dispatched.
 - `VERSION` 1.8.0 → 1.8.1.
 
 ## [1.8.0] - 2026-10-23

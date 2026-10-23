@@ -18,7 +18,7 @@ heads, head 256, GQA 6), one sequence, cuda events, median of --reps after warmu
 
   # inside a container of the runtime image, repo mounted at /w (sly/ and sly/kv4/ found via sys.path)
   python3 /w/sly/bench_attn_r4d_vs_tetra.py
-  python3 /w/sly/bench_attn_r4d_vs_tetra.py --pipes 0,1,3,5 --tile 16
+  python3 /w/sly/bench_attn_r4d_vs_tetra.py --tile 16
   python3 /w/sly/bench_attn_r4d_vs_tetra.py --check --pasts 0,4096,16384
 """
 import argparse
@@ -127,7 +127,7 @@ def tetra_arm(q, k, v, seq, chunk, scale, knobs):
 
     fn()
     c = dict(KH.LAST_LAUNCH["cfg"])
-    ext = KH._ext(c["row_tiles"], c["q_planes"], HEAD // c["k_group"], c["p_ref"], c["pipe"])
+    ext = KH._ext(c["row_tiles"], c["q_planes"], HEAD // c["k_group"], c["p_ref"])
     q8, qd = KH.quantize_query(q, 127.0 if c["q_planes"] == 2 else 7.0)
     nseg = c["nseg"]
     out_k = torch.empty(chunk, NQ, HEAD, dtype=torch.bfloat16, device=dev)
@@ -170,8 +170,6 @@ def main():
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--q-scale", type=float, default=1.0, help="the layer's static q scale (_q_scale_float)")
     ap.add_argument("--tile", type=int, default=0, help="TetraAttention tokens per tile (0 = env / tune table)")
-    ap.add_argument("--pipes", default="", help="comma list of RADIANCE_KV4H_PIPE masks, B arm once per mask "
-                                                "(empty = env RADIANCE_KV4H_PIPE, i.e. production)")
     ap.add_argument("--no-tune", action="store_true", help="skip installing sly/radiance_attn_decode (production has it)")
     ap.add_argument("--check", action="store_true", help="also compare both outputs to an fp32 SDPA reference")
     a = ap.parse_args()
@@ -182,11 +180,10 @@ def main():
     if not a.no_tune:
         import radiance_attn_decode as T
         print("decode tune installed:", T.install())
-    pipes = ints(a.pipes) or [None]
     print("device:", torch.cuda.get_device_name(), "env:", {kk: os.environ[kk] for kk in IMAGE_ENV},
-          "tile:", a.tile or "default", "pipes:", pipes)
+          "tile:", a.tile or "default")
     scale = 1.0 / math.sqrt(HEAD)
-    ratios = {p: {} for p in pipes}
+    ratios = {}
     for past in ints(a.pasts):
         seq = shape(past, a.chunk, BS_FP8)["seq"]
         k, v = make_kv(seq, seed=past)
@@ -199,27 +196,20 @@ def main():
             fa()
             torch.cuda.synchronize()
             print(f"    check r4d  : {err(outa, ref)}")
-        for p in pipes:
-            knobs = {kk: vv for kk, vv in (("tile", a.tile or None), ("pipe", p)) if vv is not None}
-            try:
-                fb, fk, outb, cfg = tetra_arm(q, k, v, seq, a.chunk, scale, knobs)
-                tb, tk = timeit(fb, a.reps), timeit(fk, a.reps)
-            except Exception as e:  # a pipe x tile the image compiler rejects: report, keep going
-                print(f"    tetra pipe={p}: FAILED {type(e).__name__}: {e}")
-                continue
-            ratios[p][past] = tb / ta
-            print(f"    tetra pipe={cfg['pipe']} tile={cfg['tile']} nseg={cfg['nseg']}: backend {tb:9.1f} us "
-                  f"({tb / ta:4.2f}x)  kernel {tk:9.1f} us ({tk / ta:4.2f}x)")
-            if a.check:
-                fb()
-                torch.cuda.synchronize()
-                print(f"    check tetra: {err(outb, ref)}")
-            sys.stdout.flush()
+        knobs = {"tile": a.tile} if a.tile else {}
+        fb, fk, outb, cfg = tetra_arm(q, k, v, seq, a.chunk, scale, knobs)
+        tb, tk = timeit(fb, a.reps), timeit(fk, a.reps)
+        ratios[past] = tb / ta
+        print(f"    tetra tile={cfg['tile']} nseg={cfg['nseg']}: backend {tb:9.1f} us "
+              f"({tb / ta:4.2f}x)  kernel {tk:9.1f} us ({tk / ta:4.2f}x)")
+        if a.check:
+            fb()
+            torch.cuda.synchronize()
+            print(f"    check tetra: {err(outb, ref)}")
+        sys.stdout.flush()
         del k, v, ref
         torch.cuda.empty_cache()
-    for p, r in ratios.items():
-        if r:
-            print(f"pipe={p}: " + "  ".join(f"{past}:{x:.2f}x" for past, x in sorted(r.items())) + "   " + verdict(r))
+    print("  ".join(f"{past}:{x:.2f}x" for past, x in sorted(ratios.items())) + "   " + verdict(ratios))
 
 
 if __name__ == "__main__":

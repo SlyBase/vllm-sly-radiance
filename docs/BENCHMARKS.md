@@ -121,6 +121,51 @@ previous stack 3.5 % at 32K. Deltas below ~2 % between single arms are therefore
 consistent over all five depths. Correctness: 210 W, 1,093 greedy digests identical (0 wrong), GSM8K-200 0.835 vs 0.835
 with PSW off.
 
+## TetraAttention (KV4) prefill gap (2026-10-23)
+
+Why: `KVCACHE_DTYPE=kv4` trades prefill for context (528,722 KV tokens at 65k against 340,723 on fp8).
+These runs say where the trade sits, and whether the 1.8.0 fp8 prefill work can be carried over.
+
+**Engine, prefill sweep, KV4 against FP8, one R9700.** 65,536 max len, chunk 4096, prefix cache off,
+`--no-async-scheduling`, thinking off, 8 runs median per depth, one start per arm (KV4 arm ran with the
+`use_cascade` fix described in CHANGELOG 1.8.1, through a bind-mounted module). Depths are the real
+prompt-token medians (1,516 / 5,920 / 11,796 / 23,545 / 47,058).
+
+| window | arm | 1.5k | 5.9k | 11.8k | 23.5k | 47k |
+|---|---|--:|--:|--:|--:|--:|
+| 300 W | FP8 (R4D_HYBRID) | 3,927 | 3,965 | 3,890 | 3,692 | 3,371 |
+| 300 W | KV4 (TETRA) | 3,748 | 3,733 | 3,566 | 3,277 | 2,833 |
+| 300 W | Δ | −4.5 % | −5.8 % | −8.3 % | −11.3 % | −15.9 % |
+| 210 W | FP8 (mean of two runs) | 3,062 | 3,024 | 2,908 | 2,750 | 2,504 |
+| 210 W | KV4 | 3,020 | 2,943 | 2,778 | 2,550 | 2,220 |
+| 210 W | Δ | −1.4 % | −2.7 % | −4.5 % | −7.3 % | −11.4 % |
+
+At 210 W the FP8 arm ran twice (3,094 / 3,031 at 1.5k, start-to-start spread 1.5–2.4 %); KV4 at chunk
+3328 and 4992 was 0–4 % below chunk 4096, so the 1664-token attention block is not the cause. KV pool
+from the start logs: FP8 332,770, KV4 528,722 tokens.
+
+**Kernel, both back ends at the serve shapes** (`sly/bench_attn_r4d_vs_tetra.py`, 4096-token chunk,
+causal, 24 q / 4 kv heads, head 256, 20 reps median, 210 W, image env defaults):
+
+| past | keys | libr4d fp8 | Tetra back end | Tetra kernel alone | back end / libr4d |
+|---|--:|--:|--:|--:|--:|
+| 0 | 4,096 | 1,477 µs | 2,817 µs | 2,323 µs | 1.91x |
+| 4,096 | 8,192 | 3,650 µs | 7,241 µs | 6,709 µs | 1.98x |
+| 16,384 | 20,480 | 11,431 µs | 20,206 µs | 19,437 µs | 1.77x |
+| 32,768 | 36,864 | 20,899 µs | 37,595 µs | 36,128 µs | 1.80x |
+| 49,152 | 53,248 | 30,407 µs | 54,994 µs | 52,901 µs | 1.81x |
+
+Rotation, query quantization and the un-rotation cost 0.1–0.5 ms per chunk, so the kernel itself is
+1.70–1.84x. Against an fp32 SDPA reference (reported, not gated): relative L2 0.053–0.059 for libr4d,
+0.186–0.238 for TetraAttention.
+
+**The 1.8.0 fp8 schedule ideas do not transfer** (same shapes, tile 16 unless stated):
+pipe 1 (block-table entry one tile ahead) 2.41–2.42x, pipe 3 (+ double-buffered LDS) 2.40–2.44x —
+both inside noise of the 2.43x stock figure; pipe 5 (one wave per row tile) 3.43–3.75x, i.e. 40–55 %
+worse. Tile 64 (the shipped prefill instance) is 1.81x, clearly better than tile 16 at 2.43x. The knob
+was removed again; the design for reading the int4 cache in the libr4d kernel, and its go/no-go
+criterion, is [R4D-INT4-PREFILL.md](R4D-INT4-PREFILL.md).
+
 ## 1.0.0
 
 ### Reference run (2026-10-07, 300 W)

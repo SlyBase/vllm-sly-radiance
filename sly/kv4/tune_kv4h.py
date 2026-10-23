@@ -37,13 +37,12 @@ BS = 1664               # the engine's attention block with int4 cells (fp8: 880
 MAX_K = 262144          # what the engine captures its decode graphs with
 
 
-def shapes(quick, only="", prefill_qlen=2048):
-    """(name, model, nseq, qlen, ctx); prefill_qlen: the chunk of the prefill shapes (--prefill-qlen,
-    the serve's CHUNK; the shipped table was swept at 2048)"""
+def shapes(quick, only=""):
+    """(name, model, nseq, qlen, ctx)"""
     if only == "prefill":
         out = []
         for ctx in (0, 16384, 32768, 65536, 98304):
-            out.append((f"prefill{prefill_qlen // 1024}k c{ctx // 1024}k", TARGET, 1, prefill_qlen, max(ctx, prefill_qlen)))
+            out.append((f"prefill2k c{ctx // 1024}k", TARGET, 1, 2048, max(ctx, 2048)))
         for qlen, ctx in ((512, 32768), (1024, 98304), (1664, 98304)):
             out.append((f"follow{qlen} c{ctx // 1024}k", TARGET, 1, qlen, ctx))
         return out
@@ -178,8 +177,6 @@ def main():
     ap.add_argument("--emit-table", default="", help="write the knob table (JSON) the launcher reads from an existing CSV")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--only", default="", help="'prefill': only the prefill / follow-up shapes (libr4d reference arm)")
-    ap.add_argument("--prefill-qlen", type=int, default=2048, help="chunk of the --only prefill shapes (serve CHUNK, e.g. 4096)")
-    ap.add_argument("--pipe", type=int, default=0, help="KV4H_PIPE schedule mask for every timed launch (0 = stock)")
     ap.add_argument("--formats", default="2:128,1:128,2:256,2:64,1:256", help="qplanes:kgroup list")
     ap.add_argument("--tiles", default="16,32,64")
     ap.add_argument("--rowtiles", default="2,4")
@@ -219,7 +216,7 @@ def main():
     for qp, kg in formats:
         print(f"=== format: query planes {qp}, K group {kg}")
         sys.stdout.flush()
-        for name, model, nseq, qlen, ctx in shapes(a.quick, a.only, a.prefill_qlen):
+        for name, model, nseq, qlen, ctx in shapes(a.quick, a.only):
             if model["head"] % kg:
                 continue
             sh = Shape(name, model, nseq, qlen, ctx, kg)
@@ -235,7 +232,7 @@ def main():
             for t, r, s, w in points:
                 try:
                     us = gtime(lambda: sh.run(tile=t, row_tiles=r, q_planes=qp, k_group=kg, num_segments=s,
-                                              reduce_warps=w, pipe=a.pipe), a.reps)
+                                              reduce_warps=w), a.reps)
                     nseg = LAST_LAUNCH["cfg"]["nseg"]
                 except Exception as e:  # noqa: BLE001
                     us, nseg = float("nan"), -1

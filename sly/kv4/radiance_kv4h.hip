@@ -71,22 +71,6 @@ typedef unsigned int uint4_t __attribute__((ext_vector_type(4)));
 #ifndef KV4H_NS
 #define KV4H_NS 2
 #endif
-// KV4H_PIPE (bit mask, 0 = the stock schedule; the launcher builds it for prefill chunks only,
-// RADIANCE_KV4H_PIPE). Every bit moves only where bytes are staged or which wave computes what:
-// the values, the WMMA chains and the float op order per output element are unchanged.
-//   1  staging loads as global loads off a block-table entry fetched one tile ahead (stock: the
-//      group pointer can be null, so the loads become FLAT, count on the LDS counter too, and the
-//      tile's first s_wait_dscnt 0 waits for them; the table entry stalls each tile on a full drain)
-//   2  double-buffered LDS tile: park the next tile into the other buffer, one barrier per tile
-//   4  one wave per row tile owns all HEAD dims (stock: two waves split the dims and both compute
-//      the same scores and softmax); half the threads, twice the accumulators per lane
-#ifndef KV4H_PIPE
-#define KV4H_PIPE 0
-#endif
-constexpr bool P_GLD = KV4H_PIPE & 1, P_DB = KV4H_PIPE & 2, P_WD1 = KV4H_PIPE & 4;
-constexpr int WPR = P_WD1 ? 1 : 2;               // waves per 16-row tile
-constexpr int NHALF = P_WD1 ? 2 : 1;             // dim halves per wave
-constexpr int NB = P_DB ? 2 : 1;                 // LDS tile buffers
 
 // per-head-size layout (radiance_kv4h_format.Layout): the cell is HEAD/2 nibble bytes plus 8 (head
 // 256) or 4 (head 128: vLLM's int4 cell of the DFlash drafter, so its pages line up) scale bytes
@@ -143,7 +127,7 @@ __device__ __forceinline__ float exp2_raw(float x) { return __builtin_amdgcn_exp
 // and softmax, and each accumulates one half of the 256 dims (64 fp32 accumulators per lane).
 
 template <int HEAD, int NH, int NRT, int QP, int NS>
-__global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
+__global__ __launch_bounds__(NRT * 64) void kv4h_attention(
     const int8_t *__restrict__ q,            // [num_tokens][num_q_heads][HEAD] int8 (rotated, per-row scale)
     const float *__restrict__ q_descale,     // [num_tokens][num_q_heads]
     const unsigned char *__restrict__ cache, // [blocks][kv_heads][block_size * 2 * TPT]
@@ -160,7 +144,7 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
     int nseg, int num_seqs, int causal,      // causal 0: every query sees all seq_len tokens (DFlash block)
     int window) {                            // > 0: key t allowed iff qabs - t < window (and t - qabs < window if non-causal)
   constexpr int PACKED = L<HEAD>::PACKED, NG = L<HEAD>::NG, REG = L<HEAD>::REG;
-  constexpr int BLOCK_M = NRT * 16, NWAVES = NRT * WPR, NTHREADS = NWAVES * 32;
+  constexpr int BLOCK_M = NRT * 16, NWAVES = NRT * 2, NTHREADS = NWAVES * 32;
   static_assert(NS * TG <= L<HEAD>::K_AREA, "K scale groups must fit the scale area");
   static_assert(NG % NS == 0, "scale groups must align with 32-dim WMMA groups");
   constexpr int K_AREA = L<HEAD>::K_AREA, DH = L<HEAD>::DH, DT = L<HEAD>::DT, KSTR = L<HEAD>::KSTR;
@@ -236,19 +220,18 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
 
   // one LDS tile buffer; the NEXT tile is prefetched into registers during this tile's math and
   // parked after it (two barriers per tile)
-  // (KV4H_PIPE & 2: NB = 2 buffers, the next tile is parked into the other one)
-  __shared__ __align__(16) unsigned char sK[NB][NH][TG * KSTR];   // [buf][group][token][PACKED + pad]
-  __shared__ __align__(16) unsigned char sV[NB][NH][PACKED * TG]; // [buf][group][dim-pair][16 tokens]
-  __shared__ __align__(16) float sKs[NB][NH][NS * TG];            // [buf][group][scale group][16 tokens], fp32
-  __shared__ __align__(16) float sVl[NB][TILE];                   // V scale * lift, per token of the tile
-  __shared__ float sUnlift[NB];                                   // max V scale / 255 / 16
+  __shared__ __align__(16) unsigned char sK[NH][TG * KSTR];   // [group][token][PACKED + pad]
+  __shared__ __align__(16) unsigned char sV[NH][PACKED * TG]; // [group][dim-pair][16 tokens]
+  __shared__ __align__(16) float sKs[NH][NS * TG];            // [group][scale group][16 tokens], fp32
+  __shared__ __align__(16) float sVl[TILE];                   // V scale * lift, per token of the tile
+  __shared__ float sUnlift;                                   // max V scale / 255 / 16
   __shared__ __align__(16) float sAlpha[NWAVES][16];
   __shared__ __align__(16) float sBeta[NWAVES][16];        // KV4H_PREF 1: per wave, beta of its 16 queries                        // per wave: alpha of its 16 queries
 
   float m_run = -INFINITY, l_run = 0.f;
-  float acc[NHALF * DT][8];               // [dim half this wave owns * DT + dim tile][query row]
+  float acc[DT][8];
 #pragma unroll
-  for (int d = 0; d < NHALF * DT; ++d)
+  for (int d = 0; d < DT; ++d)
 #pragma unroll
     for (int j = 0; j < 8; ++j) acc[d][j] = 0.f;
 
@@ -274,32 +257,14 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
     bi[h] = bi[h - 1]; tin[h] = tin[h - 1] + TG;
     if (tin[h] >= block_size) { tin[h] -= block_size; ++bi[h]; }
   }
-  // KV4H_PIPE & 1: the block-table entries of the NEXT fetch's groups, loaded at the end of the
-  // previous fetch (wave-uniform: bi[] is), so no fetch waits on a table load
-  int blk[NH];
-  auto load_blk = [&](int tj) {
-#pragma unroll
-    for (int h = 0; h < NH; ++h) blk[h] = tj * TILE + h * TG < seq_len ? block_table[seq * bt_stride + bi[h]] : 0;
-  };
-  if constexpr (P_GLD) load_blk(t_begin);
   auto group_ptr = [&](int tj, int h) -> const unsigned char * {   // h: a runtime group index
     const int t = tj * TILE + h * TG;
-    if constexpr (P_GLD) {      // never null: the caller tests group_ok, so the loads stay global
-      int b = blk[0], ti = tin[0];
-#pragma unroll
-      for (int hh = 1; hh < NH; ++hh) if (h == hh) { b = blk[hh]; ti = tin[hh]; }
-      return hcache + (size_t)b * cache_bstride + (size_t)(ti / TG) * REG;
-    }
     if (t >= seq_len) return nullptr;
     int b = bi[0], ti = tin[0];                                      // selects, not a runtime-indexed array
 #pragma unroll
     for (int hh = 1; hh < NH; ++hh) if (h == hh) { b = bi[hh]; ti = tin[hh]; }
-    const int blk_ = block_table[seq * bt_stride + b];
-    return hcache + (size_t)blk_ * cache_bstride + (size_t)(ti / TG) * REG;
-  };
-  auto group_ok = [&](int tj, int h, const unsigned char *g) {
-    if constexpr (P_GLD) return tj * TILE + h * TG < seq_len;
-    else return g != nullptr;
+    const int blk = block_table[seq * bt_stride + b];
+    return hcache + (size_t)blk * cache_bstride + (size_t)(ti / TG) * REG;
   };
   auto fetch = [&](int tj) {                                  // tiles are fetched in order
 #pragma unroll
@@ -312,7 +277,7 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
     for (int c = 0; c < VSPL; ++c) fvs[c] = 0;
 #ifndef ABL_NOSTAGE
     const unsigned char *kg = group_ptr(tj, sh);
-    if (group_ok(tj, sh, kg)) {
+    if (kg) {
 #pragma unroll
       for (int c = 0; c < KCPT; ++c) {
         const int ci = si + c * TPG;
@@ -337,30 +302,29 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
         // tile's V lift and cost every real token P resolution
         if (t < TILE && tj * TILE + t < seq_len) {
           const unsigned char *vg = group_ptr(tj, t / TG);
-          if (group_ok(tj, t / TG, vg)) fvs[c] = vg[kreg + (t % TG)];
+          if (vg) fvs[c] = vg[kreg + (t % TG)];
         }
       }
     }
 #endif
 #pragma unroll
     for (int h = 0; h < NH; ++h) { tin[h] += TILE; while (tin[h] >= block_size) { tin[h] -= block_size; ++bi[h]; } }
-    if constexpr (P_GLD) load_blk(tj + 1);
   };
-  auto park = [&](int pb_) {                                  // into LDS buffer pb_
+  auto park = [&]() {
 #pragma unroll
     for (int c = 0; c < KCPT; ++c) {
       const int ci = si + c * TPG;
-      if (ci < TG * KCH) *(uint4_t *)&sK[pb_][sh][(ci / KCH) * KSTR + (ci % KCH) * 16] = fk[c];
+      if (ci < TG * KCH) *(uint4_t *)&sK[sh][(ci / KCH) * KSTR + (ci % KCH) * 16] = fk[c];
     }
 #pragma unroll
     for (int c = 0; c < VCPT; ++c) {
       const int ci = si + c * TPG;
-      if (ci < PACKED) *(uint4_t *)&sV[pb_][sh][ci * 16] = fv[c];
+      if (ci < PACKED) *(uint4_t *)&sV[sh][ci * 16] = fv[c];
     }
 #pragma unroll
     for (int c = 0; c < KSPT; ++c) {
       const int ci = si + c * TPG;
-      if (ci < NS * TG) sKs[pb_][sh][ci] = e4m3_to_f32(fs[c]);
+      if (ci < NS * TG) sKs[sh][ci] = e4m3_to_f32(fs[c]);
     }
     if (wave == 1) {
       float vs[VSPL], vmax = 0.f;
@@ -369,24 +333,23 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
       vmax = wave_max32(vmax);
       const float lift = vmax > 0.f ? 255.f / vmax : 0.f;
 #pragma unroll
-      for (int c = 0; c < VSPL; ++c) if (lane + c * 32 < TILE) sVl[pb_][lane + c * 32] = vs[c] * lift;
-      if (lane == 0) sUnlift[pb_] = vmax * (1.f / 255.f / 16.f);
+      for (int c = 0; c < VSPL; ++c) if (lane + c * 32 < TILE) sVl[lane + c * 32] = vs[c] * lift;
+      if (lane == 0) sUnlift = vmax * (1.f / 255.f / 16.f);
     }
   };
 
-  if (t_begin < t_end) { fetch(t_begin); park(0); }
+  if (t_begin < t_end) { fetch(t_begin); park(); }
   __syncthreads();                                            // also publishes sQ
 
   for (int tj = t_begin; tj < t_end; ++tj) {
     const int t0 = tj * TILE;
-    const int cb = P_DB ? ((tj - t_begin) & 1) : 0;           // the LDS buffer holding this tile
     if (tj + 1 < t_end) fetch(tj + 1);                        // in flight during this tile's math
 
     // ---- S^T for the tile's NH 16-token groups: per scale group, four 32-dim WMMAs chained ----
     float s[NH][8];
 #pragma unroll
     for (int h = 0; h < NH; ++h) {
-      const unsigned char *krow = &sK[cb][h][(lane & 15) * KSTR + half * 8];
+      const unsigned char *krow = &sK[h][(lane & 15) * KSTR + half * 8];
       int8v c[NS][QP];
 #pragma unroll
       for (int sg = 0; sg < NS; ++sg) {
@@ -416,7 +379,7 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
       for (int j = 0; j < 8; ++j) s[h][j] = 0.f;
 #pragma unroll
       for (int sg = 0; sg < NS; ++sg) {
-        const float4 k0 = *(const float4 *)&sKs[cb][h][sg * TG + jbase], k1 = *(const float4 *)&sKs[cb][h][sg * TG + jbase + 4];
+        const float4 k0 = *(const float4 *)&sKs[h][sg * TG + jbase], k1 = *(const float4 *)&sKs[h][sg * TG + jbase + 4];
         const float ks[8] = {k0.x, k0.y, k0.z, k0.w, k1.x, k1.y, k1.z, k1.w};
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -481,7 +444,7 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
     int2_t pb[NH];
 #pragma unroll
     for (int h = 0; h < NH; ++h) {
-      const float4 v0 = *(const float4 *)&sVl[cb][h * TG + jbase], v1 = *(const float4 *)&sVl[cb][h * TG + jbase + 4];
+      const float4 v0 = *(const float4 *)&sVl[h * TG + jbase], v1 = *(const float4 *)&sVl[h * TG + jbase + 4];
       unsigned int w0 = 0, w1 = 0;
       w0 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][0] * v0.x, 0u, w0);
       w0 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][1] * v0.y, 1u, w0);
@@ -494,7 +457,7 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
       pb[h][0] = (int)w0;
       pb[h][1] = (int)w1;
     }
-    const float unlift = sUnlift[cb];
+    const float unlift = sUnlift;
 #if KV4H_PREF
     // the P.V rows j are queries jbase + j, whose beta lives in lane jbase + j
     if (half == 0) sBeta[wave][lane] = beta;
@@ -514,53 +477,19 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
       const float4 al1 = *(const float4 *)&sAlpha[wave][jbase + 4];
       const float alpha_j[8] = {al0.x, al0.y, al0.z, al0.w, al1.x, al1.y, al1.z, al1.w};
 #pragma unroll
-      for (int dt = 0; dt < NHALF * DT; ++dt)
+      for (int dt = 0; dt < DT; ++dt)
 #pragma unroll
         for (int j = 0; j < 8; ++j) acc[dt][j] *= alpha_j[j];
       __builtin_amdgcn_wave_barrier();
     }
     // ---- P . V for this wave's DH dims: DT dim tiles, the tile's NH 16-token groups chained
     //      (iu8: V's nibble sits in the high half of its byte = 16 * v as int8) ----
-    //      (KV4H_PIPE & 4: one wave, both nibbles of the same V bytes, one chain per half)
-    if constexpr (P_WD1) {
-#pragma unroll
-    for (int dt = 0; dt < DT; ++dt) {
-      int8v d[NHALF];
-#pragma unroll
-      for (int hf = 0; hf < NHALF; ++hf) d[hf] = int8v{0, 0, 0, 0, 0, 0, 0, 0};
-#pragma unroll
-      for (int h = 0; h < NH; ++h) {
-        const unsigned char *vb = &sV[cb][h][(dt * 16 + (lane & 15)) * TG + jbase];
-        const unsigned int w0 = *(const unsigned int *)vb, w1 = *(const unsigned int *)(vb + 4);
-#pragma unroll
-        for (int hf = 0; hf < NHALF; ++hf) {
-          const int nib = P_WD1 ? hf : dh;                       // 1: the high nibble = dims DH..
-          int2_t b;
-          if (nib) { b[0] = (int)(w0 & 0xF0F0F0F0u); b[1] = (int)(w1 & 0xF0F0F0F0u); }
-          else     { b[0] = (int)((w0 << 4) & 0xF0F0F0F0u); b[1] = (int)((w1 << 4) & 0xF0F0F0F0u); }
-#ifndef ABL_NOPV
-          d[hf] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(false, pb[h], true, b, d[hf], false);
-#else
-          d[hf][0] += b[0] + pb[h][0];
-#endif
-        }
-      }
-#pragma unroll
-      for (int hf = 0; hf < NHALF; ++hf)
-#pragma unroll
-#if KV4H_PREF
-        for (int j = 0; j < 8; ++j) acc[hf * DT + dt][j] = fmaf((float)d[hf][j], bu[j], acc[hf * DT + dt][j]);
-#else
-        for (int j = 0; j < 8; ++j) acc[hf * DT + dt][j] = fmaf((float)d[hf][j], unlift, acc[hf * DT + dt][j]);
-#endif
-    }
-    } else {
 #pragma unroll
     for (int dt = 0; dt < DT; ++dt) {
       int8v d = {0, 0, 0, 0, 0, 0, 0, 0};
 #pragma unroll
       for (int h = 0; h < NH; ++h) {
-        const unsigned char *vb = &sV[cb][h][(dt * 16 + (lane & 15)) * TG + jbase];
+        const unsigned char *vb = &sV[h][(dt * 16 + (lane & 15)) * TG + jbase];
         const unsigned int w0 = *(const unsigned int *)vb, w1 = *(const unsigned int *)(vb + 4);
         int2_t b;
         if (dh) { b[0] = (int)(w0 & 0xF0F0F0F0u); b[1] = (int)(w1 & 0xF0F0F0F0u); }
@@ -578,25 +507,19 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
       for (int j = 0; j < 8; ++j) acc[dt][j] = fmaf((float)d[j], unlift, acc[dt][j]);
 #endif
     }
-    }
-    if constexpr (P_DB) {
-      // the other buffer was last read in the previous tile, before the previous barrier
-      if (tj + 1 < t_end) park(cb ^ 1);
-      __syncthreads();                                        // publishes it, one barrier per tile
-    } else {
 #ifndef ABL_NOSYNC
-      __syncthreads();                                        // everyone done reading the tile
+    __syncthreads();                                          // everyone done reading the tile
 #endif
 #ifndef ABL_NOPARK
-      if (tj + 1 < t_end) park(0);
+    if (tj + 1 < t_end) park();
 #endif
 #ifndef ABL_NOSYNC
-      __syncthreads();
+    __syncthreads();
 #endif
-    }
   }
 
-  // ---- epilogue: lane holds dim nib*DH + 16*dt + lane%16 of queries (rows) half*8 + j ----
+  // ---- epilogue: lane holds dim dh*DH + 16*dt + lane%16 of queries (rows) half*8 + j ----
+  const int dcol = dh * DH + (lane & 15);
 #pragma unroll
   for (int j = 0; j < 8; ++j) {
     const int r = rt * 16 + half * 8 + j;                // query row of the block
@@ -607,22 +530,18 @@ __global__ __launch_bounds__(NRT * 32 * WPR) void kv4h_attention(
     // the running max / sum of query r live in the lanes whose column is r % 16
     const float mq = __shfl(m_run, (r & 15), 32);
     const float lq = __shfl(l_run, (r & 15), 32);
+    if (nseg == 1) {
+      const float inv = lq > 0.f ? 1.f / lq : 0.f;
+      __bf16 *o = out + tokidx * HEAD;
 #pragma unroll
-    for (int hf = 0; hf < NHALF; ++hf) {
-      const int dcol = (P_WD1 ? hf : dh) * DH + (lane & 15);
-      if (nseg == 1) {
-        const float inv = lq > 0.f ? 1.f / lq : 0.f;
-        __bf16 *o = out + tokidx * HEAD;
+      for (int dt = 0; dt < DT; ++dt) o[dt * 16 + dcol] = (__bf16)(acc[dt][j] * inv);
+    } else {
+      float *so = segm_out + (tokidx * nseg + seg) * HEAD;
 #pragma unroll
-        for (int dt = 0; dt < DT; ++dt) o[dt * 16 + dcol] = (__bf16)(acc[hf * DT + dt][j] * inv);
-      } else {
-        float *so = segm_out + (tokidx * nseg + seg) * HEAD;
-#pragma unroll
-        for (int dt = 0; dt < DT; ++dt) so[dt * 16 + dcol] = acc[hf * DT + dt][j];
-        if (dcol == 0) {
-          segm_max[tokidx * nseg + seg] = mq;
-          segm_sum[tokidx * nseg + seg] = lq;
-        }
+      for (int dt = 0; dt < DT; ++dt) so[dt * 16 + dcol] = acc[dt][j];
+      if (dcol == 0) {
+        segm_max[tokidx * nseg + seg] = mq;
+        segm_sum[tokidx * nseg + seg] = lq;
       }
     }
   }
@@ -642,7 +561,7 @@ static void launch(int head, int tile, uintptr_t q, uintptr_t q_descale, uintptr
   if (nseg > 1 && !(segm_out && segm_max && segm_sum)) throw std::runtime_error("kv4h: nseg > 1 needs the segment buffers");
   if (nqpkv * block_q > KV4H_NRT * 16) throw std::runtime_error("kv4h: block_q * nqpkv must fit the program's rows");
   if (nseg == 1 && !out) throw std::runtime_error("kv4h: nseg == 1 needs out");
-  dim3 grid(num_q_blocks, num_kv_heads, nseg), block(KV4H_NRT * 32 * WPR);
+  dim3 grid(num_q_blocks, num_kv_heads, nseg), block(KV4H_NRT * 64);
   auto args = [&](auto kern) {
     hipLaunchKernelGGL(kern, grid, block, 0, (hipStream_t)stream,
                        (const int8_t *)q, (const float *)q_descale, (const unsigned char *)cache,
@@ -675,5 +594,4 @@ PYBIND11_MODULE(KV4H_MODNAME, m) {        // one module name per knob build (sev
   m.attr("Q_PLANES") = KV4H_QP;
   m.attr("K_SCALE_GROUPS") = KV4H_NS;
   m.attr("P_REF") = KV4H_PREF;
-  m.attr("PIPE") = KV4H_PIPE;
 }
