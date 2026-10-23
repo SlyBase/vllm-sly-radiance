@@ -258,7 +258,10 @@ release itself moves.
   correct in the same probe set; drafter acceptance stays a healthy ~69 %, so the drafter is consistent
   with the corrupted verify logits — the fault is in 0.32's UltraQuant padded-spec
   verify geometry, not the drafter), so UltraQuant serves without a drafter until upstream fixes it.
-- Night gate pending.
+- Night gate green (2026-10-22, `full` mode, production launch, Swift-1.5 checkpoint, 210 W, second start, against the baseline of the previous release): KV pool 434,250 tokens, startup 276 s, 11.1965 tokens/step, acceptance 0.5678.
+- BetterBench aggregate t/s: conc 1 = 132.95, conc 2 = 230.56, conc 4 = 355.39, conc 8 = 382.86.
+- GSM8K 200 (cot zero-shot, greedy): 0.855.
+- All gate checks passed (13 checks); report: https://github.com/SlyBase/vllm-sly-radiance/actions/runs/39863819834
 
 ## [1.6.0] - 2026-10-20
 
