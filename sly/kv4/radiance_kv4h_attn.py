@@ -56,6 +56,13 @@ KV4I_QGAIN = float(os.environ.get("RADIANCE_KV4I_QGAIN", "16"))
 # L2 between the two outputs per layer (host reads: a debug aid for an accuracy hunt, never for serving)
 KV4I_CHECK = int(os.environ.get("R4D_KV4I_CHECK", "0") or 0)
 _KV4I_CHECKED = [0]
+# R4D_KV4I_DUMP=<dir>: the first R4D_KV4I_DUMP_N (1) routed launches of each layer whose name contains one
+# of R4D_KV4I_DUMP_LAYERS (comma list, e.g. "layers.47.") are saved as <dir>/<layer>.<i>.pt: query, e4m3
+# query, the cache blocks of sequence 0, metadata, routed out_rot and the Tetra reference (debug only).
+KV4I_DUMP = os.environ.get("R4D_KV4I_DUMP", "")
+KV4I_DUMP_LAYERS = tuple(s for s in os.environ.get("R4D_KV4I_DUMP_LAYERS", "").split(",") if s)
+KV4I_DUMP_N = int(os.environ.get("R4D_KV4I_DUMP_N", "1") or 1)
+_KV4I_DUMPED: dict = {}
 KV4I_GPB, KV4I_BLOCK = R4.KV4_GPB, R4.KV4_BLOCK
 KV4I_ENTRY = getattr(_r4d, "attn_prefill_h256_gqa6_int4kv", None)
 _KV4I_SAID: set = set()
@@ -237,11 +244,28 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
         )
         # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
         output[:n].copy_(F.unrotate(out_rot.float()))
-        if _KV4I_CHECKED[0] < KV4I_CHECK:
-            _KV4I_CHECKED[0] += 1
+        name = getattr(layer, "layer_name", "?")
+        dump = (KV4I_DUMP and any(s in name for s in KV4I_DUMP_LAYERS)
+                and _KV4I_DUMPED.get(name, 0) < KV4I_DUMP_N)
+        check = _KV4I_CHECKED[0] < KV4I_CHECK
+        ref = None
+        if dump or check:
             ref = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
             kv4h_attention(query[:n], kv_cache, torch.empty_like(ref), m.query_start_loc, m.max_query_len,
                            m.seq_lens, m.max_seq_len, self.scale, m.block_table, causal=True, window=0, output=ref)
+        if dump:
+            i = _KV4I_DUMPED[name] = _KV4I_DUMPED.get(name, 0) + 1
+            nblk = -(-int(m.seq_lens[0]) // int(kv_cache.shape[2]))
+            torch.save(dict(
+                query=query[:n].cpu(), q8=q.cpu(), q_scale=q_scale, scale=float(self.scale),
+                kv=kv_cache[m.block_table[0, :nblk].long()].cpu(), block_table=m.block_table.cpu(),
+                seq_lens=m.seq_lens.cpu(), query_start_loc=m.query_start_loc.cpu(),
+                num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
+                out_rot=out_rot.cpu(), out=output[:n].cpu(), ref=ref.cpu()),
+                os.path.join(KV4I_DUMP, f"{name}.{i - 1}.pt"))
+            sys.stderr.write(f"[kv4i-dump] {name}.{i - 1}.pt n={n} ctx={int(m.max_seq_len)}\n")
+        if check:
+            _KV4I_CHECKED[0] += 1
             d = output[:n].float() - ref.float()
             sys.stderr.write("[kv4i-check] %s n=%d ctx=%d rel_l2=%.4f max_abs=%.3f ref_absmax=%.3f qrot_amax=%.1f\n" % (
                 getattr(layer, "layer_name", "?"), n, int(m.max_seq_len), float(d.norm() / ref.float().norm()),

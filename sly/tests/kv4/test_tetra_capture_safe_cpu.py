@@ -163,3 +163,38 @@ def test_the_routed_query_has_headroom_below_the_e4m3_ceiling(attn, monkeypatch)
     assert qscale[-1] == pytest.approx(attn.KV4I_QGAIN)
     assert stored[-1] * qscale[-1] > 448, "test input does not exceed the ceiling"
     assert stored[-1] <= 448, f"stored query {stored[-1]} saturates e4m3"
+
+
+def test_the_dump_writes_one_launch_with_its_reference(attn, monkeypatch, tmp_path):
+    """R4D_KV4I_DUMP=<dir> + R4D_KV4I_DUMP_LAYERS: the first DUMP_N routed launches of a matching layer
+    save query, the e4m3 query, the touched cache blocks, the metadata, the routed output and the Tetra
+    reference, so the accuracy hunt can rebuild the fp32 truth offline (debug only, host reads)."""
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
+    monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: None)
+    monkeypatch.setattr(attn, "KV4I_DUMP", str(tmp_path))
+    monkeypatch.setattr(attn, "KV4I_DUMP_LAYERS", ("layers.47.",))
+    monkeypatch.setattr(attn, "KV4I_DUMP_N", 1)
+    monkeypatch.setattr(attn._r4d, "set_q_fp8", lambda s: None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: types.SimpleNamespace(cuda_stream=0))
+    monkeypatch.setattr(attn, "kv4h_attention", lambda *a, output, **k: output.fill_(3))
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 0.0625
+    impl._kv4i_scratch = None
+    kv = torch.arange(3 * 4 * 1664 * 272, dtype=torch.int64).remainder(251).to(torch.uint8).reshape(3, 4, 1664, 272)
+    meta = types.SimpleNamespace(
+        num_actual_tokens=512, max_query_len=512, max_seq_len=1700, causal=True,
+        query_start_loc=torch.tensor([0, 512], dtype=torch.int32),
+        seq_lens=torch.tensor([1700], dtype=torch.int32), block_table=torch.tensor([[2, 0, 1]], dtype=torch.int32))
+    for name in ("m.layers.3.self_attn.attn", "m.layers.47.self_attn.attn", "m.layers.47.self_attn.attn"):
+        out = torch.zeros(512, 24, 256, dtype=torch.bfloat16)
+        impl.forward(types.SimpleNamespace(layer_name=name), torch.randn(512, 24, 256), None, None, kv, meta, out)
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["m.layers.47.self_attn.attn.0.pt"], files
+    d = torch.load(tmp_path / files[0])
+    assert torch.equal(d["kv"], kv[torch.tensor([2, 0])])          # ceil(1700 / 1664) = 2 blocks, in sequence order
+    assert d["q8"].dtype == torch.float8_e4m3fn and d["query"].shape == (512, 24, 256)
+    assert d["ref"].float().eq(3).all() and d["out_rot"].shape == (512, 24, 256)
+    assert d["scale"] == pytest.approx(0.0625) and d["q_scale"] == pytest.approx(attn.KV4I_QGAIN)
+    assert d["seq_lens"].tolist() == [1700] and d["query_start_loc"].tolist() == [0, 512]
