@@ -1,5 +1,13 @@
 # vllm-sly-radiance
 
+[![Release](https://img.shields.io/github/v/release/SlyBase/vllm-sly-radiance?label=release)](https://github.com/SlyBase/vllm-sly-radiance/releases/latest)
+[![Image](https://img.shields.io/badge/ghcr.io-1.8.0--rocm10.1-blue?logo=docker)](https://github.com/SlyBase/vllm-sly-radiance/pkgs/container/vllm-sly-radiance)
+[![CI](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml)
+[![Build](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml)
+![GPU](https://img.shields.io/badge/GPU-R9700%20gfx1201-red)
+![ROCm](https://img.shields.io/badge/ROCm-10.1-green)
+![vLLM](https://img.shields.io/badge/vLLM-0.32.0-orange)
+
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
 with hand-written MXFP4 kernels, DFlash2 speculative decoding and up to 262k context on a single 32 GB card.
 
@@ -9,6 +17,18 @@ with hand-written MXFP4 kernels, DFlash2 speculative decoding and up to 262k con
 ```bash
 docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1
 ```
+
+## Contents
+
+- [Features](#features)
+- [Tech stack](#tech-stack)
+- [Performance](#performance) — [release history](#release-history-300-w-betterbench-040-full-run), [1.8.0](#180-2026-10-23), [vs the reference stack](#180-against-the-reference-stack)
+- [Quickstart](#quickstart) — [best-performance launch](#best-performance-launch-180)
+- [What this image changes, and why](#what-this-image-changes-and-why)
+- [Options](#options) (configuration)
+- [Repository and contributing](#repository-and-contributing)
+- [Credits](#credits)
+- [License](#license)
 
 ## Features
 
@@ -592,4 +612,7 @@ This image stands on other people's work:
 - **[turboderp/exllamav3](https://github.com/turboderp-org/exllamav3)** (MIT) — `escha/` derives from it;
   **[z-lab](https://huggingface.co/z-lab/Qwen3.8-27B-PARO)** for the ParoQuant format.
 
-License: same as upstream vllm-radiance (see `LICENSE`).
+## License
+
+Same license as upstream vllm-radiance; the files taken from vLLM, AITER and the projects listed under
+[Credits](#credits) keep their own licenses.
