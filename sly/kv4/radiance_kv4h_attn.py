@@ -162,7 +162,6 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             raise NotImplementedError("TetraAttention: fused output quantization is not supported")
         if attn_metadata is None:
             return output.fill_(0)     # profiling run
-        assert attn_metadata.use_cascade is False
         n = attn_metadata.num_actual_tokens
         out_rot = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
         kv4h_attention(

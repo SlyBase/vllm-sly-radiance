@@ -10,6 +10,39 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.8.1] - 2026-10-23
+
+TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31, and its prefill kernel gets the schedule
+ideas of the 1.8.0 fp8 prefill as an opt-in knob, off until the GPU gate has timed it.
+
+### Fixed
+- **`--attention-backend TETRA` (and `KV4`) crashed at the first forward on vLLM 0.31**: the backends asserted
+  `attn_metadata.use_cascade is False`, a field `RocmAttentionMetadata` no longer has. The assert is gone (cascade
+  attention was never used by these backends); `KV4` keeps its `causal` assert.
+
+### Added
+- **`RADIANCE_KV4H_PIPE` (bit mask, default `0` = the stock kernel)**: schedule variants of the TetraAttention
+  kernel for **prefill chunks only** (decode / verify launches never take it). Every bit moves only where bytes
+  are staged or which wave computes what; values, WMMA chains and the float op order per output element are
+  unchanged, so the output is meant to be **bit-identical** (GPU test `test_attn_pipe_identity`).
+  - `1`: the tile's K/V staging loads are issued as global loads off a block-table entry fetched one tile
+    ahead. In the stock build the group pointer can be null, so the compiler emits FLAT loads (which also
+    count on the LDS counter, so the first `s_wait_dscnt 0` of the next tile's math waits for them) and
+    drains all loads (`s_wait_loadcnt 0`) on the table entry before issuing the data loads, once per tile.
+  - `2`: double-buffered LDS tile, the next tile is parked into the other buffer; one barrier per tile
+    instead of two (the 1.8.0 `R4D_ATTN_DB` idea).
+  - `4`: one wave per 16-row tile owns all 256 dims; the stock kernel has two waves per row tile that both
+    compute the same scores and softmax and split only the P·V dims.
+  - CPU-side proof (`sly/tests/kv4/test_kv4h_pipe_asm.py`, device assembly, no GPU; clang 20 / HIP 7.1): bit 1
+    leaves no FLAT load in the kernel, bit 2 removes one barrier; head 256 without spill at pipe 1 tile 16/32
+    (158 / 193 VGPR), pipe 3 tile 16/32 (183 / 198 VGPR, 17.9 / 26.6 KB LDS) and pipe 5 tile 16 (225 VGPR).
+    Bit 4 spills from tile 32 on, bit 2 at tile 64, so set `RADIANCE_KV4H_PREFILL_TILE` with it. Note that the
+    shipped prefill instance (tile 64) itself compiles to 256 VGPR with 17 spilled under this compiler.
+  - **No speed claim yet**: the identity and ABBA kernel gate is `sly/kv4/gate_kv4h_pipe.py` (not run).
+- `tune_kv4h.py --prefill-qlen N --pipe M`: sweep the prefill shapes at the serve's chunk (the shipped
+  `kv4h_tune.json` was swept at 2048-token chunks; production runs 4096) and with a schedule mask.
+- `VERSION` 1.8.0 → 1.8.1.
+
 ## [1.8.0] - 2026-10-23
 
 The measured prefill stack is the **image default**: every knob below is on without any `-e` (Dockerfile ENV,

@@ -440,6 +440,25 @@ def test_attn_query_kernels():
     print("ok   query kernels: int8 rotation (<=1 LSB on <0.1 %) and un-rotation match torch")
 
 
+def test_attn_pipe_identity():
+    """RADIANCE_KV4H_PIPE moves only the schedule (staging loads, LDS buffers, which wave computes
+    what): every mask must give the bytes of pipe 0 at the same tile, on prefill, mixed, window,
+    non-causal, head-128 and decode shapes."""
+    from gate_kv4h_pipe import Case
+    cases = [dict(seq_lens=[8192 + 4096], q_lens=[4096]), dict(seq_lens=[300, 300], q_lens=[300, 300], bs=32),
+             dict(seq_lens=[2048, 5000, 7000], q_lens=[2048, 8, 1], bs=880),
+             dict(seq_lens=[4096], q_lens=[1000], bs=880, window=512),
+             dict(seq_lens=[300], q_lens=[300], bs=32, causal=False),
+             dict(seq_lens=[8200, 1000], q_lens=[8, 8], bs=880, head=128, nq=16, causal=False, window=2048)]
+    for kw in cases:
+        c = Case(**kw)
+        for tile in (16, 32, 64):
+            ref = c.run(pipe=0, tile=tile).clone()
+            for pipe in range(1, 8):
+                assert torch.equal(c.run(pipe=pipe, tile=tile), ref), (kw, tile, pipe)
+    print("ok   attn pipe masks 1-7 bit-identical to pipe 0 at tiles 16 / 32 / 64")
+
+
 def test_attn_prefill():
     _check_attn("prefill 512 nseg=1", [512], [512], 880, nseg=1)
     _check_attn("prefill 2x300 bs32", [300, 300], [300, 300], 32, nseg=1)

@@ -77,6 +77,7 @@ argument wins over the environment, which wins over the table, which wins over t
 | `_PREF` | 1 | P reference: 1 = tile max, 0 = running max |
 | `_SCALE_CLIP`, `_QMIN`, `_SCALE_STEPS` | 0.8, -8, 1 | store: first scale candidate, lowest code, scale search steps |
 | `_TUNE` | `kv4h_tune.json` | knob table; `off` disables it |
+| `_PIPE` | 0 | prefill-only schedule mask (1.8.1): 1 global staging loads + block-table entry one tile ahead, 2 double-buffered LDS tile (one barrier per tile), 4 one wave per row tile (no duplicated scores); bit-identical by construction, untimed until `gate_kv4h_pipe.py` runs; with 2 use `_PREFILL_TILE` 16 or 32, with 4 tile 16 (spill otherwise) |
 
 ## Accuracy against a bf16 KV cache
 
@@ -137,6 +138,7 @@ prefix.
 | `radiance_kv4h_attn.py` | the vLLM backend (`TETRA`, alias `KV4H`) |
 | `install_kv4.py` | prelude installer |
 | `tune_kv4h.py`, `kv4h_tune.json` | knob sweep and its table |
+| `gate_kv4h_pipe.py` | GPU gate of `RADIANCE_KV4H_PIPE`: asm stats, identity vs pipe 0, ABBA kernel timing at chunk 4096 |
 | `kl_score.py`, `kl_compare.py`, `decode_delta.py` | accuracy against bf16, pure decode rate |
 | `radiance_kv4_*.py` | Triton reference path (`KV4`) and fake-quant backend (`KV4FAKE`) for format A/Bs |
 | `patch_int4_pth_rocm.py` | vLLM's own int4 kernel for the drafter, an A/B control (`KV4_DRAFT_ATTN=TRITON_ATTN`) |
