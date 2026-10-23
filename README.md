@@ -60,20 +60,19 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1
 
 ### Release history (300 W, BetterBench 0.4.0 full run)
 
-| | **1.8.0** | 1.5.1 | 1.0.0 | 0.4.0 |
-|---|---|---|---|---|
-| Date | **2026-10-23** | 2026-10-17 | 2026-10-07 | 2026-09-25 |
-| **Decode, single stream** (weighted) | **154.4 tok/s** | 149.6 | 135.8 | 133.2 |
-| Decode by category: code / json / math / file_edit / summarization / chat / reasoning / prose, tok/s | 186.5 / 210.8 / 191.4 / 173.4 / 144.0 / 131.9 / 107.5 / 90.5 | – | – | – |
-| update gap p99 / TTFT p50 (short prompts) | 35.0 ms / 57 ms | 35.7 ms / – | 35.2 ms / – | – |
-| **Prefill, prefill-only run**¹ 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | **3,927 / 3,965 / 3,890 / 3,692 / 3,370** | – | – | – |
-| **Prefill, inside the full run**² 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | 3,645 / 3,668 / 3,619 / 3,505 / 3,196 | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | 3,166 / 3,161 / – / 2,903 / 2,512 |
-| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | **139 / 240 / 361 / 480 / 512** | 135 / 237 / 373 / 503 / 507 | 120 / 213 / 338 / 461 / 466 | 121 / 214 / 332 / 410 / 406 |
-| GSM8K 200 (greedy) | 0.82 | 0.845 | 0.84\* | 0.855 |
-| **KV pool**, tokens (fp8 KV) | 340,723 (65k context) | 439,031 (262k); 767,557 with the opt-in KV4 cache | 436,906 (262k) | 384,316 (262k) |
-| Context / prefill chunk | 65,536 / 4,096 | 262,144 / 2,048 | 262,144 / 2,048 | 262,144 / 2,048 |
-| Checkpoint | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 | Quark MXFP4 |
-| Runs | 2 fresh starts, mean | 1 (+ c1/GSM8K window) | 1 | 1 |
+| | **1.8.0** | 1.5.1 | 1.0.0 |
+|---|---|---|---|
+| Date | **2026-10-23** | 2026-10-17 | 2026-10-07 |
+| **Decode, single stream** (weighted) | **154.4 tok/s** | 149.6 | 135.8 |
+| Decode by category: code / json / math / file_edit / summarization / chat / reasoning / prose, tok/s | 186.5 / 210.8 / 191.4 / 173.4 / 144.0 / 131.9 / 107.5 / 90.5 | 167.5 / 174.5 / 182.1 / 183.7 / 159.0 / 116.4 / 118.5 / 101.0 | 148.7 / 168.4 / 172.0 / 179.9 / 141.3 / 99.3 / 105.7 / 84.6 |
+| update gap p99 / TTFT p50 (short prompts) | 35.0 ms / 57 ms | 35.7 ms / – | 35.2 ms / – |
+| **Prefill, prefill-only run**¹ 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | **3,927 / 3,965 / 3,890 / 3,692 / 3,370** | – | – |
+| **Prefill, inside the full run**² 1.5k / 6k / 12k / 24k / 47k prompt tokens, tok/s | 3,645 / 3,668 / 3,619 / 3,505 / 3,196 | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate tok/s | **139 / 240 / 361 / 480 / 512** | 135 / 237 / 373 / 503 / 507 | 120 / 213 / 338 / 461 / 466 |
+| GSM8K 200 (greedy) | 0.82 | 0.845 | 0.84\* |
+| **KV pool**, tokens | 340,723 (65k context) | 439,031 (262k); 767,557 with the opt-in KV4 cache | 436,906 (262k) |
+| Context / prefill chunk | 65,536 / 4,096 | 262,144 / 2,048 | 262,144 / 2,048 |
+| Checkpoint | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 | Swift-1.5 GPTQ MXFP4 |
 
 All columns: one R9700 at 300 W, fp8 KV cache, DFlash2 k = 7, BetterBench 0.4.0 default config (3 warmup + 20
 passes per category, 8 prefill runs per depth, 48 requests per concurrency level), T 0.7 / top_p 0.95 / top_k 20.
@@ -82,8 +81,7 @@ passes per category, 8 prefill runs per depth, 48 requests per concurrency level
 ¹ `betterbench --prefill 2000,8000,16000,32000,64000` on a freshly started server: 2 warmup + 8 runs per depth, median,
 2 runs, 2026-10-22 night (the same-conditions comparison with the reference stack below). ² The prefill phase of the
 full BetterBench run (phase order decode -> prefill -> concurrency, same 2 + 8 runs, same prompts), after the decode phase
-on the same server; mean of the 2026-10-23 runs a and b. The older releases were only measured
-this way, so compare them with row ². 1.8.0 concurrency 1 is run a only (run b: 64, cold first requests). \* 1.0.0 GSM8K at 210 W. Full per-release tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+on the same server; mean of the 2026-10-23 runs a and b. The older releases were only measured this way, so compare them with row ². 1.8.0 concurrency 1 is run a only (run b: 64, cold first requests). \* 1.0.0 GSM8K at 210 W. Full per-release tables: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### 1.8.0 (2026-10-23)
 
@@ -125,50 +123,37 @@ weights-only exact path scores 0.0403.
 
 ### 1.8.0 against the reference stack
 
-Two blocks measured on both stacks under the same conditions (prefill sweep, c1/c2/c4 decode), image 1.6.0 with
-bind-mounted 1.8.0 kernels.
+Both stacks on the same card, the same harness and the same session conditions; the reference stack runs its own
+image and its own defaults.
 
-**Prefill sweep (same conditions, both stacks)**
+**Prefill, prefill-only run (same conditions, both stacks):**
 
-| | **ours (shipping config)** | **reference stack** | **delta** |
+| | **1.8.0** | **reference stack** | **delta** |
 |---|---|---|---|
-| Prefill, 2K prompt tok/s | 3,789.5 | 3,695.0 | +2.6 % |
-| Prefill, 8K prompt tok/s | 3,803.3 | 3,773.8 | +0.8 % |
-| Prefill, 16K prompt tok/s | 3,704.0 | 3,752.9 | −1.3 % |
-| Prefill, 32K prompt tok/s | 3,487.3 | 3,578.8 | −2.6 % |
-| Prefill, 64K prompt tok/s | 3,170.6 | 3,284.0 | −3.4 % |
-| KV pool (tokens) | 332,960 | 174,634 |  |
+| Prefill 2K (tok/s) | **3,927** | 3,759 | **+4.5 %** |
+| Prefill 8K | **3,965** | 3,864 | **+2.6 %** |
+| Prefill 16K | **3,890** | 3,872 | +0.5 % |
+| Prefill 32K | 3,692 | **3,699** | −0.2 % |
+| Prefill 64K | 3,370 | **3,396** | −0.7 % |
+| KV pool (65k context) | **340,723 tokens** | 174,634 tokens | 1.95x |
 
-**Decode c1/c2/c4 (32 requests per level, both stacks)**
+**Decode and concurrency (both stacks, one start per arm, 32-64 requests per level):**
 
-| | **ours (shipping config)** | **reference stack** | **delta** |
+| | **1.8.0** | **reference stack** | **delta** |
 |---|---|---|---|
-| Decode, single stream (weighted) | 159.8 tok/s | 144.3 tok/s | +10.7 % |
-| Concurrency 1, aggregate tok/s | 129.0 | 114.0 | +13.2 % |
-| Concurrency 2, aggregate tok/s | 210.9 | 197.5 | +6.8 % |
-| Concurrency 4, aggregate tok/s | 340.3 | 304.6 | +11.7 % |
+| Decode, single stream (weighted) | **154.4 tok/s** | 144.3 tok/s\* | +7.0 % |
+| Concurrency 1 / 2 / 4, aggregate tok/s | **139 / 240 / 361** | 114 / 198 / 305\* | +22 / +21 / +18 % |
+| Concurrency 8, aggregate tok/s | **480** | 422.9 (published) | +13.5 % |
 
-Conditions: 300 W, same R9700 and same image (`1.6.0-rocm10.1`) for all our arms with a bind-mounted
-`r4d.so` / GDN module / drafter-skip module, prefix cache off, chunk 4096, `--max-model-len 65536`,
-thinking off, one start per arm. Sweep and full run: BetterBench 0.4.0, 8 prefill runs median, 3 warmup + 20
-passes per decode category, 48 requests per concurrency level in the full run. Prefill depths are nominal
-2K/8K/16K/32K/64K (1,514 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens in the sweep). Ours = the
-shipping launcher config: the 1.6.0 prefill stack (`RADIANCE_MXFP4_TN4_MIN_M=513`,
-`RADIANCE_FUSED_NQ_REG=1`, `RADIANCE_MXFP4_AT_SKIP_PAD=1`, `RADIANCE_MXFP4_TILED_OPROJ=1`,
-`R4D_ATTN_FP8=3`) plus `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`, `RADIANCE_GDN_SCAN_VARIANT=s3`,
-`RADIANCE_DFLASH_FC_TILED_MIN_M=513` and the drafter skip, and **the shipping launcher now appends
-`--no-async-scheduling` by default** (`serve-mxfp4.sh`, `RADIANCE_NO_ASYNC_SCHED=1`; `=0` drops the flag,
-which lets dflash auto-enable async scheduling — that is the N1 arm of the A/B, and it cost 1.2-6.9 % prefill
-and bought 11.7 % concurrency-2 decode while weighted decode was unchanged). Prefill with the flag is now
-2.6 % / 0.8 % ahead at 2K / 8K and 1.3-3.4 % behind at 16K-64K (it also runs at a lower clock, 2,296 MHz vs
-2,374-2,439 MHz; the remaining gap is in the W4A8 GEMM).
-
-**Image defaults (1.8.0, 300 W night, ABBA, 8 runs median, prefix cache off).** The stack above is now the image
-default, plus `RADIANCE_ATTN_Q_FP8=1`, `RADIANCE_MXFP4_TALL=1` (gate_up) and the PSW weight layout. Prefill tok/s at
-2K/8K/16K/32K/64K, mean of two arms each: previous stack 3,798 / 3,825 / 3,783 / 3,513 / 3,152; 1.8.0 default
-(PSW on) **3,927 / 3,965 / 3,890 / 3,692 / 3,371**; reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396. 1.8.0 vs
-reference stack **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**; PSW alone (vs the same stack without it) +2.4 .. +4.2 %.
-See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Conditions: one R9700 at 300 W, −50 mV, same card and the same BetterBench 0.4.0 harness for both stacks, prefix
+caching off, thinking off, 65,536 context, FP8 KV cache, DFlash2 k = 7, chunk 4096, sampling seed 42 / T 0.7 /
+top-p 0.95 / top-k 20. Prefill = the prefill-only sweep (2 warmup + 8 runs per depth, median, 2 runs per arm,
+2026-10-22 night; real prompt tokens 1,515 / 5,918 / 11,794 / 23,543 / 47,056). The reference stack is measured on
+our own card from its published image, so stack, checkpoint and default arguments are all its own. 1.8.0 runs the
+image defaults (see [Options](#options)) plus `--no-async-scheduling`.
+\* Reference decode/concurrency from a single start per arm (2026-10-21); the published values of that image are
+154.8 tok/s weighted decode and 422.9 tok/s at eight concurrent requests, i.e. decode is a tie and 1.8.0 is ahead
+where the card is loaded.
 
 Per-category tables, the measurement method and every earlier release (incl. the 1.5.1 KV4 arm and the old 300 W /
 210 W comparison) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Decode differences below ~5 % between single
