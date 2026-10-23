@@ -13,10 +13,17 @@ KV4_BLOCK = KV4_GPB * 16            # 1664 tokens per block
 GROUP = 16                          # tokens per table entry (the kernel's BS)
 TABLE_PAD = 3                       # the double-buffered prefetch reads up to 3 groups past the row
 MIN_Q_DEFAULT = 512                 # smallest query length that pays for the libr4d launch
+# The routed kernel is 1.01x of the fp8 one, but the route's own q rotation and output un-rotation are
+# two 256x256 matmuls per layer and launch -- cost per token, not per key. At 210 W that measured
+# -5.9/-5.1/-3.8/-1.1 % prefill at 1.5k/5.9k/11.8k/23.5k and +4.2 % at 47k, so the route only pays
+# once the context is deep enough for the attention to dominate. Raise MIN_CTX_DEFAULT only with a
+# fresh sweep; lower it never.
+MIN_CTX_DEFAULT = 16384
 
 
 def decline(*, enabled, has_entry, head, k_group, cache_block, cache_shape_ok, cache_strides_ok,
-            window, causal, fused_out, out_dtype, capturing, max_query_len, runs, min_q) -> str | None:
+            window, causal, fused_out, out_dtype, capturing, max_query_len, max_seq_len, runs, min_q,
+            min_ctx) -> str | None:
     """Why the launch must stay on TetraAttention, or None when libr4d takes it. First hit wins."""
     if not enabled:
         return "R4D_KV4I unset"
@@ -44,6 +51,8 @@ def decline(*, enabled, has_entry, head, k_group, cache_block, cache_shape_ok, c
         return "graph capture"
     if max_query_len < min_q:
         return f"max query length {max_query_len} < {min_q}"
+    if max_seq_len < min_ctx:
+        return f"context {max_seq_len} < {min_ctx} keys (the route's rotation costs more than it wins)"
     if not runs:
         return "no query runs"
     lo, hi = min(runs), max(runs)

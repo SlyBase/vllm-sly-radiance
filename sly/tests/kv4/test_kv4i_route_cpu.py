@@ -15,7 +15,8 @@ import kv4i_route as R  # noqa: E402
 
 OK = dict(enabled=True, has_entry=True, head=256, k_group=256, cache_block=R.KV4_BLOCK,
           cache_shape_ok=True, cache_strides_ok=True, window=0, causal=True, fused_out=False,
-          out_dtype="bfloat16", capturing=False, max_query_len=4096, runs=[4096], min_q=512)
+          out_dtype="bfloat16", capturing=False, max_query_len=4096, max_seq_len=49152, runs=[4096],
+          min_q=512, min_ctx=R.MIN_CTX_DEFAULT)
 
 
 def _decline(**over):
@@ -46,10 +47,19 @@ def test_refuses_every_shape_it_cannot_read():
         "a sequence carries 8": dict(max_query_len=4096, runs=[4096, 8]),
         "ragged query lengths 4096..8192": dict(runs=[4096, 8192]),
         "no query runs": dict(runs=[]),
+        # the rotation costs more than the kernel wins below the measured context
+        "context 8192": dict(max_seq_len=8192),
     }
     for needle, over in cases.items():
         got = _decline(**over)
         assert got is not None and needle in got, f"{over} accepted as {got!r}"
+
+
+def test_a_long_run_at_shallow_context_stays_on_tetra():
+    # 4096 new tokens, but only 4096 keys in total: the measured -5.9 % case
+    assert _decline(max_query_len=4096, max_seq_len=4096, runs=[4096]) is not None
+    # the same run with a deep cache is the +4.2 % case
+    assert _decline(max_query_len=4096, max_seq_len=49152, runs=[4096]) is None
 
 
 def test_none_causal_is_not_true():

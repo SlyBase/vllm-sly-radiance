@@ -34,8 +34,10 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   no window and no graph capture, run on the libr4d int4 kernel (`r4d_attn_prefill_h256_gqa6_int4kv`);
   decode, verify, the head-128 drafter and every batch the guard declines stay on the TetraAttention kernel.
   Kernel microbench at the serve shapes: 1.01x of the fp8 libr4d kernel at past 49152 (TetraAttention is
-  1.81x). **No engine number yet, and the route is off by default** — it needs the prefill sweep and the
-  KL/GSM8K gate before it can become a launch option.
+  1.81x). The route is **off by default** and additionally gated on `RADIANCE_KV4I_MIN_CTX` (16384 keys):
+  the engine sweep at 210 W measured -5.9 / -5.1 / -3.8 / -1.1 % prefill at 1.5k/5.9k/11.8k/23.5k and
+  **+4.2 % at 47k**, because the route's own query rotation and output un-rotation are two 256x256 matmuls
+  per layer, i.e. cost per token rather than per key. No KL/GSM8K gate yet, so it stays a research knob.
 - **Design note for reading the int4 cache in the libr4d prefill kernel** (`docs/R4D-INT4-PREFILL.md`):
   measured gap (whole engine −1.4 % at 1.5k to −11.4 % at 47k at 210 W, kernel 1.7–1.9x), the two
   exactness/cost variants, the routing point, the accuracy gate and the go/no-go criterion. Only the

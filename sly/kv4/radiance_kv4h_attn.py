@@ -48,6 +48,7 @@ import r4d as _r4d
 import kv4i_route as R4
 KV4I_ON = os.environ.get("R4D_KV4I", "") == "1"
 KV4I_MIN_Q = max(16, int(os.environ.get("RADIANCE_KV4I_MIN_Q", str(R4.MIN_Q_DEFAULT))))
+KV4I_MIN_CTX = max(0, int(os.environ.get("RADIANCE_KV4I_MIN_CTX", str(R4.MIN_CTX_DEFAULT))))
 KV4I_GPB, KV4I_BLOCK = R4.KV4_GPB, R4.KV4_BLOCK
 KV4I_ENTRY = getattr(_r4d, "attn_prefill_h256_gqa6_int4kv", None)
 _KV4I_SAID: set = set()
@@ -192,7 +193,8 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             fused_out=output_scale is not None or output_block_scale is not None,
             out_dtype=str(output.dtype).replace("torch.", ""),
             capturing=False,   # already declined above, before the host copy
-            max_query_len=int(m.max_query_len), runs=runs, min_q=KV4I_MIN_Q,
+            max_query_len=int(m.max_query_len), max_seq_len=int(m.max_seq_len),
+            runs=runs, min_q=KV4I_MIN_Q, min_ctx=KV4I_MIN_CTX,
         )
 
     def _kv4i_block_table(self, m) -> torch.Tensor:
@@ -226,8 +228,9 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
         )
         # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
         output[:n].copy_(F.unrotate(out_rot.float()))
-        _kv4i_say("route", f"[kv4i] prefill runs >= {KV4I_MIN_Q} tokens go to libr4d int4 (head 256, "
-                           f"K group 256, block {KV4I_BLOCK}); decode, verify and the drafter stay on TETRA")
+        _kv4i_say("route", f"[kv4i] prefill runs >= {KV4I_MIN_Q} tokens at context >= {KV4I_MIN_CTX} go to "
+                           f"libr4d int4 (head 256, K group 256, block {KV4I_BLOCK}); decode, verify and the "
+                           f"drafter stay on TETRA")
         return output
 
     # -- attention ----------------------------------------------------------------------------
