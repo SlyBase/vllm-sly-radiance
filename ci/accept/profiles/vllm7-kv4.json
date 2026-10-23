@@ -1,0 +1,67 @@
+{
+  "description": "KV4/TETRA start smoke (NOT run on a GPU when written): one start per image with --attention-backend TETRA --kv-cache-dtype int4_per_token_head; fails on any traceback in the first forward or the cudagraph capture, and on a KV pool below 500000 tokens. Dispatch: Actions -> accept -> Run workflow, profile vllm7-kv4, mode fast. launch_args is what the launch must carry; accept.py does not consume it -- gpu-window takes the ExecStart of the service below, so the homelab unit (or a docker-vllm7-kv4.service) must carry these arguments before this profile means anything.",
+  "service": "docker-vllm7.service",
+  "model": "slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ",
+  "launch_args": [
+    "--kv-cache-dtype",
+    "int4_per_token_head",
+    "--attention-backend",
+    "TETRA",
+    "--speculative-config.attention_backend",
+    "TETRA",
+    "--max-model-len",
+    "65536",
+    "--max-num-batched-tokens",
+    "4096",
+    "--no-enable-prefix-caching",
+    "--no-async-scheduling"
+  ],
+  "required_log_patterns": [
+    [
+      "TetraAttention installed",
+      "TetraAttention installed"
+    ]
+  ],
+  "forbidden_log_patterns": [
+    [
+      "python traceback",
+      "Traceback \\(most recent call last\\)"
+    ],
+    [
+      "attribute error",
+      "AttributeError"
+    ],
+    [
+      "engine died",
+      "EngineDeadError|Engine core proc .* died"
+    ],
+    [
+      "cuda graph capture failed",
+      "Capturing CUDA graphs? failed|CUDAGraph capture failed"
+    ]
+  ],
+  "known_warnings": [
+    "triton_bundler.py",
+    "Cubin file saved by TritonBundler not found",
+    "Failed to JIT torch c dlpack extension",
+    "torch/_inductor/"
+  ],
+  "smoke": [
+    {
+      "name": "arithmetic",
+      "prompt": "What is 17*23? Reply with the number only.",
+      "expect": "391",
+      "max_tokens": 512
+    }
+  ],
+  "thresholds": {
+    "kv_tokens_min_ratio": 1.0,
+    "aggregate_tps_min_ratio": 0.95,
+    "acceptance_rate_min_delta": -0.02,
+    "mean_tokens_per_step_min_delta": -0.3,
+    "gsm8k_min_delta": -0.05,
+    "startup_s_max_ratio": 1.5,
+    "preemptions_max": 0,
+    "aggregate_tps_min_ratio_conc_1": 0.85
+  }
+}
