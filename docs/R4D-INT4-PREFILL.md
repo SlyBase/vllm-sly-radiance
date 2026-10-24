@@ -1,5 +1,22 @@
 # Reading the int4 (KV4) cache in the libr4d prefill attention kernel — design
 
+## Verdict (2026-10-24): KV4 stays decode/capacity only, prefill work stopped
+
+- KV4 prefill is 11.7-11.8 % slower than fp8 KV at 64k, at 210 W and at 300 W / SCLK -500 MHz alike. Kernel
+  `Tetra / fp8` = 1.80x (rocprof, 47104 keys, chunk 4096). Tetra launches 2.1x the waves of the fp8 kernel, so
+  too little parallelism is not the cause and Split-KV is unlikely to help (H).
+- Variant A (int8 route) was fast but its error is coherent. Variant B / B2 (bare int4 codes on the fp8 WMMA
+  legs, token scales folded into score and P) is more accurate than Tetra against an independent fp8-KV
+  reference: KL over all contexts 0.01557 vs 0.01702, 32-64k dNLL -0.00060 vs +0.00158, GSM8K-200 0.855 vs 0.845.
+- B2 is not faster: same window, identical units, B2/Tetra -1.3 ... +3.4 % over 2k-64k, within noise.
+- Decision: KV4 is for decode and capacity (528,722 KV tokens at 65k against 340,723 on fp8, as measured in
+  [BENCHMARKS.md](BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23); start logs there: fp8 332,770).
+  The prefill route is not adopted. Branch `exp/kv4i-dump` is parked.
+- Gate lesson: the old gate (KL <= 0.003 vs Tetra) measures distance to Tetra, not to truth, so a more accurate
+  kernel cannot pass it. A future gate compares each arm against an fp8-KV reference per context bucket.
+- Ops lesson: the fp8 unit at `--gpu-memory-utilization 0.98` returned HTTP 500 on 60k-token prompt-logprob
+  requests; 0.90 worked (H: memory for logprobs). Short prompts ran at 0.98.
+
 Status: kernel compiled and gated off (`O_KV4I`, `sly/r4d/r4d_kv4i.patch`), route written and gated off
 (`R4D_KV4I=1`), CPU-verified end to end. **Kernel microbench on the R9700: the int4 libr4d kernel is 1.01x of
 the fp8 libr4d kernel at past 49152** (TetraAttention is 1.81x), so the go/no-go below passes and the port
