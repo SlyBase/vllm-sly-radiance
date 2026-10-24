@@ -44,6 +44,7 @@ namespace py = pybind11;
 typedef int int2_t __attribute__((ext_vector_type(2)));
 typedef int int8v __attribute__((ext_vector_type(8)));
 typedef unsigned int uint4_t __attribute__((ext_vector_type(4)));
+typedef float float8v __attribute__((ext_vector_type(8)));
 
 #define TG 16                     // tokens per layout group
 #define V_SCALES 16               // bytes of V scales per 16-token group
@@ -61,6 +62,24 @@ typedef unsigned int uint4_t __attribute__((ext_vector_type(4)));
 //             sum -- 8 multiplies and one LDS exchange per tile)
 #ifndef KV4H_PREF
 #define KV4H_PREF 0
+#endif
+//   KV4H_PVF8 P.V on fp8 (e4m3) WMMA into ONE f32 accumulator across all tiles (0: the iu8 WMMA into a
+//             per-tile int32 accumulator, folded into acc once per tile). V's nibble goes in as the
+//             byte (nibble ^ 8) -- as e4m3 that is exactly (c + 8) * 2^-9 for every int4 code c,
+//             so unpacking is a mask and an xor -- and the offset is removed at the end with
+//             sum_t P'_t * 8 * 2^-9 (one extra WMMA per 16 tokens against bytes 0x08 = 2^-6, from the
+//             SAME packed P'). P' = e4m3(P * V scale * lift), lift a per-tile power of two putting the
+//             tile's largest V scale at <= 448; the ratio of consecutive lifts is folded into the alpha
+//             rescale (exact), the final lift into the epilogue. P is referenced to the running max
+//             (KV4H_PREF has no effect: a per-tile beta cannot be applied to an accumulator that is
+//             shared across tiles; e4m3 reaches 2^-9 against uint8's 2^-8). l sums the unpacked fp32 P.
+#ifndef KV4H_PVF8
+#define KV4H_PVF8 0
+#endif
+#if KV4H_PVF8
+#define KV4H_PREFB 0
+#else
+#define KV4H_PREFB KV4H_PREF
 #endif
 #ifndef KV4H_NRT
 #define KV4H_NRT 4
@@ -229,7 +248,13 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
   __shared__ __align__(16) float sBeta[NWAVES][16];        // KV4H_PREF 1: per wave, beta of its 16 queries                        // per wave: alpha of its 16 queries
 
   float m_run = -INFINITY, l_run = 0.f;
+#if KV4H_PVF8
+  float8v acc[DT];                      // units of 1 / (2^-9 * lift_run); corr: the offset term (below)
+  float8v corr = {0, 0, 0, 0, 0, 0, 0, 0};
+  unsigned int lift_run = 0x3F800000u;  // bits of the lift acc is expressed in (1.0 while acc is 0)
+#else
   float acc[DT][8];
+#endif
 #pragma unroll
   for (int d = 0; d < DT; ++d)
 #pragma unroll
@@ -331,10 +356,19 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
 #pragma unroll
       for (int c = 0; c < VSPL; ++c) { vs[c] = e4m3_to_f32(fvs[c]); vmax = fmaxf(vmax, vs[c]); }
       vmax = wave_max32(vmax);
+#if KV4H_PVF8
+      // power of two (exponent bits of 448 / vmax): vmax * lift <= 448, and lift ratios are exact
+      const float lift = vmax > 0.f ? __uint_as_float(__float_as_uint(448.f / vmax) & 0x7F800000u) : 1.f;
+#else
       const float lift = vmax > 0.f ? 255.f / vmax : 0.f;
+#endif
 #pragma unroll
       for (int c = 0; c < VSPL; ++c) if (lane + c * 32 < TILE) sVl[lane + c * 32] = vs[c] * lift;
+#if KV4H_PVF8
+      if (lane == 0) sUnlift = lift;                          // PVF8: the tile's lift itself
+#else
       if (lane == 0) sUnlift = vmax * (1.f / 255.f / 16.f);
+#endif
     }
   };
 
@@ -413,7 +447,7 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
     const float m_new = fmaxf(m_run, mx * rs);
     const float m_use = (m_new == -INFINITY) ? 0.f : m_new;
     const float alpha = exp2_raw(m_run - m_use);
-#if KV4H_PREF
+#if KV4H_PREFB
     const float m_tile = mx * rs;                              // this tile's max: P's reference
     const float m_ref = (m_tile == -INFINITY) ? 0.f : m_tile;
     const float beta = (m_tile == -INFINITY) ? 0.f : exp2_raw(m_tile - m_use);
@@ -433,7 +467,7 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
         lsum += s[h][j];
       }
     lsum = wave_sum16(lsum);
-#if KV4H_PREF
+#if KV4H_PREFB
     l_run = l_run * alpha + lsum * beta;
 #else
     l_run = l_run * alpha + lsum;
@@ -446,6 +480,12 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
     for (int h = 0; h < NH; ++h) {
       const float4 v0 = *(const float4 *)&sVl[h * TG + jbase], v1 = *(const float4 *)&sVl[h * TG + jbase + 4];
       unsigned int w0 = 0, w1 = 0;
+#if KV4H_PVF8
+      w0 = __builtin_amdgcn_cvt_pk_fp8_f32(s[h][0] * v0.x, s[h][1] * v0.y, 0u, false);
+      w0 = __builtin_amdgcn_cvt_pk_fp8_f32(s[h][2] * v0.z, s[h][3] * v0.w, w0, true);
+      w1 = __builtin_amdgcn_cvt_pk_fp8_f32(s[h][4] * v1.x, s[h][5] * v1.y, 0u, false);
+      w1 = __builtin_amdgcn_cvt_pk_fp8_f32(s[h][6] * v1.z, s[h][7] * v1.w, w1, true);
+#else
       w0 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][0] * v0.x, 0u, w0);
       w0 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][1] * v0.y, 1u, w0);
       w0 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][2] * v0.z, 2u, w0);
@@ -454,11 +494,20 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
       w1 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][5] * v1.y, 1u, w1);
       w1 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][6] * v1.z, 2u, w1);
       w1 = __builtin_amdgcn_cvt_pk_u8_f32(s[h][7] * v1.w, 3u, w1);
+#endif
       pb[h][0] = (int)w0;
       pb[h][1] = (int)w1;
     }
+#if KV4H_PVF8
+    // acc is held in units of lift_run; this tile's P' is in units of its own lift: both are powers
+    // of two, so the conversion is an exact exponent difference (folded into the alpha rescale below)
+    const unsigned int lift_t = __float_as_uint(sUnlift);
+    const float lratio = __uint_as_float(lift_t - lift_run + 0x3F800000u);
+    lift_run = lift_t;
+#else
     const float unlift = sUnlift;
-#if KV4H_PREF
+#endif
+#if KV4H_PREFB
     // the P.V rows j are queries jbase + j, whose beta lives in lane jbase + j
     if (half == 0) sBeta[wave][lane] = beta;
     __builtin_amdgcn_wave_barrier();
@@ -470,12 +519,23 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
 #endif
     // the P.V accumulator's 8 values per lane belong to 8 different QUERIES (rows jbase + j),
     // whose alpha lives in lane jbase + j: exchange through LDS, only when some row's max moved
+#if KV4H_PVF8
+    if (__any(alpha != 1.f) || lratio != 1.f) {
+#else
     if (__any(alpha != 1.f)) {
+#endif
       if (half == 0) sAlpha[wave][lane] = alpha;
       __builtin_amdgcn_wave_barrier();
       const float4 al0 = *(const float4 *)&sAlpha[wave][jbase];
       const float4 al1 = *(const float4 *)&sAlpha[wave][jbase + 4];
+#if KV4H_PVF8
+      const float alpha_j[8] = {al0.x * lratio, al0.y * lratio, al0.z * lratio, al0.w * lratio,
+                                al1.x * lratio, al1.y * lratio, al1.z * lratio, al1.w * lratio};
+#pragma unroll
+      for (int j = 0; j < 8; ++j) corr[j] *= alpha_j[j];
+#else
       const float alpha_j[8] = {al0.x, al0.y, al0.z, al0.w, al1.x, al1.y, al1.z, al1.w};
+#endif
 #pragma unroll
       for (int dt = 0; dt < DT; ++dt)
 #pragma unroll
@@ -484,6 +544,30 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
     }
     // ---- P . V for this wave's DH dims: DT dim tiles, the tile's NH 16-token groups chained
     //      (iu8: V's nibble sits in the high half of its byte = 16 * v as int8) ----
+#if KV4H_PVF8
+    const int nsh = dh * 4;                                   // dim half: low / high nibble of the byte
+    // fp8 legs: B = V's bytes (nibble ^ 8) = (c + 8) * 2^-9 exactly, A = P'; straight into acc. The
+    // offset 8 * 2^-9 * sum(P') per query row comes from the same P' against bytes 0x08 (2^-6).
+    {
+      const int2_t ones = {0x08080808, 0x08080808};
+#pragma unroll
+      for (int h = 0; h < NH; ++h) corr = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(pb[h], ones, corr);
+    }
+#pragma unroll
+    for (int dt = 0; dt < DT; ++dt) {
+      float8v d = acc[dt];
+#pragma unroll
+      for (int h = 0; h < NH; ++h) {
+        const unsigned char *vb = &sV[h][(dt * 16 + (lane & 15)) * TG + jbase];
+        const unsigned int w0 = *(const unsigned int *)vb, w1 = *(const unsigned int *)(vb + 4);
+        int2_t b;
+        b[0] = (int)(((w0 >> nsh) & 0x0F0F0F0Fu) ^ 0x08080808u);   // nsh wave-uniform: no branch, no select
+        b[1] = (int)(((w1 >> nsh) & 0x0F0F0F0Fu) ^ 0x08080808u);
+        d = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(pb[h], b, d);
+      }
+      acc[dt] = d;
+    }
+#else
 #pragma unroll
     for (int dt = 0; dt < DT; ++dt) {
       int8v d = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -501,12 +585,13 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
 #endif
       }
 #pragma unroll
-#if KV4H_PREF
+#if KV4H_PREFB
       for (int j = 0; j < 8; ++j) acc[dt][j] = fmaf((float)d[j], bu[j], acc[dt][j]);
 #else
       for (int j = 0; j < 8; ++j) acc[dt][j] = fmaf((float)d[j], unlift, acc[dt][j]);
 #endif
     }
+#endif
 #ifndef ABL_NOSYNC
     __syncthreads();                                          // everyone done reading the tile
 #endif
@@ -520,6 +605,12 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
 
   // ---- epilogue: lane holds dim dh*DH + 16*dt + lane%16 of queries (rows) half*8 + j ----
   const int dcol = dh * DH + (lane & 15);
+#if KV4H_PVF8
+  const float us = 512.f / __uint_as_float(lift_run);       // undo 2^-9 and the lift (powers of two: exact)
+#define KV4H_ACC(dt, j) ((acc[dt][j] - corr[j]) * us)
+#else
+#define KV4H_ACC(dt, j) acc[dt][j]
+#endif
 #pragma unroll
   for (int j = 0; j < 8; ++j) {
     const int r = rt * 16 + half * 8 + j;                // query row of the block
@@ -534,11 +625,11 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
       const float inv = lq > 0.f ? 1.f / lq : 0.f;
       __bf16 *o = out + tokidx * HEAD;
 #pragma unroll
-      for (int dt = 0; dt < DT; ++dt) o[dt * 16 + dcol] = (__bf16)(acc[dt][j] * inv);
+      for (int dt = 0; dt < DT; ++dt) o[dt * 16 + dcol] = (__bf16)(KV4H_ACC(dt, j) * inv);
     } else {
       float *so = segm_out + (tokidx * nseg + seg) * HEAD;
 #pragma unroll
-      for (int dt = 0; dt < DT; ++dt) so[dt * 16 + dcol] = acc[dt][j];
+      for (int dt = 0; dt < DT; ++dt) so[dt * 16 + dcol] = KV4H_ACC(dt, j);
       if (dcol == 0) {
         segm_max[tokidx * nseg + seg] = mq;
         segm_sum[tokidx * nseg + seg] = lq;
