@@ -13,6 +13,13 @@
   capacity matters: 528,722 KV tokens against 342,950 on fp8 (+54 %, 1.8.1, 65k context, same window
   2026-10-24), decode 154.8 vs 158.1 tok/s, prefill about equal below 16k and 11.7 % slower at 64k. Only the
   faster prefill route is not adopted; branch `exp/kv4i-dump` is parked.
+- Where the Tetra kernel loses (kernel microbench, 47104 keys, chunk 4096, 210 W, 2 runs each; base 44.4 ms,
+  fp8 libr4d 24.8 ms): no single cause. Without the two `__syncthreads` per tile -4.9 %, without staging the next
+  tile -7.6 %, without the P.V WMMA -31 % (upper bound); P.V on fp8 WMMA with an f32 accumulator across tiles
+  (`KV4H_PVF8`, branch `perf/kv4h-pv-fp8`) -6.0 %; removing 64 `v_cndmask` from the V unpack (branch
+  `perf/kv4h-v-unpack-dh`) bit-identical and 0 % in the engine. ATT (gfx1201 decodes): extra time is VALU (55 %)
+  and barrier wait (35 %), WMMA equal, icache/L2/occupancy ruled out. Closing the gap needs a restructured kernel
+  (60 rows per program against 384, Q.K computed by both dim-half waves), not a local fix.
 - Gate lesson: the old gate (KL <= 0.003 vs Tetra) measures distance to Tetra, not to truth, so a more accurate
   kernel cannot pass it. A future gate compares each arm against an fp8-KV reference per context bucket.
 - Ops lesson: the fp8 unit at `--gpu-memory-utilization 0.98` returned HTTP 500 on 60k-token prompt-logprob
