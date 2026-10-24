@@ -482,6 +482,7 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
         for (int j = 0; j < 8; ++j) acc[dt][j] *= alpha_j[j];
       __builtin_amdgcn_wave_barrier();
     }
+    const unsigned vsh = dh ? 0u : 4u;                        // wave-uniform: shift to the high half of the byte
     // ---- P . V for this wave's DH dims: DT dim tiles, the tile's NH 16-token groups chained
     //      (iu8: V's nibble sits in the high half of its byte = 16 * v as int8) ----
 #pragma unroll
@@ -492,8 +493,7 @@ __global__ __launch_bounds__(NRT * 64) void kv4h_attention(
         const unsigned char *vb = &sV[h][(dt * 16 + (lane & 15)) * TG + jbase];
         const unsigned int w0 = *(const unsigned int *)vb, w1 = *(const unsigned int *)(vb + 4);
         int2_t b;
-        if (dh) { b[0] = (int)(w0 & 0xF0F0F0F0u); b[1] = (int)(w1 & 0xF0F0F0F0u); }
-        else    { b[0] = (int)((w0 << 4) & 0xF0F0F0F0u); b[1] = (int)((w1 << 4) & 0xF0F0F0F0u); }
+        b[0] = (int)((w0 << vsh) & 0xF0F0F0F0u); b[1] = (int)((w1 << vsh) & 0xF0F0F0F0u);
 #ifndef ABL_NOPV
         d = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(false, pb[h], true, b, d, false);
 #else
