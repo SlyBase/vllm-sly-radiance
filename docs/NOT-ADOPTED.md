@@ -312,3 +312,9 @@ high batch (their conc-64 rows: width 16 = 0.76x, width 4 = 1.16x) -- the same d
 
 Revisit when: (a) a gfx1201 (or other RDNA4) tier ships and compiles; (b) the license becomes OSI open source, or
 a commercial license is granted; (c) the vLLM tree verify works with a quantized KV cache.
+
+**Own measurements, 1.8 (2026-10-23/24, KV4 prefill):**
+
+| Item | Why not |
+|---|---|
+| libr4d int4-KV prefill route (`R4D_KV4I`, variants A/B/B2) to close the KV4 prefill gap | KV4 (Tetra) prefill is 11.7-11.8 % slower than fp8 KV at 64k (210 W and 300 W); the kernel is 1.80x (rocprof). B2 is more accurate than Tetra against an fp8-KV reference (KL 0.01557 vs 0.01702, GSM8K-200 0.855 vs 0.845) but not faster (-1.3...+3.4 %, noise). KV4 stays decode/capacity only. Experiment branch `exp/kv4i-dump`, not published. |
