@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.8.1] - 2026-10-23
+## [1.8.1] - 2026-10-24
 
 TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
 
@@ -19,6 +19,17 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   `attn_metadata.use_cascade is False`, a field `RocmAttentionMetadata` no longer has. The assert is gone (cascade
   attention was never used by these backends); `KV4` keeps its `causal` assert. Measured on the R9700: the engine
   starts, KV pool 528,722 tokens at 65k context (fp8: 340,723), and the prefill sweep runs.
+
+### Measured
+- **KV4 against fp8 KV, prefill-only sweep, one window per comparison.** 300 W with a -500 MHz SCLK offset,
+  1.8.1 build, one run each: KV4/fp8 -0.4 / -0.9 / -2.9 / -6.7 / **-11.7 %** at 2k / 8k / 16k / 32k / 64k; 210 W,
+  1.8.0 (same Tetra kernel), median of two interleaved runs each: -6.0 / -4.5 / -5.9 / -7.5 / **-11.8 %**. Decode
+  (full BetterBench, 300 W) 154.8 vs 158.1 tok/s, KV pool 528,722 vs 342,950 tokens (+54 %, 65k context, same
+  window). KV4 stays the capacity option; its prefill costs ~12 % at 64k and little below 16k.
+- **Where the gap is** (kernel microbench, 47,104 keys, 4,096 chunk, 210 W): TetraAttention 44.4 ms against 24.8 ms
+  for the fp8 libr4d kernel (1.79x). No single cause: without the two `__syncthreads` per tile -4.9 %, without
+  staging the next tile -7.6 %, without the P.V WMMA -31 % (upper bound); a thread trace puts the extra time in VALU
+  (55 %) and barrier wait (35 %), with equal WMMA time and icache, L2 and occupancy ruled out.
 
 ### Measured, not adopted
 - **`RADIANCE_KV4H_PIPE` (schedule variants of the TetraAttention prefill kernel) was built and removed again.**
@@ -48,6 +59,14 @@ TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
   fit losslessly in a 3-bit mantissa, a deterministic grid distortion. The only exact path is staging bare int4
   codes in int8 and folding the per-token scale per score (int8 WMMA), estimated 3-5 days, which removes the
   +8 % prefill gain.
+- **Faster KV4 prefill, tried after the route, none shipped** (branches `exp/kv4i-dump`, `perf/kv4h-pv-fp8`,
+  `perf/kv4h-v-unpack-dh`). Bare int4 codes on the fp8 legs with the token scales folded into the score and P
+  (variants B/B2) are *more* accurate than TetraAttention against an fp8-KV reference (KL 0.01557 vs 0.01702,
+  GSM8K-200 0.855 vs 0.845) but not faster (-1.3 ... +3.4 %, noise). Inside the Tetra kernel: P.V on fp8 WMMA with
+  an f32 accumulator across tiles -6.0 % kernel time; dropping 64 `v_cndmask` from the V unpack bit-identical and
+  0 %. Closing the gap needs a restructured kernel (60 rows per program against 384), not a local fix. Lesson for
+  the gate: KL against TetraAttention measures distance to Tetra, not to truth; compare against fp8 KV per context
+  bucket.
 - `VERSION` 1.8.0 → 1.8.1.
 
 ## [1.8.0] - 2026-10-23
