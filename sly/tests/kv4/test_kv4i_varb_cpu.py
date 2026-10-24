@@ -91,3 +91,25 @@ def test_lazy_reference_arm_stays_close_to_the_per_tile_lift():
 def test_patch_stages_bare_codes_and_carries_the_scale_tables():
     assert "kv4_ksc" in PATCH and "kv4_lsv" in PATCH and "kv4_rsv" in PATCH
     assert "ks, ks, ks, ks" not in PATCH and "s01.x, s01.y" not in PATCH   # variant A's scale-at-unpack is gone
+
+
+def test_kernel_denominator_is_a_two_term_fp8_dot():
+    # lazy arm = libr4d: l = sum over keys of P8 * (hi + lo) / RLIFT, hi = e4m3(RLIFT/sV), lo = e4m3(RLIFT/sV - hi)
+    # (one v_dot4_f32_fp8_fp8 per 4 keys per term instead of cvt + fma per key); P8 itself is unchanged.
+    q, cK, sK, cV, sV, qpos, sc = _case(ctx=64)
+    sV = sV * 400.0                                  # scales in the range of the real caches (3..16)
+    _, got, P = O.attend_b(q, cK, sK, cV, sV, qpos, sc, lazy=True, probs=True)
+    r = O.RLIFT / sV[:, 0]
+    hi = _e4m3(r)
+    rq = (hi + _e4m3(r - hi)) / O.RLIFT
+    assert ((rq - 1 / sV[:, 0]).abs() * sV[:, 0]).max() < 2 ** -7        # two terms: ~2^-8 relative, not 2^-4
+    _, exact = O.attend_b(q, cK, sK, cV, sV, qpos, sc, lazy=True, split=False)
+    assert (got - exact).norm() / exact.norm() > 1e-6                    # the model really uses the quantized weights
+    assert (P.sum(-1) - 1).abs().max() < 1e-4
+
+
+def test_patch_denominator_is_fp8_dots_and_the_table_fill_is_lane_parallel():
+    assert PATCH.count("__builtin_amdgcn_dot4_f32_fp8_fp8") == 4                  # 2 terms x 2 packed dwords per m-tile
+    assert "cvt_pk_f32_fp8" not in PATCH and "float kv4_rsv" not in PATCH   # no cvt + fma, no float rsv table
+    assert f"KV4I_RLIFT = {O.RLIFT}f" in PATCH and "vdesc * (KV4I ? KV4I_RLIFT" in PATCH
+    assert "if (vd < 8)" in PATCH and "if (vd == 0)" not in PATCH                  # 8 lanes, one token each, not 1 lane x 8

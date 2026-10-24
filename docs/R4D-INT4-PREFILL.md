@@ -220,3 +220,14 @@ Deviation from the CPU spec (`kv4i_offline.attend_b(lazy=False)`: per-row per-ti
 Attention sink / past-vs-chunk mass (B per-tile arm vs fp32 truth, chunk = the last q_len = 4089 keys): bias of the
 key-0 probability <= 1e-5 against a sink mass of 1e-3..8e-3 and a past-mass shift <= 3e-4 of 0.35..0.61 -- no case for
 keeping token 0 in high precision.
+
+### Cheaper denominator and table fill (B2)
+
+The denominator no longer widens the packed P' (4 `v_cvt_pk_f32_fp8` + 8 fma per 8 keys, 2 `ds_read_b128`): `kv4_rsv` holds
+1/sV as two e4m3 bytes (hi, lo of `KV4I_RLIFT / sV`, RLIFT 8, ~2^-8 relative, valid for sV >= 0.018; the dumps have
+sV 3..16) and the denominator is 4 `v_dot4_f32_fp8_fp8` per 8 keys on the packed P' dwords already in registers, one
+`ds_read_b128`; the epilogue multiplies by RLIFT. The unquantized-p denominator is NOT an option in the lazy arm
+(offline bias 2.76 / 1.82 / 1.76 % at L3 / L47 / L55: tiny p drop out of the numerator but not of l). The table fill
+runs on 8 lanes (one token each) instead of 8 serial iterations on one lane: 2 log2/rcp per tile instead of 16.
+Offline lazy arm (rel-L2 / bias, split vs exact 1/sV): L3 1.09 % / 0.28 % (1.08 / 0.26), L47 2.07 / 0.37 (2.06 / 0.37),
+L55 2.27 / 0.36. Tile-48 hot loop (VALU / LDS / loop): stock 228 / 19 / 403, B 330 / 34 / 613, B2 292 / 28 / 551.
