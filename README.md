@@ -1,7 +1,7 @@
 # vllm-sly-radiance
 
 [![Release](https://img.shields.io/github/v/release/SlyBase/vllm-sly-radiance?label=release)](https://github.com/SlyBase/vllm-sly-radiance/releases/latest)
-[![Image](https://img.shields.io/badge/ghcr.io-1.8.0--rocm10.1-blue?logo=docker)](https://github.com/SlyBase/vllm-sly-radiance/pkgs/container/vllm-sly-radiance)
+[![Image](https://img.shields.io/badge/ghcr.io-1.8.1--rocm10.1-blue?logo=docker)](https://github.com/SlyBase/vllm-sly-radiance/pkgs/container/vllm-sly-radiance)
 [![CI](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml)
 [![Build](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml)
 ![GPU](https://img.shields.io/badge/GPU-R9700%20gfx1201-red)
@@ -15,7 +15,7 @@ with hand-written MXFP4 kernels, DFlash2 speculative decoding and up to 262k con
 8 concurrent requests. Every number is measured and reproducible (see [Performance](#performance)).
 
 ```bash
-docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1
+docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1
 ```
 
 ## Contents
@@ -246,7 +246,7 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
   -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 -e RADIANCE_MXFP4_WIDE_MAX_M=192 \
   -e RADIANCE_ADAPTIVE_WIDTH=perseq -e RADIANCE_CACTUS_DELTA=0.5 \
-  ghcr.io/slybase/vllm-sly-radiance:1.8.0-rocm10.1 \
+  ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1 \
   --model /models/swift-mxfp4 --served-model-name swift-1.5 \
   --max-model-len 65536 --gpu-memory-utilization 0.98 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
@@ -411,7 +411,7 @@ attention runs on it too (its 136-byte cells are vLLM's int4 cell size, so the p
 
 | Variable | Recommended | What it does |
 |---|---|---|
-| `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79). Decode 4-5 % faster per step at 1 and 4 streams (same-window A/B), prefill 3-4 % faster with `CHUNK` >= 3456 (the attention block is 1664 tokens, fp8: 880, so a turn recomputes up to 1,663 tokens on a prefix hit). Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
+| `KVCACHE_DTYPE` | `fp8` | `fp8` (default) = stock; `kv4` = TetraAttention, 4-bit K/V for the attention layers, an opt-in trade: **~1.75x the KV pool** (a full 262k context in 4.25 GiB of KV instead of 8) for slightly less precision (KL against a bf16 KV cache 0.0126 vs fp8's 0.0123, perplexity +0.54 % vs +0.06 %, top-1 agreement 95.3 vs 95.6 %; GSM8K-200 0.80 vs 0.79; measured on 1.5.1 at 262k). **1.8.1 at 65k context, 4,096 chunk, same window:** KV pool 528,722 vs 342,950 tokens (+54 %), decode 154.8 vs 158.1 tok/s, prefill about equal below 16k and **11.7 % slower at 64k** (the TetraAttention prefill kernel is 1.8x the fp8 kernel, see CHANGELOG 1.8.1). Use it when capacity matters. The attention block is 1664 tokens (fp8: 880), so a turn recomputes up to 1,663 tokens on a prefix hit. Knobs `RADIANCE_KV4H_*` (sly/kv4/README.md). An offload tier written by an fp8 serve must not be reused |
 
 From vLLM 0.32.0 (image 1.7.0) there is also a **native** ROCm 4-bit KV cache, `--kv-cache-dtype
 ultraquant_4bit` (vllm#57057): Hadamard rotation plus one power-of-two scale per 32 channels instead of
