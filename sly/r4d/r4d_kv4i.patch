@@ -58,18 +58,20 @@ index a10d16c..aff8ccb 100644
  #define D_TILE 16
  #define D_OPT  3430971
 diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
-index 090be45..45697d7 100644
+index 090be45..871cda1 100644
 --- a/r4d_attn_prefill_h256_gqa6.hip
 +++ b/r4d_attn_prefill_h256_gqa6.hip
-@@ -107,6 +107,18 @@
+@@ -107,6 +107,20 @@
  // times a python scalar -- so the dwords handed on, the folded query scale and everything downstream
  // are bit-identical to the cast path. Nothing else changes.
  #define O_QF8  16777216
 +// KV4I: the KV cache is the int4 (KV4, TetraAttention) cache, read through the same byte-tile legs.
-+// Only the LOAD + UNPACK stage differs (fetchKV/storeKV below): K and V are unpacked from nibbles to
-+// e4m3 BYTES as rne_e4m3(code * token_scale) (variant A of docs/R4D-INT4-PREFILL.md) and stored into
-+// the existing KSTR8/VSTR8 byte tiles, so QK, softmax, PV and the O_QF8 query path are the O_QK8|O_PV8
-+// code, untouched. Needs O_QK8|O_PV8|O_DB|O_KWIDE|O_BTS and head 256. The block table holds 16-token
++// Variant B of docs/R4D-INT4-PREFILL.md: K and V are unpacked from nibbles to the BARE code as an exact
++// e4m3 byte (no scale, no second rounding) into the existing KSTR8/VSTR8 byte tiles. The token scales go
++// where they cost nothing: x = s * (sK*mul) + log2 sV in ONE fma per score (K scale and V scale from
++// three small LDS tables written next to the tiles), P' = 2^(x - m_ref) = p * sV is packed to e4m3, and the
++// denominator sums the packed P' times 1/sV. m_ref lives in the x domain, so the shipped lazy max/rescale
++// carries the V scale too; QK/PV WMMAs and the O_QF8 query path are the O_QK8|O_PV8 code, untouched. Needs O_QK8|O_PV8|O_DB|O_KWIDE|O_BTS and head 256. The block table holds 16-token
 +// GROUP ids (BS == 16): group G is block G / 104, group G % 104 of it, in a 1664-token KV4 block.
 +// ponytail: K scale group 256 (one scale per token) only; block 1664 hard-wired; no ragged V tail
 +// support beyond zeroing the scales of tokens >= ctx.
@@ -80,27 +82,24 @@ index 090be45..45697d7 100644
  
  typedef int v2i32_r4d __attribute__((ext_vector_type(2)));   // one fp8 WMMA operand (8 e4m3)
  // pack 4 floats -> 4 e4m3 bytes in element order (RNE, saturating), 2 instructions
-@@ -115,6 +127,19 @@ __device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d)
+@@ -115,6 +129,16 @@ __device__ __forceinline__ uint32_t pk_fp8x4(float a, float b, float c, float d)
      return __builtin_amdgcn_cvt_pk_fp8_f32(c, d, w, true);
  }
  
-+// KV4I: four signed nibbles of w (bit positions b0, b0+ST, b0+2ST, b0+3ST) -> four e4m3 bytes of
-+// code * s_i, element order, ONE rounding. Why not the exact 16-entry code LUT (kv4i_unpack.h
-+// code_e4m3): the LUT gives UNscaled bytes, so variant A would still need byte -> f32 -> mul -> e4m3
-+// (2 cvt + mul + perm-select of a 16-entry table = 2 v_perm + select) per element; the direct form is
-+// bfe + v_cvt_f32_i32 + v_mul_f32 + 0.5 v_cvt_pk_fp8 = 3.5 VALU per element, no table, and |c| <= 8
-+// times an e4m3 scale is exact in f32, so the single RNE is the one rne(float(c) * s) of the CPU test.
++// KV4I: four signed nibbles of w (bit positions b0, b0+ST, b0+2ST, b0+3ST) -> four e4m3 bytes of the BARE
++// codes, element order. |c| <= 8 is exact in e4m3 (kv4i_unpack.h code_bare == code_e4m3, all 16 codes), so
++// the pack never rounds: bfe + v_cvt_f32_i32 + 0.5 v_cvt_pk_fp8 = 2.5 VALU per element.
 +template<int B0, int ST>
-+__device__ __forceinline__ uint32_t kv4i_pk4(uint32_t w, float s0, float s1, float s2, float s3) {
++__device__ __forceinline__ uint32_t kv4i_pk4(uint32_t w) {
 +    #define KV4I_C(i) ((float)(((int32_t)(w << (28 - (B0 + ST * (i))))) >> 28))
-+    return pk_fp8x4(KV4I_C(0) * s0, KV4I_C(1) * s1, KV4I_C(2) * s2, KV4I_C(3) * s3);
++    return pk_fp8x4(KV4I_C(0), KV4I_C(1), KV4I_C(2), KV4I_C(3));
 +    #undef KV4I_C
 +}
 +
  // bf16 dword -> 16-bit dword in the target format, optionally scaled. Used once per kernel on Q.
  template<class D, int FOLDQ, int F16>
  __device__ __forceinline__ uint32_t r4d_qcvt(uint32_t w, float s) {
-@@ -165,6 +190,9 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -165,6 +189,9 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      constexpr int QF8   = (OPT & O_QF8) ? 1 : 0;
      constexpr int QK8   = ((OPT & O_QK8) && !KVP) ? 1 : 0;
      constexpr int PV8   = ((OPT & O_PV8) && !KVP) ? 1 : 0;
@@ -110,7 +109,18 @@ index 090be45..45697d7 100644
      static_assert(!(OPT & (O_QK8 | O_PV8)) || !KVP, "8-bit legs need the fp8 KV cache");
      static_assert(!(OPT & O_QK8) || KWIDE, "QK8 raw-byte staging is written for the wide K fetch");
      static_assert(!DB || (QK8 && PV8 && KWIDE && BTS), "DB staging is written for the byte-tile legs");
-@@ -290,6 +318,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -209,6 +236,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     __shared__ uint16_t sV16[PV8 ? NBUF * ((HEAD_DIM * VSTR8 + 1) / 2) : HEAD_DIM * VSTR];
+     uint8_t* const sK8 = (uint8_t*)sK;
+     uint8_t* const sV8 = (uint8_t*)sV16;
++    // KV4I per-key tables (one buffer per DB stage): K scale * mul, log2 of the V scale (-inf for 0), 1/V scale
++    __shared__ __attribute__((aligned(16))) float kv4_ksc[KV4I ? NBUF * TILE : 1];
++    __shared__ __attribute__((aligned(16))) float kv4_lsv[KV4I ? NBUF * TILE : 1];
++    __shared__ __attribute__((aligned(16))) float kv4_rsv[KV4I ? NBUF * TILE : 1];
+     uint8_t* wK8 = sK8;   // staging target; DB flips it to the buffer the next tile reads
+     uint8_t* wV8 = sV8;
+ 
+@@ -290,6 +321,7 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      // the two run back to back and the generated code is the same shape as it was before GPRE.
      const int vg = lane >> 3, vj = lane & 7;
      uint4 kreg[KREGS], vreg[VREGS];
@@ -118,7 +128,7 @@ index 090be45..45697d7 100644
  
      auto fetchK = [&](int k0, const int* blks) {
          #pragma unroll
-@@ -421,6 +450,45 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -421,6 +453,45 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      auto fetchKV = [&](int k0, const int* blks) {
          constexpr int DG = HEAD_DIM / 64;                 // KVP == 0: DB needs the byte legs
          constexpr bool PART = TILE < 2 * NWARPS;          // tile 48: every warp carries work
@@ -164,36 +174,63 @@ index 090be45..45697d7 100644
          if (PART && warp >= TILE / 2) return;
          {
              const int key = 2 * (tid >> 5) + (tid & 1);   // K: this thread's 16 bytes
-@@ -452,6 +520,28 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -452,6 +523,32 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
      auto storeKV = [&]() {
          constexpr int DG = HEAD_DIM / 64;
          constexpr bool PART = TILE < 2 * NWARPS;
 +        if constexpr (KV4I) {
 +            if (PART && __builtin_amdgcn_readfirstlane(warp) >= TILE / 2) return;
-+            // the whole new unpack stage: nibbles -> e4m3 bytes, into the existing byte tiles
++            // the whole new unpack stage: nibbles -> BARE e4m3 code bytes into the existing byte tiles; the
++            // token scales go to the per-key tables the score loop reads (no scale touches a code)
 +            const int key = 2 * (tid >> 5) + (tid & 1), ch = (tid & 31) >> 1;
++            const int wb = (int)((wK8 - sK8) / KBYTES) * TILE;
 +            const uint4 kn = kreg[0];
-+            const float ks = __builtin_amdgcn_cvt_f32_fp8(kn.z, 0);
 +            *(uint4*)(&wK8[key * KSTR8 + ch * KEL]) =
-+                make_uint4(kv4i_pk4<0, 4>(kn.x, ks, ks, ks, ks), kv4i_pk4<16, 4>(kn.x, ks, ks, ks, ks),
-+                           kv4i_pk4<0, 4>(kn.y, ks, ks, ks, ks), kv4i_pk4<16, 4>(kn.y, ks, ks, ks, ks));
++                make_uint4(kv4i_pk4<0, 4>(kn.x), kv4i_pk4<16, 4>(kn.x), kv4i_pk4<0, 4>(kn.y), kv4i_pk4<16, 4>(kn.y));
++            if (ch == 0) kv4_ksc[wb + key] = __builtin_amdgcn_cvt_f32_fp8(kn.z, 0) * mul;
 +            // V byte (d, token t) = (V[t][d] low, V[t][d + 128] high): row d from the low nibbles,
 +            // row d + 128 from the high ones, tokens 0..7 of this unit contiguous in the row.
 +            const int vd = tid & 127, hg = tid >> 7;
 +            const uint4 vn = vreg[0];
-+            const uint32_t sc0 = (uint32_t)kv4_vsc, sc1 = (uint32_t)(kv4_vsc >> 32);
-+            const v2f s01 = __builtin_amdgcn_cvt_pk_f32_fp8(sc0, false), s23 = __builtin_amdgcn_cvt_pk_f32_fp8(sc0, true);
-+            const v2f s45 = __builtin_amdgcn_cvt_pk_f32_fp8(sc1, false), s67 = __builtin_amdgcn_cvt_pk_f32_fp8(sc1, true);
-+            *(uint2*)(&wV8[vd * VSTR8 + hg * 8]) =
-+                make_uint2(kv4i_pk4<0, 8>(vn.x, s01.x, s01.y, s23.x, s23.y), kv4i_pk4<0, 8>(vn.y, s45.x, s45.y, s67.x, s67.y));
-+            *(uint2*)(&wV8[(vd + 128) * VSTR8 + hg * 8]) =
-+                make_uint2(kv4i_pk4<4, 8>(vn.x, s01.x, s01.y, s23.x, s23.y), kv4i_pk4<4, 8>(vn.y, s45.x, s45.y, s67.x, s67.y));
++            *(uint2*)(&wV8[vd * VSTR8 + hg * 8]) = make_uint2(kv4i_pk4<0, 8>(vn.x), kv4i_pk4<0, 8>(vn.y));
++            *(uint2*)(&wV8[(vd + 128) * VSTR8 + hg * 8]) = make_uint2(kv4i_pk4<4, 8>(vn.x), kv4i_pk4<4, 8>(vn.y));
++            if (vd == 0) {
++                #pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const float sv = __builtin_amdgcn_cvt_f32_fp8((uint32_t)(kv4_vsc >> (8 * j)), 0);
++                    kv4_lsv[wb + hg * 8 + j] = __builtin_amdgcn_logf(sv);                 // log2; sv == 0 -> -inf
++                    kv4_rsv[wb + hg * 8 + j] = sv > 0.0f ? __builtin_amdgcn_rcpf(sv) : 0.0f;
++                }
++            }
 +            return;
 +        }
          if (PART && warp >= TILE / 2) return;
          {
              const int kg = warp / DG, dg = warp - kg * DG;
-@@ -593,13 +683,24 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+@@ -563,8 +660,20 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+                 }
+             }
+             float sc[8];
+-            #pragma unroll
+-            for (int e = 0; e < 8; ++e) sc[e] = FOLDQ ? s[e] : s[e] * mul;
++            const int tb_ = (ti & 1) * TILE + mt * 16 + 8 * h;   // KV4I table row of this lane's 8 keys
++            if constexpr (KV4I) {
++                // lane (c, h) holds query c and keys 8h + e of this m-tile: x = s * (sK*mul) + log2 sV, the
++                // tables are the same for the 16 lanes of a half (LDS broadcast): 4 ds_read_b128, 8 fma
++                const float4 ka = *(const float4*)&kv4_ksc[tb_], kb = *(const float4*)&kv4_ksc[tb_ + 4];
++                const float4 la = *(const float4*)&kv4_lsv[tb_], lb = *(const float4*)&kv4_lsv[tb_ + 4];
++                const float kk_[8] = {ka.x, ka.y, ka.z, ka.w, kb.x, kb.y, kb.z, kb.w};
++                const float ll_[8] = {la.x, la.y, la.z, la.w, lb.x, lb.y, lb.z, lb.w};
++                #pragma unroll
++                for (int e = 0; e < 8; ++e) sc[e] = fmaf(s[e], kk_[e], ll_[e]);
++            } else {
++                #pragma unroll
++                for (int e = 0; e < 8; ++e) sc[e] = FOLDQ ? s[e] : s[e] * mul;
++            }
+ 
+             const int kbase = k0 + mt * 16 + 8 * h;
+             if (!MSKIP || wave_any(kbase + 7 > klimit)) {
+@@ -593,13 +702,26 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
              for (int e = 0; e < 8; ++e) {
                  const float p = ex2(sc[e] + off);
                  pf[e] = p;
@@ -207,15 +244,17 @@ index 090be45..45697d7 100644
                  const v2i32_r4d p8 = (v2i32_r4d){(int)pk_fp8x4(pf[0], pf[1], pf[2], pf[3]),
                                                   (int)pk_fp8x4(pf[4], pf[5], pf[6], pf[7])};
 +                if constexpr (KV4I) {
-+                    // The denominator must sum the PACKED p, not the exact one: with an exact l the
-+                    // numerator loses every p that rounds to 0 (or down) while l keeps it, so the
-+                    // output shrinks -- -1.3 % per layer, compounding over 16 layers (offline
-+                    // emulation: |out|/|truth| 0.9888 -> 1.0032 with l from the e4m3 bytes).
++                    // The denominator sums the PACKED p' times 1/sV (p' = p * sV): an exact l over a quantized
++                    // numerator shrinks the output (-1.3 % per layer offline), and rounding-dropped keys leave both.
 +                    const v2f b0 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.x, false);
 +                    const v2f b1 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.x, true);
 +                    const v2f b2 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.y, false);
 +                    const v2f b3 = __builtin_amdgcn_cvt_pk_f32_fp8((uint32_t)p8.y, true);
-+                    l_i += b0.x + b0.y + b1.x + b1.y + b2.x + b2.y + b3.x + b3.y;
++                    const float4 ra = *(const float4*)&kv4_rsv[tb_], rb = *(const float4*)&kv4_rsv[tb_ + 4];   // loaded late: short live range
++                    l_i = fmaf(b0.x, ra.x, l_i); l_i = fmaf(b0.y, ra.y, l_i);
++                    l_i = fmaf(b1.x, ra.z, l_i); l_i = fmaf(b1.y, ra.w, l_i);
++                    l_i = fmaf(b2.x, rb.x, l_i); l_i = fmaf(b2.y, rb.y, l_i);
++                    l_i = fmaf(b3.x, rb.z, l_i); l_i = fmaf(b3.y, rb.w, l_i);
 +                }
                  const uint8_t* vbase8 = &rV8[c * VSTR8 + mt * 16 + 8 * h];
                  #pragma unroll

@@ -43,7 +43,7 @@ The int4 WMMA Tetra uses would be the natural fit, but libr4d's prefill kernel i
 8-bit legs (`O_QK8`, `O_PV8`) where K and V sit in LDS as **bytes**. So the port is
 "nibble → e4m3 byte", and there are two exactness/cost pairs:
 
-**Variant A — rescale at unpack (recommended).** The byte staged in LDS is
+**Variant A — rescale at unpack (dead: its grid distortion is the route's coherent bias, see the verdict below; replaced by B in the patch).** The byte staged in LDS is
 `rne_e4m3(code * s_token)`: one multiply and one round per element, done once per tile, and then the
 score path is unchanged from the fp8 kernel (the launch constant carries no per-token factor).
 Cost: a second rounding, e4m3 has three mantissa bits, so the relative error of the byte is up to
@@ -196,3 +196,27 @@ scale in a 3-bit-mantissa byte without a deterministic grid distortion, which is
 The exact alternative stages f16 (exactly representable) and runs the f16 WMMA legs, i.e. it loses the
 +8.1 % and becomes another kernel than the one that was ported. Recommendation: keep PR #183 (start fix,
 contract check), keep `[kv4i-check]` with **bias / shrink** next to rel_l2 (added), drop the route.
+
+## Variant B in the patch (2026-10-24, compile-gated, never run on a GPU)
+
+`r4d_kv4i.patch` now stages the BARE code (`bfe` + `v_cvt_f32_i32` + `v_cvt_pk_fp8`, exact, 2.5 VALU per staged
+element instead of A's 3.5) and keeps the token scales out of the bytes: three per-key LDS tables
+(`kv4_ksc` = K scale x `mul`, `kv4_lsv` = log2 of the V scale, `kv4_rsv` = 1/V scale). Per score: `x = fma(s, ksc, lsv)`
+replaces the shipped `s * mul` (zero extra VALU, 4 broadcast `ds_read_b128` per 16-key m-tile); `m_ref` lives in the
+x domain, so the shipped lazy max / rescale carries the V scale; `P' = 2^(x - m_ref)` (= p x sV) is packed to e4m3; the
+denominator is `sum(packed P' x rsv)` (+0.5 VALU per element for the f32 widen, same as A's packed denominator).
+K scale granularity: the patch reads ONE scale per token (K group 256, `gk[kt]`); the 2 x 16 scale bytes in the K header
+are the 128-group layout, the second 16 are unused at group 256.
+Deviation from the CPU spec (`kv4i_offline.attend_b(lazy=False)`: per-row per-tile power-of-two lift of P' into
+[224,448]): a per-tile lift would have to un-lift the 128-value accumulator every tile, so the kernel arm is
+`attend_b(lazy=True)` (no lift, reference max moves only past 8 octaves). Offline on the dumps (256 rows, 24 heads, ctx 20445):
+
+| layer | Tetra | route (A) | B per-tile lift | B kernel (lazy) |
+|---|--:|--:|--:|--:|
+| 3 | 3.55 % / bias 0.33 % | 3.76 % / 1.96 % | 0.91 % / 0.02 % | 1.08 % / 0.26 % |
+| 47 | 7.76 % / 0.06 % | 6.15 % / 1.92 % | 1.75 % / 0.03 % | 2.06 % / 0.37 % |
+| 55 | 9.00 % / 0.11 % | 6.81 % / 0.86 % | 2.03 % / 0.02 % | not run |
+
+Attention sink / past-vs-chunk mass (B per-tile arm vs fp32 truth, chunk = the last q_len = 4089 keys): bias of the
+key-0 probability <= 1e-5 against a sink mass of 1e-3..8e-3 and a past-mass shift <= 3e-4 of 0.35..0.61 -- no case for
+keeping token 0 in high precision.

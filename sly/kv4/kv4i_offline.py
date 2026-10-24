@@ -74,6 +74,56 @@ def attend_lazy(qf, k, v, qpos, pshift=0.0, pgrow=8.0, lq=False, vround=True, kr
     return acc / l
 
 
+def _lift_pow2(x, amax_target=448.0):
+    """per-row power of two L with amax(x*L) in (target/2, target]; L=1 for all-zero rows."""
+    a = x.abs().amax(-1, keepdim=True)
+    e = torch.floor(torch.log2(amax_target / a.clamp_min(1e-30)))
+    return torch.where(a > 0, torch.exp2(e.clamp(-120, 120)), torch.ones_like(a))
+
+
+def attend_b(q, codeK, sK, codeV, sV, qpos, sc, rnd=True, qrnd=True, pgrow=8.0, tile=16, probs=False, lazy=False):
+    """Variant B (docs/R4D-INT4-PREFILL.md): bare int4 codes, K token scale on the fp32 score, V token scale on P
+    before the e4m3 pack. q (R,256) un-folded rotated query, codes (ctx,256), scales (ctx,1), sc = scale/HEAD*log2e.
+    lazy=False: per-row per-tile power-of-two lift of P' into [224,448] (the spec; the accumulator would have to be
+    un-lifted every tile, so no kernel does it). lazy=True: what libr4d does -- the reference max lives in the log
+    domain x = s + log2 sV, P' = 2^(x - m_ref) packed without a lift, m_ref moves (acc rescales) only when a tile
+    exceeds it by pgrow octaves. Returns (out/l unquantized, out/lq packed denominator[, P (R,ctx) effective probs]).
+    """
+    R, ctx = q.shape[0], codeK.shape[0]
+    if rnd and qrnd:
+        Lq = _lift_pow2(q)
+        q = e4m3(q * Lq) / Lq
+    m = torch.full((R, 1), -3.0e38)
+    acc = torch.zeros(R, codeV.shape[1])
+    l, lq = torch.zeros(R, 1), torch.zeros(R, 1)
+    keys, tiles = torch.arange(ctx), []
+    for k0 in range(0, ctx, tile):
+        sl = slice(k0, k0 + tile)
+        s = ((q @ codeK[sl].T) * sK[sl, 0][None, :] * sc).masked_fill(keys[None, sl] > qpos[:, None], -math.inf)
+        sv = sV[sl, 0][None, :]
+        x = s + torch.log2(sv) if lazy else s
+        rmax = x.amax(-1, keepdim=True)
+        mnew = torch.where(rmax > m + pgrow, torch.maximum(m, rmax).clamp_min(-3.0e38), m)
+        a = torch.exp2(m - mnew)
+        acc, l, lq, m = acc * a, l * a, lq * a, mnew
+        p = torch.exp2(x - m)                       # lazy: already times sV
+        pv = p if lazy else p * sv
+        rsv = (1.0 / sv.clamp_min(1e-30)) * (sv > 0)
+        if rnd:
+            Lt = torch.ones_like(m) if lazy else _lift_pow2(pv)
+            p8 = e4m3(pv * Lt)
+            acc = acc + (p8 @ codeV[sl]) / Lt
+            w = p8 / Lt * rsv
+        else:
+            acc, w = acc + pv @ codeV[sl], pv * rsv
+        lq = lq + w.sum(-1, keepdim=True)
+        l = l + (p * rsv if lazy else p).sum(-1, keepdim=True)
+        tiles.append((w, m))
+    if probs:
+        return acc / l, acc / lq, torch.cat([w * torch.exp2(mt - m) for w, mt in tiles], -1) / lq
+    return acc / l, acc / lq
+
+
 ARMS = {   # name: (q fold e4m3, K e4m3, P e4m3, V e4m3, K gain)
     "Q only": (1, 0, 0, 0, 1.0), "K only": (0, 1, 0, 0, 1.0), "P only": (0, 0, 1, 0, 1.0),
     "V only": (0, 0, 0, 1, 1.0), "kernel (all)": (1, 1, 1, 1, 1.0),

@@ -61,7 +61,8 @@ def driver(tmp_path_factory):
 
 
 def _e4m3_bits(values):
-    t = torch.tensor([float(v) for v in values], dtype=torch.float32).to(torch.float8_e4m3fn)
+    # torch >= 2.x casts an overflow to NaN, the kernel's cvt_pk_fp8 saturates: clamp first
+    t = torch.tensor([float(v) for v in values], dtype=torch.float32).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
     return [int(b) for b in t.view(torch.uint8).tolist()]
 
 

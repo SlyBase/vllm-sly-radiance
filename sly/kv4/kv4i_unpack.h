@@ -66,6 +66,10 @@ static inline uint8_t rne(float v) {
 // 0 collapses the whole row to zero, which the oracle also does (amax 0 -> scale 0).
 static inline uint8_t code_e4m3_scaled(int c, float s) { return rne(float(c) * s); }
 
+// Variant B: the byte the kernel stages is the BARE code, rne(float(c)); equals code_e4m3(c) for all 16
+// codes (|c| <= 8 fits e4m3's 3 mantissa bits), so the unpack is bfe + v_cvt_f32_i32 + v_cvt_pk_fp8, no scale.
+static inline uint8_t code_bare(int c) { return rne(float(c)); }
+
 // e4m3 bits -> the value the byte carries, as the multiply the kernel's score path expects. Only the
 // 16 code points are decoded exactly here; used by the CPU test's inverse check.
 static inline float code_value(int c) { const float v = float(c); return v; }

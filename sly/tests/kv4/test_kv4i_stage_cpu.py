@@ -2,10 +2,11 @@
 
 The kernel (fetchKV / storeKV under KV4I) maps each of the 16 * TILE staging threads to 16 K elements
 of one key and to 8 V tokens of one byte row d, reads raw bytes of the int4 cache with fixed offsets,
-and writes e4m3 bytes rne(code * scale) into the K tile sK8[key][dim] and the V tile sV8[dim][key].
+and writes the BARE code as an exact e4m3 byte (variant B) into the K tile sK8[key][dim] and the V tile
+sV8[dim][key]; the token scales go to per-key tables (K scale, V scale; tokens >= ctx get V scale 0).
 This test replays that thread mapping and those byte offsets in pure torch over a cache written by the
-layout oracle (radiance_kv4h_format.encode_block), and compares the two tiles with the oracle's own
-dequantization (decode_block: code * e4m3 scale) rounded once to float8_e4m3fn -- the indexing proof
+layout oracle (radiance_kv4h_format.encode_block), and checks that tile byte x table scale equals the
+oracle's own dequantization (decode_block: code * e4m3 scale) exactly -- the indexing proof
 (low/high nibble, token/dim order, block table of 16-token group ids, 1664 blocks straddled by tiles,
 ragged tail with garbage NaN scales past ctx). What it cannot prove: that v_cvt_pk_fp8_f32 rounds like
 torch (it is the instruction the shipped PV8 path already relies on) -- that is a GPU question.
@@ -31,13 +32,12 @@ def _e4m3(x):
 
 
 @functools.lru_cache(maxsize=None)
-def _q(code, sbyte):  # rne_e4m3(code * scale(sbyte)): the byte the kernel stages
-    s = torch.tensor([sbyte], dtype=torch.uint8).view(torch.float8_e4m3fn).to(torch.float32)
-    return int(_e4m3(torch.tensor([float(code)]) * s)[0])
+def _q(code):  # the byte the kernel stages: the bare code, exact in e4m3
+    return int(_e4m3(torch.tensor([float(code)]))[0])
 
 
-def _same(a, b):  # as values: a negative code times a zero scale stages 0x80 (-0.0), which the MMA reads as 0
-    return torch.equal(a.view(torch.float8_e4m3fn).to(torch.float32), b.view(torch.float8_e4m3fn).to(torch.float32))
+def _val(b):
+    return b.view(torch.float8_e4m3fn).to(torch.float32)
 
 
 def _signed(n):
@@ -45,7 +45,8 @@ def _signed(n):
 
 
 def stage(cache, table, ctx, k0, TILE):
-    """The kernel's fetchKV + storeKV for one key tile -> (sK8 [TILE,256], sV8 [256,TILE]) uint8."""
+    """The kernel's fetchKV + storeKV for one key tile -> (sK8 [TILE,256], sV8 [256,TILE]) uint8 + the tables
+    (K scale byte per key, V scale byte per key, 0 for tokens >= ctx)."""
     def base(G):  # grp(): block G / 104, group G % 104 (kv head 0, block stride = REGION)
         b, g = divmod(G, GPB)
         return b * REGION + g * GBYTES
@@ -55,6 +56,8 @@ def stage(cache, table, ctx, k0, TILE):
 
     sK = torch.zeros(TILE, 256, dtype=torch.uint8)
     sV = torch.zeros(256, TILE, dtype=torch.uint8)
+    ksb = torch.zeros(TILE, dtype=torch.uint8)
+    vsb = torch.zeros(TILE, dtype=torch.uint8)
     for tid in range(16 * TILE):
         key, ch = 2 * (tid >> 5) + (tid & 1), (tid & 31) >> 1
         kk = min(k0 + key, ctx - 1)
@@ -63,7 +66,8 @@ def stage(cache, table, ctx, k0, TILE):
         kn = [int(x) for x in cache[gk + 128 + kt * 128 + ch * 8: gk + 128 + kt * 128 + ch * 8 + 8]]
         for e in range(16):
             nib = (kn[e // 2] >> (4 * (e & 1))) & 0xF
-            sK[key, ch * 16 + e] = _q(_signed(nib), ksc)
+            sK[key, ch * 16 + e] = _q(_signed(nib))
+        ksb[key] = ksc
         vd, hg = tid & 127, tid >> 7
         kb = k0 + hg * 8
         kl = min(kb, (ctx - 1) & ~7)
@@ -74,9 +78,10 @@ def stage(cache, table, ctx, k0, TILE):
         vs = [b if j < nv else 0 for j, b in enumerate(vs)]       # the SGPR mask: tokens >= ctx -> scale 0
         for j in range(8):
             lo, hi = _signed(vn[j] & 0xF), _signed(vn[j] >> 4)
-            sV[vd, hg * 8 + j] = _q(lo, vs[j])
-            sV[vd + 128, hg * 8 + j] = _q(hi, vs[j])
-    return sK, sV
+            sV[vd, hg * 8 + j] = _q(lo)
+            sV[vd + 128, hg * 8 + j] = _q(hi)
+            vsb[hg * 8 + j] = vs[j]
+    return sK, sV, ksb, vsb
 
 
 def test_layout_constants_match_oracle():
@@ -89,7 +94,7 @@ def test_layout_constants_match_oracle():
 
 @pytest.mark.parametrize("TILE", [16, 32, 48])
 @pytest.mark.parametrize("ctx", [1664 + 203])
-def test_stage_matches_dequant_rounded_to_e4m3(TILE, ctx):
+def test_stage_codes_times_table_scale_match_dequant(TILE, ctx):
     g = torch.Generator().manual_seed(7)
     nblk = -(-ctx // BS)
     phys = [2, 0, 1][:nblk]                                         # non-identity block table
@@ -112,10 +117,12 @@ def test_stage_matches_dequant_rounded_to_e4m3(TILE, ctx):
     expk, expv = torch.cat(expk), torch.cat(expv)
     table = [p * GPB + g_ for p in phys for g_ in range(GPB)]       # 16-token group ids
     for k0 in range(0, ctx, TILE):
-        sK, sV = stage(cache, table[k0 // 16:], ctx, k0, TILE)
+        sK, sV, ksb, vsb = stage(cache, table[k0 // 16:], ctx, k0, TILE)
         for key in range(TILE):
             kk = min(k0 + key, ctx - 1)
-            assert _same(sK[key], _e4m3(expk[kk])), (k0, key)
+            assert torch.equal(_val(sK[key]) * _val(ksb[key]), expk[kk]), (k0, key)
             tok = k0 + key
-            want = _e4m3(expv[tok]) if tok < ctx else torch.zeros(256, dtype=torch.uint8)
-            assert _same(sV[:, key], want), (k0, key)
+            if tok < ctx:
+                assert torch.equal(_val(sV[:, key]) * _val(vsb[key]), expv[tok]), (k0, key)
+            else:
+                assert vsb[key] == 0, (k0, key)       # scale 0 -> log2 = -inf, 1/s = 0: the key cannot reach P or l
