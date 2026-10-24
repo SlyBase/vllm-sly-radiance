@@ -1,17 +1,18 @@
 # Reading the int4 (KV4) cache in the libr4d prefill attention kernel — design
 
-## Verdict (2026-10-24): KV4 stays decode/capacity only, prefill work stopped
+## Verdict (2026-10-24): KV4 stays fully supported; the faster int4 prefill route is not adopted
 
 - KV4 prefill is 11.7-11.8 % slower than fp8 KV at 64k, at 210 W and at 300 W / SCLK -500 MHz alike. Kernel
   `Tetra / fp8` = 1.80x (rocprof, 47104 keys, chunk 4096). Tetra launches 2.1x the waves of the fp8 kernel, so
   too little parallelism is not the cause and Split-KV is unlikely to help (H).
-- Variant A (int8 route) was fast but its error is coherent. Variant B / B2 (bare int4 codes on the fp8 WMMA
+- Variant A (`rne_e4m3(code * s_token)` staged on the fp8 legs) was fast but its error is coherent. Variant B / B2 (bare int4 codes on the fp8 WMMA
   legs, token scales folded into score and P) is more accurate than Tetra against an independent fp8-KV
   reference: KL over all contexts 0.01557 vs 0.01702, 32-64k dNLL -0.00060 vs +0.00158, GSM8K-200 0.855 vs 0.845.
 - B2 is not faster: same window, identical units, B2/Tetra -1.3 ... +3.4 % over 2k-64k, within noise.
-- Decision: KV4 is for decode and capacity (528,722 KV tokens at 65k against 340,723 on fp8, as measured in
-  [BENCHMARKS.md](BENCHMARKS.md#tetraattention-kv4-prefill-gap-2026-10-23); start logs there: fp8 332,770).
-  The prefill route is not adopted. Branch `exp/kv4i-dump` is parked.
+- Decision: KV4 (`int4_per_token_head`, TetraAttention) stays a supported option and is the right choice when
+  capacity matters: 528,722 KV tokens against 342,950 on fp8 (+54 %, 1.8.1, 65k context, same window
+  2026-10-24), decode 154.8 vs 158.1 tok/s, prefill about equal below 16k and 11.7 % slower at 64k. Only the
+  faster prefill route is not adopted; branch `exp/kv4i-dump` is parked.
 - Gate lesson: the old gate (KL <= 0.003 vs Tetra) measures distance to Tetra, not to truth, so a more accurate
   kernel cannot pass it. A future gate compares each arm against an fp8-KV reference per context bucket.
 - Ops lesson: the fp8 unit at `--gpu-memory-utilization 0.98` returned HTTP 500 on 60k-token prompt-logprob
