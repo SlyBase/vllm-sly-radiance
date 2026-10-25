@@ -763,8 +763,17 @@ COOP_RED=${COOP_RED:-0}
 if [ -n "$COMPILE_SIZES" ] && [ "$COMPILE_SIZES" != none ]; then
   CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"compile_sizes\":$COMPILE_SIZES"
 fi
-if [ "$COOP_RED" = 1 ]; then
-  CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"inductor_compile_config\":{\"triton.cooperative_reductions\":true}"
+# DET_COMPILE=1 (default 0, issue #189): Inductor deterministic mode. A fresh compile otherwise
+# re-times its Triton reductions and may keep a config with another fp32 summation order
+# (vllm#58899), so two fresh-compile starts can differ (A/B arms, disk-tier KV rows across
+# restarts). Prefill measured neutral (1.5k-48k); decode/acceptance not yet. Changes the compile
+# hash: one fresh compile. Proof it took: grep the compile cache for "'deterministic': True".
+DET_COMPILE=${DET_COMPILE:-0}
+IND_CC=""
+[ "$COOP_RED" = 1 ] && IND_CC="\"triton.cooperative_reductions\":true"
+[ "$DET_COMPILE" = 1 ] && IND_CC="${IND_CC:+$IND_CC,}\"deterministic\":true"
+if [ -n "$IND_CC" ]; then
+  CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"inductor_compile_config\":{$IND_CC}"
 fi
 if [ "$NQF" = 1 ]; then
   CC_ITEMS="${CC_ITEMS:+$CC_ITEMS,}\"pass_config\":{\"fuse_norm_quant\":true,\"fuse_act_quant\":true}"

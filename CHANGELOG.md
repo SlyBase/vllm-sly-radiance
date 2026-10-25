@@ -10,6 +10,23 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.8.2] - 2026-10-25
+
+Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
+
+### Added
+- **`DET_COMPILE=1` (default `0`) in `serve-mxfp4.sh`: `"deterministic": true` in `inductor_compile_config`**
+  ([#189](https://github.com/SlyBase/vllm-sly-radiance/issues/189)). A fresh compile re-times its Triton reductions
+  and keeps the fastest config ([vllm#58899](https://github.com/vllm-project/vllm/issues/58899), open); the
+  candidates sum in a different fp32 order, so two fresh-compile starts can serve slightly different numerics
+  (A/B arms, `KVCACHE=disk` rows reused across restarts). Deterministic mode skips the on-device benchmarking and
+  picks one config per reduction; vLLM already turns `benchmark_combo_kernel` off under it
+  ([vllm#59074](https://github.com/vllm-project/vllm/pull/59074)). Merges with `COOP_RED=1` into one
+  `inductor_compile_config`. Flag off: the serve command is byte-identical to before. Reporter's measurement on
+  1.8.1 (fresh compile, 1.5k-48k prefill): within noise. Not yet measured: decode ms/step and drafter acceptance,
+  so it stays opt-in until a GPU A/B clears both. Changes the compile hash (one fresh compile). CPU-gated by
+  `sly/tests/test_launcher_deterministic_compile_cpu.py`.
+
 ## [1.8.1] - 2026-10-24
 
 TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
