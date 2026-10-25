@@ -85,6 +85,8 @@ def _scratch_site(src: Path):
     pkg.mkdir(parents=True)
     target = pkg / "rejection_sampler_utils.py"
     shutil.copy(src, target)
+    # patch_cactus.py also patches the caller next to it (prompt lengths for the length fade)
+    shutil.copy(Path(src).with_name("rejection_sampler.py"), target.with_name("rejection_sampler.py"))
     return td, site, target
 
 

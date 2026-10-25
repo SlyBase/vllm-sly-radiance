@@ -455,6 +455,8 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
 | Variable | Recommended | What it does |
 |---|---|---|
 | `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
+| `RADIANCE_CACTUS_FADE_START` | `4096` | 1.10.1 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
+| `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
 1.0.0 column of the 1.5.1 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,
@@ -470,6 +472,14 @@ keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the
 `RADIANCE_CACTUS_DELTA=0` when you need output that is statistically identical to the target model (evals,
 distribution-sensitive sampling, reproducing published numbers). Do not raise it above 0.5 without measuring
 quality on your own prompts.
+
+**Length fade (1.10.1).** Long sampled generations entered verbatim repetition loops about three times as often
+with delta 0.5 as with the stock rule ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164): 11/32 vs
+2/16 runs, all loops after 7.7k output tokens, most after 16k). Cactus only in the first 4096 output tokens of a
+request removed them (0/16). The fade lowers a request's delta linearly from `RADIANCE_CACTUS_DELTA` at
+`RADIANCE_CACTUS_FADE_START` output tokens to 0 at `RADIANCE_CACTUS_FADE_END`. Outputs below 4096 tokens (chat,
+the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. The stock rule itself
+still loops on adversarial prompts (2/16 in the same test); the fade does not change that.
 
 ### Nucleus Speculative Decoding (opt-in, off by default)
 

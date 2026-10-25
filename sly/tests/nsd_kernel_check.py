@@ -51,8 +51,10 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 @triton.jit
 def gumbel_block_argmax(logits, block, mask, resample_token_idx, expanded_idx_mapping_ptr, temp_ptr, seed_ptr,
                         pos_ptr, logits_cache_ptr, logits_cache_stride_0, logits_cache_stride_1,
-                        logits_cache_col_ptr, vocab_size, IS_DRAFTING: tl.constexpr,
-                        APPLY_TEMPERATURE: tl.constexpr, USE_FP64: tl.constexpr):
+                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride, vocab_size,
+                        IS_DRAFTING: tl.constexpr, APPLY_TEMPERATURE: tl.constexpr, USE_FP64: tl.constexpr,
+                        PER_TOKEN_COL: tl.constexpr = False):
+    # signature of vLLM 0.32.0 sample/gumbel.py
     # Stand-in: plain argmax. The resample path is the same in the stock and the patched file; only the
     # accepted prefix is compared (the bonus / resampled token is not what NSD changes).
     return tl.max(tl.where(mask, logits, float("-inf")), axis=0, return_indices=True)

@@ -67,6 +67,8 @@ def _run_patch_on(src: Path) -> str:
         pkg.mkdir(parents=True)
         target = pkg / "rejection_sampler_utils.py"
         shutil.copy(src, target)
+        # patch_cactus.py also patches the caller next to it (prompt lengths for the length fade)
+        shutil.copy(Path(src).with_name("rejection_sampler.py"), target.with_name("rejection_sampler.py"))
         env = dict(os.environ, PYTHONPATH=str(ROOT), RADIANCE_PATCH_TARGET_DIR=str(site))
         r1 = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True, text=True)
         assert r1.returncode == 0, f"pass 1 failed:\n{r1.stdout}\n{r1.stderr}"
@@ -84,6 +86,56 @@ def test_default_delta_is_half():
     m = re.search(r'environ\.get\(\\?"RADIANCE_CACTUS_DELTA\\?",\s*\\?"([0-9.]+)\\?"\)', src)
     assert m, "env read with default not found"
     assert m.group(1) == "0.5", f"default must be 0.5, got {m.group(1)}"
+
+
+def test_fade_defaults():
+    # Length fade (issue #164): delta falls from 0.5 at 4096 output tokens to 0 at 16384.
+    src = PATCH.read_text()
+    for knob, want in (("RADIANCE_CACTUS_FADE_START", "4096"), ("RADIANCE_CACTUS_FADE_END", "16384")):
+        m = re.search(knob + r'\\?",\s*\\?"([0-9]+)', src)
+        assert m and m.group(1) == want, f"{knob} default must be {want}"
+
+
+def _pinned_source():
+    # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
+        return Path(sys.argv[1])
+    cand = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "rejection_sampler_utils.py"
+    return cand if cand.exists() else None
+
+
+def _skip(msg):
+    try:
+        import pytest
+        pytest.skip(msg)
+    except ImportError:
+        print("SKIP", msg)
+
+
+def test_fade_kernel_in_triton_interpreter():
+    """The patched kernel in the Triton interpreter: fade vs a float64 reference, fade off, delta 0 == stock
+    (sly/tests/cactus_fade_kernel_check.py)."""
+    try:
+        import triton  # noqa: F401
+    except ImportError:
+        return _skip("triton not installed (the interpreter check runs where it is)")
+    src = _pinned_source()
+    if src is None:
+        return _skip("pinned vLLM source not available")
+    with tempfile.TemporaryDirectory() as td:
+        site = Path(td) / "site-packages"
+        pkg = site / "vllm" / "v1" / "worker" / "gpu" / "spec_decode"
+        pkg.mkdir(parents=True)
+        target = pkg / "rejection_sampler_utils.py"
+        shutil.copy(src, target)
+        # patch_cactus.py also patches the caller next to it (prompt lengths for the length fade)
+        shutil.copy(Path(src).with_name("rejection_sampler.py"), target.with_name("rejection_sampler.py"))
+        env = dict(os.environ, PYTHONPATH=str(ROOT), RADIANCE_PATCH_TARGET_DIR=str(site))
+        assert subprocess.run([sys.executable, str(PATCH)], env=env).returncode == 0
+        env["TRITON_INTERPRET"] = "1"
+        r = subprocess.run([sys.executable, str(ROOT / "sly" / "tests" / "cactus_fade_kernel_check.py"),
+                            str(src), str(target)], env=env, capture_output=True, text=True, timeout=1200)
+        assert r.returncode == 0 and "cactus fade kernel check OK" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
 
 
 def test_patch_structure():
@@ -108,11 +160,14 @@ def test_patch_structure():
     assert "h_n" in s and "cactus_delta" in s, "transform / delta threading missing"
     assert s.count("RADIANCE_CACTUS_DELTA") == 1, "env read must happen once, module-level"
     assert '"RADIANCE_CACTUS_DELTA", "0.5"' in s, "patched file must default to 0.5"
+    assert "cactus_prompt_len_ptr" in s and "req_delta" in s, "length fade missing"
 
 
 if __name__ == "__main__":
     test_math_properties()
     test_acceptance_rate_increases()
     test_default_delta_is_half()
+    test_fade_defaults()
     test_patch_structure()
+    test_fade_kernel_in_triton_interpreter()
     print("cactus CPU tests OK")

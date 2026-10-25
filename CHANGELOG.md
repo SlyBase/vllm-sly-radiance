@@ -10,6 +10,23 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.10.1] - 2026-10-25
+
+Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)).
+
+### Fixed
+- **Repetition loops with the default Cactus delta 0.5 on long generations.** Measured on the request from #164
+  (Swift-1.5, DFlash2 drafter, 32k-token budget, 8 requests in parallel): 11/32 runs ended in a verbatim loop
+  with delta 0.5 against 2/16 with the stock rule; the loops start after 7.7k-31k output tokens, the
+  Kaplan-Meier loop share is 6 % at 12k, 19 % at 24k and 34 % at 28k output tokens. Cactus only in the first 4096 output
+  tokens gave 0/16 (p = 0.006 against delta 0.5). New **length fade** in `sly/patch_cactus.py`: a request's
+  delta falls linearly from `RADIANCE_CACTUS_DELTA` at `RADIANCE_CACTUS_FADE_START` (4096) output tokens to 0
+  at `RADIANCE_CACTUS_FADE_END` (16384). Outputs shorter than 4096 tokens keep the full Cactus gain; the trace
+  of the 16 runs puts the kept gain of a 32k-token output at ~78 % (a hard cut at 4096 keeps ~28 %). The
+  output length is `position - prompt length` per request slot (`req_states.prompt_len`, passed by the V2
+  rejection sampler). `RADIANCE_CACTUS_FADE_END=0` restores the 1.8.1 behaviour; `RADIANCE_CACTUS_DELTA=0`
+  is still the bit-exact stock path.
+
 ## [1.10.0] - 2026-10-25
 
 Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
