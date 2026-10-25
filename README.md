@@ -52,7 +52,7 @@ docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1
 | AITER / transformers | 0.1.24.post1 / 5.19.0 |
 | Kernels | [libr4d](https://codeberg.org/StillDeadcode/libr4d) (prefill attention, gated delta net, all-reduce) + this repo's MXFP4 W4A8 GEMM, fused norm/quant, attention tunes |
 | Model (benchmarks since 1.0.0) | [`slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ`](https://huggingface.co/slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ) (GPTQ MXFP4, gated-delta-net hybrid) |
-| Also tested | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, the 0.x benchmarks) |
+| Also tested | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) (Quark MXFP4, the 0.x benchmarks; serve with `--quantization quark`) |
 | Drafter | [`syvai/Qwen3.8-27B-DFlash2-W4A16`](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16), DFlash2 k = 7 + prompt lookup |
 | Also serves | NVFP4, compressed-tensors INT4, ParoQuant, AutoRound, escha checkpoints ([comparison](docs/BENCHMARKS.md#other-checkpoints-on-one-r9700-036-2026-09-24)) |
 
@@ -508,6 +508,7 @@ serve, plus an unchanged step time and KV pool at concurrency 1 and 8. Until tha
 
 | Switch | For |
 |---|---|
+| `--quantization quark` | Quark checkpoints (e.g. `amd/Qwen3.8-27B-Quark-AWQ-MXFP4`); the flag is required for every Quark checkpoint. The Swift GPTQ checkpoint (compressed-tensors) needs no `--quantization` flag |
 | `RADIANCE_NVFP4_MXFP4=1` + `--quantization compressed-tensors` | NVFP4 checkpoints (e.g. `unsloth/Qwen3.8-27B-NVFP4`), requantized to MXFP4 at load — same speed as Quark |
 | `RADIANCE_PAROQUANT=1`, `RADIANCE_AUTOROUND=1`, `RADIANCE_ESCHA=1` (no `--quantization`) | ParoQuant, AutoRound, escha checkpoints |
 | `QUANT=mxfp6 ./serve.sh` / `./setup.sh --mxfp6` | ParoQuant MXFP6 (W6A8); needs TP>=2 (upstream-validated), one R9700 is TP=1 |
