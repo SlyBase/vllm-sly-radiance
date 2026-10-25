@@ -10,6 +10,29 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.9.0] - 2026-10-25
+
+Opt-in: the DFlash drafter's prefill work shrinks to the rows its final draft reads.
+
+### Added
+- **`RADIANCE_DFLASH_PREFILL_PARTIAL_SKIP=1`** (default `0`): the prefill window skip at row granularity, for a
+  batch of one prefilling request. `fc` and the drafter's context-K/V fill run only over the last
+  `window + margin` rows of the prompt (2048 + 1760 = 3,808 with the DFlash2 drafter), never fewer than 513 rows
+  per chunk, so the kept rows take the whole chunk's GEMM tile. Chunks before the last skip their dropped draft
+  step. At chunk 4096 a 6,000-token prompt (where the whole skip never acts) runs 3,808 drafter rows instead of
+  6,000, and 24k/48k run 4,033/3,808 instead of 7,616/7,040. 12k is unchanged. CPU test
+  `sly/tests/test_dflash_prefill_partial_cpu.py`.
+
+### Measured
+- One R9700, 300 W, chunk 4096, `--max-model-len 65536` (KV pool 343,268 on every second start), A/B/A in one
+  window, median of 3 reps. Prefill: 3823 / **3886** / 3816 / 3668 / 3354 tok/s against 3831-3836 /
+  3855-3856 / 3819-3822 / 3656-3661 / 3350-3352 at 1.5k / 6k / 12k / 24k / 48k, so **+0.80 % at 6k**, +0.27 % at 24k,
+  and 0 where the patch does nothing by construction.
+- Identity: greedy text and the per-request deltas of every `spec_decode` counter are identical to the knob-off arm
+  at 8 lengths (1,514-24,000, 128 tokens).
+- Not measured: decode (the hook returns before any change on decode and spec-verify steps), GSM8K, and the
+  262k production context.
+
 ## [1.8.1] - 2026-10-24
 
 TetraAttention (`KVCACHE_DTYPE=kv4`) starts again on vLLM 0.31.
