@@ -274,6 +274,34 @@ def unrotate_output(out_rot: torch.Tensor, output: torch.Tensor | None = None) -
     return output
 
 
+@triton.jit
+def _rotate_bf16_kernel(x_ptr, d_ptr, out_ptr, n_rows, stride_x,
+                        BLOCK: tl.constexpr, HEAD: tl.constexpr, LOG2: tl.constexpr):
+    """rotate(x) = (x * D) @ H for a block of rows, bf16 in, bf16 out (butterfly, fp32 inside)."""
+    rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = rows < n_rows
+    cols = tl.arange(0, HEAD)
+    x = tl.load(x_ptr + rows[:, None] * stride_x + cols[None, :], mask=mask[:, None], other=0.0).to(tl.float32)
+    acc = _wht_rows(x * tl.load(d_ptr + cols)[None, :], BLOCK, HEAD, LOG2)
+    tl.store(out_ptr + rows[:, None] * HEAD + cols[None, :], acc.to(tl.bfloat16), mask=mask[:, None])
+
+
+def rotate_query(query: torch.Tensor) -> torch.Tensor:
+    """(num_tokens, num_q_heads, head) bf16 -> rotate(query) as a contiguous bf16 tensor; one Triton launch.
+    The int4 libr4d prefill route hands this to the kernel's bf16-query path, which takes it to e4m3 itself."""
+    n, h, head = query.shape
+    x = query.reshape(-1, head)
+    if x.dtype != torch.bfloat16:
+        x = x.to(torch.bfloat16)
+    out = torch.empty(n, h, head, dtype=torch.bfloat16, device=query.device)
+    rows = n * h
+    if rows:
+        _rotate_bf16_kernel[(triton.cdiv(rows, _QBLOCK),)](
+            x, _signs(query.device, head), out, rows, x.stride(0),
+            BLOCK=_QBLOCK, HEAD=head, LOG2=head.bit_length() - 1, num_warps=_QWARPS)
+    return out
+
+
 def quantize_query_torch(query: torch.Tensor, qmax: float = 127.0):
     """The torch reference of quantize_query (tests)."""
     n, h, head = query.shape

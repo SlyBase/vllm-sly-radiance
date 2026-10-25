@@ -190,6 +190,50 @@ def kv4i_arm(q, k, v, seq, chunk, scale, q_scale, entry):
     return fn, out
 
 
+def kv4i_route_arms(q, k, v, seq, chunk, scale, q_scale, entry):
+    """-> {"torch": (fn, out), "triton": (fn, out)}: the whole engine route of radiance_kv4h_attn._kv4i_launch
+    -- query rotation, the int4 libr4d kernel, output un-rotation into a bf16 output -- with the torch glue
+    (fp32 matmuls, e4m3 query, O_QF8) and with the Triton glue (butterfly rotate to a bf16 query, butterfly
+    un-rotation). Timed like TetraAttention's back end (B), which also rotates and un-rotates."""
+    import torch
+    import r4d
+    import radiance_kv4_format as F4
+    import radiance_kv4h_format as H
+    from radiance_kv4h_kernel import rotate_query, unrotate_output
+    from radiance_kv4h_store import kv4h_store
+    nb = -(-seq // BS_INT4)
+    cache = torch.zeros(nb + 1, NKV, BS_INT4, 2 * H.TPT, dtype=torch.uint8, device=dev)
+    kv4h_store(k, v, cache, torch.arange(BS_INT4, BS_INT4 + seq, device=dev, dtype=torch.int64))
+    gpb = BS_INT4 // 16
+    table = (torch.arange(nb * gpb, device=dev) + gpb).view(1, -1).to(torch.int32)
+    table = torch.nn.functional.pad(table, (0, 3))
+    seq_lens = torch.tensor([seq], dtype=torch.int32, device=dev)
+    scratch = torch.empty(256, dtype=torch.uint8, device=dev)
+    out_rot = torch.empty(chunk, NQ, HEAD, dtype=torch.bfloat16, device=dev)
+
+    def launch(qk):
+        entry(qk.data_ptr(), cache.data_ptr(), table.data_ptr(), seq_lens.data_ptr(), out_rot.data_ptr(), 0, 0,
+              scratch.data_ptr(), 1, chunk, NQ, NKV, HEAD, 16, table.shape[1], cache.stride(0), cache.stride(1),
+              scale / HEAD, 0, seq, torch.cuda.current_stream().cuda_stream, 256)
+
+    out_t = torch.empty(chunk, NQ, HEAD, dtype=torch.bfloat16, device=dev)
+    out_w = torch.empty(chunk, NQ, HEAD, dtype=torch.bfloat16, device=dev)
+    qs = q_scale * 16.0                        # the route's KV4I_QGAIN
+
+    def fn_torch():
+        qk = (F4.rotate(q.float()) / qs).to(torch.float8_e4m3fn)
+        r4d.set_q_fp8(qs)
+        launch(qk)
+        out_t.copy_(F4.unrotate(out_rot.float()))
+
+    def fn_triton():
+        qk = rotate_query(q)
+        r4d.set_q_fp8(0.0)
+        launch(qk)
+        unrotate_output(out_rot, out_w)
+    return {"torch": (fn_torch, out_t), "triton": (fn_triton, out_w)}
+
+
 def kv4i_unrotate(out_rot):
     import radiance_kv4_format as F4
     return F4.unrotate(out_rot.float())
@@ -243,7 +287,7 @@ def main():
     print("device:", torch.cuda.get_device_name(), "env:", {kk: os.environ[kk] for kk in IMAGE_ENV},
           "tile:", a.tile or "default")
     scale = 1.0 / math.sqrt(HEAD)
-    ratios, ratios_c = {}, {}
+    ratios, ratios_c, ratios_r = {}, {}, {}
     for past in ints(a.pasts):
         seq = shape(past, a.chunk, BS_FP8)["seq"]
         k, v = make_kv(seq, seed=past)
@@ -275,12 +319,22 @@ def main():
                 fc()
                 torch.cuda.synchronize()
                 print(f"    check kv4i : {err(kv4i_unrotate(outc), ref)}")
+            for glue, (fr, outr) in kv4i_route_arms(q, k, v, seq, a.chunk, scale, a.q_scale, entry).items():
+                tr = timeit(fr, a.reps)
+                ratios_r.setdefault(glue, {})[past] = tr / tb
+                print(f"    route {glue:6s} glue: {tr:9.1f} us  (route/tetra backend {tr / tb:4.2f}x, route/A {tr / ta:4.2f}x)")
+                if a.check:
+                    fr()
+                    torch.cuda.synchronize()
+                    print(f"    check route {glue}: {err(outr, ref)}")
         sys.stdout.flush()
         del k, v, ref
         torch.cuda.empty_cache()
     print("  ".join(f"{past}:{x:.2f}x" for past, x in sorted(ratios.items())) + "   " + verdict(ratios))
     if ratios_c:
         print("  ".join(f"{past}:{x:.2f}x" for past, x in sorted(ratios_c.items())) + "   " + verdict_kv4i(ratios_c))
+    for glue, rr in ratios_r.items():
+        print(f"ROUTE {glue:6s} / tetra backend: " + "  ".join(f"{past}:{x:.2f}x" for past, x in sorted(rr.items())))
 
 
 if __name__ == "__main__":

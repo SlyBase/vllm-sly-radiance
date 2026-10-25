@@ -27,6 +27,10 @@ class HostRead(torch.Tensor):
     pass
 
 
+def _fmt():
+    return sys.modules["radiance_kv4_format"]
+
+
 def _boom(name):
     def f(self, *a, **k):
         raise AssertionError(f"host read during capture: {name}")
@@ -51,7 +55,12 @@ def attn(monkeypatch):
         info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None)
     sys.modules["vllm.v1.attention.backend"].AttentionType = types.SimpleNamespace(DECODER="decoder")
     for m, attrs in {"radiance_kv4_attn": dict(KV_DTYPE="int4_per_token_head"), "r4d": {},
-                     "radiance_kv4h_kernel": dict(kv4h_attention=None, LAST_LAUNCH={}),
+                     # rotate_query / unrotate_output: CPU references of the Triton butterflies (the route's
+                     # default glue), looked up at call time so a monkeypatched F.unrotate still applies
+                     "radiance_kv4h_kernel": dict(
+                         kv4h_attention=None, LAST_LAUNCH={},
+                         rotate_query=lambda q: _fmt().rotate(q.float()).to(torch.bfloat16),
+                         unrotate_output=lambda o, out: out.copy_(_fmt().unrotate(o.float()))),
                      "radiance_kv4h_store": dict(kv4h_store=None)}.items():
         mod = types.ModuleType(m)
         mod.__dict__.update(attrs)
@@ -136,8 +145,10 @@ def test_the_routed_query_has_headroom_below_the_e4m3_ceiling(attn, monkeypatch)
     """The rotated query is |sum of 256 signed terms| ~ ||q||_2, up to 16x the unrotated magnitude, and
     e4m3 saturates at 448 (a clipped head is a wrong head). The route stores rotate(q) / GAIN and tells
     the kernel q_scale = GAIN, which it multiplies back in fp32: same numbers, 16x more headroom.
-    A head with ||q||_2 ~ 1000 must come through unclipped."""
+    A head with ||q||_2 ~ 1000 must come through unclipped. (Torch glue only: the triton glue hands over
+    bf16, see the next test.)"""
     seen, qscale = [], []
+    monkeypatch.setattr(attn, "KV4I_GLUE", "torch")   # the e4m3 query is the torch glue's
     monkeypatch.setattr(attn, "KV4I_ON", True)
     monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
     monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: seen.append(a))
@@ -169,6 +180,7 @@ def test_the_dump_writes_one_launch_with_its_reference(attn, monkeypatch, tmp_pa
     """R4D_KV4I_DUMP=<dir> + R4D_KV4I_DUMP_LAYERS: the first DUMP_N routed launches of a matching layer
     save query, the e4m3 query, the touched cache blocks, the metadata, the routed output and the Tetra
     reference, so the accuracy hunt can rebuild the fp32 truth offline (debug only, host reads)."""
+    monkeypatch.setattr(attn, "KV4I_GLUE", "torch")   # the e4m3 query is the torch glue's
     monkeypatch.setattr(attn, "KV4I_ON", True)
     monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
     monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: None)
@@ -230,3 +242,35 @@ def test_the_check_line_reports_bias_and_shrink(attn, monkeypatch, capsys):
     impl.forward(types.SimpleNamespace(layer_name="x"), torch.randn(512, 24, 256), None, None, kv, meta, out)
     line = capsys.readouterr().err
     assert "bias=0.5000" in line and "shrink=+1.0000" in line, line
+
+
+def test_the_triton_glue_hands_over_the_bf16_rotated_query(attn, monkeypatch):
+    """RADIANCE_KV4I_GLUE=triton (default): rotate(q) goes to the kernel as bf16 with set_q_fp8(0), the
+    kernel's bf16-query path. It packs to e4m3 at the same full magnitude the O_QF8 path reaches after
+    multiplying q_scale back in, so nothing is lost against the torch glue, and its small elements skip
+    the /GAIN trip through e4m3 subnormals. The output comes back through unrotate_output."""
+    seen, qscale, unrot = [], [], []
+    monkeypatch.setattr(attn, "KV4I_ON", True)
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 0)
+    monkeypatch.setattr(attn, "KV4I_GLUE", "triton")
+    monkeypatch.setattr(attn, "KV4I_ENTRY", lambda *a: seen.append(a))
+    monkeypatch.setattr(attn._r4d, "set_q_fp8", qscale.append, raising=False)
+    monkeypatch.setattr(attn, "unrotate_output", lambda o, out: unrot.append(o) or out.fill_(2))
+    rot, real_rotate = [], attn.rotate_query
+    monkeypatch.setattr(attn, "rotate_query", lambda x: rot.append(real_rotate(x)) or rot[-1])
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *a: types.SimpleNamespace(cuda_stream=0))
+    impl = object.__new__(attn.TetraAttentionImpl)
+    impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 0.0625
+    impl._kv4i_scratch = None
+    kv = torch.zeros(2, 4, 1664, 272, dtype=torch.uint8)
+    meta = types.SimpleNamespace(
+        num_actual_tokens=512, max_query_len=512, max_seq_len=1024, causal=True,
+        seq_lens=torch.tensor([1024], dtype=torch.int32), block_table=torch.tensor([[1]], dtype=torch.int32))
+    q = torch.randn(512, 24, 256)
+    out = torch.zeros(512, 24, 256, dtype=torch.bfloat16)
+    impl.forward(types.SimpleNamespace(), q, None, None, kv, meta, out)
+    assert len(seen) == 1 and qscale == [0.0], (len(seen), qscale)
+    assert len(rot) == 1 and seen[0][0] == rot[0].data_ptr()   # the kernel reads the rotated bf16 query
+    assert rot[0].dtype == torch.bfloat16 and torch.equal(rot[0], _fmt().rotate(q.float()).to(torch.bfloat16))
+    assert len(unrot) == 1 and out.float().eq(2).all()

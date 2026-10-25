@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 import radiance_kv4_format as F
 import radiance_kv4h_format as H
 from radiance_kv4_attn import KV_DTYPE
-from radiance_kv4h_kernel import kv4h_attention
+from radiance_kv4h_kernel import kv4h_attention, rotate_query, unrotate_output
 from radiance_kv4h_store import kv4h_store
 
 logger = init_logger("vllm.radiance_kv4h")   # under vllm.* so the engine log shows it
@@ -52,6 +52,11 @@ KV4I_MIN_CTX = max(0, int(os.environ.get("RADIANCE_KV4I_MIN_CTX", str(R4.MIN_CTX
 # rotate(q) is up to 16x the magnitude of q and e4m3 clips at 448: store rotate(q) / GAIN, the kernel
 # multiplies GAIN back in fp32 (its q_scale), so the numbers are the same with 16x the headroom.
 KV4I_QGAIN = float(os.environ.get("RADIANCE_KV4I_QGAIN", "16"))
+# RADIANCE_KV4I_GLUE: the route's query rotation and output un-rotation. "triton" (default): one butterfly
+# launch each (TetraAttention's own _wht_rows), the query handed over as bf16 (the kernel's bf16-query path,
+# QGAIN unused). "torch": the first route's fp32 matmuls + e4m3 query (O_QF8). The torch glue measured
+# -5.9 % prefill at 1.5k (210 W), which is why the route was gated to MIN_CTX.
+KV4I_GLUE = os.environ.get("RADIANCE_KV4I_GLUE", "") or "triton"
 # R4D_KV4I_CHECK=N: the first N routed launches also run the TetraAttention kernel and log the relative
 # L2 between the two outputs per layer (host reads: a debug aid for an accuracy hunt, never for serving)
 KV4I_CHECK = int(os.environ.get("R4D_KV4I_CHECK", "0") or 0)
@@ -225,11 +230,17 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
 
     def _kv4i_launch(self, layer, query, kv_cache, m, output):
         n = int(m.num_actual_tokens)
-        # TetraAttention stores K/V rotated and quantised, so the query is rotated first, scaled and
-        # handed over as e4m3 (the kernel's O_QF8 path), exactly as the bench arm does.
-        q_scale = float(getattr(layer, "_q_scale_float", 1.0) or 1.0) * KV4I_QGAIN
-        q = (F.rotate(query[:n].float()) / q_scale).to(torch.float8_e4m3fn)
-        _r4d.set_q_fp8(q_scale)
+        # TetraAttention stores K/V rotated and quantised, so the query is rotated first.
+        if KV4I_GLUE == "triton":
+            # one butterfly launch to a bf16 rotate(q); the kernel's bf16-query path takes it to e4m3 itself
+            q = rotate_query(query[:n])
+            q_scale = 0.0   # 0 = bf16 query (the dump records it)
+            _r4d.set_q_fp8(q_scale)
+        else:
+            # torch glue: fp32 matmul, scaled and handed over as e4m3 (the kernel's O_QF8 path)
+            q_scale = float(getattr(layer, "_q_scale_float", 1.0) or 1.0) * KV4I_QGAIN
+            q = (F.rotate(query[:n].float()) / q_scale).to(torch.float8_e4m3fn)
+            _r4d.set_q_fp8(q_scale)
         table = self._kv4i_block_table(m)
         out_rot = torch.empty(n, self.num_heads, self.head, dtype=torch.bfloat16, device=query.device)
         if self._kv4i_scratch is None:
@@ -242,8 +253,10 @@ class TetraAttentionImpl(RocmAiterUnifiedAttentionImpl):
             self.scale / self.head,   # K and q are both rotated (x16 each): fold it, as kv4h_attention does
             0, int(m.max_seq_len), torch.cuda.current_stream().cuda_stream, H.GROUP,
         )
-        # un-rotation is a 256x256 matmul per launch: ponytail ceiling, it is not in the kernel
-        output[:n].copy_(F.unrotate(out_rot.float()))
+        if KV4I_GLUE == "triton":
+            unrotate_output(out_rot, output[:n])   # butterfly straight into vLLM's strided bf16 output
+        else:
+            output[:n].copy_(F.unrotate(out_rot.float()))
         name = getattr(layer, "layer_name", "?")
         dump = (KV4I_DUMP and any(s in name for s in KV4I_DUMP_LAYERS)
                 and _KV4I_DUMPED.get(name, 0) < KV4I_DUMP_N)
