@@ -94,10 +94,29 @@ def check_version_bump(base):
                          text=True).stdout.strip()
     new = (ROOT / "VERSION").read_text().strip()
     if old == new:
+        # The rule exists so one version never names two different images. That only
+        # bites once the version is published: while no v<version> tag exists, VERSION
+        # is an open release frame and several image-relevant PRs land inside it.
+        if not _tag_exists(new):
+            print(f"version frame: {new} is not tagged yet, same VERSION allowed "
+                  f"({len(image_files)} image-relevant files)")
+            return
         fail(f"VERSION is still {new} although image-relevant files changed: "
              + ", ".join(image_files[:8]) + (" ..." if len(image_files) > 8 else ""))
     else:
         print(f"version bump: {old} -> {new} ({len(image_files)} image-relevant files)")
+
+
+def _tag_exists(version):
+    """True when v<version> exists on the remote, or when the lookup itself fails
+    (a failed lookup must not open the frame wide: fall back to the strict rule)."""
+    proc = subprocess.run(["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"],
+                          cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"version frame: tag lookup failed ({proc.stderr.strip()[:120]}), "
+              f"treating v{version} as released")
+        return True
+    return bool(proc.stdout.strip())
 
 
 def check_changelog():
