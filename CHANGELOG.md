@@ -10,6 +10,41 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.10.1] - 2026-10-26
+
+SKIPPAD no longer slows down the GEMMs it serves: about +1 % prefill with the default image, same output.
+
+### Fixed
+- **The A-tiled MXFP4 prefill GEMM's SKIPPAD variant** (`RADIANCE_MXFP4_AT_SKIP_PAD=1`, image default since 1.8.0)
+  cost every wave of every GEMM it was dispatched for, not only the all-padding waves it skips. The skip was a
+  branch inside the K loop, and with the PSW kernel two things happened every slab. The compiler could no longer
+  issue the W loads ahead of the A loads, so the W fold waited for the whole A batch (`s_wait_loadcnt 0`). And
+  the end-of-slab barrier could no longer be signalled before the last 16 of the 64 WMMAs. SKIPPAD is dispatched
+  for every M that is not a multiple of 256, so this hit most prefill chunks: with DFlash, chunks are 4,089 rows,
+  and with prefix caching there are many partial chunks. In a rocprofv3 trace (24k prefill), the A-tiled GEMMs took
+  about 2.5 % more time per row at M = 4089, which has no dead wave, than the plain kernel at M = 4096. An all-padding wave now runs its own loop, which stages its share of W,
+  meets both barriers and returns. Live waves run the plain kernel's loop: in the disassembly its
+  load/wait/barrier sequence is the same as SKIPPAD=0. The output is bit-identical by construction: live waves
+  compute the same thing, and a dead wave's rows were always dropped.
+
+### Measured
+- One R9700, 300 W, `--max-model-len 65536`, DFlash on, A / fixed / `SKIP_PAD=0` / A in one window, second starts,
+  median of 3 reps, 1.5k / 6k / 12k / 24k / 48k prefill:
+  - **CHUNK 2560, prefix caching on** (the production chunking): 3857 / 3701 / 3638 / 3457 / 3148 tok/s against
+    3812-3813 / 3656-3659 / 3597-3604 / 3420-3423 / 3118-3120, so **+1.15 / +1.19 / +1.03 / +1.02 / +0.93 %**.
+  - **CHUNK 4096, prefix caching off:** 3855 / 3873 / 3826 / 3672 / 3361 against 3812-3816 / 3834-3835 /
+    3796-3802 / 3645-3646 / 3338, so **+1.08 / +0.99 / +0.71 / +0.73 / +0.70 %**.
+  - Every fixed rep is above every as-shipped rep.
+- `SKIP_PAD=0` in the same window was equal to the fix within noise, except at 6k. There the last chunk keeps
+  all-padding waves (880 rows with prefix caching, 1,911 without), and turning SKIPPAD off loses −1.62 % / −0.38 %
+  where the fix keeps the skip.
+- Identity: greedy text and every `spec_decode` counter delta identical to as shipped at 8 lengths, in both
+  shapes. KV pool unchanged (341,967 / 343,268).
+- Resources: no spills, and VGPRs equal or one lower on every A-tiled instantiation. The lambda that holds the
+  shared W staging changes register allocation slightly in the plain (SKIPPAD=0) instantiations as well. In the
+  CHUNK 2560 runs, the full 2,560-row chunks ran that rebuilt plain kernel.
+- Not measured: decode (this kernel only runs at M >= 513), GSM8K, 210 W, the 262k production context.
+
 ## [1.10.0] - 2026-10-25
 
 Opt-in Inductor deterministic mode for reproducible fresh-compile starts.

@@ -232,6 +232,13 @@ M=700 -> 0.958-0.963 (1 wave dead), 880 -> 0.902-0.909 (2 of 4), 1100 -> 0.920-0
 0.996-1.007 (no dead wave), 2000 -> 0.998-1.003, 4096 -> 1.00 (not dispatched). So the knob pays
 exactly where a wave is pure padding and costs at most 0.7 % elsewhere (branch only).
 
+**Update 1.10.1:** with PSW the branch cost more than this. At M = 1760 (no dead wave), "both" is
+0.987-0.991 against PSW alone at 0.978-0.985, and a 300 W server trace measured +2.5 % GEMM time at M = 4089. The
+cause was the in-loop branch: the W loads were issued after the A loads (the fold waited `loadcnt 0`), and the
+end-of-slab barrier was signalled only after the last WMMAs. All-padding waves now run their own W-and-barriers
+loop, so live waves run the plain kernel's code. Measured in the 1.10.1 CHANGELOG entry: +0.7-1.2 % prefill,
+bit-identical.
+
 Reading: with GEMM at 74.3 % of the 1.5k prefill, SKIPPAD/PSW/both are worth **+0.7-1.0 %** at
 M >= 1514 (where the last M-block is only partly padding) and **+7-8 %** for chunks whose M lands at
 880. PSW's clock drops 1.3-1.9 % at the fixed cap while time drops 1-2 % -- at 210 W the kernel is
