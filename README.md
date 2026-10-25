@@ -170,7 +170,7 @@ Windows 11 through WSL2: see [docs/WINDOWS-WSL2.md](docs/WINDOWS-WSL2.md).
 
 ```bash
 # 1. model + drafter into the Hugging Face cache
-hf download amd/Qwen3.8-27B-Quark-AWQ-MXFP4
+hf download slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ
 hf download syvai/Qwen3.8-27B-DFlash2-W4A16
 
 # 2. serve (OpenAI-compatible API on :8000)
@@ -189,8 +189,8 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
   -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
-  ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1 \
-  --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 --quantization quark \
+  ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1 \
+  --model slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ \
   --max-model-len 262144 --gpu-memory-utilization 0.98 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
@@ -211,7 +211,7 @@ docker run -d --name vllm --restart unless-stopped \
 
 # 3. test
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"amd/Qwen3.8-27B-Quark-AWQ-MXFP4","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 - **First start** compiles kernels and CUDA graphs (~10 min) and reports a ~2 GiB smaller KV pool;
