@@ -10,30 +10,6 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.10.1] - 2026-10-25
-
-Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)).
-
-### Fixed
-- **Repetition loops with the default Cactus delta 0.5 on long generations.** Measured on the request from #164
-  (Swift-1.5, DFlash2 drafter, 32k-token budget, 8 requests in parallel): 11/32 runs ended in a verbatim loop
-  with delta 0.5 against 2/16 with the stock rule; the loops start after 7.7k-31k output tokens, the
-  Kaplan-Meier loop share is 6 % at 12k, 19 % at 24k and 34 % at 28k output tokens. Cactus only in the first 4096 output
-  tokens gave 0/16 (p = 0.006 against delta 0.5). New **length fade** in `sly/patch_cactus.py`: a request's
-  delta falls linearly from `RADIANCE_CACTUS_DELTA` at `RADIANCE_CACTUS_FADE_START` (4096) output tokens to 0
-  at `RADIANCE_CACTUS_FADE_END` (16384). Outputs shorter than 4096 tokens keep the full Cactus gain; the trace
-  of the 16 runs puts the kept gain of a 32k-token output at ~78 % (a hard cut at 4096 keeps ~28 %). The
-  output length is `position - prompt length` per request slot (`req_states.prompt_len`, passed by the V2
-  rejection sampler). `RADIANCE_CACTUS_FADE_END=0` restores the 1.8.1 behaviour; `RADIANCE_CACTUS_DELTA=0`
-  is still the bit-exact stock path.
-- **Acceptance cap `RADIANCE_CACTUS_CAP_R` (default 0.5), independent of the output length.** Cactus sets the
-  threshold to h = 1 for every drafted token with q >= 1/(1+2*delta), so a confident drafter has no rejection
-  left. The cap limits h to `1 - r*(1-q)`: h >= q always (never stricter than the stock rule), and at the
-  drafter's p ~ 1 it keeps exactly `r` of the stock rejection chance at every q < 1. `0` = off, `1` = the stock
-  rule, values outside `[0,1]` are refused at load. Calculated on the trace of the runs above: the cap keeps
-  90 % of the Cactus acceptance gain, the fade 78 %, both combined 72 % -- only the fade has run evidence, the
-  cap is the length-independent insurance behind it.
-
 ## [1.10.0] - 2026-10-25
 
 Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
@@ -53,7 +29,8 @@ Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
 
 ## [1.9.0] - 2026-10-25
 
-Opt-in: three Inductor-side copies in the Qwen3.5/3.8 forward are gone, about +0.5 % prefill at every length.
+Two things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every
+length), and Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)).
 
 ### Added
 - **`RADIANCE_ATTN_GATE_VIEW=1`** (default `0`, `sly/patch_attn_gate_view.py`): the attention output gate stays
@@ -68,6 +45,26 @@ Opt-in: three Inductor-side copies in the Qwen3.5/3.8 forward are gone, about +0
 - CPU test `sly/tests/test_inductor_waste_cpu.py`: bit-identical eager and compiled, no gate buffer in Inductor's
   code.
 
+### Fixed
+- **Repetition loops with the default Cactus delta 0.5 on long generations.** Measured on the request from #164
+  (Swift-1.5, DFlash2 drafter, 32k-token budget, 8 requests in parallel): 11/32 runs ended in a verbatim loop
+  with delta 0.5 against 2/16 with the stock rule; the loops start after 7.7k-31k output tokens, the
+  Kaplan-Meier loop share is 6 % at 12k, 19 % at 24k and 34 % at 28k output tokens. Cactus only in the first 4096 output
+  tokens gave 0/16 (p = 0.006 against delta 0.5). New **length fade** in `sly/patch_cactus.py`: a request's
+  delta falls linearly from `RADIANCE_CACTUS_DELTA` at `RADIANCE_CACTUS_FADE_START` (4096) output tokens to 0
+  at `RADIANCE_CACTUS_FADE_END` (16384). Outputs shorter than 4096 tokens keep the full Cactus gain; the trace
+  of the 16 runs puts the kept gain of a 32k-token output at ~78 % (a hard cut at 4096 keeps ~28 %). The
+  output length is `position - prompt length` per request slot (`req_states.prompt_len`, passed by the V2
+  rejection sampler). `RADIANCE_CACTUS_FADE_END=0` restores the 1.8.1 behaviour; `RADIANCE_CACTUS_DELTA=0`
+  is still the bit-exact stock path.
+- **Acceptance cap `RADIANCE_CACTUS_CAP_R` (default 0.5), independent of the output length.** Cactus sets the
+  threshold to h = 1 for every drafted token with q >= 1/(1+2*delta), so a confident drafter has no rejection
+  left. The cap limits h to `1 - r*(1-q)`: h >= q always (never stricter than the stock rule), and at the
+  drafter's p ~ 1 it keeps exactly `r` of the stock rejection chance at every q < 1. `0` = off, `1` = the stock
+  rule, values outside `[0,1]` are refused at load. Calculated on the trace of the runs above: the cap keeps
+  90 % of the Cactus acceptance gain, the fade 78 %, both combined 72 % -- the fade carries the run evidence, the cap is the length-independent
+  insurance behind it (see Measured).
+
 ### Measured
 - One R9700, 300 W, chunk 4096, `--max-model-len 65536`, A/B/A in one window, median of 3 reps, all three knobs
   on (`RADIANCE_ATTN_GATE_VIEW=1 RADIANCE_DFLASH_AUX_FROM_RESIDUAL=1 RADIANCE_GDN_EMPTY_OUT=1`). Prefill:
@@ -79,6 +76,28 @@ Opt-in: three Inductor-side copies in the Qwen3.5/3.8 forward are gone, about +0
   the zero fill before it.
 - Identity: greedy text and every `spec_decode` counter delta identical to the knob-off arm at 8 lengths. KV pool
   344,223 against 343,268.
+- **Loop rate and throughput, same image, same prompt, 8 requests in parallel** (`request.json` from #164,
+  Swift-1.5 + DFlash2 k=7, 32k-token budget, 16-32 sampled runs per arm):
+
+  | Arm | loops | acceptance | tok/s | vs stock | GSMQ-200 (temp 0.7) |
+  |---|---|---|---|---|---|
+  | Cactus 0.5 (previous default) | 11/32 (34 %) | 0.670 | 443.0 | +24.9 % | 0.965 |
+  | cap 0.5 alone (`FADE_END=0`) | 5/16 (31 %) | 0.653 | 436.4 | +23.0 % | 0.975 |
+  | **fade 4096->16384 + cap 0.5** | **1/16 (6 %)** | 0.604 | **397.6** | **+12.1 %** | **0.960** |
+  | fade as a hard cut at 4096 | 0/16 | 0.567 | 369.1 | +4.0 % | - |
+  | stock (delta 0) | 2/16 (12.5 %) | 0.532 | 354.8 | - | - |
+
+  The fade is the fix (1/16 against 11/32, Fisher p = 0.03, i.e. no longer distinguishable from the stock
+  rule's 2/16). The cap alone does not move the loop rate (5/16 vs 11/32, p = 0.55): it is the
+  length-independent insurance, and it costs almost nothing (436 vs 443 tok/s, quality inside the +-5 pp
+  noise of 200 sampled items). The soft fade keeps about half of the Cactus gain on a long output where a
+  hard cut keeps a sixth. Sampled GSM8K at temperature 0.7 (a rule-sensitive check; the gate's greedy GSM8K
+  never enters the Cactus branch) shows no quality cost.
+- **What this does not show:** one prompt and one model-which is the case the report is about; outputs below
+  4096 tokens are untouched by construction (chat, the BetterBench corpus), so their Cactus behaviour is
+  1.10.0's. The stock rule itself still loops on this prompt (2/16); the fade only brings the rate back to
+  that level. A loop can still start while the fade is running (the one fadecap loop began at 12.5k output
+  tokens, where delta is 0.16, not 0).
 - Not measured: decode, GSM8K, the 262k production context, and each knob alone.
 
 ## [1.8.1] - 2026-10-24
