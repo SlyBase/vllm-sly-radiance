@@ -250,6 +250,20 @@ The overlap the reference stack is credited with (the next slab's weight loads i
 is what the A-tiled kernel already does; the explicit software-pipelined variant (`AT_OVL`, section above) was neutral
 to 0-4 % slower. Nothing to port.
 
+## Row-granular drafter prefill skip (PR #187, reviewed 2026-10-25): correct, but 0 % in production
+
+`RADIANCE_DFLASH_PREFILL_PARTIAL_SKIP=1` runs the DFlash2 drafter's `fc` and context-K/V fill only over the last
+`window + margin` rows of the prompt (3,808 rows at a 6,000-token prompt instead of 6,000). The code is correct: the CI
+gates and the patch dry run are green, the kept rows stay bit-identical (never fewer than 513 per chunk), greedy text
+and all `spec_decode` counters are identical, and the CPU test catches deliberate breakages. The PR measured at 300 W
+with prefix caching off: +0.80 % prefill at 6k, +0.27 % at 24k, 0 % at 1.5k / 12k / 48k.
+
+Not adopted, because it uses the same gate as the whole skip (section above): it turns itself off when prefix caching
+is on, and production runs with prefix caching on. Turning prefix caching off to get the knob is a bad trade: one
+cache hit on a 20k-token prefix saves about 5 s of prefill, and the knob saves about 0.8 % of a cold prefill. If we
+merged it, it would act only in the benchmarks (prefix caching off for determinism) and make the published prefill
+numbers higher than what production sees. Open it again only if a version of the skip works with prefix caching on.
+
 
 ## 2:4 structured sparsity on the weights via FP8 SWMMAC (RDNA4), reviewed 2026-10-21
 
