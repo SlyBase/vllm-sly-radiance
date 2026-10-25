@@ -457,6 +457,7 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
 | `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
 | `RADIANCE_CACTUS_FADE_START` | `4096` | 1.10.1 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
 | `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
+| `RADIANCE_CACTUS_CAP_R` | `0.5` | 1.10.1 acceptance cap, independent of length: h is also limited to `1 - r*(1-q)`. Never stricter than the stock rule (h >= q for every r <= 1), and it keeps `r` of the stock rejection chance at the drafter's p ~ 1, where Cactus has none above q = 1/(1+2*delta). `0` = off, `1` = exactly the stock rule; outside `[0,1]` the engine refuses to start |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
 1.0.0 column of the 1.5.1 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,
@@ -478,7 +479,10 @@ with delta 0.5 as with the stock rule ([#164](https://github.com/SlyBase/vllm-sl
 2/16 runs, all loops after 7.7k output tokens, most after 16k). Cactus only in the first 4096 output tokens of a
 request removed them (0/16). The fade lowers a request's delta linearly from `RADIANCE_CACTUS_DELTA` at
 `RADIANCE_CACTUS_FADE_START` output tokens to 0 at `RADIANCE_CACTUS_FADE_END`. Outputs below 4096 tokens (chat,
-the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. The stock rule itself
+the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. On top, the length-independent
+**acceptance cap** (`RADIANCE_CACTUS_CAP_R`) keeps a share `r` of the stock rejection chance at every output length,
+so a confident drafter can never pin a repetition with zero escape probability. From the same trace: the fade keeps
+78 % of the Cactus gain, the cap at 0.5 keeps 90 %, both together 72 % (all calculated, not measured). The stock rule itself
 still loops on adversarial prompts (2/16 in the same test); the fade does not change that.
 
 ### Nucleus Speculative Decoding (opt-in, off by default)

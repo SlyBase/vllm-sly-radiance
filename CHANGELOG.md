@@ -26,6 +26,13 @@ Cactus no longer drives long sampled generations into repetition loops ([#164](h
   output length is `position - prompt length` per request slot (`req_states.prompt_len`, passed by the V2
   rejection sampler). `RADIANCE_CACTUS_FADE_END=0` restores the 1.8.1 behaviour; `RADIANCE_CACTUS_DELTA=0`
   is still the bit-exact stock path.
+- **Acceptance cap `RADIANCE_CACTUS_CAP_R` (default 0.5), independent of the output length.** Cactus sets the
+  threshold to h = 1 for every drafted token with q >= 1/(1+2*delta), so a confident drafter has no rejection
+  left. The cap limits h to `1 - r*(1-q)`: h >= q always (never stricter than the stock rule), and at the
+  drafter's p ~ 1 it keeps exactly `r` of the stock rejection chance at every q < 1. `0` = off, `1` = the stock
+  rule, values outside `[0,1]` are refused at load. Calculated on the trace of the runs above: the cap keeps
+  90 % of the Cactus acceptance gain, the fade 78 %, both combined 72 % -- only the fade has run evidence, the
+  cap is the length-independent insurance behind it.
 
 ## [1.10.0] - 2026-10-25
 

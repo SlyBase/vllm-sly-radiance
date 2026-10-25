@@ -20,6 +20,11 @@ RADIANCE_CACTUS_DELTA   divergence budget (default 0.5; set 0 for the bit-exact 
 RADIANCE_CACTUS_FADE_START  length fade (issue #164): the request's delta falls linearly from
 RADIANCE_CACTUS_FADE_END    `delta` at START output tokens to 0 at END (defaults 4096 / 16384);
                             END <= START = hard cut at START, END = 0 = no fade (1.8.1 behaviour).
+RADIANCE_CACTUS_CAP_R       acceptance cap, default 0.5 (0 = off): h_n is additionally limited to
+                            1 - r*(1 - q_n). h >= q always (never stricter than stock) and, at the
+                            drafter's p ~ 1, it keeps r of the stock rejection chance at every q < 1 --
+                            Cactus itself has none above q = 1/(1+2*delta). A second, length-independent
+                            guarantee next to the fade; it costs gain mainly in the q 0.4-0.7 band.
 
 Only the V2 model runner path is patched: vLLM 0.31 defaults ROCm Qwen3.8 + dflash
 to the V2 runner (vllm/config/vllm.py), and the V1 sample/rejection_sampler.py is a
@@ -61,9 +66,12 @@ apply(TARGET,
       "CACTUS_DELTA = float(os.environ.get(\"RADIANCE_CACTUS_DELTA\", \"0.5\"))\n"
       "# radiance cactus fade: env knobs (sly/patch_cactus.py, issue #164)\n"
       "CACTUS_FADE_START = int(os.environ.get(\"RADIANCE_CACTUS_FADE_START\", \"4096\"))\n"
-      "CACTUS_FADE_END = int(os.environ.get(\"RADIANCE_CACTUS_FADE_END\", \"16384\"))\n",
-      "RADIANCE_CACTUS_FADE_START",
-      "cactus fade: env knobs")
+      "CACTUS_FADE_END = int(os.environ.get(\"RADIANCE_CACTUS_FADE_END\", \"16384\"))\n"
+      "CACTUS_CAP_R = float(os.environ.get(\"RADIANCE_CACTUS_CAP_R\", \"0.5\"))\n"
+      "if not 0.0 <= CACTUS_CAP_R <= 1.0:\n"
+      "    raise RuntimeError(f\"RADIANCE_CACTUS_CAP_R must be in [0, 1], got {CACTUS_CAP_R}\")\n",
+      "RADIANCE_CACTUS_CAP_R",
+      "cactus fade + cap: env knobs")
 
 apply(TARGET,
       "    vocab_num_blocks,\n"
@@ -87,7 +95,8 @@ apply(TARGET,
       "    cactus_delta,  # radiance cactus: kernel arg (sly/patch_cactus.py)\n"
       "    cactus_prompt_len_ptr,  # radiance cactus fade: kernel args\n"
       "    cactus_fade_start,\n"
-      "    cactus_fade_end,\n",
+      "    cactus_fade_end,\n"
+      "    cactus_cap_r,\n",
       "# radiance cactus fade: kernel args",
       "cactus fade: kernel signature")
 
@@ -109,6 +118,8 @@ _THRESHOLD = (
     "                    h_n = tl.minimum(\n"
     "                        tl.maximum(q_n + tl.sqrt(2.0 * req_delta * q_n * (1.0 - q_n)), 0.0), 1.0\n"
     "                    )\n"
+    "                    # radiance cactus cap: keeps an escape at every q (h >= q, so never below stock)\n"
+    "                    h_n = tl.minimum(h_n, 1.0 - cactus_cap_r * (1.0 - q_n))\n"
     "                    log_h_n = tl.where(req_delta == 0.0, target_logprob, tl.log(h_n))\n"
     "                    accepted = log_h_n > tl.log(u) + draft_logprob\n"
 )
@@ -178,7 +189,8 @@ apply(TARGET,
       "        # pointer (fade end 0), so `seed` ([max_num_reqs], in bounds) only fills the slot.\n"
       "        cactus_prompt_len if cactus_prompt_len is not None else seed,\n"
       "        CACTUS_FADE_START,\n"
-      "        CACTUS_FADE_END if cactus_prompt_len is not None else 0,\n",
+      "        CACTUS_FADE_END if cactus_prompt_len is not None else 0,\n"
+      "        CACTUS_CAP_R,\n",
       "# radiance cactus fade: launch args",
       "cactus fade: kernel launch")
 
