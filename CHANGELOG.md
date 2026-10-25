@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.9.0] - 2026-10-25
+## [1.10.0] - 2026-10-25
 
 Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
 
@@ -26,6 +26,36 @@ Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
   1.8.1 (fresh compile, 1.5k-48k prefill): within noise. Not yet measured: decode ms/step and drafter acceptance,
   so it stays opt-in until a GPU A/B clears both. Changes the compile hash (one fresh compile). CPU-gated by
   `sly/tests/test_launcher_deterministic_compile_cpu.py`.
+
+## [1.9.0] - 2026-10-25
+
+Opt-in: three Inductor-side copies in the Qwen3.5/3.8 forward are gone, about +0.5 % prefill at every length.
+
+### Added
+- **`RADIANCE_ATTN_GATE_VIEW=1`** (default `0`, `sly/patch_attn_gate_view.py`): the attention output gate stays
+  a strided view of q_proj's output. On ROCm the eager path's `gate.reshape(...)` is a copy that Inductor
+  materializes because attention splits the graph (0.38 % of prefill GPU time).
+- **`RADIANCE_DFLASH_AUX_FROM_RESIDUAL=1`** (default `0`, `sly/patch_dflash_aux_residual.py`): each DFlash aux
+  hidden state comes from the next layer's input residual, which `radiance_add_rms_quant` already writes with
+  the same bits, instead of a second residual add (5 add kernels per step fewer).
+- `patch_gdn_glue.py` is back in the loop (`RADIANCE_GDN_EMPTY_OUT` / `RADIANCE_GDN_STRIDED_GATES`, default `0`).
+  `sly/patch_graph_knob_keys.py` puts `RADIANCE_ATTN_GATE_VIEW` and both GDN knobs into
+  `envs.compile_factors()`, because they change the traced graph.
+- CPU test `sly/tests/test_inductor_waste_cpu.py`: bit-identical eager and compiled, no gate buffer in Inductor's
+  code.
+
+### Measured
+- One R9700, 300 W, chunk 4096, `--max-model-len 65536`, A/B/A in one window, median of 3 reps, all three knobs
+  on (`RADIANCE_ATTN_GATE_VIEW=1 RADIANCE_DFLASH_AUX_FROM_RESIDUAL=1 RADIANCE_GDN_EMPTY_OUT=1`). Prefill:
+  3851 / 3878 / 3843 / 3680 / 3371 tok/s against 3831-3836 / 3855-3856 / 3819-3822 / 3656-3661 / 3350-3352 at
+  1.5k / 6k / 12k / 24k / 48k, so **+0.47 / +0.59 / +0.58 / +0.60 / +0.58 %**. Every patched rep is above every
+  knob-off rep.
+- The rocprofv3 kernel trace shows exactly these kernels gone. The gate multiply after attention gets ~36 % slower
+  reading the strided gate, about a third of the copy's saving back. GDN `conv_prep` runs 14-18 % faster without
+  the zero fill before it.
+- Identity: greedy text and every `spec_decode` counter delta identical to the knob-off arm at 8 lengths. KV pool
+  344,223 against 343,268.
+- Not measured: decode, GSM8K, the 262k production context, and each knob alone.
 
 ## [1.8.1] - 2026-10-24
 

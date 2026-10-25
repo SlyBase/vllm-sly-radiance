@@ -745,6 +745,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
              sly/patch_dflash_prefill_skip \
+             sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \

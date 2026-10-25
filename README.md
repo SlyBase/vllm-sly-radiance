@@ -170,7 +170,7 @@ Windows 11 through WSL2: see [docs/WINDOWS-WSL2.md](docs/WINDOWS-WSL2.md).
 
 ```bash
 # 1. model + drafter into the Hugging Face cache
-hf download amd/Qwen3.8-27B-Quark-AWQ-MXFP4
+hf download slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ
 hf download syvai/Qwen3.8-27B-DFlash2-W4A16
 
 # 2. serve (OpenAI-compatible API on :8000)
@@ -189,8 +189,8 @@ docker run -d --name vllm --restart unless-stopped \
   -e RADIANCE_LMHEAD_INT4=1 -e RADIANCE_FUSED_NORM_QUANT=1 \
   -e RADIANCE_KV_GROUP_SIZE=8 -e RADIANCE_EMBED_INT8=1 -e RADIANCE_EMBED_BITS=4 \
   -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
-  ghcr.io/slybase/vllm-sly-radiance:1.1.0-rocm10.1 \
-  --model amd/Qwen3.8-27B-Quark-AWQ-MXFP4 --quantization quark \
+  ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1 \
+  --model slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ \
   --max-model-len 262144 --gpu-memory-utilization 0.98 \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
@@ -211,7 +211,7 @@ docker run -d --name vllm --restart unless-stopped \
 
 # 3. test
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"amd/Qwen3.8-27B-Quark-AWQ-MXFP4","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 - **First start** compiles kernels and CUDA graphs (~10 min) and reports a ~2 GiB smaller KV pool;
@@ -328,12 +328,15 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `R4D_ATTN_DB` (+ `R4D_ATTN_TILE`) | `1` + `16` (image ENV; `R4D_ATTN_DB=0` reverts) | 1.8.0: double-buffered K/V staging, one barrier per key tile (O_DB), only with `R4D_ATTN_FP8=3` — otherwise inert. Bit-identical output, one layer M = 4089: 27.128 → 26.310 ms at ctx 40,890 (−3.0 %), 11.763 → 11.313 ms at 16,356 (−3.8 %), 1.687 → 1.571 ms at 0 (−6.9 %). `R4D_ATTN_TILE=16/32/48` (default 48) picks the key tile; tile 16 *without* DB is 7.7 % slower than tile 48, which is why the earlier tile-16 attempt lost |
 | `RADIANCE_GDN_SCAN_VARIANT` | `s3` (image ENV; empty reverts to stock) | 1.8.0: `s1` / `s2` / `s3` select build-time variants of the GDN chunk scan in the same `r4d.so` (`s1` = no `-mcumode`, `s2` = + LDS diet, `s3` = + late staging). DIGEST bit-identical at T = 64/65/880/1760/4089 and varlen; one layer T = 4089 stock 0.5720 ms, s1 0.4860 (−15.0 %), s2 0.5366 (−6.2 %), s3 0.4255 (−25.6 %); s3 189 VGPR / 43,008 B LDS vs stock 256 / 4-VGPR spill / 60,928 B. s1+s3 is the pair, s2 alone is worse than s1. Details: [docs/GDN-CHUNK-SCAN-VARIANTS.md](docs/GDN-CHUNK-SCAN-VARIANTS.md) |
 | `RADIANCE_DFLASH_PREFILL_WINDOW_SKIP` (+ `..._MARGIN`) | `1` (image ENV, module default `0`; `=0` reverts) | 1.8.0: lossless (GPU identity test: identical text and per-position acceptance counters, knob on vs off, 10 requests). Skip the drafter's `fc`, context-K/V fill and draft step on intermediate prefill chunks that end more than `window(2048) + margin(512)` below the prompt length — the scheduler drops its draft tokens there anyway. Needs prefix caching **off** (with APC on it warns once and does nothing), all-sliding drafter layers, DP = 1, so it only acts with prefix caching off. CPU test `sly/tests/test_dflash_prefill_skip_cpu.py`; +2.1 / +3.6 / +3.2 % prefill at 16K / 32K / 64K |
+| `RADIANCE_ATTN_GATE_VIEW` | `0` | Keeps the attention output gate a strided view of q_proj's output instead of `gate.reshape(...)`: on ROCm the eager path copies the gate (M x 6144 bf16 per attention layer) because attention splits the graph. The o_proj input is bit-identical (CPU test, eager and compiled). rocprofv3 trace of 1.8.1: the copy is 0.38 % of prefill GPU time at 1.5k-12k. Measured together with `RADIANCE_DFLASH_AUX_FROM_RESIDUAL=1` and `RADIANCE_GDN_EMPTY_OUT=1` (R9700, 300 W, A/B/A, median of 3): prefill **+0.47 / +0.59 / +0.58 / +0.60 / +0.58 %** at 1.5k / 6k / 12k / 24k / 48k, output identical. Changes the traced graph: in the compile key (`sly/patch_graph_knob_keys.py`) |
+| `RADIANCE_DFLASH_AUX_FROM_RESIDUAL` | `0` | The DFlash aux hidden states are taken from the next layer's input residual (`add_rms_quant` already writes `h + r`) instead of a second residual add: same bits, 5 add kernels fewer per step. Trace: 0.11-0.13 % of prefill GPU time. In the compile key via `RADIANCE_DFLASH_*` |
+| `RADIANCE_GDN_EMPTY_OUT`, `RADIANCE_GDN_STRIDED_GATES` | `0` (`patch_gdn_glue.py`, in the loop since this version) | `core_attn_out` via `torch.empty` (the R4D paths zero the pad rows themselves, the Triton fallback zero-fills) and no `b`/`a` contiguous copies on the R4D path. Measured neutral at decode (2026-09-02); prefill trace of 1.8.1: the zero-fill is 0.12 % of the GPU time (it runs at ~2.6 TB/s, the MALL absorbs it), and without it the GDN `conv_prep` kernel after it runs 14-18 % faster. Now in the compile key |
 | `RADIANCE_MXFP4_AT_PSW` | `auto` (module default; `0` = off, `2` = on and refused on a conflict) | 1.8.0: PSW weight layout. At load every MXFP4 layer's nibble plane is repacked in place (preshuffled nibbles, pre-folded scale; same shapes, no extra memory) and the GEMM kernels read it directly; output bit-identical. `auto` = on unless the launch has a knob whose reader needs the checkpoint byte order (`W4A8_MIN_M>0`, no `WPERM`, `DECODE_NT`, `R4D_DECODE_MAX_M`, debug/check knobs, ParoQuant), then off and the reason is logged. The production launch qualifies. 300 W night A/B, only PSW differing: prefill **+3.1 / +2.4 / +4.2 / +2.9 / +3.5 %** at 2K/8K/16K/32K/64K; 210 W: 1,093 greedy digests identical / 0 wrong, GSM8K-200 0.835 = 0.835 |
 | `RADIANCE_MXFP4_TALL` (+ `..._TALL_MIN_M`) | `1` (image ENV; default `2048`; `=0` reverts) | 1.8.0: gate_up only (N 34,816), M >= 2048, bit-identical to TN4, 1.5-1.8 % faster on that GEMM. Not for the merged GDN in_proj (measured slower) |
 | `RADIANCE_ATTN_Q_FP8` | `1` (image ENV; `=0` reverts) | 1.8.0: the prefill attention kernel reads the e4m3 query directly, the 57 ms bf16 widening copy of a 47k prefill is gone; bit-identical |
 | `RADIANCE_MXFP4_TN4_MIN_M`, `RADIANCE_FUSED_NQ_REG`, `RADIANCE_MXFP4_AT_SKIP_PAD`, `RADIANCE_MXFP4_TILED_OPROJ`, `R4D_ATTN_FP8`, `RADIANCE_DFLASH_FC_TILED_MIN_M` | `513`, `1`, `1`, `1`, `3`, `513` (image ENV since 1.8.0; the first four were launcher-only before) | the 1.6.0 prefill stack and the drafter `fc` tile, now defaults of the image itself, not only of `serve-mxfp4.sh` |
 | `RADIANCE_NO_ASYNC_SCHED` | `1` in `serve-mxfp4.sh` (ship it; `=0` drops the flag, `ASYNC=1` forces async) | 1.8.0: append `--no-async-scheduling`. With dflash, async scheduling adds an output-drain engine step whose output is fetched through an event wait; without the flag the first token is sampled inside the prefill step. ABBA, only the flag differing: 300 W (2026-10-23) prefill 2K/8K/16K/32K/64K **+7.5 / +1.7 / +0.8 / +0.2 / 0 %**; 210 W (2026-10-22) prefill +7.7 / +2.8 / +1.8 / +3.0 / +1.2 %, decode c1/c2/c4 no measurable difference (the earlier single-start c2 −11.7 % did not reproduce). Scheduling-only: no numerics change. CPU test `sly/tests/test_launcher_async_sched_cpu.py` |
-| `DET_COMPILE` | `0` (opt-in; `1` for A/B arms and reproducible restarts) | 1.9.0: add `"deterministic": true` to `inductor_compile_config`, so a fresh compile picks one config per reduction instead of re-timing them ([#189](https://github.com/SlyBase/vllm-sly-radiance/issues/189), [vllm#58899](https://github.com/vllm-project/vllm/issues/58899)). Removes start-to-start numeric drift between fresh compiles. Prefill within noise (1.5k-48k); decode and acceptance not yet measured. Changes the compile hash: one fresh compile. CPU test `sly/tests/test_launcher_deterministic_compile_cpu.py` |
+| `DET_COMPILE` | `0` (opt-in; `1` for A/B arms and reproducible restarts) | 1.10.0: add `"deterministic": true` to `inductor_compile_config`, so a fresh compile picks one config per reduction instead of re-timing them ([#189](https://github.com/SlyBase/vllm-sly-radiance/issues/189), [vllm#58899](https://github.com/vllm-project/vllm/issues/58899)). Removes start-to-start numeric drift between fresh compiles. Prefill within noise (1.5k-48k); decode and acceptance not yet measured. Changes the compile hash: one fresh compile. CPU test `sly/tests/test_launcher_deterministic_compile_cpu.py` |
 | `RADIANCE_MXFP4_A_TILED_MIN_M` | `513` | fragment-tiled prefill GEMM from M = 513 (+11–13 % prefill); must stay above 512 and `DECODE_MAX_M` |
 | `--build-arg RADIANCE_GROUPM` | `0` (build-time, default off) | M-band raster grouping of the W4A8 prefill GEMM (`16` = groups of 16 activation bands). Default build is unchanged; not measured on a GPU yet, so no recommendation |
 | `RADIANCE_MXFP4_WPERM` | `1` | fragment-order weights (+3.7 % decode); set `0` with `RADIANCE_TP_PAD=3` |
