@@ -455,6 +455,9 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
 | Variable | Recommended | What it does |
 |---|---|---|
 | `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
+| `RADIANCE_CACTUS_FADE_START` | `4096` | 1.9.0 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
+| `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
+| `RADIANCE_CACTUS_CAP_R` | `0.5` | 1.9.0 acceptance cap, independent of length: h is also limited to `1 - r*(1-q)`. Never stricter than the stock rule (h >= q for every r <= 1), and it keeps `r` of the stock rejection chance at the drafter's p ~ 1, where Cactus has none above q = 1/(1+2*delta). `0` = off, `1` = exactly the stock rule; outside `[0,1]` the engine refuses to start |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
 1.0.0 column of the 1.5.1 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,
@@ -470,6 +473,31 @@ keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the
 `RADIANCE_CACTUS_DELTA=0` when you need output that is statistically identical to the target model (evals,
 distribution-sensitive sampling, reproducing published numbers). Do not raise it above 0.5 without measuring
 quality on your own prompts.
+
+**Length fade (1.9.0).** Long sampled generations entered verbatim repetition loops about three times as often
+with delta 0.5 as with the stock rule ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164): 11/32 vs
+2/16 runs, all loops after 7.7k output tokens, most after 16k). Cactus only in the first 4096 output tokens of a
+request removed them (0/16). The fade lowers a request's delta linearly from `RADIANCE_CACTUS_DELTA` at
+`RADIANCE_CACTUS_FADE_START` output tokens to 0 at `RADIANCE_CACTUS_FADE_END`. Outputs below 4096 tokens (chat,
+the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. On top, the length-independent
+**acceptance cap** (`RADIANCE_CACTUS_CAP_R`) keeps a share `r` of the stock rejection chance at every output length,
+so a confident drafter can never pin a repetition with zero escape probability.
+
+Measured on one R9700 (production arguments, the `request.json` from #164, Swift-1.5, 32k-token budget, 8
+requests in parallel, 16-32 sampled runs per arm):
+
+| Arm | loops | acceptance | tok/s | vs stock | GSMQ-200 (temp 0.7) |
+|---|---|---|---|---|---|
+| Cactus 0.5 (previous default) | 11/32 (34 %) | 0.670 | 443.0 | +24.9 % | 0.965 |
+| cap 0.5 alone | 5/16 (31 %) | 0.653 | 436.4 | +23.0 % | 0.975 |
+| **fade 4096->16384 + cap 0.5 (new default)** | **1/16 (6 %)** | 0.604 | **397.6** | **+12.1 %** | **0.960** |
+| fade as a hard cut at 4096 | 0/16 | 0.567 | 369.1 | +4.0 % | - |
+| stock (delta 0) | 2/16 (12.5 %) | 0.532 | 354.8 | - | - |
+
+The fade is the fix (1/16 vs 11/32, p = 0.03); the cap alone does not change the loop rate (p = 0.55) and is
+kept as the length-independent insurance. Outputs below 4096 tokens are untouched, so their Cactus behaviour is
+unchanged. The stock rule itself still loops on this prompt (2/16). The stock rule itself
+still loops on adversarial prompts (2/16 in the same test); the fade does not change that.
 
 ### Nucleus Speculative Decoding (opt-in, off by default)
 
