@@ -1,0 +1,5144 @@
+{
+ "_what": "Read ledger of the LLM-research corpus sweep. Diff with check_corpus.py; update with --update.",
+ "corpus": "github.com/1jmdev/research",
+ "corpus_commit": "ae20e11f9f37d19eeb8d9c1e545d3cf3b69b2f49",
+ "swept": "2026-10-25",
+ "subcategories": {
+  "decoding/constrained-and-structured": 3,
+  "decoding/diffusion-llm-inference": 3,
+  "decoding/diffusion-language-models": 3,
+  "decoding/early-exit-and-layer-skipping": 3,
+  "decoding/jacobi-and-parallel-decoding": 3,
+  "decoding/multi-token-prediction": 3,
+  "decoding/sampling-and-strategies": 3,
+  "decoding/speculative-decoding": 3,
+  "reasoning/efficient-reasoning": 3,
+  "reasoning/latent-and-looped": 3,
+  "reasoning/test-time-scaling": 3,
+  "context-compression/prompt-and-context-compression": 3,
+  "context-compression/visual-token-reduction": 3,
+  "models-and-architectures/novel-architectures": 3,
+  "models-and-architectures/small-language-models": 3,
+  "models-and-architectures/technical-reports": 3,
+  "kv-cache/_general": 3,
+  "kv-cache/cross-layer-sharing": 3,
+  "kv-cache/eviction-and-token-selection": 3,
+  "kv-cache/low-rank-and-latent": 3,
+  "kv-cache/offloading-and-hierarchical-storage": 3,
+  "kv-cache/prefix-caching-and-reuse": 3,
+  "kv-cache/quantization": 3,
+  "attention/attention-variants": 3,
+  "attention/hybrid-architectures": 3,
+  "attention/kernels-and-io-aware": 3,
+  "attention/linear-attention": 3,
+  "attention/long-context-and-position": 3,
+  "attention/sparse-attention": 3,
+  "attention/state-space-and-recurrent": 3,
+  "compression/_general": 3,
+  "compression/activation-sparsity": 3,
+  "compression/low-rank-decomposition": 3,
+  "compression/structured-pruning": 3,
+  "compression/unstructured-and-semi-structured-pruning": 3,
+  "quantization/1-bit-and-ternary": 3,
+  "quantization/2-bit": 3,
+  "quantization/3-bit": 3,
+  "quantization/4-bit-floating-point": 3,
+  "quantization/4-bit-integer": 3,
+  "quantization/5-to-8-bit": 3,
+  "quantization/_general": 3,
+  "quantization/low-precision-training": 3,
+  "quantization/mixed-precision": 3,
+  "quantization/sub-1-bit": 3,
+  "model-conversion/ar-to-diffusion": 3,
+  "model-conversion/attention-conversion": 3,
+  "model-conversion/dense-to-moe-upcycling": 3,
+  "model-conversion/model-growth-and-other": 3,
+  "model-conversion/model-merging": 3,
+  "model-conversion/tokenizer-and-vocab-transfer": 3,
+  "model-conversion/transformer-to-linear-or-hybrid": 3,
+  "mixture-of-experts/architecture-and-routing": 3,
+  "mixture-of-experts/compression": 3,
+  "mixture-of-experts/inference-and-serving": 3,
+  "mixture-of-experts/training": 3,
+  "compression/knowledge-distillation": 3,
+  "serving-systems/_general": 3,
+  "serving-systems/disaggregated-prefill-decode": 3,
+  "serving-systems/distributed-inference-and-parallelism": 3,
+  "serving-systems/edge-and-on-device": 3,
+  "serving-systems/energy-and-cost": 3,
+  "serving-systems/gpu-kernels-and-compilers": 3,
+  "serving-systems/hardware-accelerators": 3,
+  "serving-systems/memory-and-offloading": 3,
+  "serving-systems/scheduling-and-batching": 3,
+  "training/data-curation-and-synthetic-data": 3,
+  "training/optimizers": 3,
+  "training/parameter-efficient-finetuning": 3,
+  "training/pretraining-recipes-and-efficiency": 3,
+  "training/rl-for-reasoning": 3,
+  "training/scaling-laws": 3,
+  "training/tokenization": 3
+ },
+ "entries": {
+  "2501.00663": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "11e12c375563",
+   "checked": "2026-10-25"
+  },
+  "2501.01005": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "cd9e4e7b041b",
+   "checked": "2026-10-25"
+  },
+  "2501.03895": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2da5ea2790ee",
+   "checked": "2026-10-25"
+  },
+  "2501.03905": {
+   "sub": "mixture-of-experts/training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "25893632757f",
+   "checked": "2026-10-25"
+  },
+  "2501.04519": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "950c3b5abb2e",
+   "checked": "2026-10-25"
+  },
+  "2501.06252": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0d8e05b912de",
+   "checked": "2026-10-25"
+  },
+  "2501.06425": {
+   "sub": "attention/attention-variants",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9c157a10b803",
+   "checked": "2026-10-25"
+  },
+  "2501.07301": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e17501608a7e",
+   "checked": "2026-10-25"
+  },
+  "2501.11873": {
+   "sub": "mixture-of-experts/training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "30b59707f36a",
+   "checked": "2026-10-25"
+  },
+  "2501.12570": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7774568de7ff",
+   "checked": "2026-10-25"
+  },
+  "2501.12948": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "90fb6b21c1a7",
+   "checked": "2026-10-25"
+  },
+  "2501.12956": {
+   "sub": "quantization/3-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f35036d374ce",
+   "checked": "2026-10-25"
+  },
+  "2501.13987": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b92bcc3d33cf",
+   "checked": "2026-10-25"
+  },
+  "2501.14794": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d46d74e49142",
+   "checked": "2026-10-25"
+  },
+  "2501.15296": {
+   "sub": "compression/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4e1b10639050",
+   "checked": "2026-10-25"
+  },
+  "2501.16975": {
+   "sub": "training/tokenization",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "427a0b51d765",
+   "checked": "2026-10-25"
+  },
+  "2501.17116": {
+   "sub": "quantization/low-precision-training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a0f43064724f",
+   "checked": "2026-10-25"
+  },
+  "2501.19324": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "abd6f9704b81",
+   "checked": "2026-10-25"
+  },
+  "2501.19393": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "9c24d38078d8",
+   "checked": "2026-10-25"
+  },
+  "2502.02723": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4c5f8eb6ec3b",
+   "checked": "2026-10-25"
+  },
+  "2502.02737": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "290239ebf58f",
+   "checked": "2026-10-25"
+  },
+  "2502.03387": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b0d2d10e2fd1",
+   "checked": "2026-10-25"
+  },
+  "2502.04416": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "75499a5d725c",
+   "checked": "2026-10-25"
+  },
+  "2502.04959": {
+   "sub": "model-conversion/model-merging",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a5088f3ccb63",
+   "checked": "2026-10-25"
+  },
+  "2502.05003": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e4099faa9427",
+   "checked": "2026-10-25"
+  },
+  "2502.05171": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "68836a6190c1",
+   "checked": "2026-10-25"
+  },
+  "2502.06415": {
+   "sub": "compression/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "bb25e260bdf9",
+   "checked": "2026-10-25"
+  },
+  "2502.07578": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e522fe445c99",
+   "checked": "2026-10-25"
+  },
+  "2502.07780": {
+   "sub": "compression/structured-pruning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8a88b09c1306",
+   "checked": "2026-10-25"
+  },
+  "2502.07864": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2566daf11763",
+   "checked": "2026-10-25"
+  },
+  "2502.09061": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "f3b677d6df0c",
+   "checked": "2026-10-25"
+  },
+  "2502.09741": {
+   "sub": "training/tokenization",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "85fcd97afa3e",
+   "checked": "2026-10-25"
+  },
+  "2502.09992": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e73d0be6081e",
+   "checked": "2026-10-25"
+  },
+  "2502.11089": {
+   "sub": "attention/sparse-attention",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1acb370d49b7",
+   "checked": "2026-10-25"
+  },
+  "2502.12346": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d088bf7fbcbc",
+   "checked": "2026-10-25"
+  },
+  "2502.12574": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e46b01200647",
+   "checked": "2026-10-25"
+  },
+  "2502.13145": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "657937fc594c",
+   "checked": "2026-10-25"
+  },
+  "2502.13189": {
+   "sub": "attention/sparse-attention",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e408b6fdb2d1",
+   "checked": "2026-10-25"
+  },
+  "2502.13685": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "71cdc0f31084",
+   "checked": "2026-10-25"
+  },
+  "2502.13923": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "350468982dfd",
+   "checked": "2026-10-25"
+  },
+  "2502.13965": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "bc34e3ddfc78",
+   "checked": "2026-10-25"
+  },
+  "2502.14837": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0e65dff0568d",
+   "checked": "2026-10-25"
+  },
+  "2502.15470": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8cf2c113480c",
+   "checked": "2026-10-25"
+  },
+  "2502.16002": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7be0b0fee3d8",
+   "checked": "2026-10-25"
+  },
+  "2502.16894": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1a4358f973f9",
+   "checked": "2026-10-25"
+  },
+  "2502.16982": {
+   "sub": "training/optimizers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9b73568e7e92",
+   "checked": "2026-10-25"
+  },
+  "2502.17298": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c1a2dd42288e",
+   "checked": "2026-10-25"
+  },
+  "2502.18137": {
+   "sub": "attention/sparse-attention",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "fc4257d99cae",
+   "checked": "2026-10-25"
+  },
+  "2502.18600": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "beb7157171be",
+   "checked": "2026-10-25"
+  },
+  "2502.19261": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c96513b63fa6",
+   "checked": "2026-10-25"
+  },
+  "2502.19811": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d1fabd9b601b",
+   "checked": "2026-10-25"
+  },
+  "2503.00540": {
+   "sub": "kv-cache/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0ddf370dc7e9",
+   "checked": "2026-10-25"
+  },
+  "2503.01328": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d49e2f5040a9",
+   "checked": "2026-10-25"
+  },
+  "2503.01496": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "5e1e391e7b62",
+   "checked": "2026-10-25"
+  },
+  "2503.01840": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7fb1b3055d7c",
+   "checked": "2026-10-25"
+  },
+  "2503.03321": {
+   "sub": "attention/attention-variants",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "201aceab4bc3",
+   "checked": "2026-10-25"
+  },
+  "2503.04992": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "76698fb71ee1",
+   "checked": "2026-10-25"
+  },
+  "2503.05066": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a957e0e0a58d",
+   "checked": "2026-10-25"
+  },
+  "2503.07137": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7d653192b8ee",
+   "checked": "2026-10-25"
+  },
+  "2503.09516": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "809619568538",
+   "checked": "2026-10-25"
+  },
+  "2503.09573": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "40d4fb4badfb",
+   "checked": "2026-10-25"
+  },
+  "2503.10622": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a3265ca143eb",
+   "checked": "2026-10-25"
+  },
+  "2503.11579": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9b5181e98fa1",
+   "checked": "2026-10-25"
+  },
+  "2503.12340": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e0215358396e",
+   "checked": "2026-10-25"
+  },
+  "2503.14456": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2cf5ccc25dfe",
+   "checked": "2026-10-25"
+  },
+  "2503.14476": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7d34e633a31a",
+   "checked": "2026-10-25"
+  },
+  "2503.16419": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3a8f56c08432",
+   "checked": "2026-10-25"
+  },
+  "2503.17407": {
+   "sub": "attention/long-context-and-position",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4269bd7001fa",
+   "checked": "2026-10-25"
+  },
+  "2503.18893": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8d2d1cbefd50",
+   "checked": "2026-10-25"
+  },
+  "2503.19693": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "abb2eebcc86a",
+   "checked": "2026-10-25"
+  },
+  "2503.20083": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a16e1ae53434",
+   "checked": "2026-10-25"
+  },
+  "2503.23798": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f11325151c14",
+   "checked": "2026-10-25"
+  },
+  "2504.00623": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "49ac41340c0d",
+   "checked": "2026-10-25"
+  },
+  "2504.04823": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "5a7fe85f21ef",
+   "checked": "2026-10-25"
+  },
+  "2504.05299": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "014ada9593ab",
+   "checked": "2026-10-25"
+  },
+  "2504.05897": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b88abd1a8e55",
+   "checked": "2026-10-25"
+  },
+  "2504.06225": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f21807ace3ee",
+   "checked": "2026-10-25"
+  },
+  "2504.07951": {
+   "sub": "training/scaling-laws",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "6d4bf36422ae",
+   "checked": "2026-10-25"
+  },
+  "2504.08791": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c24a933b1a0c",
+   "checked": "2026-10-25"
+  },
+  "2504.11651": {
+   "sub": "compression/_general",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "512b23f83724",
+   "checked": "2026-10-25"
+  },
+  "2504.12285": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8fafdcb02757",
+   "checked": "2026-10-25"
+  },
+  "2504.13359": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b4a8fe2e4f56",
+   "checked": "2026-10-25"
+  },
+  "2504.13837": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ea783878f910",
+   "checked": "2026-10-25"
+  },
+  "2504.15266": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "48598d9b742b",
+   "checked": "2026-10-25"
+  },
+  "2504.18415": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ed5dce63f159",
+   "checked": "2026-10-25"
+  },
+  "2504.19449": {
+   "sub": "compression/activation-sparsity",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4cb8e10bff46",
+   "checked": "2026-10-25"
+  },
+  "2504.19874": {
+   "sub": "kv-cache/quantization",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "fef0435bac02",
+   "checked": "2026-10-25"
+  },
+  "2505.02214": {
+   "sub": "quantization/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d7fefec2ca35",
+   "checked": "2026-10-25"
+  },
+  "2505.02819": {
+   "sub": "compression/structured-pruning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a36584b5345e",
+   "checked": "2026-10-25"
+  },
+  "2505.02922": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d9f6c95914ba",
+   "checked": "2026-10-25"
+  },
+  "2505.03005": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8e9e19aa1348",
+   "checked": "2026-10-25"
+  },
+  "2505.04021": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f20ece4801f8",
+   "checked": "2026-10-25"
+  },
+  "2505.04081": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "655ce21f66e8",
+   "checked": "2026-10-25"
+  },
+  "2505.06708": {
+   "sub": "attention/attention-variants",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "980a7487115a",
+   "checked": "2026-10-25"
+  },
+  "2505.09343": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "38ac612a4033",
+   "checked": "2026-10-25"
+  },
+  "2505.09388": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9f09f0b0b78f",
+   "checked": "2026-10-25"
+  },
+  "2505.09598": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "735cd1e6e0a9",
+   "checked": "2026-10-25"
+  },
+  "2505.10475": {
+   "sub": "training/scaling-laws",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7c00fb06c711",
+   "checked": "2026-10-25"
+  },
+  "2505.10518": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0a068df8e1f7",
+   "checked": "2026-10-25"
+  },
+  "2505.11594": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "dce9669b31ef",
+   "checked": "2026-10-25"
+  },
+  "2505.12082": {
+   "sub": "model-conversion/model-merging",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "83c9cced871d",
+   "checked": "2026-10-25"
+  },
+  "2505.14302": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c1c18732d477",
+   "checked": "2026-10-25"
+  },
+  "2505.14669": {
+   "sub": "quantization/low-precision-training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "44b5a8510b2b",
+   "checked": "2026-10-25"
+  },
+  "2505.15809": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "dcb40a31db48",
+   "checked": "2026-10-25"
+  },
+  "2505.16990": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2df7138ee400",
+   "checked": "2026-10-25"
+  },
+  "2505.19433": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "67658737ab6b",
+   "checked": "2026-10-25"
+  },
+  "2505.20139": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4c997b23b244",
+   "checked": "2026-10-25"
+  },
+  "2505.21334": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a4f33bc7df5a",
+   "checked": "2026-10-25"
+  },
+  "2505.22323": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "bcbe08857519",
+   "checked": "2026-10-25"
+  },
+  "2505.22618": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "463e5e7ad85e",
+   "checked": "2026-10-25"
+  },
+  "2505.23416": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "40fb24523912",
+   "checked": "2026-10-25"
+  },
+  "2505.24357": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2333e03984fc",
+   "checked": "2026-10-25"
+  },
+  "2505.24760": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3e3cbdbaf0ab",
+   "checked": "2026-10-25"
+  },
+  "2506.02153": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1f9a78f73303",
+   "checked": "2026-10-25"
+  },
+  "2506.02634": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "197f9ec37f3e",
+   "checked": "2026-10-25"
+  },
+  "2506.08007": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c4930beb3f58",
+   "checked": "2026-10-25"
+  },
+  "2506.09501": {
+   "sub": "serving-systems/_general",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "6de05ba38092",
+   "checked": "2026-10-25"
+  },
+  "2506.09991": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0d00a2340dfa",
+   "checked": "2026-10-25"
+  },
+  "2506.12040": {
+   "sub": "quantization/sub-1-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3dc7bc4e8816",
+   "checked": "2026-10-25"
+  },
+  "2506.13131": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d72051add797",
+   "checked": "2026-10-25"
+  },
+  "2506.13771": {
+   "sub": "quantization/sub-1-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9c9a8c6b9e2b",
+   "checked": "2026-10-25"
+  },
+  "2506.15745": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8dcf7c6456a5",
+   "checked": "2026-10-25"
+  },
+  "2506.16406": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b04b35e5ca91",
+   "checked": "2026-10-25"
+  },
+  "2506.18582": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2de6906c4b13",
+   "checked": "2026-10-25"
+  },
+  "2506.18879": {
+   "sub": "kv-cache/quantization",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9564b903da02",
+   "checked": "2026-10-25"
+  },
+  "2506.20512": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "fa60ffd9d993",
+   "checked": "2026-10-25"
+  },
+  "2506.20920": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7e3fef9c8fab",
+   "checked": "2026-10-25"
+  },
+  "2507.02259": {
+   "sub": "attention/long-context-and-position",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "cfbcb93fce93",
+   "checked": "2026-10-25"
+  },
+  "2507.06457": {
+   "sub": "attention/linear-attention",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ce69cce74e2c",
+   "checked": "2026-10-25"
+  },
+  "2507.06607": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "63668b7ee6ba",
+   "checked": "2026-10-25"
+  },
+  "2507.07955": {
+   "sub": "training/tokenization",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "090330059894",
+   "checked": "2026-10-25"
+  },
+  "2507.08771": {
+   "sub": "compression/activation-sparsity",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b099d11ea858",
+   "checked": "2026-10-25"
+  },
+  "2507.09404": {
+   "sub": "training/scaling-laws",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "38a2034f6caf",
+   "checked": "2026-10-25"
+  },
+  "2507.10524": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "bf02d6ab4b37",
+   "checked": "2026-10-25"
+  },
+  "2507.11017": {
+   "sub": "quantization/3-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c72534fc2a6e",
+   "checked": "2026-10-25"
+  },
+  "2507.11851": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a883b1d195f6",
+   "checked": "2026-10-25"
+  },
+  "2507.14111": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a3bc96a29bab",
+   "checked": "2026-10-25"
+  },
+  "2507.18553": {
+   "sub": "quantization/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "955f63b3011e",
+   "checked": "2026-10-25"
+  },
+  "2507.19427": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "026bd88e54f5",
+   "checked": "2026-10-25"
+  },
+  "2508.02215": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ab92f696f171",
+   "checked": "2026-10-25"
+  },
+  "2508.02343": {
+   "sub": "quantization/mixed-precision",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "3cd3247affc1",
+   "checked": "2026-10-25"
+  },
+  "2508.05257": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "5e36b0819b24",
+   "checked": "2026-10-25"
+  },
+  "2508.06133": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d9c197061e51",
+   "checked": "2026-10-25"
+  },
+  "2508.14896": {
+   "sub": "quantization/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "684abeadf21a",
+   "checked": "2026-10-25"
+  },
+  "2508.15212": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "aea33f2e7b8b",
+   "checked": "2026-10-25"
+  },
+  "2508.19228": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3ebca686a84d",
+   "checked": "2026-10-25"
+  },
+  "2508.19559": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "633eb10a03b8",
+   "checked": "2026-10-25"
+  },
+  "2509.02046": {
+   "sub": "training/optimizers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "43ef6a20778e",
+   "checked": "2026-10-25"
+  },
+  "2509.02510": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "f9c511bd5364",
+   "checked": "2026-10-25"
+  },
+  "2509.04185": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b4593f0f0f79",
+   "checked": "2026-10-25"
+  },
+  "2509.12019": {
+   "sub": "quantization/mixed-precision",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4209786ad988",
+   "checked": "2026-10-25"
+  },
+  "2509.13310": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "0e84029f958e",
+   "checked": "2026-10-25"
+  },
+  "2509.20214": {
+   "sub": "quantization/mixed-precision",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "904977170ef2",
+   "checked": "2026-10-25"
+  },
+  "2509.22075": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3e8d5ccbff82",
+   "checked": "2026-10-25"
+  },
+  "2509.23202": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "7fdaa5c718a6",
+   "checked": "2026-10-25"
+  },
+  "2509.25149": {
+   "sub": "quantization/low-precision-training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8447de5dfc04",
+   "checked": "2026-10-25"
+  },
+  "2509.25175": {
+   "sub": "serving-systems/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "5bfd6e06b514",
+   "checked": "2026-10-25"
+  },
+  "2509.26328": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d11f7e154e9a",
+   "checked": "2026-10-25"
+  },
+  "2510.00615": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "d5d676aecc6d",
+   "checked": "2026-10-25"
+  },
+  "2510.03215": {
+   "sub": "kv-cache/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ccad9991d0a7",
+   "checked": "2026-10-25"
+  },
+  "2510.05491": {
+   "sub": "training/optimizers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "78c8e80d5c14",
+   "checked": "2026-10-25"
+  },
+  "2510.05528": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8ede2483c7d4",
+   "checked": "2026-10-25"
+  },
+  "2510.06303": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7414223477b6",
+   "checked": "2026-10-25"
+  },
+  "2510.07019": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "d854749ee2b6",
+   "checked": "2026-10-25"
+  },
+  "2510.09608": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4b146511f1bb",
+   "checked": "2026-10-25"
+  },
+  "2510.09665": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8414fa393330",
+   "checked": "2026-10-25"
+  },
+  "2510.12773": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "3d12be4aa877",
+   "checked": "2026-10-25"
+  },
+  "2510.12872": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "dd27330d5528",
+   "checked": "2026-10-25"
+  },
+  "2510.13999": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1d70e37700f0",
+   "checked": "2026-10-25"
+  },
+  "2510.18234": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "517bbe5b09f4",
+   "checked": "2026-10-25"
+  },
+  "2510.25602": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1e145ddfbad4",
+   "checked": "2026-10-25"
+  },
+  "2510.25741": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a7474aa2ef8e",
+   "checked": "2026-10-25"
+  },
+  "2510.26692": {
+   "sub": "attention/linear-attention",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9643ce1e4b57",
+   "checked": "2026-10-25"
+  },
+  "2510.26697": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a811e22267a2",
+   "checked": "2026-10-25"
+  },
+  "2510.27656": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "388dfefa0d61",
+   "checked": "2026-10-25"
+  },
+  "2511.02230": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "eb862d3ea5e8",
+   "checked": "2026-10-25"
+  },
+  "2511.07885": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "9dc70844b2ba",
+   "checked": "2026-10-25"
+  },
+  "2511.13254": {
+   "sub": "model-conversion/model-merging",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "13464355966e",
+   "checked": "2026-10-25"
+  },
+  "2511.20639": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "14d1fe041777",
+   "checked": "2026-10-25"
+  },
+  "2512.02010": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c920ae8db3b3",
+   "checked": "2026-10-25"
+  },
+  "2512.02924": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1a8d057e6f2a",
+   "checked": "2026-10-25"
+  },
+  "2512.04746": {
+   "sub": "quantization/2-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "33cf204a5ca5",
+   "checked": "2026-10-25"
+  },
+  "2512.06776": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "8101e02e3a68",
+   "checked": "2026-10-25"
+  },
+  "2512.14067": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7e72d35bef5e",
+   "checked": "2026-10-25"
+  },
+  "2512.14080": {
+   "sub": "mixture-of-experts/training",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4cc94c09c857",
+   "checked": "2026-10-25"
+  },
+  "2512.15586": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "250da5d0f595",
+   "checked": "2026-10-25"
+  },
+  "2512.23447": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "cdf6568f617c",
+   "checked": "2026-10-25"
+  },
+  "2512.24601": {
+   "sub": "attention/long-context-and-position",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "311a7fba4e9c",
+   "checked": "2026-10-25"
+  },
+  "2601.14724": {
+   "sub": "kv-cache/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "5998513045eb",
+   "checked": "2026-10-25"
+  },
+  "2601.19897": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "9222de22e965",
+   "checked": "2026-10-25"
+  },
+  "2601.20552": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "be02ae8ff01b",
+   "checked": "2026-10-25"
+  },
+  "2602.01053": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a9976034029d",
+   "checked": "2026-10-25"
+  },
+  "2602.03560": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2524230cb2f5",
+   "checked": "2026-10-25"
+  },
+  "2602.06036": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "692fe4b207fd",
+   "checked": "2026-10-25"
+  },
+  "2602.06694": {
+   "sub": "quantization/sub-1-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "b0cab50f0508",
+   "checked": "2026-10-25"
+  },
+  "2602.21548": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "15e97d6ea77b",
+   "checked": "2026-10-25"
+  },
+  "2602.22647": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "97ef259fa358",
+   "checked": "2026-10-25"
+  },
+  "2602.24286": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "6cbc0acb77fb",
+   "checked": "2026-10-25"
+  },
+  "2603.04445": {
+   "sub": "serving-systems/_general",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "a97dfcdab19e",
+   "checked": "2026-10-25"
+  },
+  "2603.05451": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "461f4398e878",
+   "checked": "2026-10-25"
+  },
+  "2603.15031": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "00b582888328",
+   "checked": "2026-10-25"
+  },
+  "2603.24472": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "acec50dc40e8",
+   "checked": "2026-10-25"
+  },
+  "2604.02045": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "eb052c63d22d",
+   "checked": "2026-10-25"
+  },
+  "2604.03258": {
+   "sub": "compression/activation-sparsity",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "006d4bd7e3eb",
+   "checked": "2026-10-25"
+  },
+  "2604.04921": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7b93e4fd6120",
+   "checked": "2026-10-25"
+  },
+  "2604.05091": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f7fde16a539d",
+   "checked": "2026-10-25"
+  },
+  "2604.13016": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "ccda03db2ca6",
+   "checked": "2026-10-25"
+  },
+  "2604.19835": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "1beec367d934",
+   "checked": "2026-10-25"
+  },
+  "2605.02404": {
+   "sub": "quantization/3-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e8c2073adaa3",
+   "checked": "2026-10-25"
+  },
+  "2605.13779": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "4180dfec2439",
+   "checked": "2026-10-25"
+  },
+  "2605.16928": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "9647aba2fcac",
+   "checked": "2026-10-25"
+  },
+  "2605.22791": {
+   "sub": "attention/linear-attention",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7bde554d43ee",
+   "checked": "2026-10-25"
+  },
+  "2605.29843": {
+   "sub": "quantization/2-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "fc5f2288b9e4",
+   "checked": "2026-10-25"
+  },
+  "2606.03458": {
+   "sub": "kv-cache/quantization",
+   "depth": "tldr",
+   "verdict": "candidate",
+   "digest": "84901fc11adc",
+   "checked": "2026-10-25"
+  },
+  "2606.06574": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "2fb6d9064544",
+   "checked": "2026-10-25"
+  },
+  "2607.07964": {
+   "sub": "quantization/2-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "e4293f2bc795",
+   "checked": "2026-10-25"
+  },
+  "2607.13124": {
+   "sub": "compression/structured-pruning",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "7c65123b9777",
+   "checked": "2026-10-25"
+  },
+  "2608.16157": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "f300c5f5a683",
+   "checked": "2026-10-25"
+  },
+  "2608.21952": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "tldr",
+   "verdict": "rejected",
+   "digest": "c2ca1e308adc",
+   "checked": "2026-10-25"
+  },
+  "2501.10868": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2e1b243ec1af",
+   "checked": "PENDING"
+  },
+  "2505.23061": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "32a843d447f8",
+   "checked": "PENDING"
+  },
+  "2502.05111": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "99e76781265b",
+   "checked": "PENDING"
+  },
+  "2504.09246": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "07288e3a4a3d",
+   "checked": "PENDING"
+  },
+  "2502.18878": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a5c43def8b62",
+   "checked": "PENDING"
+  },
+  "2602.00612": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c23ddc98356a",
+   "checked": "PENDING"
+  },
+  "2601.07525": {
+   "sub": "decoding/constrained-and-structured",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5aa0cae57564",
+   "checked": "PENDING"
+  },
+  "2602.08676": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e90ebf037f7b",
+   "checked": "PENDING"
+  },
+  "2505.15781": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dae11f268d45",
+   "checked": "PENDING"
+  },
+  "2508.09192": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ef00b01cf957",
+   "checked": "PENDING"
+  },
+  "2510.04767": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "60e4559146ad",
+   "checked": "PENDING"
+  },
+  "2506.06295": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "57dfa63250e7",
+   "checked": "PENDING"
+  },
+  "2508.19982": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "70e568c41d6a",
+   "checked": "PENDING"
+  },
+  "2506.00413": {
+   "sub": "decoding/diffusion-llm-inference",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a53209b3c6d0",
+   "checked": "PENDING"
+  },
+  "2512.15745": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "30234bd4211b",
+   "checked": "PENDING"
+  },
+  "2506.10892": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "753760454e32",
+   "checked": "PENDING"
+  },
+  "2505.16839": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0819c2a0f95c",
+   "checked": "PENDING"
+  },
+  "2506.20639": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "00f8567dd2ac",
+   "checked": "PENDING"
+  },
+  "2505.19223": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3b9f7bc7fba9",
+   "checked": "PENDING"
+  },
+  "2503.00307": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "348bea98b77f",
+   "checked": "PENDING"
+  },
+  "2508.02193": {
+   "sub": "decoding/diffusion-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9eec4581e12c",
+   "checked": "PENDING"
+  },
+  "2507.07996": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2fb918ccff98",
+   "checked": "PENDING"
+  },
+  "2506.21103": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2647f5c1f731",
+   "checked": "PENDING"
+  },
+  "2501.02336": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "87d2c9132d2e",
+   "checked": "PENDING"
+  },
+  "2504.08850": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2b1b6d14324e",
+   "checked": "PENDING"
+  },
+  "2609.05275": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d0ebba7af8f9",
+   "checked": "PENDING"
+  },
+  "2604.18396": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6ae9df328257",
+   "checked": "PENDING"
+  },
+  "2504.06949": {
+   "sub": "decoding/early-exit-and-layer-skipping",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "95b71e0b51a2",
+   "checked": "PENDING"
+  },
+  "2505.21189": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5757b3e48dd4",
+   "checked": "PENDING"
+  },
+  "2512.14681": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ba95a16fff42",
+   "checked": "PENDING"
+  },
+  "2502.11517": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0de93184e9e1",
+   "checked": "PENDING"
+  },
+  "2503.20533": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6e63410aaecb",
+   "checked": "PENDING"
+  },
+  "2508.08712": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "55cd5dc55248",
+   "checked": "PENDING"
+  },
+  "2508.08895": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fa037df7b8ed",
+   "checked": "PENDING"
+  },
+  "2609.05707": {
+   "sub": "decoding/jacobi-and-parallel-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bcec5c6e6dbc",
+   "checked": "PENDING"
+  },
+  "2604.07023": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "91651c0c59e2",
+   "checked": "PENDING"
+  },
+  "2510.14751": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "007a815d8617",
+   "checked": "PENDING"
+  },
+  "2505.17505": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f5d0aacb8266",
+   "checked": "PENDING"
+  },
+  "2603.17942": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e4dc0a5e0e70",
+   "checked": "PENDING"
+  },
+  "2511.11346": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1fe783f34bad",
+   "checked": "PENDING"
+  },
+  "2506.07833": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "77a48dab4878",
+   "checked": "PENDING"
+  },
+  "2509.18362": {
+   "sub": "decoding/multi-token-prediction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9dae2d7b0c9a",
+   "checked": "PENDING"
+  },
+  "2602.10273": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "baa6fb8755b6",
+   "checked": "PENDING"
+  },
+  "2604.11012": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2e1a4c91f63b",
+   "checked": "PENDING"
+  },
+  "2507.04404": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "da3d12ed1388",
+   "checked": "PENDING"
+  },
+  "2510.01218": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "172a5de5635a",
+   "checked": "PENDING"
+  },
+  "2511.21702": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3ed66a3b3ed3",
+   "checked": "PENDING"
+  },
+  "2505.19371": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "322b106a4042",
+   "checked": "PENDING"
+  },
+  "2602.18292": {
+   "sub": "decoding/sampling-and-strategies",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "38998b33c856",
+   "checked": "PENDING"
+  },
+  "2607.05147": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3330e450ffe8",
+   "checked": "PENDING"
+  },
+  "2605.29707": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "818fafd9de41",
+   "checked": "PENDING"
+  },
+  "2505.21600": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fa3567a3144c",
+   "checked": "PENDING"
+  },
+  "2602.23881": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "64665d92a856",
+   "checked": "PENDING"
+  },
+  "2604.12989": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "01a6a550ecdc",
+   "checked": "PENDING"
+  },
+  "2604.09557": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bb53031218ed",
+   "checked": "PENDING"
+  },
+  "2606.18394": {
+   "sub": "decoding/speculative-decoding",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "94279cd5880b",
+   "checked": "PENDING"
+  },
+  "2505.13379": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "306a3880e56a",
+   "checked": "PENDING"
+  },
+  "2503.05179": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dd5959dc8a79",
+   "checked": "PENDING"
+  },
+  "2503.21614": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e9e13b2dd459",
+   "checked": "PENDING"
+  },
+  "2502.15589": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6b897516472f",
+   "checked": "PENDING"
+  },
+  "2501.18585": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e8987a16d81d",
+   "checked": "PENDING"
+  },
+  "2503.04697": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2ff7506a8228",
+   "checked": "PENDING"
+  },
+  "2502.08235": {
+   "sub": "reasoning/efficient-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7d1d09dbcf8e",
+   "checked": "PENDING"
+  },
+  "2505.15778": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ed42d674bd9c",
+   "checked": "PENDING"
+  },
+  "2502.21074": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "607e2b6a20c6",
+   "checked": "PENDING"
+  },
+  "2502.03275": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9b296b07263c",
+   "checked": "PENDING"
+  },
+  "2509.20317": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1db44ba80a05",
+   "checked": "PENDING"
+  },
+  "2505.16782": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dabc71fcf17a",
+   "checked": "PENDING"
+  },
+  "2604.12946": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "92da0764edd2",
+   "checked": "PENDING"
+  },
+  "2507.06203": {
+   "sub": "reasoning/latent-and-looped",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "876615931b91",
+   "checked": "PENDING"
+  },
+  "2508.15260": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "25549165fb15",
+   "checked": "PENDING"
+  },
+  "2504.02495": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "63d59e9b77cf",
+   "checked": "PENDING"
+  },
+  "2502.06703": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b6c637928738",
+   "checked": "PENDING"
+  },
+  "2502.14382": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d14b884c36b2",
+   "checked": "PENDING"
+  },
+  "2601.16175": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "39123b5acd9c",
+   "checked": "PENDING"
+  },
+  "2503.07572": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d6f79fbf2c2a",
+   "checked": "PENDING"
+  },
+  "2510.14901": {
+   "sub": "reasoning/test-time-scaling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "498253a04ae2",
+   "checked": "PENDING"
+  },
+  "2510.17800": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9553c343f337",
+   "checked": "PENDING"
+  },
+  "2601.16746": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2a9abc449e3b",
+   "checked": "PENDING"
+  },
+  "2510.00446": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ec650abb78c5",
+   "checked": "PENDING"
+  },
+  "2505.19147": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "571ea41ad408",
+   "checked": "PENDING"
+  },
+  "2506.06266": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "14a87c50f964",
+   "checked": "PENDING"
+  },
+  "2603.13875": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7d7f246d9b82",
+   "checked": "PENDING"
+  },
+  "2607.18213": {
+   "sub": "context-compression/prompt-and-context-compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fdbba1fdf346",
+   "checked": "PENDING"
+  },
+  "2507.13348": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bbe4179aa63f",
+   "checked": "PENDING"
+  },
+  "2503.04130": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7ab711dc2746",
+   "checked": "PENDING"
+  },
+  "2504.17343": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d61ebfd76de9",
+   "checked": "PENDING"
+  },
+  "2503.02175": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "788860d96646",
+   "checked": "PENDING"
+  },
+  "2508.18264": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5a92a35cedd0",
+   "checked": "PENDING"
+  },
+  "2511.14582": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "984a00b5f217",
+   "checked": "PENDING"
+  },
+  "2502.11494": {
+   "sub": "context-compression/visual-token-reduction",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "90deb95d346a",
+   "checked": "PENDING"
+  },
+  "2502.05795": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7721d5cbd2a3",
+   "checked": "PENDING"
+  },
+  "2512.24880": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e683989d2595",
+   "checked": "PENDING"
+  },
+  "2512.17351": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "26f1ed23ce0c",
+   "checked": "PENDING"
+  },
+  "2512.24695": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b0ed1d96cc7f",
+   "checked": "PENDING"
+  },
+  "2601.07372": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fdd2a7c60688",
+   "checked": "PENDING"
+  },
+  "2605.20613": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "867946d55594",
+   "checked": "PENDING"
+  },
+  "2507.02092": {
+   "sub": "models-and-architectures/novel-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5d07058683a2",
+   "checked": "PENDING"
+  },
+  "2601.08584": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3fea43eb9eee",
+   "checked": "PENDING"
+  },
+  "2603.06569": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "68fbfae0de83",
+   "checked": "PENDING"
+  },
+  "2511.18890": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "719ce763a87d",
+   "checked": "PENDING"
+  },
+  "2511.06221": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5007c1cda862",
+   "checked": "PENDING"
+  },
+  "2606.16140": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "87446104878f",
+   "checked": "PENDING"
+  },
+  "2507.20984": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c7862b48087c",
+   "checked": "PENDING"
+  },
+  "2506.07712": {
+   "sub": "models-and-architectures/small-language-models",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e16f3f4c4013",
+   "checked": "PENDING"
+  },
+  "2511.21631": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4b7dfd4cc3ed",
+   "checked": "PENDING"
+  },
+  "2507.06261": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cdfef28eb5b3",
+   "checked": "PENDING"
+  },
+  "2504.10479": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e640d7164830",
+   "checked": "PENDING"
+  },
+  "2602.02276": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "aeec355bb875",
+   "checked": "PENDING"
+  },
+  "2506.05176": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8b85d0cafc94",
+   "checked": "PENDING"
+  },
+  "2508.18265": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fc0435223eda",
+   "checked": "PENDING"
+  },
+  "2503.20215": {
+   "sub": "models-and-architectures/technical-reports",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "63b9fb08e283",
+   "checked": "PENDING"
+  },
+  "2506.05344": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0d35340047e3",
+   "checked": "PENDING"
+  },
+  "2508.15717": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e42305104602",
+   "checked": "PENDING"
+  },
+  "2607.08057": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d6f6a081b37c",
+   "checked": "PENDING"
+  },
+  "2503.00979": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "220d01528282",
+   "checked": "PENDING"
+  },
+  "2505.13109": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "624cfdd41a67",
+   "checked": "PENDING"
+  },
+  "2506.11886": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "83ea08376e5b",
+   "checked": "PENDING"
+  },
+  "2604.10539": {
+   "sub": "kv-cache/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5b20ecd85521",
+   "checked": "PENDING"
+  },
+  "2508.08438": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "886514bdacc2",
+   "checked": "PENDING"
+  },
+  "2604.22782": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "23a94cd82d4c",
+   "checked": "PENDING"
+  },
+  "2509.24832": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "df7f888aea7c",
+   "checked": "PENDING"
+  },
+  "2510.16807": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "425f10b1c64e",
+   "checked": "PENDING"
+  },
+  "2508.16134": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f322529148cf",
+   "checked": "PENDING"
+  },
+  "2512.03870": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6c81d284102d",
+   "checked": "PENDING"
+  },
+  "2606.01751": {
+   "sub": "kv-cache/cross-layer-sharing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ad7e1f4807dd",
+   "checked": "PENDING"
+  },
+  "2502.00299": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c3f394d0c8c4",
+   "checked": "PENDING"
+  },
+  "2506.05345": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b2a1967a034a",
+   "checked": "PENDING"
+  },
+  "2505.13866": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "db3951ccaf1a",
+   "checked": "PENDING"
+  },
+  "2503.12491": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "695d3f61b2ad",
+   "checked": "PENDING"
+  },
+  "2502.01068": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "43749a8f27e5",
+   "checked": "PENDING"
+  },
+  "2504.15364": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a05c34a805b6",
+   "checked": "PENDING"
+  },
+  "2510.00636": {
+   "sub": "kv-cache/eviction-and-token-selection",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "55c4ac68f6b9",
+   "checked": "PENDING"
+  },
+  "2509.21623": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ac97f8af33d8",
+   "checked": "PENDING"
+  },
+  "2512.05916": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f8f7ac8f2200",
+   "checked": "PENDING"
+  },
+  "2508.15881": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "253d0ebb6e87",
+   "checked": "PENDING"
+  },
+  "2510.23649": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5620865c7299",
+   "checked": "PENDING"
+  },
+  "2606.08382": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d6802e9c089d",
+   "checked": "PENDING"
+  },
+  "2507.11273": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "41a6fe2fd577",
+   "checked": "PENDING"
+  },
+  "2602.05929": {
+   "sub": "kv-cache/low-rank-and-latent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f64ace1b9d29",
+   "checked": "PENDING"
+  },
+  "2504.10326": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "187c0c2294fc",
+   "checked": "PENDING"
+  },
+  "2511.20172": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "78ab8a40a883",
+   "checked": "PENDING"
+  },
+  "2512.11920": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8626cf1ccf28",
+   "checked": "PENDING"
+  },
+  "2608.03893": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bd1b239e7b7b",
+   "checked": "PENDING"
+  },
+  "2512.18194": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "72b616251a6d",
+   "checked": "PENDING"
+  },
+  "2502.09921": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8154b9d51047",
+   "checked": "PENDING"
+  },
+  "2511.01815": {
+   "sub": "kv-cache/offloading-and-hierarchical-storage",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "39e9ce608cad",
+   "checked": "PENDING"
+  },
+  "2507.07400": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "954becf5d9a6",
+   "checked": "PENDING"
+  },
+  "2502.03771": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c732224f00d7",
+   "checked": "PENDING"
+  },
+  "2604.13226": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e6df1ccbaeec",
+   "checked": "PENDING"
+  },
+  "2502.15734": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "91d316f6f4eb",
+   "checked": "PENDING"
+  },
+  "2508.18572": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6f12c5cb2359",
+   "checked": "PENDING"
+  },
+  "2510.10129": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4317d2842f71",
+   "checked": "PENDING"
+  },
+  "2601.06007": {
+   "sub": "kv-cache/prefix-caching-and-reuse",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "02d213189c80",
+   "checked": "PENDING"
+  },
+  "2502.04420": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4d3f7baa1041",
+   "checked": "PENDING"
+  },
+  "2605.17757": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b358ee089522",
+   "checked": "PENDING"
+  },
+  "2503.16257": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "97cb4e06e1df",
+   "checked": "PENDING"
+  },
+  "2605.19660": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "29fc07905269",
+   "checked": "PENDING"
+  },
+  "2505.18610": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f5ed57bc5af9",
+   "checked": "PENDING"
+  },
+  "2501.16383": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "99479f580005",
+   "checked": "PENDING"
+  },
+  "2505.10938": {
+   "sub": "kv-cache/quantization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7cdea7d3a013",
+   "checked": "PENDING"
+  },
+  "2504.20966": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1fb14e091cd1",
+   "checked": "PENDING"
+  },
+  "2504.02732": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "864f8642265d",
+   "checked": "PENDING"
+  },
+  "2604.10098": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d07b1da11aeb",
+   "checked": "PENDING"
+  },
+  "2504.00927": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ceefdeddde95",
+   "checked": "PENDING"
+  },
+  "2510.06477": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cb003ead523b",
+   "checked": "PENDING"
+  },
+  "2603.11487": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "49eb9fde0725",
+   "checked": "PENDING"
+  },
+  "2507.02754": {
+   "sub": "attention/attention-variants",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "eff0da49f56a",
+   "checked": "PENDING"
+  },
+  "2510.04800": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7c859324138f",
+   "checked": "PENDING"
+  },
+  "2510.07318": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4df23c2e2470",
+   "checked": "PENDING"
+  },
+  "2503.24067": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "067e74231ce6",
+   "checked": "PENDING"
+  },
+  "2604.03444": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4d9ade0cc38d",
+   "checked": "PENDING"
+  },
+  "2606.15378": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a30290444648",
+   "checked": "PENDING"
+  },
+  "2506.00744": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c87122df1b8a",
+   "checked": "PENDING"
+  },
+  "2603.26380": {
+   "sub": "attention/hybrid-architectures",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "59d4f3875b56",
+   "checked": "PENDING"
+  },
+  "2605.23081": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ed1161e3cd49",
+   "checked": "PENDING"
+  },
+  "2603.02170": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3719e8f557dc",
+   "checked": "PENDING"
+  },
+  "2505.12044": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "44665e78bc49",
+   "checked": "PENDING"
+  },
+  "2502.12082": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "43d8be30fce0",
+   "checked": "PENDING"
+  },
+  "2503.14376": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "af1cdc68ed95",
+   "checked": "PENDING"
+  },
+  "2511.22333": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c2c594e3a28f",
+   "checked": "PENDING"
+  },
+  "2506.01969": {
+   "sub": "attention/kernels-and-io-aware",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5fd60da052b4",
+   "checked": "PENDING"
+  },
+  "2604.06169": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "88c2d5256321",
+   "checked": "PENDING"
+  },
+  "2505.23884": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "283a0e1311b2",
+   "checked": "PENDING"
+  },
+  "2602.21204": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "91c2e09f8113",
+   "checked": "PENDING"
+  },
+  "2506.04761": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "20b4d6fb3021",
+   "checked": "PENDING"
+  },
+  "2601.07832": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dacce182156a",
+   "checked": "PENDING"
+  },
+  "2512.12602": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c3800ea02c27",
+   "checked": "PENDING"
+  },
+  "2501.12352": {
+   "sub": "attention/linear-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "89b5019f4acb",
+   "checked": "PENDING"
+  },
+  "2502.05167": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7083c86f4143",
+   "checked": "PENDING"
+  },
+  "2503.02130": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0c0655197014",
+   "checked": "PENDING"
+  },
+  "2512.23675": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "24f31d08668e",
+   "checked": "PENDING"
+  },
+  "2510.05381": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9150298fbf6e",
+   "checked": "PENDING"
+  },
+  "2501.19399": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b973523069e0",
+   "checked": "PENDING"
+  },
+  "2502.20082": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "76c27c38d5b1",
+   "checked": "PENDING"
+  },
+  "2502.13922": {
+   "sub": "attention/long-context-and-position",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4317d9d628af",
+   "checked": "PENDING"
+  },
+  "2505.13389": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a59546bc42b4",
+   "checked": "PENDING"
+  },
+  "2503.16428": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "575f1b139b0d",
+   "checked": "PENDING"
+  },
+  "2509.24006": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b83b15db430f",
+   "checked": "PENDING"
+  },
+  "2606.13392": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "987182c7c63d",
+   "checked": "PENDING"
+  },
+  "2603.12201": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8a19bbb376f0",
+   "checked": "PENDING"
+  },
+  "2502.14866": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d139a934bb9e",
+   "checked": "PENDING"
+  },
+  "2502.20766": {
+   "sub": "attention/sparse-attention",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6a1c5721f4d6",
+   "checked": "PENDING"
+  },
+  "2603.15569": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a4567933ac85",
+   "checked": "PENDING"
+  },
+  "2505.23735": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5c585efbee63",
+   "checked": "PENDING"
+  },
+  "2504.13173": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a3ba58a7ad95",
+   "checked": "PENDING"
+  },
+  "2506.05233": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8d5d5c8487c9",
+   "checked": "PENDING"
+  },
+  "2502.10297": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e2f50a414e19",
+   "checked": "PENDING"
+  },
+  "2504.10449": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f5a4d7fba896",
+   "checked": "PENDING"
+  },
+  "2501.00658": {
+   "sub": "attention/state-space-and-recurrent",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b7ee04007eab",
+   "checked": "PENDING"
+  },
+  "2603.17435": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6ede253bb880",
+   "checked": "PENDING"
+  },
+  "2602.17664": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f5b165339ee3",
+   "checked": "PENDING"
+  },
+  "2502.00922": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "544c146b141a",
+   "checked": "PENDING"
+  },
+  "2502.01717": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fc46bd9c34d6",
+   "checked": "PENDING"
+  },
+  "2503.05936": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cc5b9c717b34",
+   "checked": "PENDING"
+  },
+  "2504.13237": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "905f6c15134c",
+   "checked": "PENDING"
+  },
+  "2505.03031": {
+   "sub": "compression/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4805e827059f",
+   "checked": "PENDING"
+  },
+  "2505.19427": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2662ac1a8193",
+   "checked": "PENDING"
+  },
+  "2507.01299": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "53250ddb6c34",
+   "checked": "PENDING"
+  },
+  "2505.14884": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e41da9c639b7",
+   "checked": "PENDING"
+  },
+  "2506.06644": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "828c0b8f3c01",
+   "checked": "PENDING"
+  },
+  "2509.00454": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "989cbb794573",
+   "checked": "PENDING"
+  },
+  "2503.16672": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "26ad2f7255da",
+   "checked": "PENDING"
+  },
+  "2506.20194": {
+   "sub": "compression/activation-sparsity",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5c840543cc80",
+   "checked": "PENDING"
+  },
+  "2512.03383": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2073c5b9d689",
+   "checked": "PENDING"
+  },
+  "2502.01403": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "666edea20725",
+   "checked": "PENDING"
+  },
+  "2505.17974": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5444fa0774ee",
+   "checked": "PENDING"
+  },
+  "2604.01609": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "10cfa1338b15",
+   "checked": "PENDING"
+  },
+  "2602.12429": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d0d5490e5f70",
+   "checked": "PENDING"
+  },
+  "2501.16372": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b8061facc853",
+   "checked": "PENDING"
+  },
+  "2602.03051": {
+   "sub": "compression/low-rank-decomposition",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "063dc293ce27",
+   "checked": "PENDING"
+  },
+  "2502.17941": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "792ce3c73919",
+   "checked": "PENDING"
+  },
+  "2502.15618": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "53e7f41f0dc4",
+   "checked": "PENDING"
+  },
+  "2601.06787": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ec4c6de693f5",
+   "checked": "PENDING"
+  },
+  "2603.24652": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d63d5b5ee578",
+   "checked": "PENDING"
+  },
+  "2505.22689": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b184a20ee9c9",
+   "checked": "PENDING"
+  },
+  "2509.14230": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "189c0ace7a0a",
+   "checked": "PENDING"
+  },
+  "2501.02086": {
+   "sub": "compression/structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2bc6b298cdbd",
+   "checked": "PENDING"
+  },
+  "2502.00258": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d593e063d962",
+   "checked": "PENDING"
+  },
+  "2505.23049": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e6460e9e39c5",
+   "checked": "PENDING"
+  },
+  "2603.05168": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2858edc86802",
+   "checked": "PENDING"
+  },
+  "2505.08299": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b9adfed10937",
+   "checked": "PENDING"
+  },
+  "2606.09080": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a8eef03d2ca0",
+   "checked": "PENDING"
+  },
+  "2511.13061": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e21d15c0950e",
+   "checked": "PENDING"
+  },
+  "2506.06866": {
+   "sub": "compression/unstructured-and-semi-structured-pruning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "581b84d06ad4",
+   "checked": "PENDING"
+  },
+  "2502.11880": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fc4f8209624b",
+   "checked": "PENDING"
+  },
+  "2510.13998": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bc0eaa56e2e8",
+   "checked": "PENDING"
+  },
+  "2606.13054": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d9db16c0519a",
+   "checked": "PENDING"
+  },
+  "2502.13179": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "db1d6f448e0d",
+   "checked": "PENDING"
+  },
+  "2512.02901": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b951208b1346",
+   "checked": "PENDING"
+  },
+  "2606.26650": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9c204e74d191",
+   "checked": "PENDING"
+  },
+  "2509.23809": {
+   "sub": "quantization/1-bit-and-ternary",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bae7c8fb5308",
+   "checked": "PENDING"
+  },
+  "2602.04163": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6a90371dff34",
+   "checked": "PENDING"
+  },
+  "2602.05367": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6127eceb815d",
+   "checked": "PENDING"
+  },
+  "2504.07389": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8ffab1f19c23",
+   "checked": "PENDING"
+  },
+  "2509.09679": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "64e9e9bf1226",
+   "checked": "PENDING"
+  },
+  "2508.05571": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f9d685605409",
+   "checked": "PENDING"
+  },
+  "2606.10531": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4fbbcadb6e95",
+   "checked": "PENDING"
+  },
+  "2606.10520": {
+   "sub": "quantization/2-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9f444c48e4ee",
+   "checked": "PENDING"
+  },
+  "2505.02390": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d7547480be2d",
+   "checked": "PENDING"
+  },
+  "2504.09223": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fea28eee88c1",
+   "checked": "PENDING"
+  },
+  "2603.17809": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "054ec240db74",
+   "checked": "PENDING"
+  },
+  "2608.21134": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b9d8d0c4fec1",
+   "checked": "PENDING"
+  },
+  "2608.11045": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dd56c4cfc153",
+   "checked": "PENDING"
+  },
+  "2501.16385": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7a936d6b8d67",
+   "checked": "PENDING"
+  },
+  "2602.01037": {
+   "sub": "quantization/3-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a03603eaaf2d",
+   "checked": "PENDING"
+  },
+  "2601.07475": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c41f8c6da032",
+   "checked": "PENDING"
+  },
+  "2605.20315": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "69e09afef972",
+   "checked": "PENDING"
+  },
+  "2601.20088": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "917e37cdaee6",
+   "checked": "PENDING"
+  },
+  "2609.04098": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e354a86c7d81",
+   "checked": "PENDING"
+  },
+  "2511.04214": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d9910a9a355c",
+   "checked": "PENDING"
+  },
+  "2601.19213": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "19c70363768f",
+   "checked": "PENDING"
+  },
+  "2601.19026": {
+   "sub": "quantization/4-bit-floating-point",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "189bfbbd78d4",
+   "checked": "PENDING"
+  },
+  "2512.00956": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "387d9c940a68",
+   "checked": "PENDING"
+  },
+  "2503.22879": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1071374a4e0e",
+   "checked": "PENDING"
+  },
+  "2507.04610": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "31a123194f66",
+   "checked": "PENDING"
+  },
+  "2511.10645": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "076d31ef290e",
+   "checked": "PENDING"
+  },
+  "2502.00425": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "86034d109773",
+   "checked": "PENDING"
+  },
+  "2607.27704": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "649b21d77ef1",
+   "checked": "PENDING"
+  },
+  "2502.09720": {
+   "sub": "quantization/4-bit-integer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "815c708542bc",
+   "checked": "PENDING"
+  },
+  "2506.02024": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4078907d61c0",
+   "checked": "PENDING"
+  },
+  "2609.01587": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "950177099f68",
+   "checked": "PENDING"
+  },
+  "2605.26339": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "26e77fe7caba",
+   "checked": "PENDING"
+  },
+  "2508.04405": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3017b533dfc7",
+   "checked": "PENDING"
+  },
+  "2505.20839": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "55eeafb8f107",
+   "checked": "PENDING"
+  },
+  "2505.08981": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e1fab6104cc1",
+   "checked": "PENDING"
+  },
+  "2512.18934": {
+   "sub": "quantization/5-to-8-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e2dea5901918",
+   "checked": "PENDING"
+  },
+  "2509.22944": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "927348b1f4c5",
+   "checked": "PENDING"
+  },
+  "2506.19697": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f7305590b63d",
+   "checked": "PENDING"
+  },
+  "2504.02692": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d9902d41fd07",
+   "checked": "PENDING"
+  },
+  "2502.02631": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a1c5dbb4c669",
+   "checked": "PENDING"
+  },
+  "2504.09629": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dbe5dcd134eb",
+   "checked": "PENDING"
+  },
+  "2505.07004": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "28e8cab4096b",
+   "checked": "PENDING"
+  },
+  "2603.04800": {
+   "sub": "quantization/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "aba6be6a1c90",
+   "checked": "PENDING"
+  },
+  "2510.26788": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "366a1ad0f8d3",
+   "checked": "PENDING"
+  },
+  "2510.04212": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "314b554070b0",
+   "checked": "PENDING"
+  },
+  "2601.22813": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3bbc961cd06e",
+   "checked": "PENDING"
+  },
+  "2505.01043": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a0199b6f23ee",
+   "checked": "PENDING"
+  },
+  "2601.14243": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2e59435b69e1",
+   "checked": "PENDING"
+  },
+  "2601.18150": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "275747be615a",
+   "checked": "PENDING"
+  },
+  "2507.16099": {
+   "sub": "quantization/low-precision-training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f04d8205a1f2",
+   "checked": "PENDING"
+  },
+  "2501.01144": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6fe3173ca466",
+   "checked": "PENDING"
+  },
+  "2603.17891": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2da43fa50f73",
+   "checked": "PENDING"
+  },
+  "2511.06516": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cd21daa5c2cc",
+   "checked": "PENDING"
+  },
+  "2506.12024": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0beb2d240de3",
+   "checked": "PENDING"
+  },
+  "2602.22268": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7e0db7ddebda",
+   "checked": "PENDING"
+  },
+  "2504.03717": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6028816f5301",
+   "checked": "PENDING"
+  },
+  "2606.04115": {
+   "sub": "quantization/mixed-precision",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f0fcd0c25309",
+   "checked": "PENDING"
+  },
+  "2506.17255": {
+   "sub": "quantization/sub-1-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2a58ca86b8c1",
+   "checked": "PENDING"
+  },
+  "2602.17063": {
+   "sub": "quantization/sub-1-bit",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "bb9b5ba4967b",
+   "checked": "PENDING"
+  },
+  "2607.05722": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "de12a77d0f61",
+   "checked": "PENDING"
+  },
+  "2512.15713": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1195a5da0b6f",
+   "checked": "PENDING"
+  },
+  "2510.03270": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "814644ae258e",
+   "checked": "PENDING"
+  },
+  "2606.06712": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "998dc9d25034",
+   "checked": "PENDING"
+  },
+  "2606.01774": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7eea40b8ade9",
+   "checked": "PENDING"
+  },
+  "2604.06832": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0b6fd6ef01aa",
+   "checked": "PENDING"
+  },
+  "2605.06885": {
+   "sub": "model-conversion/ar-to-diffusion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a38919e889f7",
+   "checked": "PENDING"
+  },
+  "2512.10411": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9e36be1379e9",
+   "checked": "PENDING"
+  },
+  "2505.17272": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9b6409c75beb",
+   "checked": "PENDING"
+  },
+  "2605.15250": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f2a7b9c6f404",
+   "checked": "PENDING"
+  },
+  "2603.17946": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b62eead66a39",
+   "checked": "PENDING"
+  },
+  "2512.23966": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "34d8f5de809c",
+   "checked": "PENDING"
+  },
+  "2503.11132": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "982ec48bc3ae",
+   "checked": "PENDING"
+  },
+  "2604.05688": {
+   "sub": "model-conversion/attention-conversion",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "14026045eaa4",
+   "checked": "PENDING"
+  },
+  "2501.15316": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "38f572fe5878",
+   "checked": "PENDING"
+  },
+  "2502.03009": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9345a30be4be",
+   "checked": "PENDING"
+  },
+  "2603.13364": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5ef6c739ab28",
+   "checked": "PENDING"
+  },
+  "2506.09351": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a0643613bffd",
+   "checked": "PENDING"
+  },
+  "2503.11144": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5061affecec3",
+   "checked": "PENDING"
+  },
+  "2505.15414": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ad21ddf6d1fb",
+   "checked": "PENDING"
+  },
+  "2603.29765": {
+   "sub": "model-conversion/dense-to-moe-upcycling",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6bec273ff649",
+   "checked": "PENDING"
+  },
+  "2507.07129": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "767e60651602",
+   "checked": "PENDING"
+  },
+  "2508.08011": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8b1841c216b9",
+   "checked": "PENDING"
+  },
+  "2608.11233": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "13ca33956c1f",
+   "checked": "PENDING"
+  },
+  "2605.13405": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "556fc4c9abb3",
+   "checked": "PENDING"
+  },
+  "2609.27294": {
+   "sub": "model-conversion/model-growth-and-other",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "62708c160fad",
+   "checked": "PENDING"
+  },
+  "2509.17786": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a0367fc47150",
+   "checked": "PENDING"
+  },
+  "2502.02421": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "77a5ffb16d23",
+   "checked": "PENDING"
+  },
+  "2503.08099": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2a2e2fd78a32",
+   "checked": "PENDING"
+  },
+  "2509.24244": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e0a0b7efbffa",
+   "checked": "PENDING"
+  },
+  "2505.10833": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4dcbcecc6a72",
+   "checked": "PENDING"
+  },
+  "2505.22934": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "abb509e894ab",
+   "checked": "PENDING"
+  },
+  "2502.09056": {
+   "sub": "model-conversion/model-merging",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "59a5a2187509",
+   "checked": "PENDING"
+  },
+  "2504.17025": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8d5d68fe273e",
+   "checked": "PENDING"
+  },
+  "2505.20133": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e5fc9330fefd",
+   "checked": "PENDING"
+  },
+  "2506.03523": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "97a392fa3bfe",
+   "checked": "PENDING"
+  },
+  "2604.07466": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "651b79100486",
+   "checked": "PENDING"
+  },
+  "2505.09738": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dd849780978a",
+   "checked": "PENDING"
+  },
+  "2510.21954": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9d8ae6184314",
+   "checked": "PENDING"
+  },
+  "2508.15229": {
+   "sub": "model-conversion/tokenizer-and-vocab-transfer",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "022637315f7e",
+   "checked": "PENDING"
+  },
+  "2601.22156": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1a09e226a939",
+   "checked": "PENDING"
+  },
+  "2507.09025": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "43e831f7ccf3",
+   "checked": "PENDING"
+  },
+  "2501.15570": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f591614189fb",
+   "checked": "PENDING"
+  },
+  "2603.15590": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1ac42e962c0f",
+   "checked": "PENDING"
+  },
+  "2502.14458": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6182c0f163eb",
+   "checked": "PENDING"
+  },
+  "2512.20569": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "07e3384aaca9",
+   "checked": "PENDING"
+  },
+  "2606.30562": {
+   "sub": "model-conversion/transformer-to-linear-or-hybrid",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "711033294f59",
+   "checked": "PENDING"
+  },
+  "2507.07024": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7e4ab0e2c565",
+   "checked": "PENDING"
+  },
+  "2504.07964": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6c72a4fad5f0",
+   "checked": "PENDING"
+  },
+  "2501.13074": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b0f1c4adbe2c",
+   "checked": "PENDING"
+  },
+  "2506.18945": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6e54f1686a20",
+   "checked": "PENDING"
+  },
+  "2511.07419": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2f50b550d378",
+   "checked": "PENDING"
+  },
+  "2508.07785": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1106a50ec852",
+   "checked": "PENDING"
+  },
+  "2606.12397": {
+   "sub": "mixture-of-experts/architecture-and-routing",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fbcfb52e1cd7",
+   "checked": "PENDING"
+  },
+  "2505.03804": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "db58ebae8b17",
+   "checked": "PENDING"
+  },
+  "2604.04356": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "588f0af0bde6",
+   "checked": "PENDING"
+  },
+  "2605.18643": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "612f23607095",
+   "checked": "PENDING"
+  },
+  "2509.16105": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7a9bbf58e582",
+   "checked": "PENDING"
+  },
+  "2506.23266": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e56597606b9f",
+   "checked": "PENDING"
+  },
+  "2509.10377": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "752a04411db9",
+   "checked": "PENDING"
+  },
+  "2504.06792": {
+   "sub": "mixture-of-experts/compression",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "31d05f8187bd",
+   "checked": "PENDING"
+  },
+  "2512.13525": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2957eee0c437",
+   "checked": "PENDING"
+  },
+  "2504.02263": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "34311ba6d72c",
+   "checked": "PENDING"
+  },
+  "2502.06888": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "323dbdc73029",
+   "checked": "PENDING"
+  },
+  "2502.06643": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "343b8b6bb6a8",
+   "checked": "PENDING"
+  },
+  "2607.00466": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "38ea19bbbb4e",
+   "checked": "PENDING"
+  },
+  "2609.18063": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5a09cb3c523b",
+   "checked": "PENDING"
+  },
+  "2510.05497": {
+   "sub": "mixture-of-experts/inference-and-serving",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e15fdc801d46",
+   "checked": "PENDING"
+  },
+  "2505.11432": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "37c1db0d6b47",
+   "checked": "PENDING"
+  },
+  "2501.10714": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6c2e6c2ee4a3",
+   "checked": "PENDING"
+  },
+  "2602.11686": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e8895e3d51f8",
+   "checked": "PENDING"
+  },
+  "2505.20225": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b1fb832c33e5",
+   "checked": "PENDING"
+  },
+  "2510.08008": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c2761ad440a6",
+   "checked": "PENDING"
+  },
+  "2601.20205": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cc76f1185c06",
+   "checked": "PENDING"
+  },
+  "2505.13380": {
+   "sub": "mixture-of-experts/training",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1a0f11656435",
+   "checked": "PENDING"
+  },
+  "2604.03128": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d14918d63549",
+   "checked": "PENDING"
+  },
+  "2502.12143": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "615970d00731",
+   "checked": "PENDING"
+  },
+  "2603.25562": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7964e3d1c8cd",
+   "checked": "PENDING"
+  },
+  "2601.18734": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1e812ce654dc",
+   "checked": "PENDING"
+  },
+  "2505.17612": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "305aa3d96843",
+   "checked": "PENDING"
+  },
+  "2604.00626": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9bd1ee389fa3",
+   "checked": "PENDING"
+  },
+  "2606.30406": {
+   "sub": "compression/knowledge-distillation",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "470cddd57474",
+   "checked": "PENDING"
+  },
+  "2505.01658": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b513b2873462",
+   "checked": "PENDING"
+  },
+  "2510.18586": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5379fdbe2a03",
+   "checked": "PENDING"
+  },
+  "2502.20969": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "41a86bc27988",
+   "checked": "PENDING"
+  },
+  "2502.08773": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "572f687d79ef",
+   "checked": "PENDING"
+  },
+  "2501.14417": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "faa0519ce925",
+   "checked": "PENDING"
+  },
+  "2504.19720": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f2e6442c8c2b",
+   "checked": "PENDING"
+  },
+  "2502.20576": {
+   "sub": "serving-systems/_general",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c07ba58c5f10",
+   "checked": "PENDING"
+  },
+  "2602.02204": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e2fc472dc606",
+   "checked": "PENDING"
+  },
+  "2501.05460": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0c6d73e57e68",
+   "checked": "PENDING"
+  },
+  "2502.07903": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ab673991396a",
+   "checked": "PENDING"
+  },
+  "2604.15039": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "75f60f7e83a1",
+   "checked": "PENDING"
+  },
+  "2602.14516": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0d14f2aced48",
+   "checked": "PENDING"
+  },
+  "2504.14489": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "70816bc0f277",
+   "checked": "PENDING"
+  },
+  "2606.07684": {
+   "sub": "serving-systems/disaggregated-prefill-decode",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0ad1262011cd",
+   "checked": "PENDING"
+  },
+  "2506.10911": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3aa34737f3c0",
+   "checked": "PENDING"
+  },
+  "2505.11329": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "667dffcc7f51",
+   "checked": "PENDING"
+  },
+  "2502.07563": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5b262ba03e27",
+   "checked": "PENDING"
+  },
+  "2510.18121": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8d3e11cc38ad",
+   "checked": "PENDING"
+  },
+  "2503.17924": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "af6151bad895",
+   "checked": "PENDING"
+  },
+  "2511.17826": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9179ce1c3fab",
+   "checked": "PENDING"
+  },
+  "2504.14960": {
+   "sub": "serving-systems/distributed-inference-and-parallelism",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "40705c2feb98",
+   "checked": "PENDING"
+  },
+  "2502.15964": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "083a73330281",
+   "checked": "PENDING"
+  },
+  "2510.11496": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f3de2d3203c1",
+   "checked": "PENDING"
+  },
+  "2504.08242": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f8e5fbd23b48",
+   "checked": "PENDING"
+  },
+  "2507.16731": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2743a2ef0e9e",
+   "checked": "PENDING"
+  },
+  "2512.14052": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9daf6ffb332a",
+   "checked": "PENDING"
+  },
+  "2506.02847": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "333fdaeeec77",
+   "checked": "PENDING"
+  },
+  "2505.16508": {
+   "sub": "serving-systems/edge-and-on-device",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "523cf92bacd6",
+   "checked": "PENDING"
+  },
+  "2504.17674": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4e178c435374",
+   "checked": "PENDING"
+  },
+  "2503.05804": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "4ebe1e9ef5de",
+   "checked": "PENDING"
+  },
+  "2512.03024": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "fc6e006f1aea",
+   "checked": "PENDING"
+  },
+  "2502.05043": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a0ac20a9c3d8",
+   "checked": "PENDING"
+  },
+  "2511.05597": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "db4af6fc93ba",
+   "checked": "PENDING"
+  },
+  "2501.01990": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6e4597d38d52",
+   "checked": "PENDING"
+  },
+  "2601.22076": {
+   "sub": "serving-systems/energy-and-cost",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c7103b3a31ac",
+   "checked": "PENDING"
+  },
+  "2502.10517": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9ed7993aa7c8",
+   "checked": "PENDING"
+  },
+  "2507.05687": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f43b389853d0",
+   "checked": "PENDING"
+  },
+  "2602.05885": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e1cb8d3a34cf",
+   "checked": "PENDING"
+  },
+  "2512.02551": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "792cc98a8707",
+   "checked": "PENDING"
+  },
+  "2502.14752": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3ba798722000",
+   "checked": "PENDING"
+  },
+  "2601.15727": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "60b3c452d527",
+   "checked": "PENDING"
+  },
+  "2602.19128": {
+   "sub": "serving-systems/gpu-kernels-and-compilers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5ed7dbb02723",
+   "checked": "PENDING"
+  },
+  "2511.06174": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "95baa34519b5",
+   "checked": "PENDING"
+  },
+  "2506.12708": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d8b21f385680",
+   "checked": "PENDING"
+  },
+  "2601.05047": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "85e782ff68fd",
+   "checked": "PENDING"
+  },
+  "2504.17584": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "9d124e012c3f",
+   "checked": "PENDING"
+  },
+  "2507.10178": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a7b096df8d87",
+   "checked": "PENDING"
+  },
+  "2502.15260": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2cff20ae3b13",
+   "checked": "PENDING"
+  },
+  "2502.04563": {
+   "sub": "serving-systems/hardware-accelerators",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3a767b34130b",
+   "checked": "PENDING"
+  },
+  "2502.16963": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f20e0a83a015",
+   "checked": "PENDING"
+  },
+  "2607.10186": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "180e9e803206",
+   "checked": "PENDING"
+  },
+  "2608.13868": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5272a2b34855",
+   "checked": "PENDING"
+  },
+  "2503.18292": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "51456999c0a1",
+   "checked": "PENDING"
+  },
+  "2505.06901": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c7c80413c68a",
+   "checked": "PENDING"
+  },
+  "2606.00866": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c507ad9fe1c7",
+   "checked": "PENDING"
+  },
+  "2608.11668": {
+   "sub": "serving-systems/memory-and-offloading",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "69473ad918b1",
+   "checked": "PENDING"
+  },
+  "2505.07203": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0d928219aac0",
+   "checked": "PENDING"
+  },
+  "2602.13692": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2c5be584f9fe",
+   "checked": "PENDING"
+  },
+  "2507.10150": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "57ca7cf3052b",
+   "checked": "PENDING"
+  },
+  "2502.07115": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "c89d9108cbf7",
+   "checked": "PENDING"
+  },
+  "2505.17052": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1afde385d073",
+   "checked": "PENDING"
+  },
+  "2504.20068": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "84a3dfeece0f",
+   "checked": "PENDING"
+  },
+  "2510.24051": {
+   "sub": "serving-systems/scheduling-and-batching",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "69adf00fbcf9",
+   "checked": "PENDING"
+  },
+  "2504.11456": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6f24a8a5624a",
+   "checked": "PENDING"
+  },
+  "2503.02951": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "03379696a844",
+   "checked": "PENDING"
+  },
+  "2504.13161": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d365e5ec4968",
+   "checked": "PENDING"
+  },
+  "2504.01943": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "44b3504fbae9",
+   "checked": "PENDING"
+  },
+  "2503.00808": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2a3f0d76b965",
+   "checked": "PENDING"
+  },
+  "2504.02807": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dcf9bb1661d0",
+   "checked": "PENDING"
+  },
+  "2506.05209": {
+   "sub": "training/data-curation-and-synthetic-data",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "13d37849ecfa",
+   "checked": "PENDING"
+  },
+  "2509.01440": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a249e38856e7",
+   "checked": "PENDING"
+  },
+  "2501.06842": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d38dd8d6500d",
+   "checked": "PENDING"
+  },
+  "2503.20762": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "afa7ce36cd18",
+   "checked": "PENDING"
+  },
+  "2511.20626": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "911f88ea3bba",
+   "checked": "PENDING"
+  },
+  "2504.02507": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f1ca02ead310",
+   "checked": "PENDING"
+  },
+  "2510.12402": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6c088cce5efd",
+   "checked": "PENDING"
+  },
+  "2509.11983": {
+   "sub": "training/optimizers",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "0a96c4264dc6",
+   "checked": "PENDING"
+  },
+  "2502.14502": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b426bc1f8ea4",
+   "checked": "PENDING"
+  },
+  "2506.16500": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "18a2d455ec74",
+   "checked": "PENDING"
+  },
+  "2606.02437": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d9bea16ea96c",
+   "checked": "PENDING"
+  },
+  "2507.12142": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "6e8dedaf6f3c",
+   "checked": "PENDING"
+  },
+  "2506.06105": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "2a9931ee9c73",
+   "checked": "PENDING"
+  },
+  "2502.01235": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b66916234751",
+   "checked": "PENDING"
+  },
+  "2501.13787": {
+   "sub": "training/parameter-efficient-finetuning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cb0f8f28e927",
+   "checked": "PENDING"
+  },
+  "2512.07783": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "a3c31fdc99a6",
+   "checked": "PENDING"
+  },
+  "2603.03276": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "42593c134503",
+   "checked": "PENDING"
+  },
+  "2504.04022": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e6c9a7262a7a",
+   "checked": "PENDING"
+  },
+  "2508.02317": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "57f3dc3fcfc8",
+   "checked": "PENDING"
+  },
+  "2502.08524": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "db8f951a30a0",
+   "checked": "PENDING"
+  },
+  "2501.18512": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "cb2ddc7f8495",
+   "checked": "PENDING"
+  },
+  "2510.03264": {
+   "sub": "training/pretraining-recipes-and-efficiency",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "e3a2ef61c06f",
+   "checked": "PENDING"
+  },
+  "2503.20783": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "ae708bee1520",
+   "checked": "PENDING"
+  },
+  "2506.01939": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d08f3fcf15cd",
+   "checked": "PENDING"
+  },
+  "2507.19457": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "da27cb65c772",
+   "checked": "PENDING"
+  },
+  "2507.18071": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "1fa13886389b",
+   "checked": "PENDING"
+  },
+  "2505.03335": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "5ad770cc0580",
+   "checked": "PENDING"
+  },
+  "2503.18892": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "7084f7c4a987",
+   "checked": "PENDING"
+  },
+  "2503.24290": {
+   "sub": "training/rl-for-reasoning",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "60c8b166512c",
+   "checked": "PENDING"
+  },
+  "2501.12370": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "389f13398064",
+   "checked": "PENDING"
+  },
+  "2505.01618": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3ec82210aec3",
+   "checked": "PENDING"
+  },
+  "2503.09799": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "34dac6e985e4",
+   "checked": "PENDING"
+  },
+  "2502.06857": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "249f37d9e073",
+   "checked": "PENDING"
+  },
+  "2505.13738": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "609c47aa15b1",
+   "checked": "PENDING"
+  },
+  "2609.01343": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "36caafd10268",
+   "checked": "PENDING"
+  },
+  "2503.04725": {
+   "sub": "training/scaling-laws",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "d8850803ccc8",
+   "checked": "PENDING"
+  },
+  "2506.14761": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "3c17de7c0f39",
+   "checked": "PENDING"
+  },
+  "2503.13423": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "dbf4fe2a5ffb",
+   "checked": "PENDING"
+  },
+  "2512.20757": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "8842e568a540",
+   "checked": "PENDING"
+  },
+  "2507.12720": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "b7ca08f011fb",
+   "checked": "PENDING"
+  },
+  "2506.19004": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "67c6b67b3f3f",
+   "checked": "PENDING"
+  },
+  "2506.03149": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "f8ff9da03c8c",
+   "checked": "PENDING"
+  },
+  "2506.01084": {
+   "sub": "training/tokenization",
+   "depth": "ranking-only",
+   "verdict": "unjudged",
+   "digest": "759242f4da3c",
+   "checked": "PENDING"
+  }
+ }
+}
