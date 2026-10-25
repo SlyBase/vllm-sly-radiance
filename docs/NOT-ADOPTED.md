@@ -242,3 +242,116 @@ is ported to libr4d. The bar then: >= 10x TTFT at >= 32k context, batch 1, with 
 Process lesson kept: their benchmark is an honest template for any prefill-pruning idea — batch 1, frozen held-out
 test split, an unpruned reference arm, and random-selection baselines.
 
+
+## Prefill levers measured on 2026-10-21/22 (R9700, image 1.6.0 base + the 1.8.0 kernels)
+
+### Drafter prefill-window skip with prefix caching on: FAIL, removed
+
+A sub-knob (`RADIANCE_DFLASH_PREFILL_WINDOW_SKIP_APC=1`) let the skip act with prefix caching on. 210 W GPU check,
+greedy, same prompt, only the switch differing: the ON arm's output was no longer identical (text ended `...-bbc52c2`
+instead of `...-bbc`), the accepted-draft count on the 39,622-token prompt went 82 -> 179 (17 -> 33 drafts), the
+prefix-cache query counter 39,622 -> 86,807 and the request took 2.1x as long, which reads as a recompute after
+masking. Over two 10-round sessions TTFT was no better and 0.8-1.8 % slower (the skip does not even fire in 2K
+rounds, gate 3,808). The commit was reverted; the skip stays gated on prefix caching off.
+
+### Tall tile for the merged GDN in_proj: slower in the cell bench, not enabled
+
+`RADIANCE_MXFP4_TALL` is gate_up only (N 34,816): the same tile on in_proj (N 16,480) was up to 2 % slower than
+TN2/TN4 in the cell bench. At serve level the in_proj variant (night arm V8, 300 W) against the gate_up-only stack
+(V6) read -0.1 / 0.0 / +2.1 / +0.9 / +1.7 % at 2K-64K, but the two V6 starts differ from each other by up to 3.7 %,
+so this is noise, not a gain; it is not enabled.
+
+### NVFP4 checkpoint instead of MXFP4: not faster
+
+Same image, same launcher, 210 W, prefill tok/s at 2K/8K/16K/32K/64K: MXFP4 3,051 / 3,006 / 2,922 / 2,746 / 2,488,
+NVFP4 2,968 / 2,901 / 2,833 / 2,687 / 2,445 (-2.7 / -3.5 / -3.0 / -2.1 / -1.7 %). The weight format is not the cause of
+the remaining GEMM gap to the reference stack.
+
+### GEMM / W-stream overlap: already in the kernel
+
+The overlap the reference stack is credited with (the next slab's weight loads issued while the current slab computes)
+is what the A-tiled kernel already does; the explicit software-pipelined variant (`AT_OVL`, section above) was neutral
+to 0-4 % slower. Nothing to port.
+
+## Row-granular drafter prefill skip (PR #187, reviewed 2026-10-25): correct, but 0 % in production
+
+`RADIANCE_DFLASH_PREFILL_PARTIAL_SKIP=1` runs the DFlash2 drafter's `fc` and context-K/V fill only over the last
+`window + margin` rows of the prompt (3,808 rows at a 6,000-token prompt instead of 6,000). The code is correct: the CI
+gates and the patch dry run are green, the kept rows stay bit-identical (never fewer than 513 per chunk), greedy text
+and all `spec_decode` counters are identical, and the CPU test catches deliberate breakages. The PR measured at 300 W
+with prefix caching off: +0.80 % prefill at 6k, +0.27 % at 24k, 0 % at 1.5k / 12k / 48k.
+
+Not adopted, because it uses the same gate as the whole skip (section above): it turns itself off when prefix caching
+is on, and production runs with prefix caching on. Turning prefix caching off to get the knob is a bad trade: one
+cache hit on a 20k-token prefix saves about 5 s of prefill, and the knob saves about 0.8 % of a cold prefill. If we
+merged it, it would act only in the benchmarks (prefix caching off for determinism) and make the published prefill
+numbers higher than what production sees. Open it again only if a version of the skip works with prefix caching on.
+
+
+## 2:4 structured sparsity on the weights via FP8 SWMMAC (RDNA4), reviewed 2026-10-21
+
+The idea: prune every layer to 2:4 (two of each four weights along K are zero) in one shot with SparseGPT or Wanda,
+store the weights as compressed FP8 plus a sparsity index, and let the card's sparse matrix instruction do the MACs.
+Carrot: the prefill GEMM is 66 % of the 47k prefill span, so halving its compute would be about +22 % prefill.
+
+The hardware is there, the payoff is not.
+
+| Item | Finding |
+|---|---|
+| Sparse FP8 instruction on gfx1201 | Exists and is reachable from the toolchain we ship. `clang++ -x hip --offload-arch=gfx1201 -S` emits `v_swmmac_f32_16x16x32_fp8_fp8 v[0:7], v[12:13], v[8:11], v15`; the builtin is `__builtin_amdgcn_swmmac_f32_16x16x32_fp8_fp8_w32` (ROCm 10.1, image 1.6.0). |
+| Rate gain per instruction | Not documented by AMD. The page states the gain as *"halves the storage and bandwidth required for A"* and says nothing about throughput. Arithmetic: 16x16x32 with 16 non-zeros holds the same 4,096 useful MACs as the dense 16x16x16 FP8 instruction, so a gain can only come from issuing 2x the B operand per cycle. Unmeasured. |
+| Dense FP8 reference width | `v_wmma_f32_16x16x32_fp8_fp8` does not exist on gfx1201 ("invalid instruction"), so the sparse form cannot simply be compared to a wider dense form. |
+| Headroom left in the kernel | Small. The A-tiled FP8 GEMM already runs at 270 TF/s effective at 47k (2.54 PFLOP over 9,425 ms) against 325 TF/s measured register-resident peak = 83 % of the card. WMMA alone is 55 % of the GEMM time; the other 45 % is unpack, LDS and barriers and stays. |
+| Best case end to end | +22 % prefill at 47k and +24 % at 2k **if** the sparse instruction doubles the rate and the operand path is free. If the rate is at parity the gain is 0, because prefill is compute-bound and A-bandwidth buys nothing. |
+| Serving path | None. vLLM 0.31 refuses a sparse checkpoint outright: `compressed_tensors/compressed_tensors.py:311` raises *"Sparsity support has been removed from compressed-tensors. Please use a model without sparsity configuration."* A sparse model here means our own quant config, loader, checkpoint converter and kernel. |
+| Pruning tool | Present but not the bottleneck: `llmcompressor/modifiers/pruning/sparsegpt/base.py` takes `sparsity: 0.5` and `mask_structure: "2:4"`. |
+| Dense base checkpoint | Not on the host. What is served is the MXFP4 checkpoint (19 GB); one-shot pruning needs the dense BF16 model plus a calibration set. |
+| Operand slot | The sparse operand is SWMMAC's A slot, and our GEMM keeps the weights in B (`C[M,N] = A[M,K] . W[N,K]^T`). Pruning the weights means transposing the formulation to `C^T[N,M] = W . A^T`, which changes the epilogue, the store layout and the scale axis. That is a new kernel, not a change to the existing one. |
+
+Accuracy is the deciding item, and it is not close. 2:4 in one shot was validated on 2023-scale models; on current
+models it costs a factor of three.
+
+| Model | Dense | SparseGPT 2:4 | Change |
+|---|---:|---:|---:|
+| OPT-13B (WikiText2) | 10.13 | 12.96 | +28 % |
+| OPT-175B (WikiText2) | 8.35 | 8.74 | +5 % |
+| LLaMA-7B (WikiText2) | 5.68 | 11.00 | +94 % |
+| Llama-3.1-8B Instruct (Wiki) | 7.27 | 26.19 | 3.6x |
+| Llama-3.1-70B (Wiki) | 3.34 | 10.93 | 3.3x |
+
+Sources: Frantar et al., SparseGPT (ICML 2023) Table 1; PGZ (ICLR 2024) Table 1; arXiv 2501.18015 Table 1.
+Our model is already 4-bit group-quantized and an abliterated variant, so 2:4 would be the third degradation stacked
+on it. A 22 % prefill gain does not buy a 3x perplexity loss.
+
+Revisit when: (a) a measured register-resident microbenchmark shows the sparse FP8 instruction above 1.6x the useful
+MAC rate of the dense one (the only cheap decisive test, ~30 min in a GPU window, and the reason to run it first);
+(b) a consumer for sparse weights exists in vLLM again, or we are willing to carry our own loader; (c) pruning with
+recovery training is on the table, because one-shot 2:4 is what fails here, not sparsity as such.
+
+## EAGLE-4 ([eagle-hq/EAGLE-4](https://github.com/eagle-hq/EAGLE-4), reviewed 2026-10-21, source read, nothing run)
+
+`eagle-harness`: a speculative-decoding plugin that runs a trained 1-layer EAGLE-4 draft inside pinned SGLang /
+vLLM / TokenSpeed builds. Measured: 4x B300 (3.40x SGLang / 2.99x vLLM, conc 1, Qwen3.8-27B BF16) and 1x MI355X
+SGLang (2.07x conc 8, 1.56x conc 32). Their HF card compares EAGLE-4 3.59x to DFlash2 2.80x at T = 0 on 4x B300.
+
+| Item | Why not |
+|---|---|
+| gfx1201 support | None. The kernel tiers are NVIDIA sm_80+ and AMD CDNA2/3/4 (gfx90a, gfx942, gfx950); `kernels/arch.py` refuses `EAGLE_HARNESS` at startup on any other GPU. No serving measurement on any RDNA4. |
+| License | "Eagle 4 Source-Available License", not OSI open source. Commercial Use of a Competing Offering requires a separate written commercial license; other commercial use is gated at a US $20M aggregate-revenue threshold. The Radiance image on DockerHub cannot ship it without a commercial license from licensing@eagle.ai. |
+| vLLM verify path | Tree verification needs an unquantized KV cache (`known-limits.md`); this image serves fp8 KV. The GDN tree-verify Gluon kernel is B300-only; the Triton fallback tier does not cover gfx1201 (row above). |
+| Engine coupling | The plugin pins specific engine builds (sglang `0.5.23.dev252+eagle.5`, a vLLM with `suspend_drafting` / `verify_budget` hooks and the `CUSTOM` attention-backend slot) and registers through a generic hook list that refuses to load on any name mismatch. This image's vLLM is patched (MXFP4, DFlash2, R4D_HYBRID); the port surface is the whole hook list, not a flag. |
+| Draft model | 1 layer, hidden 5120, 40 heads, low-rank candidate head (rank 128, 128 candidates), reads 3 target hidden states (layers 3/31/59), sliding window 4096, BF16, ~1.5 GB. Smaller than this image's DFlash2 W4A16 full-model drafter; quantization is not an algorithmic requirement (their runs are BF16) but a VRAM-budget question. |
+| Numbers transfer | Every speedup is B300 / MI355X at a BF16 target, conc 1-32; on SGLang above conc 64 they fall to 0.61x-1.35x. Nothing on gfx1201, nothing MXFP4, nothing fp8 KV. This image's DFlash2 does 4.5-5.09 tokens per step on this card; there is no A/B to compare against. |
+
+Ideas to take (no code, the license blocks reuse): a low-rank candidate head for the drafter's LM-head cost
+(rank 128 / 128 candidates instead of the full-vocab head), and cost-model-driven verify widths that narrow at
+high batch (their conc-64 rows: width 16 = 0.76x, width 4 = 1.16x) -- the same direction as `RADIANCE_ADAPTIVE_WIDTH`.
+
+Revisit when: (a) a gfx1201 (or other RDNA4) tier ships and compiles; (b) the license becomes OSI open source, or
+a commercial license is granted; (c) the vLLM tree verify works with a quantized KV cache.
+
+**Own measurements, 1.8 (2026-10-23/24, KV4 prefill):**
+
+| Item | Why not |
+|---|---|
+| libr4d int4-KV prefill route (`R4D_KV4I`, variants A/B/B2) to close the KV4 prefill gap | KV4 (Tetra) prefill is 11.7-11.8 % slower than fp8 KV at 64k (210 W and 300 W); the kernel is 1.80x (rocprof). B2 is more accurate than Tetra against an fp8-KV reference (KL 0.01557 vs 0.01702, GSM8K-200 0.855 vs 0.845) but not faster (-1.3...+3.4 %, noise). KV4 itself stays supported (528,722 vs 342,950 KV tokens, prefill -11.7 % at 64k); only this route is dropped. Experiment branch `exp/kv4i-dump` (parked, not merged). |

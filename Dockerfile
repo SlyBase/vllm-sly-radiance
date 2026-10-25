@@ -508,7 +508,7 @@ ARG R4D_VERSION
 # a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
 # original check was actually protecting against), not the self-reported semver string, which prints
 # only as informational context alongside it.
-COPY sly/r4d/r4d_extras_rx10.patch /opt/kernels/
+COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch /opt/kernels/
 RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && git init -q && git remote add origin ${R4D_REPO} \
  && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
@@ -516,6 +516,7 @@ RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && [ "$GOT" = "${R4D_VERSION}" ] \
     || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
  && git apply /opt/kernels/r4d_extras_rx10.patch \
+ && git apply /opt/kernels/r4d_gdn_scan_variants.patch \
  && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
  && PYTHONPATH=/out python -c "import sys, torch, r4d; \
 print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
@@ -601,7 +602,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
      sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
-     sly/radiance_adaptive_width.py \
+     sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
@@ -743,6 +744,8 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
+             sly/patch_dflash_prefill_skip \
+             sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
@@ -830,6 +833,17 @@ ENV RADIANCE_USE_R4D=1 \
     RADIANCE_PRESHUFFLE=1 RADIANCE_FUSE_RMS_QUANT=1 \
     RADIANCE_DYNAMIC_DRAFT=1 RADIANCE_DRAFT_SCHEDULE=1:8,2:7,4:6,8:5,16:4 RADIANCE_DRAFT_TAU=0.35 \
     RADIANCE_RUN_BWTEST=1
+
+# --- the measured prefill stack (1.8.0), on by default. Each knob reverts with an explicit `-e` (the
+#     flags with =0, RADIANCE_MXFP4_TN4_MIN_M=2048, RADIANCE_GDN_SCAN_VARIANT= empty, R4D_ATTN_FP8=0 is
+#     a different arm); kernel-side fallbacks stay at the stock path. RADIANCE_MXFP4_TILED_OPROJ acts
+#     with RADIANCE_FUSED_NORM_QUANT=1 (the launch sets it). The drafter skip disables itself under
+#     prefix caching. RADIANCE_MXFP4_AT_PSW defaults to "auto" in radiance_mxfp4.py (PSW unless the
+#     launch conflicts with it), so it is not here. ---
+ENV RADIANCE_MXFP4_TN4_MIN_M=513 RADIANCE_FUSED_NQ_REG=1 RADIANCE_MXFP4_AT_SKIP_PAD=1 \
+    RADIANCE_MXFP4_TILED_OPROJ=1 RADIANCE_MXFP4_TALL=1 RADIANCE_ATTN_Q_FP8=1 \
+    R4D_ATTN_FP8=3 R4D_ATTN_DB=1 R4D_ATTN_TILE=16 RADIANCE_GDN_SCAN_VARIANT=s3 \
+    RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1 RADIANCE_DFLASH_FC_TILED_MIN_M=513
 
 # Fail the build if the native stack does not import, or if a wheel reports a version that does not
 # match the source it was built from (a silently mis-stamped wheel is how "aiter 0.0.0" shipped).

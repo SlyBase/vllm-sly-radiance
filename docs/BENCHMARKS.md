@@ -56,6 +56,116 @@ tokens per update, step gap, conc 1/8, the KV pool from the log.
 and will not unless something else gives) and GSM8K 200 against `ci/accept/baselines/`. Then README
 (recommended launch + options table), CHANGELOG with the measured line, and move the row in NOT-ADOPTED.
 
+## 1.8.0
+
+### Final run at 300 W (2026-10-23)
+
+**Test environment (all 1.8.0 numbers below).** One AMD Radeon AI PRO R9700 (32 GB), in an LXC container on
+Proxmox, ROCm 10.1 image `1.8.0-rocm10.1` (`1.6.0-rocm10.1` plus bind-mounted 1.8.0 kernels in the earlier A/B
+arms). Model: Swift-1.5 Qwen3.8-27B heretic, MXFP4 (GPTQ checkpoint) with the DFlash2 drafter (k = 7). FP8 KV
+cache, `--max-model-len 65536`, prefill chunk 4096 (`--max-num-batched-tokens`), prefix caching off,
+`--no-async-scheduling`, GPU KV pool 340,723 tokens. Sampling in the benchmark: seed 42, temperature 0.7,
+top-p 0.95, top-k 20 (BetterBench 0.4.0, full config). Host tuning: power cap 300 W and a voltage offset of
+-50 mV set with LACT, core clock offset 0 (both optional, see the launch example below).
+
+**Full BetterBench 0.4.0 at 300 W, 2026-10-23, two fresh starts (run a / run b).**
+
+| | **run a** | **run b** |
+|---|---|---|
+| Decode, single stream (weighted median) | **154.6 tok/s** | **154.1 tok/s** |
+| update gap p99 | 34.9 ms | 35.1 ms |
+| time to first token p50 (short prompts) | 57 ms | 57 ms |
+| Decode by category: chat / code / file_edit / json / math / prose / reasoning / summarization | 131.9 / 186.8 / 173.6 / 211.0 / 191.7 / 90.6 / 107.6 / 144.1 tok/s | within 0.5 % of run a |
+| tokens per update (same order) | 4.23 / 5.99 / 5.37 / 6.56 / 6.35 / 2.98 / 4.02 / 4.59 | |
+| Concurrency 1 / 2 / 4 / 8 / 16, aggregate tok/s | 139 / 236 / 365 / 478 / 516 | 64\* / 244 / 357 / 481 / 508 |
+| Prefill 1,515 / 5,918 / 11,794 / 23,543 / 47,056 real prompt tokens, tok/s (inside the full run) | 3,661 / 3,694 / 3,638 / 3,526 / 3,261 | 3,628 / 3,641 / 3,599 / 3,483 / 3,130 |
+| GSM8K 200 (greedy, flexible-extract) | 0.82 | 0.82 |
+
+\* Concurrency 1 of run b is an outlier (cold first requests); run a gives 139.
+
+Prefill inside the full run is lower than the dedicated prefill sweep below because it is the last phase of the
+run, on a card that is already hot.
+
+**Prefill, same conditions as the reference stack** (300 W, 2026-10-22 night, 2 runs per arm, harness prefill
+phase), 2K / 8K / 16K / 32K / 64K nominal: ours **3,927 / 3,965 / 3,890 / 3,692 / 3,370** tok/s against the
+reference stack 3,759 / 3,864 / 3,872 / 3,699 / 3,396, i.e. **+4.5 / +2.6 / +0.5 / −0.2 / −0.7 %**.
+
+**Scheduling.** `--no-async-scheduling` stays the default: in the 210 W ABBA of 2026-10-22 it gave prefill
++1.2 .. +7.7 % and no measurable decode difference. **Speculative depth:** k = 7 is the best measured value
+(concurrency 1: 124 tok/s at k = 7, 114 at k = 5, 92 at k = 3).
+
+**Quality.** KL divergence against a bf16 layer-by-layer reference over 15,177 positions: **0.0527**, top-1
+agreement 93.1 %, perplexity +2.2 %. 1.8.0 is bit-identical to 1.6.0 (KL divergence 0 between them); the
+weights-only exact path scores 0.0403.
+
+### Prefill, image default vs reference stack (2026-10-22 night, 300 W)
+
+One R9700, one start per arm, order ABBA, BetterBench prefill, 8 runs median per depth, prefix cache off, chunk 4096,
+`--max-model-len 65536`, thinking off, junction 108 C at the end of each arm. Each row is the mean of its two starts.
+"previous stack" = image 1.6.0 prefill stack with the drafter skip, `--no-async-scheduling` and the DB16/s3 kernels
+bind-mounted; "stack without PSW" = the same plus `RADIANCE_ATTN_Q_FP8=1` and `RADIANCE_MXFP4_TALL=1`; "1.8.0 default" =
+that plus `RADIANCE_MXFP4_AT_PSW=2` (what the image now does without any flag).
+
+| prefill tok/s | 2K | 8K | 16K | 32K | 64K |
+|---|--:|--:|--:|--:|--:|
+| previous stack | 3,798.0 | 3,825.0 | 3,783.3 | 3,513.0 | 3,152.1 |
+| stack without PSW | 3,810.3 | 3,871.7 | 3,732.9 | 3,589.6 | 3,258.0 |
+| **1.8.0 default (PSW on)** | **3,926.8** | **3,964.9** | **3,889.9** | **3,692.2** | **3,370.5** |
+| reference stack | 3,758.5 | 3,863.8 | 3,871.6 | 3,698.6 | 3,395.6 |
+| 1.8.0 default vs stack without PSW | +3.1 % | +2.4 % | +4.2 % | +2.9 % | +3.5 % |
+| 1.8.0 default vs reference stack | +4.5 % | +2.6 % | +0.5 % | -0.2 % | -0.7 % |
+| 1.8.0 default vs previous stack | +3.4 % | +3.7 % | +2.8 % | +5.1 % | +6.9 % |
+
+Start-to-start spread within an arm pair is 0.0-0.6 % except: stack without PSW 3.7 / 1.5 / 3.0 % at 16K / 32K / 64K,
+previous stack 3.5 % at 32K. Deltas below ~2 % between single arms are therefore noise; the PSW row is
+consistent over all five depths. Correctness: 210 W, 1,093 greedy digests identical (0 wrong), GSM8K-200 0.835 vs 0.835
+with PSW off.
+
+## TetraAttention (KV4) prefill gap (2026-10-23)
+
+Why: `KVCACHE_DTYPE=kv4` trades prefill for context (528,722 KV tokens at 65k against 340,723 on fp8).
+These runs say where the trade sits, and whether the 1.8.0 fp8 prefill work can be carried over.
+
+**Engine, prefill sweep, KV4 against FP8, one R9700.** 65,536 max len, chunk 4096, prefix cache off,
+`--no-async-scheduling`, thinking off, 8 runs median per depth, one start per arm (KV4 arm ran with the
+`use_cascade` fix described in CHANGELOG 1.8.1, through a bind-mounted module). Depths are the real
+prompt-token medians (1,516 / 5,920 / 11,796 / 23,545 / 47,058).
+
+| window | arm | 1.5k | 5.9k | 11.8k | 23.5k | 47k |
+|---|---|--:|--:|--:|--:|--:|
+| 300 W | FP8 (R4D_HYBRID) | 3,927 | 3,965 | 3,890 | 3,692 | 3,371 |
+| 300 W | KV4 (TETRA) | 3,748 | 3,733 | 3,566 | 3,277 | 2,833 |
+| 300 W | Δ | −4.5 % | −5.8 % | −8.3 % | −11.3 % | −15.9 % |
+| 210 W | FP8 (mean of two runs) | 3,062 | 3,024 | 2,908 | 2,750 | 2,504 |
+| 210 W | KV4 | 3,020 | 2,943 | 2,778 | 2,550 | 2,220 |
+| 210 W | Δ | −1.4 % | −2.7 % | −4.5 % | −7.3 % | −11.4 % |
+
+At 210 W the FP8 arm ran twice (3,094 / 3,031 at 1.5k, start-to-start spread 1.5–2.4 %); KV4 at chunk
+3328 and 4992 was 0–4 % below chunk 4096, so the 1664-token attention block is not the cause. KV pool
+from the start logs: FP8 332,770, KV4 528,722 tokens.
+
+**Kernel, both back ends at the serve shapes** (`sly/bench_attn_r4d_vs_tetra.py`, 4096-token chunk,
+causal, 24 q / 4 kv heads, head 256, 20 reps median, 210 W, image env defaults):
+
+| past | keys | libr4d fp8 | Tetra back end | Tetra kernel alone | back end / libr4d |
+|---|--:|--:|--:|--:|--:|
+| 0 | 4,096 | 1,477 µs | 2,817 µs | 2,323 µs | 1.91x |
+| 4,096 | 8,192 | 3,650 µs | 7,241 µs | 6,709 µs | 1.98x |
+| 16,384 | 20,480 | 11,431 µs | 20,206 µs | 19,437 µs | 1.77x |
+| 32,768 | 36,864 | 20,899 µs | 37,595 µs | 36,128 µs | 1.80x |
+| 49,152 | 53,248 | 30,407 µs | 54,994 µs | 52,901 µs | 1.81x |
+
+Rotation, query quantization and the un-rotation cost 0.1–0.5 ms per chunk, so the kernel itself is
+1.70–1.84x. Against an fp32 SDPA reference (reported, not gated): relative L2 0.053–0.059 for libr4d,
+0.186–0.238 for TetraAttention.
+
+**The 1.8.0 fp8 schedule ideas do not transfer** (same shapes, tile 16 unless stated):
+pipe 1 (block-table entry one tile ahead) 2.41–2.42x, pipe 3 (+ double-buffered LDS) 2.40–2.44x —
+both inside noise of the 2.43x stock figure; pipe 5 (one wave per row tile) 3.43–3.75x, i.e. 40–55 %
+worse. Tile 64 (the shipped prefill instance) is 1.81x, clearly better than tile 16 at 2.43x. The knob
+was removed again; the design for reading the int4 cache in the libr4d kernel, and its go/no-go
+criterion, is [R4D-INT4-PREFILL.md](R4D-INT4-PREFILL.md).
+
 ## 1.0.0
 
 ### Reference run (2026-10-07, 300 W)
@@ -382,3 +492,64 @@ at conc 1/2/4/8/16 (≈1 ms/step at conc 1), per-stream decode 128.7 → 133.5 t
 105 → 102 ms, KV 146k tokens (+3.8 %, fewer Inductor intermediates), GSM8K 0.840 → 0.845 ± 0.026,
 mean tokens/step 4.312 → 4.314 (acceptance unchanged). Numerics (`sly/check_fused_norm.py`): the
 fused chain equals the unfused pq chain exactly; against eager/Inductor only fp8 rounding flips.
+
+## Earlier README reference runs
+
+### 1.5.1 reference run (2026-10-17, moved from the README)
+
+Reference run of image **1.5.1** on 2026-10-17, 300 W (firmware fan curve), production arguments, BetterBench
+0.4.0 default config, Cactus delta 0.5 (the image default). Two arms: the fp8 KV cache with `R4D_HYBRID`, and the
+4-bit KV cache (`KVCACHE_DTYPE=kv4`, backend `TETRA`). The 1.0.0 column is the 1.0.0 reference run of 2026-10-07
+(300 W, same method, a different GPU window and day; details in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
+Decode, prefill and concurrency 2-16 were measured on the pre-release build `1.5.1-cactus-pr153` (same kernels, delta
+set by environment variable). Concurrency 1 and GSM8K come from a second window on the release image
+`1.5.1-rocm10.1`, after a GSM8K warm-up.
+
+| | **1.5.1 fp8 KV** | **1.5.1 KV4** | 1.0.0 | Δ fp8 | Δ KV4 |
+|---|---|---|---|---|---|
+| **Decode, single stream** (weighted) | **149.6 tok/s** | 145.2 tok/s | 135.8 tok/s | **+10.2 %** | +6.9 % |
+| update gap p50 / p99 | 34.6 / 35.7 ms | 34.8 / 35.9 ms | 34.4 / 35.2 ms | ± 0 | ± 0 |
+| tokens per update: code / reasoning / prose | 5.71 / 4.08 / 3.45 | 5.56 / 4.22 / 3.26 | 5.07 / 3.57 / 2.88 | +13 / +14 / +20 % | +10 / +18 / +13 % |
+| tokens per update: json / file_edit / summarization | 5.83 / 6.16 / 5.45 | 5.71 / 6.07 / 5.17 | 5.60 / 5.98 / 4.79 | +4 / +3 / +14 % | +2 / +2 / +8 % |
+| **Prefill** 1.5k / 6k / 12k / 24k / 47k prompt tokens | 3,024 / 3,032 / 2,994 / 2,766 / 2,430 | 3,065 / 2,977 / 2,913 / 2,757 / 2,440 | 3,132 / 3,136 / 3,105 / 2,949 / 2,635 | −3 / −3 / −4 / −6 / **−8 %** | −2 / −5 / −6 / −7 / **−7 %** |
+| time to first token, 47k tokens | 19.4 s | 19.3 s | 17.9 s | +8 % | +8 % |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **135**\* / 237 / 373 / **503 / 507** tok/s | 134\* / 243 / 373 / 483 / 506 | 120 / 213 / 338 / 461 / 466 | +12 / +12 / +10 / **+9 / +9 %** | +11 / +14 / +10 / +5 / +8 % |
+| KV pool (262k context) | 439,031 tokens | **767,557 tokens** | 436,906 | +0.5 % | **+76 %** |
+| GSM8K 200 (greedy)\*\* | 0.845 | 0.855 | 0.84 | tie | tie |
+
+\* Concurrency 1, warm engine, release image: fp8 136.2 and 133.7 tok/s in two runs (mean 135, TTFT p50 88 ms,
+p99 121 ms); KV4 133.7 from the first window. The first fp8 run in that window gave 115 tok/s with a TTFT p99 of
+2.7 s because its first requests ran cold, so it was discarded.
+
+\*\* lm-eval `gsm8k_cot_zeroshot`, 200 questions, `temperature=0`, 16 concurrent requests, flexible-extract,
+standard error 0.026 (so all three values tie). Run at 300 W on the release image; the 200 requests took 1:31
+(fp8) and 1:29 (KV4) minutes. The 1.0.0 value was taken at 210 W. Cactus leaves greedy requests untouched, so this
+figure checks the engine and the KV format, not delta 0.5.
+
+What that means: the gain over 1.0.0 is acceptance (Cactus), not speed. The step time is unchanged, tokens per
+update rise by 2-20 %, and decode and concurrency 2-16 follow. KV4 gives up about 3 % decode against fp8 and
+gives 1.75x the KV pool. Prefill is 3-8 % lower than in the 1.0.0 window; that run was taken in another window
+and this release did not change prefill, so treat it as window spread until a same-window A/B says otherwise.
+The 1.5.1 numbers carry no same-image delta 0 control at 300 W (see the Cactus section of the README).
+
+### 0.4.0 at 300 W and 210 W (2026-09-25, Quark checkpoint, moved from the README)
+
+Reference run of image **0.4.0** on 2026-09-25, production arguments from the [quickstart](../README.md#quickstart)
+(`--max-model-len 262144`, fp8 KV, bf16 SSM state, DFlash2 k = 7, KV pool **384,316 tokens**),
+BetterBench 0.4.0 default config: single-stream decode
+3 warmup + 20 passes per category, prefill sweep with unique prompts, concurrency 1–16 × 48 requests,
+sampling temperature 0.7 / top_p 0.95 / top_k 20. Two power settings, no other traffic:
+**300 W** (firmware fan curve) and **210 W** (fan capped at 2,800 rpm, what this card runs 24/7).
+
+| | 300 W | 210 W |
+|---|---|---|
+| **Decode, single stream** (weighted over 8 task categories) | **133.2 tok/s** | 124.5 tok/s |
+| step gap (one target forward + draft) | 34.8 ms | 37.0 ms |
+| **Prefill** 1.5k / 6k / 24k / 47k prompt tokens | **3,166 / 3,161 / 2,903 / 2,512** tok/s | 2,527 / 2,498 / 2,311 / 2,027 tok/s |
+| time to first token, 1.5k / 47k tokens | 0.48 s / 18.7 s | 0.60 s / 23.2 s |
+| **Concurrency** 1 / 2 / 4 / 8 / 16, aggregate | **121 / 214 / 332 / 410 / 406** tok/s | 111 / 197 / 312 / 362 / 369 tok/s |
+| GSM8K (200, cot zero-shot, greedy) | 0.855 ± 0.025 | |
+| board power / junction / fan (avg) | 296 W / 98 °C / 3,710 rpm | 210 W / 93 °C / 2,321 rpm |
+
+What that means: code, JSON, math and edits decode at 140–175 tok/s (the drafter lands 5–6 tokens per step),
+free prose at ~85; long contexts stay fast (99k tokens of context cost ~7 ms per step instead of 83).

@@ -41,7 +41,7 @@ on:
       profile:
         description: profile
         type: choice
-        options: [vllm7-mxfp4, vllm5-int4]
+        options: [vllm7-mxfp4, vllm5-int4, vllm7-kv4]
         default: vllm7-mxfp4
       mode:
         description: gate scope
