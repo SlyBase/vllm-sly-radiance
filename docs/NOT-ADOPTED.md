@@ -220,6 +220,29 @@ the GEMM cell check stayed bit-identical (24 digests, 0 WRONG) but the clock und
 so this is "no gain", not a measured loss). -100 mV and GSM8K at -75 mV were not run. The assumption that the power cap
 turns less voltage into more clock (about +2 % per 25 mV from P ~ f V^2) did not hold on this card.
 
+## TokenGate (token-gate-llms/TokenGate, arXiv 2610.26754, reviewed 2026-10-21)
+
+A learned token-pruning gate for long-context prefill: a gate at an early layer L scores every token of a marked
+"state" span, keeps the top-K, and the layers above L process and KV-cache only those K tokens ("skimming"; up to
+11.3x TTFT and 3.4x peak memory, batch 1, H100). The non-differentiable selection is trained end-to-end through a
+per-key attention bias built from the scores ("token-gated attention"), jointly with LoRA on q/v projections. Apache-2.0.
+
+| Item | Why not |
+|---|---|
+| Gate checkpoints | Released only for Qwen3-1.7B and Qwen3.5-2B. A gate is task-specific (NIAH, RepoBench, BioDEX, 2Wiki, MultiNews), so Qwen3.8-27B needs its own trained gate plus adapter. Training is DDP torchrun, CUDA-first, wandb — no path on the 32 GB R9700 (production card, power capped). |
+| Fast attention path | The key-bias kernel is a fork of FlashAttention-2 2.8.3 compiled with nvcc (sm_80+PTX, bf16, head_dim 128 only); the no-build fallback is FlexAttention (torch.compile). Our prefill attention is the libr4d HIP kernel inside vLLM V1 — no CUDA and no FlexAttention path here. Taking the idea means writing the key-bias prefill kernel ourselves. |
+| vLLM integration | None in the repo: inference is a custom `generate` loop over HF transformers with its own cache handling. In vLLM this is an engine feature, not a plugin — per-request variable KV above layer L, key-biased attention in every full-attention layer, scheduler and KV-manager changes. |
+| Regime of the headline numbers | Batch-1 TTFT on H100 over document-plus-question prompts (NIAH shape) where the prunable state dominates. Our production traffic is coding-agent workloads where the context is broadly relevant, and prefill is already 2,430-3,024 tok/s and compute-bound. The prefix cache already skips prefilled context; TokenGate prunes inside new context, which our traffic does not put there. |
+| Quality evidence | Task metrics only (NIAH acc, RepoBench ES, BioDEX F1), and the numbers mix the gate+LoRA fine-tune gain with the pruning gain (base RepoBench ES 0.285 -> 0.587 unpruned). No GSM8K band, no perplexity, nothing comparable to our acceptance gate. |
+
+Revisit when: (a) a workload with a dominant prunable state (document-plus-question) appears in production traffic;
+(b) a gate trained for Qwen3.8-27B exists (needs a training GPU, not the R9700); (c) a HIP key-bias prefill kernel
+is ported to libr4d. The bar then: >= 10x TTFT at >= 32k context, batch 1, with GSM8K-200 inside the 0.855 +/- 0.025 band.
+
+Process lesson kept: their benchmark is an honest template for any prefill-pruning idea — batch 1, frozen held-out
+test split, an unpruned reference arm, and random-selection baselines.
+
+
 ## Prefill levers measured on 2026-10-21/22 (R9700, image 1.6.0 base + the 1.8.0 kernels)
 
 ### Drafter prefill-window skip with prefix caching on: FAIL, removed
