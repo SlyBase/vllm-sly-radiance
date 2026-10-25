@@ -751,17 +751,8 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
 
   const bool mlive = !SKIPPAD || (m0 >> 4) + wm * TMT < Mt;
-  for (int k0 = 0; k0 < K; k0 += LBK) {
-    // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
-    int2_t af[TMT][NS];
-    if (mlive) {
-#pragma unroll
-      for (int i = 0; i < TMT; ++i)
-#pragma unroll
-        for (int st = 0; st < NS; ++st)
-          af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
-    }
-
+  // W staging (loads + fold to sW), shared by the live loop and the SKIPPAD dead-wave loop below.
+  auto stage_w = [&](const int k0) {
     // ---- W tile -> LDS, folded to e4m3 (kMag[d] via v_perm, see the folded kernel) ----
     uint4_t pk[NW]; unsigned int wsv[NW];
     uint2_t hp[NW];
@@ -856,9 +847,34 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
         *(uint4_t *)(&sW[wrow[it] * LWSTR + wcol[it] * 2]) = uint4_t{outw[0], outw[1], outw[2], outw[3]};
       }
     }
+  };
+
+  // SKIPPAD: an all-padding wave runs its own loop -- it stages its share of W and meets both barriers
+  // per slab, nothing else -- so the live waves below run exactly the plain kernel's code. With the
+  // skip as a branch inside the loop, the A loads could not be issued after the W loads (the fold
+  // waited loadcnt 0) and the second barrier could not be signalled before the last WMMAs: every
+  // SKIPPAD GEMM paid ~2.5 %, dead wave or not. Its epilogue would write nothing (all rows >= M).
+  if constexpr (SKIPPAD) {
+    if (!mlive) {
+      for (int k0 = 0; k0 < K; k0 += LBK) {
+        stage_w(k0);
+        radiance_lds_barrier();
+        radiance_lds_barrier();
+      }
+      return;
+    }
+  }
+  for (int k0 = 0; k0 < K; k0 += LBK) {
+    // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
+    int2_t af[TMT][NS];
+#pragma unroll
+    for (int i = 0; i < TMT; ++i)
+#pragma unroll
+      for (int st = 0; st < NS; ++st)
+        af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+    stage_w(k0);
     radiance_lds_barrier();
 
-    if (mlive)
 #pragma unroll
     for (int step = 0; step < NS; ++step) {
       const int kk = step * 16 + kb8;
