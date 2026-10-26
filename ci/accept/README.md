@@ -96,10 +96,39 @@ fail open.
 | KV pool | `GPU KV cache size: N tokens` | `< 98 %` of the baseline |
 | smoke | 4 chat completions | wrong answer, no reasoning content, no tool call, needle not found |
 | throughput | BetterBench `aggregate_tps` | `< 95 %` of the baseline at any level |
+| throughput per category | BetterBench `single_stream` medians | any category `< 95 %` of the baseline (`category_decode_tps_min_ratio`) |
+| chat replay | 3-turn conversation at 4k/8k/16k, cold prefix cache | decode t/s `< 95 %` of the baseline (`chat_tps_min_ratio`); hard in `full`, soft in `fast` |
 | tokens/step | `/metrics` delta over the benchmark | more than 0.1 below the baseline (drafter regression) |
 | preemptions | `vllm:num_preemptions_total` delta | `> 0` |
 | GSM8K | lm-eval | more than 0.05 below the baseline (`full` only) |
 | production restore | `gpu-window release` + `curl /health` | production is not back up |
+
+### Why per category and not only weighted (1.9.0, k=15)
+
+The weighted decode median is a MIXTURE over `configs/*.json` weights. On 1.9.0 the DFlash2
+depth change to k=15 raised it +10.3 % and the release shipped with it — while `prose` lost
+7.2 %, `chat` 8.6 %, and a real chat lost half its throughput (1k context: 72 → 34 t/s, 16k:
+28 → 21 t/s, measured 2026-10-26, same image, step time 39 ms in both arms). The mixture
+carries 55 % weight on code/json/file_edit, so a category can lose without moving the number.
+
+Two consequences, both in the gate now:
+
+* **every category is its own check.** A lever that trades prose for code has to say so in the
+  PR and re-calibrate the category that loses (threshold + baseline in the same PR).
+* **the gate measures the profile the weights cannot describe.** BetterBench single-stream
+  prompts are 60–120 tokens; the chat replay phase walks 4k → 16k with a cold prefix cache and
+  reports decode-only t/s (TTFT excluded, thinking off).
+
+`ci/accept/prod_mix.py` attacks the same problem from the data side: it reads the *production*
+counters (per-position draft acceptance → the depth that still pays, plus the concurrency mix)
+and prints the JSON to paste into a PR body. It states what it cannot do: **content mix
+(code/prose/chat) is not in any metric** — the weights stay a declared assumption in
+`configs/*.json`, and the per-category checks are what keep that assumption honest.
+
+```bash
+python3 ci/accept/prod_mix.py --prometheus http://192.168.178.21:30090   # live Prometheus
+python3 ci/accept/prod_mix.py --metrics-file /tmp/prod-metrics.txt --json
+```
 
 Startup time is a soft check (reported, never blocking): the first start after a compile-cache
 invalidation legitimately takes twice as long.

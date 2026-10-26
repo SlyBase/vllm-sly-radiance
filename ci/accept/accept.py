@@ -16,9 +16,15 @@ Phases
   2. start    -- stop vllm7, start the candidate (double start), read KV pool
   3. logs     -- required / forbidden `[radiance]` markers
   4. smoke    -- four chat completions (arithmetic, reasoning, tool call, needle)
-  5. bench    -- BetterBench concurrency sweep + speculative-decoding counters
-  6. gsm8k    -- accuracy, full mode only
-  7. release  -- always: restore docker-vllm7.service and verify /health == 200
+  5. chat     -- multi-turn decode at growing context (the gate used to measure
+                 decode only on 60-120 token prompts; a spec-depth or acceptance
+                 change can lose half its throughput on a real chat and still
+                 win the weighted median, see the 1.9.0 k=15 case)
+  6. bench    -- BetterBench sweep; per CATEGORY decode medians gate on their own
+                 (`category_decode_tps_min_ratio`), the weighted median does not
+                 hide a losing category any more
+  7. gsm8k    -- accuracy, full mode only
+  8. release  -- always: restore docker-vllm7.service and verify /health == 200
 
 Every phase result is compared against `--baseline`; the gate exits non-zero on
 the first hard failure but still runs the release phase.
@@ -316,8 +322,140 @@ def run_smoke(base_url: str, model: str, profile: dict, dry_run: bool = False) -
 
 
 # --------------------------------------------------------------------------- #
-# Phase 5/6: BetterBench + GSM8K
+# Phase 5: chat replay (multi-turn decode at growing context)
 # --------------------------------------------------------------------------- #
+# The BetterBench single-stream prompts are 60-120 tokens. A lever that changes
+# tokens/update (speculative depth, acceptance rule, KV dtype) can cost half the
+# throughput on a real chat and still win the weighted median: k=15 on 1.9.0 won
+# +10.3 % weighted while losing every prose category and dropping 1k-context chat
+# from 72 to 34 t/s. This phase measures exactly that: growing context, cold
+# prefix cache, decode-only tok/s.
+CHAT_FILLER = (
+    "The maintenance log for rack {i} records nominal temperatures, stable fan "
+    "curves and no error counters worth reporting. "
+)
+CHAT_ANSWER = (
+    "Noted: rack {i} ran nominal, the fans were stable and no error counter "
+    "moved. I keep the interval at the documented value and re-check the seal "
+    "at the next turn. "
+)
+
+
+def stream_decode(base_url: str, model: str, payload: dict, timeout: int = 900) -> dict:
+    """One streaming completion; returns TTFT and DECODE-only tok/s.
+
+    vLLM emits one content delta per emitted token, so the delta count is the
+    completion length. Decode t/s excludes the time to first token -- a
+    total-wall number reports prefill speed for short answers and would make a
+    context-length comparison meaningless.
+    """
+    body = json.dumps({"model": model, "stream": True, **payload}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/v1/chat/completions", data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    t0 = time.time()
+    ttft = None
+    tokens = 0
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:
+            if not raw.startswith(b"data: "):
+                continue
+            data = raw[6:].strip()
+            if data == b"[DONE]":
+                break
+            chunk = json.loads(data)
+            if not chunk.get("choices"):
+                continue
+            delta = chunk["choices"][0].get("delta") or {}
+            if delta.get("content"):
+                if ttft is None:
+                    ttft = time.time() - t0
+                tokens += 1
+    wall = time.time() - t0
+    decode_s = wall - (ttft or 0.0)
+    return {
+        "ttft_ms": round((ttft or 0.0) * 1000, 1),
+        "completion_tokens": tokens,
+        "wall_s": round(wall, 2),
+        "decode_tps": round(tokens / decode_s, 1) if decode_s > 0.5 and tokens else 0.0,
+    }
+
+
+def build_chat(depth_tokens: int, turns: int) -> list[dict]:
+    """A multi-turn conversation of roughly `depth_tokens` prompt tokens."""
+    per_turn = max(1, depth_tokens // max(1, turns))
+    sentences = max(1, (per_turn * 4) // len(CHAT_FILLER))   # ~4 characters per token
+    messages: list[dict] = []
+    for turn in range(turns):
+        messages.append({"role": "user",
+                         "content": "".join(CHAT_FILLER.format(i=turn) for _ in range(sentences))})
+        messages.append({"role": "assistant",
+                         "content": "".join(CHAT_ANSWER.format(i=turn) for _ in range(3))})
+    messages.append({"role": "user",
+                     "content": "Summarise the maintenance log above in eight bullet points."})
+    return messages
+
+
+def run_chat_replay(base_url: str, model: str, profile: dict, mode: str) -> dict:
+    cfg = profile.get("chat_replay") or {}
+    depths = list(cfg.get("depths") or [4000, 8000, 16000])
+    if mode == "fast":
+        depths = depths[: int(cfg.get("fast_levels", 1))]
+    turns = int(cfg.get("turns", 3))
+    max_tokens = int(cfg.get("max_tokens", 256))
+    levels: dict[str, dict] = {}
+    for depth in depths:
+        payload = {
+            "messages": build_chat(int(depth), turns),
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            # Unique salt => cold prefix cache, so the number describes the
+            # context length and not a cached replay of an identical prompt.
+            "cache_salt": f"accept-chat-{depth}-{time.time_ns()}",
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            levels[str(depth)] = stream_decode(base_url, model, payload)
+        except Exception as exc:  # noqa: BLE001
+            levels[str(depth)] = {"error": str(exc)[:200]}
+        log(f"chat {depth}: {levels[str(depth)]}")
+    return {"ok": all("error" not in v for v in levels.values()), "levels": levels}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6: BetterBench + GSM8K
+# --------------------------------------------------------------------------- #
+def _median(values: list[float]) -> float | None:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    if len(vals) % 2:
+        return round(vals[mid], 1)
+    return round((vals[mid - 1] + vals[mid]) / 2, 1)
+
+
+def category_medians(data: dict) -> tuple[dict, dict]:
+    """Per-category MEDIAN decode t/s and tokens/update of the single-stream phase.
+
+    This is the number the weighted median hides: on 1.9.0 k=15 the weighted
+    value rose +10.3 % while prose lost 7.2 % and chat 8.6 %, because the mix
+    carries 55 % weight on code/json/file_edit.
+    """
+    tps: dict[str, float] = {}
+    tpu: dict[str, float] = {}
+    for cat, entries in (data.get("single_stream") or {}).items():
+        ok = [e for e in entries if e.get("ok")]
+        med_tps = _median([e.get("decode_tps") for e in ok])
+        if med_tps is not None:
+            tps[cat] = med_tps
+            med_tpu = _median([e.get("tokens_per_update") for e in ok])
+            if med_tpu is not None:
+                tpu[cat] = med_tpu
+    return tps, tpu
+
+
 BB_SNIPPET = (
     "import sys;"
     "from betterbench.cli import main;"
@@ -344,10 +482,13 @@ def run_betterbench(python: str, cwd: Path, base_url: str, model: str,
         raise RuntimeError(f"betterbench failed (rc={proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
     data = json.loads(out_file.read_text())
     levels = {int(e["level"]): e for e in data.get("concurrency", [])}
+    cat_tps, cat_tpu = category_medians(data)
     return {
         "out": str(out_file),
         "aggregate_tps": {str(k): round(v["aggregate_tps"], 2) for k, v in sorted(levels.items())},
         "ok_requests": {str(k): [v["ok"], v["requests"]] for k, v in sorted(levels.items())},
+        "categories_decode_tps": cat_tps,
+        "categories_tokens_per_update": cat_tpu,
     }
 
 
@@ -388,8 +529,11 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
     checks: list[dict] = []
 
     def add(name, ok, actual, expected, hard=True):
-        checks.append({"name": name, "ok": bool(ok), "actual": actual,
-                       "expected": expected, "hard": hard})
+        # `ok is None` means "not measured" (skipped phase, no baseline data).
+        # Collapsing it to False made an unmeasured check look like a failure
+        # and a measured-and-passed one indistinguishable from an absent one.
+        checks.append({"name": name, "ok": None if ok is None else bool(ok),
+                       "actual": actual, "expected": expected, "hard": hard})
 
     startup = results.get("start", {})
     logs = results.get("logs", {})
@@ -443,6 +587,51 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
             f">= {min_ratio:.2f}x of {base} t/s")
 
     spec = results.get("spec", {})
+
+    # Per-category decode. The weighted median is a MIXTURE, so a lever that
+    # wins code/json/file_edit and loses prose looks like a win -- exactly how
+    # 1.9.0's k=15 shipped (weighted +10.3 %, prose -7.2 %, chat -8.6 %, and
+    # 30 t/s in the user's chat). Every measured category is its own check; the
+    # threshold is per profile, because a category that legitimately changes
+    # has to be re-calibrated in the same PR that changes it.
+    bb_cats = results.get("betterbench", {}).get("categories_decode_tps") or {}
+    cat_base = baseline.get("categories_decode_tps") or {}
+    cat_min = thresholds.get("category_decode_tps_min_ratio", 0.95)
+    for cat in sorted(cat_base):
+        base = cat_base[cat]
+        value = bb_cats.get(cat)
+        if not base or value is None:
+            continue
+        ratio = value / base
+        add(f"throughput {cat}", ratio >= cat_min,
+            f"{value} t/s ({ratio:.3f}x)",
+            f">= {cat_min:.2f}x of {base} t/s")
+    if bb_cats and not cat_base:
+        # A baseline recorded before this check existed carries no category
+        # medians. Say so instead of reporting a silent pass.
+        add("throughput per category", None,
+            f"baseline has no category medians ({len(bb_cats)} measured)",
+            "re-record the baseline", hard=False)
+
+    # Chat replay: decode t/s at growing context, cold prefix cache. This is the
+    # profile the weights cannot describe at all -- BetterBench prompts are
+    # 60-120 tokens, a real chat is not. Soft in fast mode (one level, short
+    # run), hard in full mode.
+    chat_res = results.get("chat") or {}
+    chat_base = baseline.get("chat_decode_tps") or {}
+    chat_min = thresholds.get("chat_tps_min_ratio", 0.95)
+    for depth in sorted(chat_base, key=lambda d: int(d)):
+        base = chat_base[depth]
+        level = (chat_res.get("levels") or {}).get(depth) or {}
+        value = level.get("decode_tps")
+        if not base or not value:
+            continue
+        ratio = value / base
+        add(f"chat {int(depth) // 1000}k decode", ratio >= chat_min,
+            f"{value} t/s ({ratio:.3f}x)",
+            f">= {chat_min:.2f}x of {base} t/s", hard=(mode == "full"))
+    if chat_res and not chat_res.get("ok"):
+        add("chat replay", False, "a level failed", "every level answered")
 
     # Draft quality is acceptance_rate, not tokens/step. The first real gate run
     # (0.2.5, 2026-09-17) failed on tokens/step by 0.0008 while acceptance_rate
@@ -511,6 +700,15 @@ def render_markdown(meta: dict, checks: list[dict], results: dict,
     if bb:
         lines += ["", "BetterBench aggregate t/s: " +
                   ", ".join(f"conc {k} = {v}" for k, v in bb.items())]
+    cats = results.get("betterbench", {}).get("categories_decode_tps")
+    if cats:
+        lines += ["", "BetterBench decode per category (median t/s): " +
+                  ", ".join(f"{c} = {v}" for c, v in sorted(cats.items()))]
+    chat = (results.get("chat") or {}).get("levels")
+    if chat:
+        lines += ["", "Chat replay, decode t/s (cold prefix cache): " +
+                  ", ".join(f"{int(d) // 1000}k ctx = {v.get('decode_tps')}"
+                            for d, v in sorted(chat.items(), key=lambda kv: int(kv[0])))]
     rel = results.get("release", {})
     lines += ["", f"Production restored: `{rel.get('service', 'docker-vllm7.service')}` "
                   f"health={rel.get('health')} kv={rel.get('kv_tokens')}"]
@@ -639,6 +837,12 @@ def main() -> int:
         if args.dry_run:
             log("DRY-RUN: skipping betterbench and gsm8k")
         else:
+            before("chat")
+            log(f"chat replay (multi-turn, growing context, {args.mode})")
+            results["chat"] = run_chat_replay(base_url, model, profile, args.mode)
+            if not results["chat"]["ok"]:
+                failures.append("chat")
+
             before("betterbench")
             metrics_before = scrape_metrics(base_url)
             log(f"betterbench ({args.mode})")
@@ -725,6 +929,23 @@ def main() -> int:
             new["modes"] = modes
         else:
             log(f"no betterbench numbers -- keeping the existing '{args.mode}' aggregate_tps")
+        # Per-category medians are mode-independent (single stream), so they are
+        # not nested under modes[]. Without them the per-category checks stay
+        # silently skipped -- the exact hole the 1.9.0 k=15 release fell through.
+        cat_tps = results.get("betterbench", {}).get("categories_decode_tps") or {}
+        if cat_tps:
+            new["categories_decode_tps"] = cat_tps
+            new["categories_tokens_per_update"] = (
+                results["betterbench"].get("categories_tokens_per_update") or {})
+        else:
+            log("no per-category medians -- keeping the existing categories_decode_tps")
+        # Chat replay levels are additive: a fast run measures fewer depths than a
+        # full run, and the missing ones must keep their reference value.
+        chat_levels = {d: v["decode_tps"]
+                       for d, v in (results.get("chat", {}).get("levels") or {}).items()
+                       if v.get("decode_tps")}
+        if chat_levels:
+            new["chat_decode_tps"] = {**(new.get("chat_decode_tps") or {}), **chat_levels}
         baseline_path.write_text(json.dumps(new, indent=2) + "\n")
         log(f"baseline updated: {baseline_path}")
 
