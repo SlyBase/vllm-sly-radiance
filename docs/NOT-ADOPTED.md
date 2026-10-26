@@ -355,3 +355,21 @@ a commercial license is granted; (c) the vLLM tree verify works with a quantized
 | Item | Why not |
 |---|---|
 | libr4d int4-KV prefill route (`R4D_KV4I`, variants A/B/B2) to close the KV4 prefill gap | KV4 (Tetra) prefill is 11.7-11.8 % slower than fp8 KV at 64k (210 W and 300 W); the kernel is 1.80x (rocprof). B2 is more accurate than Tetra against an fp8-KV reference (KL 0.01557 vs 0.01702, GSM8K-200 0.855 vs 0.845) but not faster (-1.3...+3.4 %, noise). KV4 itself stays supported (528,722 vs 342,950 KV tokens, prefill -11.7 % at 64k); only this route is dropped. Experiment branch `exp/kv4i-dump` (parked, not merged). |
+
+## W4A4 prefill (int4 activations) from the hipfire engine (2026-10-26)
+
+Cross-engine test on one R9700, 210 W, same window, BetterBench `--quick`: hipfire 0.4.3.1 (Qwen3.8-27B,
+MQ4-XTS + its DFlash draft) against 1.8.1 (Swift-1.5 MXFP4 + DFlash2 W4A16). hipfire prefills 18-24 % faster
+(3273/3487/3337/3282/2932 against 2696/2818/2779/2689/2484 tok/s at 1515/5920/11796/23546/47058 prompt
+tokens) and decodes 6.6 % slower (143.5 against 153.7 weighted), so only its prefill path was examined.
+
+| Item | Why not |
+|---|---|
+| **IU4 prefill route: int4 weights x int4 activations** (`v_wmma_i32_16x16x32_iu4`, FWHT-rotated activations) | The gain is the activation width, not the matrix rate: their own CHANGELOG puts the A4 route at 4.8-4.9k tok/s and their native-FP8 route (W4A8-class) at 3.8-3.9k at pp8192 on other cards, which is where this image already sits. Their measured quality cost on gfx1201 for A4 against their own A8: WT2 KLD 0.0419 -> 0.0696 (+66 %) and code24 0.0299 -> 0.0521 (+74 %); on gfx1151 MoE it is +0.0205 nats. This image's budget for a prefill-route change is dKLD <= 0.010 nats, so A4 fails by the competitor's own evidence. Their "Quality-first" preset turns it off on gfx1201. |
+| Porting cost, even if the quality bar moved | MXFP4 values x2 reach +-12 and do not fit int4, so the route needs a rotated int4 trunk (ParoQuant int4 exists on HF and this image serves it as W4A8) plus an int4 activation quantiser and an int4-WMMA GEMM. That is a new prefill kernel, not a flag. |
+| Their prompt-processing chunk size | Not a lever: their gfx1201 default is 8192 rows (the `prefill.chunk_rows` 512 in their config schema is the fallback), and the 60-68 us/token gap is flat over depth, i.e. a per-token GEMM cost. |
+| Their DFlash "hidden rows stay on device" prefill gain (+29 % in their CHANGELOG) | Fixed a host copy in their own path; this image has no equivalent host round-trip. |
+| Their `fa_prefill_pm` attention kernel | H16/KV2 geometry only, not the 27B's H24/Hkv4/D256. |
+
+Revisit when: (a) a rotated-int4 trunk with a measured dKLD <= 0.010 nats against our W4A8 exists; (b) gfx1201
+gains an FP4 matrix instruction (NVFP4 W4A4 checkpoints exist on HF, but the ISA has no such GEMM today).
