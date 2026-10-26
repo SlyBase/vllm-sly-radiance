@@ -29,9 +29,10 @@ Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
 
 ## [1.9.0] - 2026-10-25
 
-Three things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every
+Four things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every
 length), the A-tiled MXFP4 SKIPPAD GEMM no longer slows the waves it serves (+1 % prefill, output identical),
-and Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)).
+Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)),
+and the GDN chunk scan no longer attenuates chunks whose gate decays steeply ([libr4d#4](https://github.com/StillDeadcode/libr4d/issues/4)).
 
 ### Added
 - **`RADIANCE_ATTN_GATE_VIEW=1`** (default `0`, `sly/patch_attn_gate_view.py`): the attention output gate stays
@@ -76,6 +77,21 @@ and Cactus no longer drives long sampled generations into repetition loops ([#16
   rule, values outside `[0,1]` are refused at load. Calculated on the trace of the runs above: the cap keeps
   90 % of the Cactus acceptance gain, the fade 78 %, both combined 72 % -- the fade carries the run evidence, the cap is the length-independent
   insurance behind it (see Measured).
+- **GDN chunk scan, chunks with a gate span above 160** ([libr4d#4](https://github.com/StillDeadcode/libr4d/issues/4),
+  `sly/r4d/r4d_gdn_exact_decay.patch`, applied after the scan variants). The scan factors e^{g_i-g_j} as
+  e^{g_i-c} * e^{c-g_j} about the chunk midpoint and clamps the growing half at e^80 (the NaN fix in PERFORMANCE.md). When
+  g_0 - g_last exceeds 160, one half leaves range and the clamp *attenuates* the chunk -- the last tokens' own
+  diagonal and their weight into the state the next chunk reads -- instead of computing it. This is not rare on
+  Qwen3.8-27B: jkuepker's capture on the issue has 51 of 2,304 GDN heads past 160 on real prompts. Such a chunk
+  now takes the exact form (score `e^{g_i-g_j+log scale}`, masked before use, so every kept exponent is <= 0;
+  V' undecayed; K scaled by e^{g_last-g_j} in place; state `e^{g_last} S + V'^T K`), the form radiance's own
+  engine uses. The choice is per chunk and workgroup-uniform, and a chunk at or below 160 runs the unchanged
+  split arithmetic, so the output is bit-identical to 1.8.1 wherever the clamp could not fire. No knob:
+  `-DEXACT=0` builds the old kernel. Reference model `chunked(split="hybrid")` in `sly/gdn/chunk_scan_ref.py`
+  (fp64, equals the naive recurrence to 2e-15 up to span 1000, where the split form is 7-90 % off); CPU-gated
+  by `sly/gdn/tests/test_chunk_scan_ref.py` and `sly/tests/test_gdn_exact_decay_patch_cpu.py` (patch contents,
+  Dockerfile order, resource fixtures in `sly/tests/fixtures/gdn_scan_exact/`). GPU gate
+  `sly/gdn/tests/gpu_chunk_scan_exact_decay.py`: every unit against the fp64 recurrence at spans 3-1000, 1 %.
 
 ### Measured
 - One R9700, 300 W, `--max-model-len 65536`, DFlash on, A / fixed / `SKIP_PAD=0` / A in one window, second starts,
@@ -127,6 +143,26 @@ and Cactus no longer drives long sampled generations into repetition loops ([#16
   that level. A loop can still start while the fade is running (the one fadecap loop began at 12.5k output
   tokens, where delta is 0.16, not 0).
 - Not measured: decode, GSM8K, the 262k production context, and each knob alone.
+- **GDN exact decay** (one R9700, 300 W, 1.8.1 image and compiler, libr4d a3e4833 + rx10 + variants with and
+  without the patch; the patched `r4d.so` rebuilt from this PR is byte-identical to the one measured):
+  - Kernel against an fp64 sequential recurrence, 12 steep-decay cases (`check_gdn_extreme_decay.py` from
+    magiccodingman/vllm-radiance): as shipped 7/12 within 1 %, worst output
+    error 94 %; patched 12/12, worst 0.34 %, in both the s3 and the stock unit. `gpu_chunk_scan_variants.py`:
+    33 ok, 0 WRONG; DIGEST of `o` and `ht` identical to as shipped on all 20 (5 shapes x stock/s1/s2/s3).
+    `gpu_chunk_scan_exact_decay.py`: patched 24/24 (worst 0.32 %, the same as at span 3); as shipped 20/20 WRONG
+    above 160, at 15-90 %, which equals the fp64 split-form model of `chunk_scan_ref.py` to three digits.
+  - Kernel time, one layer, H = 48, two processes each, interleaved. s3 (the image default):
+    0.3845 / 0.1665 / 0.0871 ms against 0.3849 / 0.1685 / 0.0884 at T = 4089 / 1760 / 880 (−0.1 / −1.2 / −1.4 %).
+    The units the image does not select are slower: stock +4-7 %, s1 +11-12 %, s2 +3-5 %. Resources:
+    s3 228 VGPR (was 189), no spill, 6 waves/SIMD, LDS unchanged; stock and s1 lose their 4-VGPR spill.
+  - Model accuracy, teacher-forced top-20 logprobs over 4 documents x 48k tokens (C++, Moby-Dick, prose,
+    Python) against a reference that runs the GDN layer on vLLM's Triton/FLA path (exact decay), attention
+    unchanged: as shipped KL 0.0241, top-1 94.2 %, +0.0109 nats/token; patched KL 0.0107, top-1 96.1 %,
+    −0.0003 nats/token. 0.0107 is this harness's floor: two exact implementations (the patch and a full
+    exact port) differ from each other by 0.0106. Moby-Dick perplexity 7.040 -> 6.831 (reference 6.839).
+  - GSM8K-200, the accept gate's command: 0.860 as shipped, 0.860 patched (2 items flip each way).
+  - Not measured: engine prefill with the patch (the s3 kernel ties as shipped; a full exact port measured
+    −0.2 to −0.3 % at 1.5k-48k), decode, 210 W, the 262k production context.
 
 ## [1.8.1] - 2026-10-24
 

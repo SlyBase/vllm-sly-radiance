@@ -226,5 +226,12 @@ the next chunk reads, are *attenuated* by `e^{80-(cref-g_t)}` rather than correc
 real fix is to stop splitting a weight that is provably <= 1 into a huge x tiny pair: stage `V'` in
 fp32, or apply `e^{gl-g_t}` directly on the state path.
 
+**Fixed in 1.9.0** (`sly/r4d/r4d_gdn_exact_decay.patch`, [libr4d#4](https://github.com/StillDeadcode/libr4d/issues/4)):
+a chunk whose span `g_0 - g_last` exceeds 160 now takes the exact form, with `e^{gl-g_t}` applied to K on
+the state path. Every other chunk keeps the split arithmetic bit for bit, because at or below 160 both halves
+stay <= e^80 and the clamp cannot fire. Measured against an exact-decay reference over 4 x 48k tokens:
+KL 0.0241 -> 0.0107 (the harness floor), +0.0109 -> −0.0003 nats/token, at no cost on the shipped s3 kernel.
+Numbers are in the CHANGELOG.
+
 Fixing this also removed a second symptom: `RADIANCE_FAST_DRAFT` used to hang a worker at chunk 8192
 because the draft head was being fed NaN like everything else downstream of the GDN core.
