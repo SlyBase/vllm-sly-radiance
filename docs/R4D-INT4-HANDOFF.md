@@ -25,8 +25,9 @@ verify and the head-128 drafter.
 | Scripts used on the GPU host | `/opt/data/analysis/r4d-int4-route/scripts/` (`run_acc.sh`, `watch_acc_v3.sh`, `unit.ACCV`, `unit.ACCT`, `mb.sh`) |
 | Data | `/opt/data/analysis/r4d-int4-route/data/` (per-layer check log, KL table, KL npz + texts + token ids) |
 
-Knobs (all env): `R4D_KV4I=1` (route on), `RADIANCE_KV4I_MIN_Q` (512), `RADIANCE_KV4I_MIN_CTX` (16384),
-`RADIANCE_KV4I_QGAIN` (16), `R4D_KV4I_CHECK=N` (first N routed launches also run the Tetra kernel and log
+Knobs (all env): `R4D_KV4I=1` (route on), `RADIANCE_KV4I_MIN_Q` (512), `RADIANCE_KV4I_MIN_CTX` (0; 16384 before
+the Triton glue), `RADIANCE_KV4I_GLUE` (`triton`, or `torch` for the first route's fp32 matmuls + e4m3 query),
+`RADIANCE_KV4I_QGAIN` (16, torch glue only), `R4D_KV4I_CHECK=N` (first N routed launches also run the Tetra kernel and log
 `[kv4i-check] <layer> n= ctx= rel_l2= max_abs= ref_absmax= qrot_amax=`; host reads, debug only).
 
 ## 3. How the route computes

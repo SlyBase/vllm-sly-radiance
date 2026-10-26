@@ -13,12 +13,14 @@ KV4_BLOCK = KV4_GPB * 16            # 1664 tokens per block
 GROUP = 16                          # tokens per table entry (the kernel's BS)
 TABLE_PAD = 3                       # the double-buffered prefetch reads up to 3 groups past the row
 MIN_Q_DEFAULT = 512                 # smallest query length that pays for the libr4d launch
-# The routed kernel is 1.01x of the fp8 one, but the route's own q rotation and output un-rotation are
-# two 256x256 matmuls per layer and launch -- cost per token, not per key. At 210 W that measured
-# -5.9/-5.1/-3.8/-1.1 % prefill at 1.5k/5.9k/11.8k/23.5k and +4.2 % at 47k, so the route only pays
-# once the context is deep enough for the attention to dominate. Raise MIN_CTX_DEFAULT only with a
-# fresh sweep; lower it never.
-MIN_CTX_DEFAULT = 16384
+# The routed kernel is 1.01x of the fp8 one. With the first route's torch glue (fp32 256x256 matmuls for the
+# q rotation and output un-rotation, ~3 ms per layer launch at 4096 tokens) the route measured -5.9/-5.1/-3.8/
+# -1.1 % prefill at 1.5k/5.9k/11.8k/23.5k and +4.2 % at 47k (210 W), hence the old gate of 16384. The Triton
+# glue (RADIANCE_KV4I_GLUE=triton, ~0.5 ms) removed that cost: engine sweep, R9700 300 W, CHUNK 4096, route vs
+# TetraAttention +0.6/+1.7/+3.4/+6.7/+12.3 % at 1514/6000/12000/24000/48000, and KL against an fp8-KV reference
+# 0.01709 vs Tetra's 0.02026 over four 48k-token documents, lower in every context bucket from 0-4K up (torch
+# glue: 0.01705). So no context gate by default; RADIANCE_KV4I_MIN_CTX=N still sets one.
+MIN_CTX_DEFAULT = 0
 
 
 def decline(*, enabled, has_entry, head, k_group, cache_block, cache_shape_ok, cache_strides_ok,

@@ -47,19 +47,21 @@ def test_refuses_every_shape_it_cannot_read():
         "ragged or short": dict(num_tokens=4096 + 8, num_seqs=2),          # 4096 + 8 in 2 runs
         "ragged or short query runs (12288": dict(num_tokens=12288, num_seqs=2, max_query_len=8192),
         "no query runs": dict(num_seqs=0, num_tokens=0),
-        # the rotation costs more than the kernel wins below the measured context
-        "context 8192": dict(max_seq_len=8192),
+        # an explicit RADIANCE_KV4I_MIN_CTX (default 0 = no gate) still declines below it
+        "context 8192": dict(max_seq_len=8192, min_ctx=16384),
     }
     for needle, over in cases.items():
         got = _decline(**over)
         assert got is not None and needle in got, f"{over} accepted as {got!r}"
 
 
-def test_a_long_run_at_shallow_context_stays_on_tetra():
-    # 4096 new tokens, but only 4096 keys in total: the measured -5.9 % case
-    assert _decline(max_query_len=4096, max_seq_len=4096) is not None
-    # the same run with a deep cache is the +4.2 % case
-    assert _decline(max_query_len=4096, max_seq_len=49152) is None
+def test_a_long_run_at_shallow_context_takes_the_route_by_default():
+    # 4096 new tokens, 4096 keys: with the Triton glue the route wins here too (+1.7 % at 6000), so no gate
+    assert R.MIN_CTX_DEFAULT == 0
+    assert _decline(max_query_len=4096, max_seq_len=4096) is None
+    # an explicit RADIANCE_KV4I_MIN_CTX still keeps a shallow run on Tetra, and a deep one routed
+    assert _decline(max_query_len=4096, max_seq_len=4096, min_ctx=16384) is not None
+    assert _decline(max_query_len=4096, max_seq_len=49152, min_ctx=16384) is None
     # two equal runs batch fine, two unequal ones do not
     assert _decline(num_tokens=8192, num_seqs=2) is None
     assert _decline(num_tokens=8000, num_seqs=2) is not None

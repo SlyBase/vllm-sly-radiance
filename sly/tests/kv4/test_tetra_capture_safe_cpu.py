@@ -87,6 +87,7 @@ def test_a_declined_launch_reads_no_device_value_at_all(attn, monkeypatch):
     monkeypatch.setattr(attn, "kv4h_attention", lambda *a, **k: calls.append(k))
     monkeypatch.setattr(attn, "KV4I_ON", True)
     monkeypatch.setattr(attn, "KV4I_ENTRY", object())
+    monkeypatch.setattr(attn, "KV4I_MIN_CTX", 16384)   # an explicit gate (the default is 0 since the Triton glue)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     impl = object.__new__(attn.TetraAttentionImpl)
     impl.head, impl.window, impl.num_heads, impl.num_kv_heads, impl.scale = 256, 0, 24, 4, 1.0
