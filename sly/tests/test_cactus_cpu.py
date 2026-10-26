@@ -142,6 +142,15 @@ def test_fade_defaults():
         assert m and m.group(1) == want, f"{knob} default must be {want}"
 
 
+def test_ctx_fade_defaults():
+    # Context fade: an agent turn is a new request with a short output on a long context, so the
+    # output fade above never starts there. delta also falls over the absolute position.
+    src = PATCH.read_text()
+    for knob, want in (("RADIANCE_CACTUS_CTX_FADE_START", "32768"), ("RADIANCE_CACTUS_CTX_FADE_END", "131072")):
+        m = re.search(knob + r'\\?",\s*\\?"([0-9]+)', src)
+        assert m and m.group(1) == want, f"{knob} default must be {want}"
+
+
 def _pinned_source():
     # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
     if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
@@ -208,6 +217,7 @@ def test_patch_structure():
     assert '"RADIANCE_CACTUS_DELTA", "0.5"' in s, "patched file must default to 0.5"
     assert "cactus_prompt_len_ptr" in s and "req_delta" in s, "length fade missing"
     assert "cactus_cap_r" in s and "1.0 - cactus_cap_r * (1.0 - q_n)" in s, "acceptance cap missing"
+    assert "cactus_ctx_fade_end" in s and s.count("RADIANCE_CACTUS_CTX_FADE_END") == 1, "context fade missing"
 
 
 if __name__ == "__main__":
@@ -218,6 +228,7 @@ if __name__ == "__main__":
     test_cap_keeps_a_positive_escape()
     test_cap_default_is_half()
     test_fade_defaults()
+    test_ctx_fade_defaults()
     test_patch_structure()
     test_fade_kernel_in_triton_interpreter()
     print("cactus CPU tests OK")

@@ -10,6 +10,23 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.9.1] - 2026-10-26
+
+Cactus also fades over the context length. The 1.9.0 length fade counts the output tokens of one request, and
+an agent turn is a new request with a short output on a long context, so the fade never started there.
+
+### Fixed
+- **Context fade for the Cactus acceptance rule: `RADIANCE_CACTUS_CTX_FADE_START` (default `32768`) and
+  `RADIANCE_CACTUS_CTX_FADE_END` (default `131072`).** The request's delta also falls linearly over the absolute
+  position (prompt + output), from `RADIANCE_CACTUS_DELTA` at START to 0 (stock rule) at END, and multiplies with
+  the output fade. `CTX_FADE_END=0` = off (1.9.0 behaviour). Trigger: a production agent session (Swift-1.5,
+  ~170k context, k=7, 1.9.0 defaults) locked into a reasoning repetition loop after ~3k output tokens of one
+  turn, with per-position acceptance at 1.0 for the last ~300 tokens; the output fade (start 4096) was not
+  active. Contexts below 32k (chat, BetterBench, GSM8K) keep the full gain. The defaults are not tuned yet: a
+  loop replay of that request (16-32 seeds, stock / delta 0.5 / delta 0.5 + context fade) sets them. CPU-gated
+  by `sly/tests/cactus_fade_kernel_check.py` (Triton interpreter: context fade and output x context fade vs a
+  float64 reference, past END == stock, before START == full Cactus).
+
 ## [1.9.0] - 2026-10-25
 
 Three things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every

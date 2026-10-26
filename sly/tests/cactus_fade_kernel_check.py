@@ -63,7 +63,7 @@ _stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argma
 _stub("vllm.v1.worker.gpu.sample.watermark", philox_gumbel_block_argmax=None)
 
 KNOBS = ("RADIANCE_CACTUS_DELTA", "RADIANCE_CACTUS_FADE_START", "RADIANCE_CACTUS_FADE_END",
-         "RADIANCE_CACTUS_CAP_R", "RADIANCE_NSD")
+         "RADIANCE_CACTUS_CAP_R", "RADIANCE_CACTUS_CTX_FADE_START", "RADIANCE_CACTUS_CTX_FADE_END", "RADIANCE_NSD")
 K, VOCAB, POS0 = 3, 9000, 100
 Q = 0.6
 # slot -> output length at the first verified position (prompt length = POS0 - out)
@@ -115,8 +115,8 @@ def run(mod, prompt_len=True):
     return [int(x) - 1 for x in num]
 
 
-def reference(start, end, delta=0.5, cap_r=0.0):
-    """float64: accepted drafts per slot under the fade (point-mass draft: accept iff h > u)."""
+def reference(start, end, delta=0.5, cap_r=0.0, ctx_start=0, ctx_end=0):
+    """float64: accepted drafts per slot under the fades (point-mass draft: accept iff h > u)."""
     _, _, _, pos, _, _, _, seed, _ = batch()
     u = torch.empty(SLOTS * (K + 1))
     _u_kernel[(SLOTS * (K + 1),)](u, seed.repeat_interleave(K + 1), pos)
@@ -127,6 +127,8 @@ def reference(start, end, delta=0.5, cap_r=0.0):
         for i in range(K):
             # end == 0 is the "no fade" switch in the kernel, not a fade to zero
             fade = 1.0 if end == 0 else min(max((end - (o0 + i)) / max(end - start, 1), 0.0), 1.0)
+            if ctx_end > 0:  # context fade over the absolute position
+                fade *= min(max((ctx_end - (POS0 + i)) / max(ctx_end - ctx_start, 1), 0.0), 1.0)
             h = min(Q + math.sqrt(2 * delta * fade * Q * (1 - Q)), 1.0)
             h = min(h, 1.0 - cap_r * (1.0 - Q))
             if not h > float(u[s, i]):
@@ -152,6 +154,28 @@ def main(stock_path, patched_path):
     want = reference(8, 16)
     assert fade == want, f"fade differs from the float64 reference: {fade} vs {want}"
     print(f"fade 8..16, cap off: {fade} (stock {stock}) == reference - OK")
+
+    # context fade over the absolute position (agent turns: long prompt, short output). Positions are
+    # POS0..POS0+K-1 in every slot, so 99..102 gives delta factors 2/3, 1/3 and 0.
+    no_out = dict(RADIANCE_CACTUS_DELTA=0.5, RADIANCE_CACTUS_FADE_END=0, RADIANCE_CACTUS_CAP_R=0)
+    ctx = run(load(patched_path, "rsu_ctx", RADIANCE_CACTUS_CTX_FADE_START=99, RADIANCE_CACTUS_CTX_FADE_END=102,
+                   **no_out))
+    want_ctx = reference(0, 0, ctx_start=99, ctx_end=102)
+    assert ctx == want_ctx, f"context fade differs from the reference: {ctx} vs {want_ctx}"
+    assert ctx != full, f"context fade did not bite: {ctx}"
+    past = run(load(patched_path, "rsu_ctxpast", RADIANCE_CACTUS_CTX_FADE_START=50, RADIANCE_CACTUS_CTX_FADE_END=90,
+                    **no_out))
+    assert past == stock, f"past the context fade must equal stock: {past} vs {stock}"
+    before = run(load(patched_path, "rsu_ctxbefore", RADIANCE_CACTUS_CTX_FADE_START=200,
+                      RADIANCE_CACTUS_CTX_FADE_END=300, **no_out))
+    assert before == full, f"before the context fade every draft must be accepted: {before}"
+    # both fades multiply (output fade 8..16 and context fade 99..102)
+    both = run(load(patched_path, "rsu_both", RADIANCE_CACTUS_DELTA=0.5, RADIANCE_CACTUS_FADE_START=8,
+                    RADIANCE_CACTUS_FADE_END=16, RADIANCE_CACTUS_CAP_R=0, RADIANCE_CACTUS_CTX_FADE_START=99,
+                    RADIANCE_CACTUS_CTX_FADE_END=102))
+    want_both = reference(8, 16, ctx_start=99, ctx_end=102)
+    assert both == want_both, f"output x context fade differs from the reference: {both} vs {want_both}"
+    print(f"context fade 99..102: {ctx}, past {past}, before {before}, both {both} == reference - OK")
 
     # cap on: q = 0.6, so h is limited to 1 - r*0.4 (0.8 at the default r = 0.5), i.e. only 80 % of the
     # drafts are accepted; the value must equal the float64 reference of the combined rule.

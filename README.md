@@ -458,6 +458,8 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py`.
 | `RADIANCE_CACTUS_FADE_START` | `4096` | 1.9.0 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
 | `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
 | `RADIANCE_CACTUS_CAP_R` | `0.5` | 1.9.0 acceptance cap, independent of length: h is also limited to `1 - r*(1-q)`. Never stricter than the stock rule (h >= q for every r <= 1), and it keeps `r` of the stock rejection chance at the drafter's p ~ 1, where Cactus has none above q = 1/(1+2*delta). `0` = off, `1` = exactly the stock rule; outside `[0,1]` the engine refuses to start |
+| `RADIANCE_CACTUS_CTX_FADE_START` | `32768` | 1.9.1 context fade: absolute position (prompt + output) after which the delta starts to fall. For agent turns, where a long context meets a short output and the output fade never starts |
+| `RADIANCE_CACTUS_CTX_FADE_END` | `131072` | position at which the delta reaches 0 (stock rule). Multiplies with the output fade; `0` = off (1.9.0 behaviour) |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
 1.0.0 column of the 1.5.1 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,

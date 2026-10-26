@@ -25,6 +25,11 @@ RADIANCE_CACTUS_CAP_R       acceptance cap, default 0.5 (0 = off): h_n is additi
                             drafter's p ~ 1, it keeps r of the stock rejection chance at every q < 1 --
                             Cactus itself has none above q = 1/(1+2*delta). A second, length-independent
                             guarantee next to the fade; it costs gain mainly in the q 0.4-0.7 band.
+RADIANCE_CACTUS_CTX_FADE_START  context fade: delta also falls linearly over the ABSOLUTE position (prompt +
+RADIANCE_CACTUS_CTX_FADE_END    output), from `delta` at START to 0 at END (defaults 32768 / 131072; END = 0 =
+                                off). An agent turn is a new request with a short output on a long context,
+                                so the output fade never starts there; a loop at ~170k context and ~3k output
+                                tokens ran with the full delta. Multiplies with the output fade.
 
 Only the V2 model runner path is patched: vLLM 0.31 defaults ROCm Qwen3.8 + dflash
 to the V2 runner (vllm/config/vllm.py), and the V1 sample/rejection_sampler.py is a
@@ -74,6 +79,15 @@ apply(TARGET,
       "cactus fade + cap: env knobs")
 
 apply(TARGET,
+      "    raise RuntimeError(f\"RADIANCE_CACTUS_CAP_R must be in [0, 1], got {CACTUS_CAP_R}\")\n",
+      "    raise RuntimeError(f\"RADIANCE_CACTUS_CAP_R must be in [0, 1], got {CACTUS_CAP_R}\")\n"
+      "# radiance cactus context fade: env knobs (sly/patch_cactus.py)\n"
+      "CACTUS_CTX_FADE_START = int(os.environ.get(\"RADIANCE_CACTUS_CTX_FADE_START\", \"32768\"))\n"
+      "CACTUS_CTX_FADE_END = int(os.environ.get(\"RADIANCE_CACTUS_CTX_FADE_END\", \"131072\"))\n",
+      "RADIANCE_CACTUS_CTX_FADE_END",
+      "cactus context fade: env knobs")
+
+apply(TARGET,
       "    vocab_num_blocks,\n"
       "    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,\n"
       "    HAS_DRAFT_LOGITS: tl.constexpr,\n"
@@ -99,6 +113,16 @@ apply(TARGET,
       "    cactus_cap_r,\n",
       "# radiance cactus fade: kernel args",
       "cactus fade: kernel signature")
+
+apply(TARGET,
+      "    cactus_cap_r,\n"
+      "    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,\n",
+      "    cactus_cap_r,\n"
+      "    cactus_ctx_fade_start,  # radiance cactus context fade: kernel args\n"
+      "    cactus_ctx_fade_end,\n"
+      "    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,\n",
+      "# radiance cactus context fade: kernel args",
+      "cactus context fade: kernel signature")
 
 # Threshold. Shape 2 is the 1.5.1-1.8.1 hunk, so a launcher re-run on an older image upgrades it.
 _STOCK_TEST = (
@@ -138,6 +162,17 @@ apply_any(TARGET,
        _THRESHOLD)],
       "# radiance cactus fade: delta falls",
       "cactus: Leviathan acceptance")
+
+apply(TARGET,
+      "                    req_delta = tl.where(cactus_fade_end > 0, cactus_delta * fade, cactus_delta)\n",
+      "                    req_delta = tl.where(cactus_fade_end > 0, cactus_delta * fade, cactus_delta)\n"
+      "                    # radiance cactus context fade: delta also falls over the absolute position\n"
+      "                    ctx_fade = tl.minimum(tl.maximum((cactus_ctx_fade_end - pos.to(tl.float32))\n"
+      "                                          / tl.maximum((cactus_ctx_fade_end - cactus_ctx_fade_start) * 1.0, 1.0),\n"
+      "                                          0.0), 1.0)\n"
+      "                    req_delta = tl.where(cactus_ctx_fade_end > 0, req_delta * ctx_fade, req_delta)\n",
+      "# radiance cactus context fade: delta also falls",
+      "cactus context fade: threshold")
 
 # vLLM 0.32.0 inserts watermarking_skip_mask between watermarking and watermark_key, so the
 # cactus_delta wrapper arg anchors on the skip-mask + watermark_key tail (unique in the file).
@@ -193,6 +228,14 @@ apply(TARGET,
       "        CACTUS_CAP_R,\n",
       "# radiance cactus fade: launch args",
       "cactus fade: kernel launch")
+
+apply(TARGET,
+      "        CACTUS_CAP_R,\n",
+      "        CACTUS_CAP_R,\n"
+      "        CACTUS_CTX_FADE_START,  # radiance cactus context fade: launch args\n"
+      "        CACTUS_CTX_FADE_END,\n",
+      "# radiance cactus context fade: launch args",
+      "cactus context fade: kernel launch")
 
 # The V2 rejection sampler passes the prompt lengths it already holds (req_states.prompt_len, per slot).
 apply(TARGET_CALL,
