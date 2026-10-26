@@ -53,6 +53,17 @@ gated commit; the tag starts `build.yml`, which publishes the image to ghcr.io, 
 creates the GitHub release from the CHANGELOG section. A release without a green gate goes through
 Actions → release (reason required).
 
+**A change that moves tokens/update needs a per-category table, not just the weighted number.**
+Speculative depth, acceptance rules, KV dtype and anything else that changes accepted tokens per
+engine step hit the categories very differently (`tokens/update` ranges from 3.1 on prose to 10.2
+on json). 1.9.0 shipped depth k=15 with "weighted decode +10.3 %" in the release body — prose lost
+7.2 %, chat 8.6 %, and a real 1k-token chat dropped from 72 to 34 t/s; the mixture (55 % weight on
+code/json/file_edit) hid it. So the CHANGELOG section for such a change carries the per-category
+decode table and the chat-replay levels from the gate report, or states plainly that they were not
+measured. The gate enforces the same rule mechanically: every category is its own check
+(`category_decode_tps_min_ratio`) plus the multi-turn chat replay (`chat_tps_min_ratio`), see
+`ci/accept/README.md`.
+
 ## Upstreams
 
 `upstream/stilldeadcode` and `upstream/ggz14` are read-only mirrors (daily sync PRs). Credit the authors
