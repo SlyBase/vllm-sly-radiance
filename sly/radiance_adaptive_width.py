@@ -24,7 +24,7 @@ toward the pooled estimate with PRIOR pseudo-positions so a new request starts a
 
 Pure host code, no torch import. Knobs (all optional):
   RADIANCE_ADAPTIVE_WIDTH   0 (default) | uniform | perseq
-  RADIANCE_AW_LENS          "1,3,5,7"  widths tried (the full depth is always added)
+  RADIANCE_AW_LENS          odd        widths tried, default 1,3,5,... below the depth (the depth is always added)
   RADIANCE_AW_ALPHA         0.25       weight of the newest verify in a request's estimate
   RADIANCE_AW_PRIOR         2.0        pseudo-positions pulling q toward the pool
   RADIANCE_AW_COST_A        29.9       ms, T(M) = a + b*M  (prod: ~33 ms at M 8, ~55 ms at M 64, 210 W)
@@ -72,16 +72,23 @@ def mode():
     return m
 
 
+# Odd widths; every caller keeps only those below the draft depth and adds the depth itself, so
+# k=7 gets exactly {1,3,5,7} (the shipped ladder) and k=11/15 get the steps in between.
+_DEFAULT_LENS = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
+
+
 def lens_from_env():
-    v = os.environ.get("RADIANCE_AW_LENS", "1,3,5,7")
+    v = os.environ.get("RADIANCE_AW_LENS", "")
+    if not v.strip():
+        return list(_DEFAULT_LENS)
     try:
         out = sorted({int(x) for x in v.split(",") if x.strip()})
         if out and out[0] >= 1:
             return out
     except ValueError:
         pass
-    print(f"[radiance-aw] RADIANCE_AW_LENS={v!r} invalid: using 1,3,5,7", file=sys.stderr)
-    return [1, 3, 5, 7]
+    print(f"[radiance-aw] RADIANCE_AW_LENS={v!r} invalid: using the odd widths", file=sys.stderr)
+    return list(_DEFAULT_LENS)
 
 
 def varlen_graph_enabled():

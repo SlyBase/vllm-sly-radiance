@@ -195,7 +195,7 @@ docker run -d --name vllm --restart unless-stopped \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
-  --speculative-config.num_speculative_tokens 7 \
+  --speculative-config.num_speculative_tokens 15 \
   --speculative-config.draft_sample_method greedy \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \
@@ -252,7 +252,7 @@ docker run -d --name vllm --restart unless-stopped \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
-  --speculative-config.num_speculative_tokens 7 \
+  --speculative-config.num_speculative_tokens 15 \
   --speculative-config.draft_sample_method probabilistic \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \

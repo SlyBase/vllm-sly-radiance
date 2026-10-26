@@ -64,7 +64,7 @@ Everything is an environment variable; these are the ones worth knowing.
 
   SPEC_METHOD=dflash        speculative drafter: dflash (fastest, needs the DFlash2 checkpoint)
                             or mtp (uses the head inside the target, no extra download)
-  SPEC=7 dflash / 4 mtp     speculative depth
+  SPEC=15 dflash / 4 mtp    speculative depth
   MAXSEQS=8                 max concurrent sequences
   MAXLEN=262144             max context length
   CHUNK=4096                prefill chunk (--max-num-batched-tokens)
@@ -486,7 +486,16 @@ DRAFT_ATTN=${DRAFT_ATTN:-TRITON_ATTN}
 #   (184.7 vs 184.3) with code tok/update intact, and conc-8 recovers static SPEC=5's batch
 #   efficiency (steps 52-57 -> 46-47 ms, aggregate 391-413 -> 444-461 t/s). Lossless by
 #   construction -- verification preserves the distribution at any proposal length.
-if [ "$SPEC_METHOD" = dflash ]; then SPEC=${SPEC:-7}; else SPEC=${SPEC:-4}; fi
+#
+#   dflash 15 since 1.9.0 (2026-10-26, one window, 210 W, BetterBench 0.4 full, k=7 / 11 / 15):
+#   weighted single-stream 144.9 / 156.5 / 159.8 t/s (+10.3 % for 15, z=+2.4), json +30 %,
+#   math +21 %, code +13 %; chat -9 %, prose -7 %; step +3.6 ms. Concurrency LOSES: c4/c8/c16
+#   324 / 419 / 418 -> 286 / 348 / 359 t/s (-12/-17/-14 %), with CUDA graphs up to 128 rows as
+#   well (356 at c8) -- the drafter drafts all 15 positions whatever width the verify keeps.
+#   KV pool at 65k: 334,823 -> 262,410 tokens (-22 %). Production runs ~80 % of its busy time
+#   with one request, so 15 is the default; SPEC=7 for batch-throughput serving. The adaptive
+#   width ladder follows the depth (1,3,5,...,15) without RADIANCE_AW_LENS.
+if [ "$SPEC_METHOD" = dflash ]; then SPEC=${SPEC:-15}; else SPEC=${SPEC:-4}; fi
 # The tuned drafter stack. The right default is NOT the same for both methods:
 #   mtp    -- 1. The 2-bit draft head with an exact rerank is a straight win here (+6.5% decode).
 #   dflash -- 1 as of 2026-08-27, WITH RERANK=64 (below). It used to be 0: FAST_DRAFT=1 crashed
@@ -629,7 +638,7 @@ MIN_M=${MIN_M:-0}
 # The decode-kernel band must cover MAXSEQS x (SPEC+1) rows or the biggest verify batches fall
 # onto the prefill tile: 64 covers the 8-stream default exactly (dflash SPEC=7 -> 8x8), 128
 # covers 16 streams. Defaulted from MAXSEQS so the 8-and-under band routes IDENTICALLY to today.
-if [ "${MAXSEQS:-8}" -gt 8 ]; then
+if [ $(( ${MAXSEQS:-8} * (SPEC + 1) )) -gt 64 ]; then
   RADIANCE_MXFP4_DECODE_MAX_M=${RADIANCE_MXFP4_DECODE_MAX_M:-128}
 fi
 
