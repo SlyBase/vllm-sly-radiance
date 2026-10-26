@@ -10,9 +10,12 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.10.0] - 2026-10-25
+## [1.9.0] - 2026-10-25
 
-Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
+Three things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every
+length), the A-tiled MXFP4 SKIPPAD GEMM no longer slows the waves it serves (+1 % prefill, output identical),
+and Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)). The DFlash2 launcher default
+drafts 15 tokens instead of 7 (+10 % single-stream decode at 210 W, concurrency below it, see Changed).
 
 ### Added
 - **`DET_COMPILE=1` (default `0`) in `serve-mxfp4.sh`: `"deterministic": true` in `inductor_compile_config`**
@@ -26,14 +29,6 @@ Opt-in Inductor deterministic mode for reproducible fresh-compile starts.
   1.8.1 (fresh compile, 1.5k-48k prefill): within noise. Not yet measured: decode ms/step and drafter acceptance,
   so it stays opt-in until a GPU A/B clears both. Changes the compile hash (one fresh compile). CPU-gated by
   `sly/tests/test_launcher_deterministic_compile_cpu.py`.
-
-## [1.9.0] - 2026-10-25
-
-Three things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every
-length), the A-tiled MXFP4 SKIPPAD GEMM no longer slows the waves it serves (+1 % prefill, output identical),
-and Cactus no longer drives long sampled generations into repetition loops ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)).
-
-### Added
 - **`RADIANCE_ATTN_GATE_VIEW=1`** (default `0`, `sly/patch_attn_gate_view.py`): the attention output gate stays
   a strided view of q_proj's output. On ROCm the eager path's `gate.reshape(...)` is a copy that Inductor
   materializes because attention splits the graph (0.38 % of prefill GPU time).
@@ -45,6 +40,30 @@ and Cactus no longer drives long sampled generations into repetition loops ([#16
   `envs.compile_factors()`, because they change the traced graph.
 - CPU test `sly/tests/test_inductor_waste_cpu.py`: bit-identical eager and compiled, no gate buffer in Inductor's
   code.
+
+### Changed
+- **DFlash2 speculative depth 7 -> 15 in `serve-mxfp4.sh` (`SPEC`), and the adaptive-width ladder follows the
+  depth.** `RADIANCE_AW_LENS` now defaults to the odd widths below the depth (k=7: {1,3,5,7} as before, decisions
+  identical; k=15: 1,3,...,15); an explicit value still wins. `RADIANCE_MXFP4_DECODE_MAX_M=128` is now derived
+  from `MAXSEQS x (SPEC+1) > 64` instead of `MAXSEQS > 8`. Measured in one window at 210 W, BetterBench 0.4
+  full, 1.9.0, k = 7 / 11 / 15:
+
+  | | k=7 | k=11 | k=15 |
+  |---|---|---|---|
+  | decode weighted (median), t/s | 144.9 | 156.5 | **159.8** (+10.3 %, z=+2.4) |
+  | code / json / math | 173.9 / 197.9 / 175.5 | 199.5 / 230.8 / 202.2 | 197.2 / 257.6 / 213.0 |
+  | prose / chat | 80.2 / 143.2 | 76.9 / 119.0 | 74.4 / 130.9 |
+  | step / tokens per update | 35.8 ms / 4.94 | 38.0 ms / 5.74 | 39.4 ms / 6.07 |
+  | c2 / c4 / c8 / c16, t/s | 217 / 325 / 419 / 418 | 207 / 291 / 357 / 360 | 206 / 286 / 348 / 359 |
+  | KV pool at 65k, tokens | 334,823 | - | 262,410 (-22 %) |
+
+  Concurrency loses 12-17 % at c4-c16, also with CUDA graphs captured up to 128 rows (c8 356): the drafter
+  drafts all 15 positions whatever width the verify keeps, so adaptive width cannot claw that back. Chosen for
+  the single-user profile (about 80 % of production busy time has one request running); `SPEC=7` stays the
+  setting for batch-throughput serving. Accepted per position at k=15: 0.86 0.68 0.53 0.40 0.32 0.25 0.21 0.16
+  0.14 0.10 0.08 0.06 0.05 0.04 0.03. Same window, Cactus without the #164 fade and cap: 145.6 vs 144.9 (tie),
+  so the fade and cap cost nothing measurable on BetterBench. CPU-gated by
+  `sly/tests/test_adaptive_width_lens_cpu.py`.
 
 ### Fixed
 - **The A-tiled MXFP4 prefill GEMM's SKIPPAD variant** (`RADIANCE_MXFP4_AT_SKIP_PAD=1`, image default since 1.8.0)
