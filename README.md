@@ -373,7 +373,7 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
 | `--speculative-config.num_speculative_tokens` | `7` | the drafter's maximum (block size 8) |
 | `--speculative-config.draft_sample_method` | `greedy` | draft-side sampling: `greedy` takes the draft head's argmax, `probabilistic` samples it with vLLM's shared-Gumbel coupling (needs the full draft-logits head). Lossless either way — the verifier decides the emitted token — so this trades acceptance rate against per-step cost, not accuracy. `serve.sh` / `serve-mxfp4.sh` take it as `DRAFT_SAMPLE` (`DRAFT_SAMPLE=probabilistic ./serve-mxfp4.sh`); the like-for-like A/B against `probabilistic` is still open ([BENCHMARKS.md](docs/BENCHMARKS.md), step 2, arm G) |
-| `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes) |
+| `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes); since 1.9.1 (`-sly1`) earlier turns' reasoning is not replayed unless `preserve_thinking` is set |
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |
 
 **Less context, more prefill:** if your requests stay well below 262k tokens, set

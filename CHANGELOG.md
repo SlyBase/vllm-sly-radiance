@@ -10,6 +10,33 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.9.1] - 2026-10-27
+
+The chat template no longer replays the reasoning of earlier assistant turns. Agent sessions that send
+their old thinking back locked into reasoning repetition loops; this is the cause, not the Cactus rule.
+
+### Fixed
+- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly1`: earlier turns' reasoning is dropped by
+  default.** Without an explicit `preserve_thinking` / `preserve_reasoning` in `chat_template_kwargs`, every
+  historical assistant turn renders an empty think block (`<think>\n\n</think>`) followed by its content and
+  tool calls. Setting either knob gives the upstream behaviour (true = keep all, false = keep after the last
+  user query). Both the official Qwen3.8 template and v22.5 keep all old reasoning by default.
+  Measured on a replay of a production agent request (Swift-1.5, 1.9.0, k=7, Cactus 0.5, 16 seeds unless
+  noted, "no result" = repetition loop or token budget used up):
+
+  | Prompt | ours | bf16 cloud (DeepInfra) |
+  |---|---|---|
+  | all old reasoning replayed (v22.5 / official default, 163k tokens) | 11/16 / 9/16 | 6/16 |
+  | official `preserve_thinking=false` (only after the last user query) | 12/16 | - |
+  | **no old reasoning (this default, 97k tokens)** | **1/32** | 0/32 |
+
+  Cactus delta 0 vs 0.5 looped equally often (10/16 vs 8/16 on the same replay), and a system-prompt
+  hint or `reasoning_effort=low` did not help. Next-token logprobs at the loop: P(`</think>`) ~ 0 at every
+  paragraph boundary while P("Let") rises 0.35 -> 0.86 -> 1.00, an in-context repetition lock-in. Side
+  effect: ~65k fewer prompt tokens per turn on that session; the turn just generated is re-prefilled
+  once without its reasoning. Not measured: answer quality on tasks that need the earlier thinking.
+  CPU-gated by `ci/check_chat_template.py` (default drops, both opt-ins keep, inline `<think>` content).
+
 ## [1.9.0] - 2026-10-25
 
 Three things: three Inductor-side copies in the Qwen3.5/3.8 forward are gone (about +0.5 % prefill at every

@@ -9,7 +9,7 @@ chat request. Run in the final stage of the Dockerfile; no GPU needed.
 """
 from transformers.utils.chat_template_utils import render_jinja_template
 t = open("/opt/qwen-fixed.jinja").read()
-assert 'template_version = "qwen3.8-froggeric-v22.5"' in t
+assert 'template_version = "qwen3.8-froggeric-v22.5-sly1"' in t
 tools = [{"type": "function", "function": {"name": "get_weather", "description": "w",
           "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
 msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Wetter in Paris?"},
@@ -27,7 +27,20 @@ assert '<function=get_weather>\n{"city": "Paris"}</function>' in on, on
 # ... and a mapping (what vLLM hands over after parsing) renders as XML parameters
 msgs[2]["tool_calls"][0]["function"]["arguments"] = {"city": "Paris"}
 assert "<function=get_weather>\n<parameter=city>\nParis\n</parameter>" in render(msgs)
-assert "<tool_response>\n{\"temp\": 21}" in on and "call the tool" in on
+assert "<tool_response>\n{\"temp\": 21}" in on
+# sly1: replayed reasoning of earlier assistant turns is dropped by default (an agent that sends its old
+# thinking back locks into the repetition loops it contains); the empty think block stays, so the turn
+# shape is the one measured. preserve_thinking / preserve_reasoning set explicitly = upstream behaviour.
+assert "call the tool" not in on and "<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>" in on, on
+assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_thinking=True)
+assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_reasoning=True)
+# explicit false keeps upstream semantics: reasoning after the last user query survives
+assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_thinking=False)
+# reasoning inlined in content (<think>...</think>answer) is dropped as well
+inl = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<think>\nold plan\n</think>\n\nanswer"},
+       {"role": "user", "content": "q2"}]
+o = render(inl)
+assert "old plan" not in o and "<think>\n\n</think>\n\nanswer" in o, o
 x = render([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
 assert "Reasoning effort is set to xhigh" in x
-print("chat template OK: qwen3.8-froggeric-v22.5 renders (thinking on/off, xhigh, tool round trip)")
+print("chat template OK: qwen3.8-froggeric-v22.5-sly1 renders (thinking on/off, xhigh, tool round trip)")
