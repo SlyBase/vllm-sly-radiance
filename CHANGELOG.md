@@ -10,6 +10,32 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.9.2] - 2026-10-27
+
+The chat template keeps the reasoning of the newest assistant turn only. 1.9.1 dropped every earlier
+turn and cost the multi-turn recall tasks that agents actually need; this restores them without
+bringing the loop back.
+
+### Fixed
+- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`: the reasoning of the MOST RECENT
+  assistant turn is kept, every older turn still renders an empty think block.** The multi-turn value
+  sits one turn back (an agent reads its own last scratchpad); the older turns are what grew the 163k
+  agent prompt and primed the repetition loops. `preserve_thinking: true` still keeps all turns.
+  Measured in one GPU window on 1.9.0 (Swift-1.5, k=7, Cactus 0.5, 210 W), message shown per arm:
+
+  | Arm | Prompt of the 163k agent request | Loops | Quality set (32 tasks) | recall | variant | Decode, median |
+  |---|---|---|---|---|---|---|
+  | v22.5, all reasoning replayed | 575.6k chars | 8/16 and 7/16 (two runs) | 22/32 and 22/32 | 6/16 | 16/16 | 51 / 65 t/s |
+  | sly1, no reasoning | 335.9k chars | 2/16 and 1/16 | 17/32 | 1/16 | 16/16 | 62 / 56 t/s |
+  | **sly2, newest turn only** | 351.6k chars | **1/16** | **25/32** | **9/16** | 16/16 | 90 t/s |
+
+  "Loops" = zlib ratio of the last 4000 generated chars < 0.10 (verbatim repetition), 16 seeds of the
+  same request. "Quality" = 16 recall tasks (turn 2 asks for an intermediate value from turn 1, which
+  only exists in the reasoning) plus 16 variant tasks (same method, new numbers = capability guard).
+  Decode tok/s is length-biased (correlation tokens/s 0.55-0.74 per arm), so compare it only inside
+  a run; the same-v22.5 template spread 51 vs 65 t/s between two runs of the window.
+  CPU-gated by `ci/check_chat_template.py` (newest turn keeps, older turns drop, both opt-ins keep).
+
 ## [1.9.1] - 2026-10-27
 
 The chat template no longer replays the reasoning of earlier assistant turns. Agent sessions that send

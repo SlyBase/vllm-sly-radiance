@@ -41,6 +41,17 @@ inl = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<thin
        {"role": "user", "content": "q2"}]
 o = render(inl)
 assert "old plan" not in o and "<think>\n\n</think>\n\nanswer" in o, o
+# sly2: only the MOST RECENT assistant turn keeps its reasoning; older turns render an empty block
+three = [{"role": "user", "content": "u1"},
+         {"role": "assistant", "content": "a1", "reasoning_content": "REASON-ONE"},
+         {"role": "user", "content": "u2"},
+         {"role": "assistant", "content": "a2", "reasoning_content": "REASON-TWO"},
+         {"role": "user", "content": "u3"}]
+latest = render(three)
+assert "REASON-TWO" in latest and "REASON-ONE" not in latest, latest
+# ... and preserve_thinking stays the full-continuity opt-in
+kept_opt_in = render(three, preserve_thinking=True)
+assert "REASON-ONE" in kept_opt_in and "REASON-TWO" in kept_opt_in, kept_opt_in
 x = render([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
 assert "Reasoning effort is set to xhigh" in x
 print("chat template OK: qwen3.8-froggeric-v22.5-sly1 renders (thinking on/off, xhigh, tool round trip)")
