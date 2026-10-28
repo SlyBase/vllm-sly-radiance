@@ -66,6 +66,10 @@ on:
         description: compile torch from source (via the ghcr.io torch image) instead of AMD's wheel
         type: boolean
         default: false
+      push_zstd:
+        description: push zstd-compressed layers (smaller download, needs a reader with the containerd image store)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -210,9 +214,27 @@ jobs:
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           REMOTE: ${{ steps.meta.outputs.remote_tag }}
+          ZSTD: ${{ inputs.push_zstd }}
         run: |
           docker tag "$TAG" "$REMOTE"
-          docker push "$REMOTE"
+          if [ "$ZSTD" = "true" ]; then
+            # Default. `docker push` has no compression knob, and with the containerd image store it
+            # uploads the blobs it already holds (gzip) -- so the layers are re-encoded here. Readers
+            # must know application/vnd.oci.image.layer.v1.tar+zstd: Docker >= 23 with the containerd
+            # image store (Engine 29 defaults to it), containerd >= 1.5, podman; a classic overlay2
+            # graphdriver store cannot pull it -- set push_zstd=false for such a registry consumer.
+            # Level 19, not the usual 3: on this image's .so-heavy layers it is ~1/4 smaller than
+            # gzip -6 (level 3 gets ~1/10), and the re-compression cost is a one-off in a publish job.
+            # Measured on the 1.9.1 trees: /opt/vllm gzip -6 1.00 GB, zstd -3 0.91 GB, zstd -19 0.73 GB.
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$HOME/.docker/config.json:/auth/auth.json:ro" \
+              quay.io/skopeo/stable:v1.16 \
+              copy --dest-authfile /auth/auth.json \
+                   --dest-compress-format zstd --dest-compress-level 19 \
+                   "docker-daemon:$TAG" "docker://$REMOTE"
+          else
+            docker push "$REMOTE"
+          fi
           # Registry-side OCI annotations (ghcr.io shows the index's description and links the
           # package to its repo by source). `docker build --annotation` is dropped by the docker
           # image-store exporter, so they are added here: imagetools re-creates the index around

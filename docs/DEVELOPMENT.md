@@ -12,7 +12,9 @@ below) → **builder** (Triton as AMD's hash-pinned wheel; AITER, vLLM from sour
 → **final** (clean `ubuntu:24.04` + pruned ROCm + venv + entrypoint).
 
 The final image has three large layers, from stable to volatile: the pruned ROCm tree
-([`prune_rocm.sh`](prune_rocm.sh): gfx1201 only, no static archives, no Flang/MLIR), the **cold**
+([`prune_rocm.sh`](prune_rocm.sh): gfx1201 only, no static archives, no Flang/MLIR, no host-side
+tooling or profiler products — rpp, rocprofiler-systems/compute, rocgdb, the 64-bit OpenBLAS twin),
+the **cold**
 venv (the installed stack: torch, triton, aiter's metadata, the Python dependencies) and the **hot**
 venv (the patched vLLM and aiter trees, the few files patched elsewhere, the radiance modules and
 kernels). [`split_venv.py`](split_venv.py) makes the split and resets every mtime, so the cold layer
@@ -105,7 +107,7 @@ Workflows (`.github/workflows/`):
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci` | PR, push to `main`, manual | `lint` (ruff E9/F63/F7/F82, shellcheck, hadolint, actionlint, `docker buildx build --check`), `patch-dryrun` (`ci/patch_dryrun.sh`: the pinned upstream sources from the Dockerfile ARGs in a venv, then the Dockerfile patch loop twice — pass 1 must apply every hunk, pass 2 must be all NOOP; `ci/patch_dryrun_skip.txt` is the documented skip allowlist), `constraints` (`ci/check_constraints.py`, see below), `consistency` (`ci/check_consistency.py`: every patch file is in the loop or in `ci/unused_patches.txt`, every `sly/patch_*.py` is documented in `sly/README.md`, image changes bump `VERSION`). The aggregate status **`ci`** is the required check on `main`. |
-| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` with AMD's PyTorch wheel (input `torch_from_source`: PyTorch from `ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>`, missing → `--target torch-wheel` once, ~2 h, and pushed) → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.1` only for `v*` tags or the `push_ghcr` input. Build log is an artifact. |
+| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` with AMD's PyTorch wheel (input `torch_from_source`: PyTorch from `ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>`, missing → `--target torch-wheel` once, ~2 h, and pushed) → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.1` only for `v*` tags or the `push_ghcr` input (input `push_zstd`, default on: layers zstd-compressed at level 19 via skopeo instead of gzip, about a third smaller, needs a reader with the containerd image store — `false` for a consumer on the classic overlay2 store). Build log is an artifact. |
 | `upstream-sync` | daily 04:00 UTC, manual | Fast-forwards `upstream/*` from Codeberg (never force) and opens/updates a PR `upstream/<name>` → `main` (label `upstream-sync`) listing the new commits, the test-merge conflict status and the image-relevant files. Never merges. Needs the `SYNC_TOKEN` secret (fine-grained PAT, contents + pull-requests write) to create PRs. |
 | `renovate` | every 6 h, push to `main` touching the config, manual | Self-hosted Renovate (same setup as SlyBase/helm-charts) with the upstream-sync App token (`SYNC_APP_*`). Optional secret `RENOVATE_GITHUB_COM_TOKEN` (read-only PAT) lifts the rate limit for lookups in other repositories. |
 | `stale-issues` | daily 03:17 UTC, manual (`debug_only` = dry run) | `actions/stale` for issues only: no activity for 7 days → comment + label `stale`, 3 more days without activity → closed (10 days in total). Activity removes the label. Exempt: labels `keep-open`, `pinned`, `security`, issues with a milestone (the Renovate dashboard carries `keep-open`). PRs are untouched. |

@@ -10,6 +10,46 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+The image ships about 1 GB (apparent) less: the ROCm prune now also drops the host-side tooling and
+profiler products that no runtime path touches, and published images are pushed zstd-compressed.
+
+### Changed
+- **`prune_rocm.sh` step 12 — host-side tools and profiler products are gone from the ROCm tree.**
+  Removed (151 entries, 934 MB apparent): `librpp` (image processing, 382 MB), the rocprofiler-SYSTEMS
+  product (`lib/rocprofiler-systems`, `librocprof-sys*`, `rocprof-sys-*`, its python bindings for four
+  interpreters), rocprofiler-compute (`libexec/rocprofiler-compute`, its own 78 MB python app), the
+  seven `rocgdb*` launcher variants, the 64-bit-index OpenBLAS twin (`librocm-openblas64`, torch and
+  aiter link the plain `librocm-openblas`), the gallium video-decode driver, the `rocpd` python
+  bindings and the one-off CLI inspectors (`rocshmem_info`, `hipify-clang`, `rdc*`, `MIOpenDriver`,
+  `mirage`). Kept on purpose, with a check that fails the build if one goes missing: `rocprofv3` and
+  `rocprofiler-sdk` (`ci/` profiles in place through them, and the SDK is linked into the HIP
+  runtime), `rocjitsu` (`libhsa-runtime64` dlopen()s the hotswap shim, which links it), `libMIOpen` and
+  the arch's CK group-conv library. The removal is guarded: no remaining shared object may declare a
+  `NEEDED` edge on a removed library, hipcc must still compile and link a HIP shared object (the AITER
+  JIT path), and the kept set above must exist.
+- **Published images are pushed zstd-compressed (`build.yml` input `push_zstd`, default `true`).**
+  `docker push` cannot compress, and with the containerd image store it uploads the gzip blobs it
+  already holds, so the push step re-encodes the daemon's image with skopeo (`docker-daemon:` →
+  registry) at level 19. Readers must understand `application/vnd.oci.image.layer.v1.tar+zstd`: Docker
+  23+ with the containerd image store (Engine 29 defaults to it on fresh installs), containerd 1.5+,
+  podman. A classic overlay2 graphdriver store cannot pull such an image — set `push_zstd=false` for a
+  registry consumer that still uses one. The registry-side annotation step (`imagetools create`) and a
+  pull back into the same daemon were checked against a zstd image.
+
+### Measured
+
+**Image size.** Prune, in-container on the 1.9.1 tree: 151 entries, 934 MB apparent, ROCm `/opt/rocm` 1,527 MB →
+1,106 MB apparent (421 MB fewer blocks on the ZFS layer), with `import torch, vllm, radiance_mxfp4`
+green, `rocprofv3` present and the hipcc JIT probe compiling. Download: the ROCm tree as a `gzip -6`
+tar stream 1.056 GB → 0.777 GB, so the stable ROCm layer (ghcr `1.9.1`: 1.07 GB of the 2.23 GB total)
+shrinks by about 280 MB and every later release keeps the smaller layer. zstd, both large trees as a
+tar stream:
+`/opt/vllm` 1.00 GB with `gzip -6`, 0.91 GB with `zstd -3`, 0.73 GB with `zstd -19`; `/opt/rocm/core-10.1`
+1.06 GB / 0.84 GB / 0.68 GB — about −31 % on the two trees together, so roughly 1.6 GB instead of
+2.23 GB per download. Level 19, not 3: level 3 gets only a third of that.
+
 ## [1.9.1] - 2026-10-28
 
 The chat template no longer replays the reasoning of every earlier assistant turn. An agent that sends
