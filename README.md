@@ -195,7 +195,7 @@ docker run -d --name vllm --restart unless-stopped \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
-  --speculative-config.num_speculative_tokens 15 \
+  --speculative-config.num_speculative_tokens 7 \
   --speculative-config.draft_sample_method greedy \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \
@@ -252,7 +252,7 @@ docker run -d --name vllm --restart unless-stopped \
   --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
   --speculative-config.method dflash \
   --speculative-config.model syvai/Qwen3.8-27B-DFlash2-W4A16 \
-  --speculative-config.num_speculative_tokens 15 \
+  --speculative-config.num_speculative_tokens 7 \
   --speculative-config.draft_sample_method probabilistic \
   --speculative-config.attention_backend TRITON_ATTN \
   --attention-backend R4D_HYBRID \
@@ -372,7 +372,7 @@ GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a
 | `--max-num-seqs` | `8` | 8 × (7 + 1) = 64 verify tokens per step, inside `DECODE_MAX_M`; above 8 requests queue (conc 16 = conc 8 throughput) |
 | `--kv-cache-dtype fp8` | on | twice the KV of bf16; accuracy unchanged |
 | `--mamba-ssm-cache-dtype bfloat16` | on | halves the gated-delta-net state; with 0.3.5 also the faster libr4d kernels |
-| `--speculative-config.num_speculative_tokens` | `7` | the drafter's maximum (block size 8) |
+| `--speculative-config.num_speculative_tokens` | `7` | shipped default here and in the production unit. The 1.9.0 launcher default was 15: +10.3 % weighted decode on short prompts (json +30 %, math +21 %), but chat −9 %, prose −7 %, and on a real multi-turn chat −50 % at 1k and −30 % at 16k prompt tokens (1.9.1 gate); a 189-message agent request ran 19 t/s against 84 t/s at k=7. Use 15 only for short code/JSON single-stream work |
 | `--speculative-config.draft_sample_method` | `greedy` | draft-side sampling: `greedy` takes the draft head's argmax, `probabilistic` samples it with vLLM's shared-Gumbel coupling (needs the full draft-logits head). Lossless either way — the verifier decides the emitted token — so this trades acceptance rate against per-step cost, not accuracy. `serve.sh` / `serve-mxfp4.sh` take it as `DRAFT_SAMPLE` (`DRAFT_SAMPLE=probabilistic ./serve-mxfp4.sh`); the like-for-like A/B against `probabilistic` is still open ([BENCHMARKS.md](docs/BENCHMARKS.md), step 2, arm G) |
 | `--chat-template /opt/qwen-fixed.jinja` | on | froggeric's fixed Qwen template (medium reasoning default, no empty think blocks, tool-call fixes); since 1.9.1 (`-sly2`) only the newest turn's reasoning is replayed; older turns keep an empty think block unless `preserve_thinking` is set |
 | `--override-generation-config` | Qwen's thinking values | temperature 1.0 / top_p 0.95 / top_k 20; clients that turn thinking off should send 0.7 / 0.8 / 20 / presence 1.5 |

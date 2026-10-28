@@ -64,7 +64,7 @@ Everything is an environment variable; these are the ones worth knowing.
 
   SPEC_METHOD=dflash        speculative drafter: dflash (fastest, needs the DFlash2 checkpoint)
                             or mtp (uses the head inside the target, no extra download)
-  SPEC=15 dflash / 4 mtp    speculative depth
+  SPEC=7 dflash / 4 mtp     speculative depth
   MAXSEQS=8                 max concurrent sequences
   MAXLEN=262144             max context length
   CHUNK=4096                prefill chunk (--max-num-batched-tokens)
@@ -487,15 +487,18 @@ DRAFT_ATTN=${DRAFT_ATTN:-TRITON_ATTN}
 #   efficiency (steps 52-57 -> 46-47 ms, aggregate 391-413 -> 444-461 t/s). Lossless by
 #   construction -- verification preserves the distribution at any proposal length.
 #
-#   dflash 15 since 1.9.0 (2026-10-26, one window, 210 W, BetterBench 0.4 full, k=7 / 11 / 15):
+#   dflash 15 (opt-in since 1.9.0; 2026-10-26, one window, 210 W, BetterBench 0.4 full, k=7/11/15):
 #   weighted single-stream 144.9 / 156.5 / 159.8 t/s (+10.3 % for 15, z=+2.4), json +30 %,
 #   math +21 %, code +13 %; chat -9 %, prose -7 %; step +3.6 ms. Concurrency LOSES: c4/c8/c16
 #   324 / 419 / 418 -> 286 / 348 / 359 t/s (-12/-17/-14 %), with CUDA graphs up to 128 rows as
 #   well (356 at c8) -- the drafter drafts all 15 positions whatever width the verify keeps.
-#   KV pool at 65k: 334,823 -> 262,410 tokens (-22 %). Production runs ~80 % of its busy time
-#   with one request, so 15 is the default; SPEC=7 for batch-throughput serving. The adaptive
-#   width ladder follows the depth (1,3,5,...,15) without RADIANCE_AW_LENS.
-if [ "$SPEC_METHOD" = dflash ]; then SPEC=${SPEC:-15}; else SPEC=${SPEC:-4}; fi
+#   KV pool at 65k: 334,823 -> 262,410 tokens (-22 %). The weighted median hid the real chat cost:
+#   BetterBench single-stream prompts are 60-120 tokens, and on a real multi-turn chat the same
+#   build lost ~50 % at 1k and ~30 % at 16k prompt tokens (1.9.1 gate, cold prefix cache), while
+#   a 189-message agent request ran 19 t/s against 84 t/s at k=7. 15 is therefore opt-in for short
+#   code/JSON single-stream work, not the default. The adaptive width ladder follows the depth
+#   (1,3,5,...,15) without RADIANCE_AW_LENS.
+if [ "$SPEC_METHOD" = dflash ]; then SPEC=${SPEC:-7}; else SPEC=${SPEC:-4}; fi
 # The tuned drafter stack. The right default is NOT the same for both methods:
 #   mtp    -- 1. The 2-bit draft head with an exact rerank is a straight win here (+6.5% decode).
 #   dflash -- 1 as of 2026-08-27, WITH RERANK=64 (below). It used to be 0: FAST_DRAFT=1 crashed
