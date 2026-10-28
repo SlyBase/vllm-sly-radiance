@@ -10,58 +10,61 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [1.9.2] - 2026-10-27
+## [1.9.1] - 2026-10-28
 
-The chat template keeps the reasoning of the newest assistant turn only. 1.9.1 dropped every earlier
-turn and cost the multi-turn recall tasks that agents actually need; this restores them without
-bringing the loop back.
-
-### Fixed
-- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`: the reasoning of the MOST RECENT
-  assistant turn is kept, every older turn still renders an empty think block.** The multi-turn value
-  sits one turn back (an agent reads its own last scratchpad); the older turns are what grew the 163k
-  agent prompt and primed the repetition loops. `preserve_thinking: true` still keeps all turns.
-  Measured in one GPU window on 1.9.0 (Swift-1.5, k=7, Cactus 0.5, 210 W), message shown per arm:
-
-  | Arm | Prompt of the 163k agent request | Loops | Quality set (32 tasks) | recall | variant | Decode, median |
-  |---|---|---|---|---|---|---|
-  | v22.5, all reasoning replayed | 575.6k chars | 8/16 and 7/16 (two runs) | 22/32 and 22/32 | 6/16 | 16/16 | 51 / 65 t/s |
-  | sly1, no reasoning | 335.9k chars | 2/16 and 1/16 | 17/32 | 1/16 | 16/16 | 62 / 56 t/s |
-  | **sly2, newest turn only** | 351.6k chars | **1/16** | **25/32** | **9/16** | 16/16 | 90 t/s |
-
-  "Loops" = zlib ratio of the last 4000 generated chars < 0.10 (verbatim repetition), 16 seeds of the
-  same request. "Quality" = 16 recall tasks (turn 2 asks for an intermediate value from turn 1, which
-  only exists in the reasoning) plus 16 variant tasks (same method, new numbers = capability guard).
-  Decode tok/s is length-biased (correlation tokens/s 0.55-0.74 per arm), so compare it only inside
-  a run; the same-v22.5 template spread 51 vs 65 t/s between two runs of the window.
-  CPU-gated by `ci/check_chat_template.py` (newest turn keeps, older turns drop, both opt-ins keep).
-
-## [1.9.1] - 2026-10-27
-
-The chat template no longer replays the reasoning of earlier assistant turns. Agent sessions that send
-their old thinking back locked into reasoning repetition loops; this is the cause, not the Cactus rule.
+The chat template no longer replays the reasoning of every earlier assistant turn. An agent that sends
+its old thinking back locks into the repetition loops that thinking contains; the model continues its
+own prose instead of finishing the task. The newest assistant turn keeps its reasoning, the older
+turns render an empty think block, and `preserve_thinking` / `preserve_reasoning` still keeps
+everything for clients that need full continuity.
 
 ### Fixed
-- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly1`: earlier turns' reasoning is dropped by
-  default.** Without an explicit `preserve_thinking` / `preserve_reasoning` in `chat_template_kwargs`, every
-  historical assistant turn renders an empty think block (`<think>\n\n</think>`) followed by its content and
-  tool calls. Setting either knob gives the upstream behaviour (true = keep all, false = keep after the last
-  user query). Both the official Qwen3.8 template and v22.5 keep all old reasoning by default.
-  Measured on a replay of a production agent request (Swift-1.5, 1.9.0, k=7, Cactus 0.5, 16 seeds unless
-  noted, "no result" = repetition loop or token budget used up):
+- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`.** Without an explicit
+  `preserve_thinking` / `preserve_reasoning` in `chat_template_kwargs`, the reasoning of the MOST
+  RECENT assistant turn is replayed, every older turn renders ` thinking\n\n</think>`. `true` keeps
+  all turns, `false` keeps the upstream behaviour (reasoning after the last user query survives).
+- Two intermediate states were built and measured before this default: `sly1` (drop every turn) and
+  `sly3` (older turns keep the head of their reasoning, `old_reasoning_head_chars`). Both are in the
+  history of this PR and neither ships — see the tables below.
 
-  | Prompt | ours | bf16 cloud (DeepInfra) |
-  |---|---|---|
-  | all old reasoning replayed (v22.5 / official default, 163k tokens) | 11/16 / 9/16 | 6/16 |
-  | official `preserve_thinking=false` (only after the last user query) | 12/16 | - |
-  | **no old reasoning (this default, 97k tokens)** | **1/32** | 0/32 |
+### Measured
 
-  Cactus delta 0 vs 0.5 looped equally often (10/16 vs 8/16 on the same replay), and a system-prompt
-  hint or `reasoning_effort=low` did not help. Next-token logprobs at the loop: P(`</think>`) ~ 0 at every
-  paragraph boundary while P("Let") rises 0.35 -> 0.86 -> 1.00, an in-context repetition lock-in. Side
-  effect: ~65k fewer prompt tokens per turn on that session; the turn just generated is re-prefilled
-  once without its reasoning. Not measured: answer quality on tasks that need the earlier thinking.
-  CPU-gated by `ci/check_chat_template.py` (default drops, both opt-ins keep, inline `<think>` content).
+One GPU window on 1.9.0 (Swift-1.5, k=7, Cactus 0.5, 210 W), the same production agent request
+(`req-E1`, 189 messages, 20 tools) per arm. "Loops" = zlib ratio of the last 4000 generated
+characters < 0.10 (verbatim repetition); "no result" = verbatim loop or token budget exhausted.
+
+| Template | Prompt | 16 seeds | 32 seeds | no result / 32 |
+|---|---|---|---|---|
+| v22.5, all reasoning replayed | 575.6k chars | 8/16 and 7/16 (two runs) | 20/32 and 15/32 | 22/32 and 19/32 |
+| sly1, no reasoning | 335.9k chars | 2/16 and 1/16 | — | — |
+| **sly2, newest turn only (this default)** | 351.6k chars | 1/16 | **3/32** | **3/32** |
+| sly3, head of older turns (head 1000) | 391.7k chars | — | 0/32 on req-E1, 1/32 on req-E2 | 0/32 and 7/32 |
+
+Second request (`req-E2`) at 32 seeds: sly2 3/32 no-result, sly3 7/32 (six of them ran the 16384-token
+budget out inside the reasoning), full replay 13/32. Across both requests sly2 6/64 against sly3 7/64
+(Fisher p = 1.00) and against full replay 35/64 (p < 1e-6). sly3 was therefore not kept: no gain, a
+larger prompt and an extra knob.
+
+Quality:
+
+- **Multi-turn quality set** (32 tasks: 16 "recall" tasks that need an intermediate value from the
+  previous turn, 16 "variant" tasks that only re-use the method): full 22/32, sly2 25/32, sly1 17/32.
+  24-task three-turn set: every policy at 23-24/24 — the set is saturated and cannot separate them.
+- **Paired prompt-NLL** over 24 three-turn cases, answer tokens only (teacher forcing, greedy):
+  sly2 costs **+0.31 nats** [0.25, 0.47] against full replay, sly1 costs **+1.03 nats** [0.90, 1.20].
+  sly2 recovers about 70 % of what sly1 throws away. Two harness controls pass: the same history
+  rendered with `old_reasoning_head_chars=-1` equals the old template byte for byte (delta exactly
+  0.0000), and with the reasoning dropped both case families render the same prompt.
+- **Blind pairwise judge on 12 real agent sessions** of this model (claude-sonnet as judge, both
+  answer orders): keep-all 2 wins, drop 1 win, 9 ties, 3 of them word-identical. No systematic
+  difference — the state an agent needs lives in the tool results, not in its old reasoning.
+- Decode: sly2 84.1 t/s against 66.2 t/s of the full replay in the same window (`/metrics`,
+  generation tokens over decode time), step time 81.0 ms against 99.3 ms. Replay median tok/s is
+  length-biased (correlation 0.55-0.74 per arm) and was not used for ranking. k=15 with the same
+  workload collapses to 19 t/s (step 522 ms against 81 ms) and is not a lever for agent traffic.
+
+- CPU-gated by `ci/check_chat_template.py`: newest turn keeps, older turns drop, both opt-ins keep,
+  and an inline ` thinking` block in the content is stripped.
 
 ## [1.9.0] - 2026-10-25
 
