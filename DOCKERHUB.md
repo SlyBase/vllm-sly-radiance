@@ -368,7 +368,7 @@ Tool-calling and reasoning:
 --enable-auto-tool-choice --tool-call-parser <parser> --reasoning-parser <parser>
 ```
 
-For Qwen 3.5 / 3.6 / 3.8 the image ships froggeric's fixed chat template (v22.5) at `/opt/qwen-fixed.jinja`: `--chat-template /opt/qwen-fixed.jinja`. It defaults to `medium` reasoning effort (the official 3.8 template: `xhigh`), keeps the prefix cache across turns and accepts `reasoning_effort` / `enable_thinking` in `chat_template_kwargs`. Any other template works with `--chat-template file.jinja`; the image ships the `from_json` filter those templates often rely on.
+For Qwen 3.5 / 3.6 / 3.8 the image ships froggeric's fixed chat template (v22.5) at `/opt/qwen-fixed.jinja`: `--chat-template /opt/qwen-fixed.jinja`. It defaults to `medium` reasoning effort (the official 3.8 template: `xhigh`), keeps the prefix cache across turns and accepts `reasoning_effort` / `enable_thinking` in `chat_template_kwargs`. Since 1.9.1 (`v22.5-sly2`) only the reasoning of the newest assistant turn is rendered back into the prompt; older turns keep an empty think block (agents that replay all of it lock into repetition loops); `chat_template_kwargs: {"preserve_thinking": true}` restores the upstream behaviour. Any other template works with `--chat-template file.jinja`; the image ships the `from_json` filter those templates often rely on.
 
 ## MXFP4 (4-bit) checkpoints
 
