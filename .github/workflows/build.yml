@@ -6,7 +6,11 @@
 # Triggers:
 #   - a VERSION bump on main or a v* tag (the production build: a main-branch build is a build
 #     check, nothing more);
-#   - pull_request -- but ONLY for non-draft PRs from this repo's own branches (head_repo == repo
+#   - pull_request -- a PR builds ONCE when it leaves draft (opened / ready_for_review) and again on
+#     every push only if it carries the label `stack` (accept-night gates exactly that head) or
+#     `build` (opt-in). The label `build` itself also starts a build. A feature PR leaves VERSION
+#     alone (notes under `## [Unreleased]`); the release PR (ci/cut_release.py) moves VERSION and
+#     is the one whose merge builds on main, gates and tags. ONLY for non-draft PRs from this repo's own branches (head_repo == repo
 #     check): a PR from a fork must not reach the self-hosted runner (its code would execute
 #     on it). Own-branch PRs (the renovate/* trio PRs, feature branches) are the classic
 #     case where a build catches a compile-level break BEFORE the merge, at CPU-only cost
@@ -28,7 +32,7 @@ on:
   pull_request:
     # a draft PR does not build (see the job `if:`); ready_for_review starts the build when it
     # leaves draft
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     # only when something that ends up in the image can have moved (the stack PRs bump the pins in
     # Dockerfile / constraints.txt, and the Hermes re-anchor agent pushes patch fixes into sly/ and the
     # patch_*.py files to the same branch -- accept-night needs an image of exactly the head it gates,
@@ -82,7 +86,11 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       !github.event.pull_request.draft)
+       !github.event.pull_request.draft &&
+       (github.event.action != 'synchronize' ||
+        contains(github.event.pull_request.labels.*.name, 'stack') ||
+        contains(github.event.pull_request.labels.*.name, 'build')) &&
+       (github.event.action != 'labeled' || github.event.label.name == 'build'))
     runs-on: [self-hosted, linux, x64, rocm-build]
     timeout-minutes: 300
     env:

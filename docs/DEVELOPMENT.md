@@ -145,11 +145,16 @@ Changing code:
 
 ```bash
 git switch -c feat/my-change main
-# edit; bump VERSION for anything that changes the image (consistency enforces it on PRs)
+# edit; note image changes under '## [Unreleased]' in CHANGELOG.md (consistency enforces it on PRs)
 python3 ci/check_consistency.py --base origin/main && ci/patch_dryrun.sh
 git push -u origin feat/my-change && gh pr create
-# merge when `ci` is green — the VERSION bump on main then triggers `build`
+# merge when `ci` is green
 ```
+
+Releasing (when you want an image): `python3 ci/cut_release.py X.Y.Z` on a branch turns
+`[Unreleased]` into `[X.Y.Z] - <date>` and sets `VERSION`; open that as the release PR (it builds once
+when it leaves draft). Its merge — the VERSION change on main — triggers `build`, then the gate and the tag.
+A PR builds on push only with the label `stack` or `build`.
 
 Merging upstream: take the `upstream-sync` PR (or `git merge origin/upstream/<name>` on a branch),
 resolve the usual conflicts (Dockerfile pins + patch loop, `README.md`, `VERSION`) and re-verify
