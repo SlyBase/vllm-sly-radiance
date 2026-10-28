@@ -10,6 +10,25 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.9.3] - 2026-10-28
+
+Older assistant turns keep the **head** of their reasoning (the plan) instead of nothing. 1.9.2 kept
+the newest turn only and paid for it on questions that depend on an earlier turn's scratchpad; the
+head carries the decision without carrying the repetition.
+
+### Changed
+- **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly3`: an older turn renders the first
+  `old_reasoning_head_chars` characters of its reasoning (default 1000, cut at a paragraph boundary),
+  the newest turn keeps it in full, `preserve_thinking` keeps everything. `0` reproduces 1.9.2,
+  a negative value keeps everything.
+- Why the head and not the tail: in the measured agent sessions the repetition starts 1.5-4k output
+  tokens in, i.e. at the **end** of the trace. A "last N characters" cut would ship the very pattern
+  it should remove. The head holds the plan and the decision, which is what a later turn needs.
+- Prompt size of the 163k agent request (`req-E1`): 335.9k chars without any reasoning, 351.6k with
+  the newest turn only, 391.7k with a 1000-char head, 421.0k with 2000, 575.6k with everything.
+- `ci/check_chat_template.py` gates the rule: older turn keeps the head, newest turn keeps all,
+  `0` reproduces 1.9.2, a negative value keeps everything.
+
 ## [1.9.2] - 2026-10-27
 
 The chat template keeps the reasoning of the newest assistant turn only. 1.9.1 dropped every earlier

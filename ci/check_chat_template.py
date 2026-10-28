@@ -52,6 +52,22 @@ assert "REASON-TWO" in latest and "REASON-ONE" not in latest, latest
 # ... and preserve_thinking stays the full-continuity opt-in
 kept_opt_in = render(three, preserve_thinking=True)
 assert "REASON-ONE" in kept_opt_in and "REASON-TWO" in kept_opt_in, kept_opt_in
+# sly3: older turns keep only the HEAD of their reasoning (plan, decision); the tail is where the
+# repetition lives. 0 reproduces sly2, a negative value keeps everything.
+def _long(tag):
+    return f"HEAD-{tag} plan\n\n" + ("filler sentence about the state. " * 60) + f"\n\nTAIL-{tag} conclusion"
+turns3 = [{"role": "user", "content": "u1"},
+          {"role": "assistant", "content": "a1", "reasoning_content": _long("ONE")},
+          {"role": "user", "content": "u2"},
+          {"role": "assistant", "content": "a2", "reasoning_content": _long("TWO")},
+          {"role": "user", "content": "u3"}]
+head = render(turns3)
+assert "HEAD-ONE" in head and "TAIL-ONE" not in head, "older turn must keep the head only"
+assert "HEAD-TWO" in head and "TAIL-TWO" in head, "newest turn must keep its full reasoning"
+cut0 = render(turns3, old_reasoning_head_chars=0)
+assert "HEAD-ONE" not in cut0 and "TAIL-TWO" in cut0, "0 must reproduce sly2"
+kept = render(turns3, old_reasoning_head_chars=-1)
+assert "TAIL-ONE" in kept, "a negative value must keep everything"
 x = render([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
 assert "Reasoning effort is set to xhigh" in x
 print("chat template OK: qwen3.8-froggeric-v22.5-sly1 renders (thinking on/off, xhigh, tool round trip)")

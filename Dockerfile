@@ -896,8 +896,9 @@ COPY VERSION /opt/radiance_version
 # and maps client effort aliases (high/max -> xhigh, none/off -> thinking off). Serve with
 # `--chat-template /opt/qwen-fixed.jinja`; the path stays the same across template versions, the
 # version is in the label io.slybase.radiance.chat-template and in the file's first line.
-# Local change "sly2": only the newest assistant turn is rendered with its reasoning; older turns keep
-# an empty think block unless the request sets preserve_thinking / preserve_reasoning (CHANGELOG 1.9.2).
+# Local change "sly3": the newest assistant turn keeps its full reasoning, older turns keep only the
+# head of it (old_reasoning_head_chars, default 1000, 0 = drop, negative = keep all) unless the request
+# sets preserve_thinking / preserve_reasoning (CHANGELOG 1.9.3).
 COPY qwen-fixed-v22.5.jinja /opt/qwen-fixed.jinja
 COPY ci/check_chat_template.py /tmp/check_chat_template.py
 RUN python /tmp/check_chat_template.py && rm -f /tmp/check_chat_template.py
@@ -938,4 +939,4 @@ LABEL org.opencontainers.image.title="vllm-sly-radiance" \
       io.slybase.radiance.aiter="${AITER_VERSION}" \
       io.slybase.radiance.transformers="${TRANSFORMERS_VERSION}" \
       io.slybase.radiance.r4d="${R4D_VERSION}" \
-      io.slybase.radiance.chat-template="qwen3.8-froggeric-v22.5-sly2 (/opt/qwen-fixed.jinja)"
+      io.slybase.radiance.chat-template="qwen3.8-froggeric-v22.5-sly3 (/opt/qwen-fixed.jinja)"

@@ -1,4 +1,4 @@
-{%- set template_version = "qwen3.8-froggeric-v22.5-sly2" %}
+{%- set template_version = "qwen3.8-froggeric-v22.5-sly3" %}
 {%- set _tool_format = tool_call_format if tool_call_format is defined else 'xml' %}
 {%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
@@ -18,6 +18,12 @@
 {%- else %}
     {%- set _preserve_thinking = true %}
 {%- endif %}
+{#- sly3: older turns keep only the HEAD of their reasoning -- the plan and the decision. The tail is
+    where the repetition lives (loop onset measured at 1.5-4k output tokens), so a tail cut would ship
+    the very pattern it should remove. old_reasoning_head_chars: 0 = drop everything (sly2),
+    < 0 = keep everything, default 1000 characters. -#}
+{%- set _old_head = (old_reasoning_head_chars | int) if (old_reasoning_head_chars is defined
+                     and old_reasoning_head_chars is not none) else 1000 %}
 {%- set max_tool_arg_chars = max_tool_arg_chars if max_tool_arg_chars is defined else 0 %}
 {%- set max_tool_response_chars = max_tool_response_chars if max_tool_response_chars is defined else 0 %}
 {%- set _default_reasoning_effort = 'medium' %}
@@ -338,15 +344,25 @@
             {%- endif %}
         {%- endif %}
         {%- set reasoning_content = reasoning_content | trim %}
-        {#- sly2: keep the reasoning of the MOST RECENT assistant turn only. The multi-turn value lives
-            one turn back (an agent reads its own last scratchpad); the older turns are what grew the
-            163k agent prompt and primed the repetition loops (sly1 dropped them all and cost 5/16 of
-            the multi-turn recall tasks: 6/16 -> 1/16, with the newest turn kept 9/16). -#}
+        {#- sly2/sly3: the MOST RECENT assistant turn keeps its full reasoning (an agent reads its own
+            last scratchpad); every older turn keeps only the head, or nothing when _old_head is 0. -#}
+        {%- set _keep_head = _old_head != 0 %}
         {%- if _drop_old_reasoning and loop.index0 != ns.last_assistant_index %}
-            {%- set reasoning_content = '' %}
+            {%- if _old_head < 0 %}
+                {#- negative = keep everything, same as preserve_thinking -#}
+            {%- elif reasoning_content %}
+                {%- set _rcut = reasoning_content[:_old_head] %}
+                {%- if '\n\n' in _rcut %}
+                    {%- set _rpara = _rcut.rsplit('\n\n', 1)[0] %}
+                    {%- if _rpara | trim %}{%- set _rcut = _rpara %}{%- endif %}
+                {%- endif %}
+                {%- set reasoning_content = _rcut | trim %}
+            {%- else %}
+                {%- set reasoning_content = '' %}
+            {%- endif %}
         {%- endif %}
         {%- if (_preserve_thinking or loop.index0 > ns.last_query_index
-               or (loop.index0 == ns.last_assistant_index and reasoning_content)) %}
+               or (reasoning_content and (loop.index0 == ns.last_assistant_index or _keep_head))) %}
             {{- '<|im_start|>assistant\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
         {%- else %}
             {{- '<|im_start|>assistant\n' + content }}
