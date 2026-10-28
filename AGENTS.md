@@ -5,9 +5,10 @@ Read this before changing anything. It keeps the image, the docs and the release
 ## Every change that ends up in the image
 
 1. Work on a branch (or a `git worktree` if someone else uses the checkout) — never on `main`.
-2. Bump `VERSION` (MAJOR.MINOR.PATCH; minor for a dependency/stack bump or a new feature, patch for a
-   fix). `ci/check_consistency.py` fails a PR that changes an image file without a bump.
-3. Add a `## [<version>] - <date>` section at the top of `CHANGELOG.md` (Added / Changed / Fixed /
+2. Do **not** bump `VERSION` in a feature PR. VERSION moves in the release PR only (see Releases), so
+   one image covers all PRs collected since the last release. `ci/check_consistency.py` fails a PR that
+   changes an image file without a note under `## [Unreleased]` (or a bump).
+3. Add the notes under `## [Unreleased]` at the top of `CHANGELOG.md` (Added / Changed / Fixed /
    Removed, plus a *Measured* line with the numbers that justify the change). The consistency check
    fails without it, and `ci/release_tag.sh` publishes exactly that section as the GitHub release body
    when the `v<version>` tag is cut. Write it for users: what changes for them, and by how much.
@@ -47,6 +48,13 @@ An opt-in back end is invisible to the default start, so a GPU start finds its b
 | `sly/README.md` | per-patch reference (German) | a `sly/` file is added or changed |
 
 ## Releases
+
+Collect, then release: feature PRs only write `## [Unreleased]`. When you want an image, run
+`ci/cut_release.py <MAJOR.MINOR.PATCH>` (minor for a dependency/stack bump or a new feature, patch for
+a fix) on a branch and open the result as the release PR: it renames `[Unreleased]` to
+`[<version>] - <date>` and sets `VERSION`. A PR builds once when it leaves draft; the release PR's
+merge builds on main. Stack PRs (`renovate/stack-*`, label `stack`) bump VERSION themselves and need an
+empty `[Unreleased]`: release the collected notes first.
 
 A green acceptance gate (`accept.yml`, GPU window approved by a maintainer) tags `v<VERSION>` on the
 gated commit; the tag starts `build.yml`, which publishes the image to ghcr.io, and `release_tag.sh`
