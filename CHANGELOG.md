@@ -32,6 +32,14 @@ everything for clients that need full continuity.
   (`rotate_query` / `unrotate_output`) replaces the fp32 matmul rotate, so the route no longer needs a context
   gate (`MIN_CTX` default 0): KV4 prefill +0.2 to +10.7 % over Tetra at 210 W (see Measured).
 
+### Changed
+- **The `serve-mxfp4.sh` default speculative depth is 7 again** (it was 15 since 1.9.0). k = 15 pays
+  only on short code/JSON prompts: weighted BetterBench +10.3 %, json +30 %, math +21 %, code +13 %,
+  against chat −9 %, prose −7 %, step +3.6 ms, c4/c8/c16 −12/−17/−14 % and KV pool −22 %. On a real
+  multi-turn chat the same build lost ~50 % at 1k and ~30 % at 16k prompt tokens (gate `chat_replay`),
+  and a 189-message agent request ran 19 t/s against 84 t/s at k = 7. `SPEC=15` stays opt-in; the
+  production unit already runs 7. Per-category table: `docs/BENCHMARKS.md`.
+
 ### Fixed
 - **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`.** Without an explicit
   `preserve_thinking` / `preserve_reasoning` in `chat_template_kwargs`, the reasoning of the MOST
