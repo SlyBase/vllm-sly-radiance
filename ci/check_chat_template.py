@@ -9,7 +9,7 @@ chat request. Run in the final stage of the Dockerfile; no GPU needed.
 """
 from transformers.utils.chat_template_utils import render_jinja_template
 t = open("/opt/qwen-fixed.jinja").read()
-assert 'template_version = "qwen3.8-froggeric-v22.5-sly1"' in t
+assert 'template_version = "qwen3.8-froggeric-v22.5-sly2"' in t
 tools = [{"type": "function", "function": {"name": "get_weather", "description": "w",
           "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
 msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Wetter in Paris?"},
@@ -28,19 +28,19 @@ assert '<function=get_weather>\n{"city": "Paris"}</function>' in on, on
 msgs[2]["tool_calls"][0]["function"]["arguments"] = {"city": "Paris"}
 assert "<function=get_weather>\n<parameter=city>\nParis\n</parameter>" in render(msgs)
 assert "<tool_response>\n{\"temp\": 21}" in on
-# sly1: replayed reasoning of earlier assistant turns is dropped by default (an agent that sends its old
-# thinking back locks into the repetition loops it contains); the empty think block stays, so the turn
-# shape is the one measured. preserve_thinking / preserve_reasoning set explicitly = upstream behaviour.
-assert "call the tool" not in on and "<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>" in on, on
+# sly2: the tool-calling turn is the newest assistant turn, so it keeps its reasoning (older turns are
+# checked below). preserve_thinking / preserve_reasoning set explicitly = upstream behaviour.
+assert "<|im_start|>assistant\n<think>\ncall the tool\n</think>\n\n<tool_call>" in on, on
 assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_thinking=True)
 assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_reasoning=True)
 # explicit false keeps upstream semantics: reasoning after the last user query survives
 assert "call the tool" in render(msgs, reasoning_effort="medium", preserve_thinking=False)
-# reasoning inlined in content (<think>...</think>answer) is dropped as well
+# reasoning inlined in the content of an OLDER turn (<think>...</think>answer) is dropped as well
 inl = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<think>\nold plan\n</think>\n\nanswer"},
-       {"role": "user", "content": "q2"}]
+       {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2", "reasoning_content": "new plan"},
+       {"role": "user", "content": "q3"}]
 o = render(inl)
-assert "old plan" not in o and "<think>\n\n</think>\n\nanswer" in o, o
+assert "old plan" not in o and "<think>\n\n</think>\n\nanswer" in o and "new plan" in o, o
 # sly2: only the MOST RECENT assistant turn keeps its reasoning; older turns render an empty block
 three = [{"role": "user", "content": "u1"},
          {"role": "assistant", "content": "a1", "reasoning_content": "REASON-ONE"},
@@ -54,4 +54,4 @@ kept_opt_in = render(three, preserve_thinking=True)
 assert "REASON-ONE" in kept_opt_in and "REASON-TWO" in kept_opt_in, kept_opt_in
 x = render([{"role": "user", "content": "hi"}], reasoning_effort="xhigh")
 assert "Reasoning effort is set to xhigh" in x
-print("chat template OK: qwen3.8-froggeric-v22.5-sly1 renders (thinking on/off, xhigh, tool round trip)")
+print("chat template OK: qwen3.8-froggeric-v22.5-sly2 renders (thinking on/off, xhigh, tool round trip)")

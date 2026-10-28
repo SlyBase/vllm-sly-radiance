@@ -18,6 +18,20 @@ own prose instead of finishing the task. The newest assistant turn keeps its rea
 turns render an empty think block, and `preserve_thinking` / `preserve_reasoning` still keeps
 everything for clients that need full continuity.
 
+### Added
+- **`R4D_ATTN_HVF=1`** (default `0`, `sly/r4d/r4d_attn_heavy_first.patch`): heaviest-first dispatch of the tile-16
+  double-buffered prefill attention (new OPT bit `O_HVF`). Under the causal limit a query block's key-tile count
+  grows with its index, and the stock grid (q-block, kv head) is handed out q-block fastest, so the launch ends on
+  the heaviest blocks with most of the 32 WGP slots idle (24-wave workgroups at 216 VGPR: one per WGP). With
+  `O_HVF` the grid is (kv head, q-block) and the q-blocks are walked in reverse; every workgroup computes what it
+  did before. `R4D_ATTN_HVF_MAX_CTX=N` (default `0` = no bound) limits it to launches with at most N keys.
+  Reaches the production path: the image ENV already sets `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`.
+- **`R4D_KV4I=1`** (default `0`, `sly/r4d/r4d_kv4i.patch`, `sly/kv4/kv4i_route.py`; PR #200): int4 per-token-head KV route
+  (Tetra, `--kv-cache-dtype int4_per_token_head`) through the r4d attention kernel (OPT bit `O_KV4I` = 1 << 25),
+  with `RADIANCE_KV4I_GLUE` / `RADIANCE_KV4I_MIN_CTX`. Opt-in; with the knob off nothing changes. The Triton glue
+  (`rotate_query` / `unrotate_output`) replaces the fp32 matmul rotate, so the route no longer needs a context
+  gate (`MIN_CTX` default 0): KV4 prefill +0.2 to +10.7 % over Tetra at 210 W (see Measured).
+
 ### Fixed
 - **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`.** Without an explicit
   `preserve_thinking` / `preserve_reasoning` in `chat_template_kwargs`, the reasoning of the MOST
@@ -26,6 +40,21 @@ everything for clients that need full continuity.
 - Two intermediate states were built and measured before this default: `sly1` (drop every turn) and
   `sly3` (older turns keep the head of their reasoning, `old_reasoning_head_chars`). Both are in the
   history of this PR and neither ships — see the tables below.
+- **GDN chunk scan, chunks with a gate span above 160** ([libr4d#4](https://github.com/StillDeadcode/libr4d/issues/4),
+  `sly/r4d/r4d_gdn_exact_decay.patch`, applied after the scan variants). The scan factors e^{g_i-g_j} as
+  e^{g_i-c} * e^{c-g_j} about the chunk midpoint and clamps the growing half at e^80 (the NaN fix in PERFORMANCE.md). When
+  g_0 - g_last exceeds 160, one half leaves range and the clamp *attenuates* the chunk -- the last tokens' own
+  diagonal and their weight into the state the next chunk reads -- instead of computing it. This is not rare on
+  Qwen3.8-27B: jkuepker's capture on the issue has 51 of 2,304 GDN heads past 160 on real prompts. Such a chunk
+  now takes the exact form (score `e^{g_i-g_j+log scale}`, masked before use, so every kept exponent is <= 0;
+  V' undecayed; K scaled by e^{g_last-g_j} in place; state `e^{g_last} S + V'^T K`), the form radiance's own
+  engine uses. The choice is per chunk and workgroup-uniform, and a chunk at or below 160 runs the unchanged
+  split arithmetic, so the output is bit-identical to 1.8.1 wherever the clamp could not fire. No knob:
+  `-DEXACT=0` builds the old kernel. Reference model `chunked(split="hybrid")` in `sly/gdn/chunk_scan_ref.py`
+  (fp64, equals the naive recurrence to 2e-15 up to span 1000, where the split form is 7-90 % off); CPU-gated
+  by `sly/gdn/tests/test_chunk_scan_ref.py` and `sly/tests/test_gdn_exact_decay_patch_cpu.py` (patch contents,
+  Dockerfile order, resource fixtures in `sly/tests/fixtures/gdn_scan_exact/`). GPU gate
+  `sly/gdn/tests/gpu_chunk_scan_exact_decay.py`: every unit against the fp64 recurrence at spans 3-1000, 1 %.
 
 ### Measured
 
@@ -65,6 +94,55 @@ Quality:
 
 - CPU-gated by `ci/check_chat_template.py`: newest turn keeps, older turns drop, both opt-ins keep,
   and an inline ` thinking` block in the content is stripped.
+- `R4D_ATTN_HVF`, one layer (`r4d_attn_paged` prefill, production instance), R9700 300 W, 1.8.1 image, A/H/A/H x3, output hashes
+  identical in every pair: chunk 4089 at ctx 4,089 1435.8 -> 1183 us (−17.6 %), 24,534 −3.3 %, 28,623-44,979
+  −1.5 / −1.8 / −0.9 / −0.3 / −0.3 %; chunk 2560 at 2,560 −18.1 %, 23,040 −2.2 %, 28-43.5k −0.1 to −1.2 %; 1,514
+  tokens −19.7 %. Deep contexts are neutral (ranges overlap), never slower. A context bound of 32,768 measured
+  equal to stock above it and gave up 0.7-1.8 % at 28-33k, hence the default of no bound.
+- `R4D_ATTN_HVF` build: all 32 kernels of the 1.8.1 `r4d.so` are instruction-identical with the patch applied; the two new
+  instances (`O_QF8` on and off) pass `ci/attn_sched_lint.py` at 216 VGPR, 0 spill (loop 368 instructions vs 367).
+- `R4D_ATTN_HVF` end to end (1.8.1 via a podman launcher with the production arguments, the patched `r4d.so` in every arm, arms
+  differing only by the knob, A H A H, prefill tok/s medians of 3 reps at 1514 / 6000 / 12000 / 24000 / 48000):
+  CHUNK 4096 without APC +0.03 / +0.30 / +0.24 / +0.44 / +0.36 % (A-to-A drift <= 0.11 %); CHUNK 2560 with APC
+  +0.12 / +0.14 / +0.14 / +0.07 / +0.03 % (inside the A-to-A drift of up to 0.16 %, not resolved). Greedy text
+  and spec-decode counters identical in every pair. Small because attention is a small share of prefill (about
+  1 % at 1514 tokens).
+- **GDN exact decay** (one R9700, 300 W, 1.8.1 image and compiler, libr4d a3e4833 + rx10 + variants with and
+  without the patch; the patched `r4d.so` rebuilt from this PR is byte-identical to the one measured):
+  - Kernel against an fp64 sequential recurrence, 12 steep-decay cases (`check_gdn_extreme_decay.py` from
+    magiccodingman/vllm-radiance): as shipped 7/12 within 1 %, worst output
+    error 94 %; patched 12/12, worst 0.34 %, in both the s3 and the stock unit. `gpu_chunk_scan_variants.py`:
+    33 ok, 0 WRONG; DIGEST of `o` and `ht` identical to as shipped on all 20 (5 shapes x stock/s1/s2/s3).
+    `gpu_chunk_scan_exact_decay.py`: patched 24/24 (worst 0.32 %, the same as at span 3); as shipped 20/20 WRONG
+    above 160, at 15-90 %, which equals the fp64 split-form model of `chunk_scan_ref.py` to three digits.
+  - Kernel time, one layer, H = 48, two processes each, interleaved. s3 (the image default):
+    0.3845 / 0.1665 / 0.0871 ms against 0.3849 / 0.1685 / 0.0884 at T = 4089 / 1760 / 880 (−0.1 / −1.2 / −1.4 %).
+    The units the image does not select are slower: stock +4-7 %, s1 +11-12 %, s2 +3-5 %. Resources:
+    s3 228 VGPR (was 189), no spill, 6 waves/SIMD, LDS unchanged; stock and s1 lose their 4-VGPR spill.
+  - Model accuracy, teacher-forced top-20 logprobs over 4 documents x 48k tokens (C++, Moby-Dick, prose,
+    Python) against a reference that runs the GDN layer on vLLM's Triton/FLA path (exact decay), attention
+    unchanged: as shipped KL 0.0241, top-1 94.2 %, +0.0109 nats/token; patched KL 0.0107, top-1 96.1 %,
+    −0.0003 nats/token. 0.0107 is this harness's floor: two exact implementations (the patch and a full
+    exact port) differ from each other by 0.0106. Moby-Dick perplexity 7.040 -> 6.831 (reference 6.839).
+  - GSM8K-200, the accept gate's command: 0.860 as shipped, 0.860 patched (2 items flip each way).
+  - Not measured: decode, the 262k production context.
+- **1.9.1 release check, 210 W** (one R9700, 1.9.0 image, production unit arguments with `--max-model-len 65536`,
+  CHUNK 4096, APC off, `--no-async-scheduling`; one `r4d.so` built from this tree with all three libr4d patches,
+  mounted; BetterBench `--prefill`, median of 8 per depth, 1,514 / 5,917 / 11,793 / 23,543 / 47,055 tokens):
+  - Kernels: GDN exact-decay gate as shipped 20/20 WRONG above span 160, patched ALL OK; DIGEST of the
+    `gpu_chunk_scan_variants.py` shapes identical; s3 0.4342 / 0.1808 / 0.0920 -> 0.4341 / 0.1765 / 0.0911 ms at
+    T = 4089 / 1760 / 880. `R4D_ATTN_HVF` one layer, A/H x3, one output hash per shape: −19.0 % (1,514),
+    −18.9 % (2,560), −15.8 % (4,089), −1.6 % (2,560 + 20k past), −2.9 / −2.7 / −0.4 % (24.5k / 28.6k / 45k keys).
+  - fp8 KV, exact decay + `R4D_ATTN_HVF=1` against 1.9.0 (X C C X, plus a third control): +0.5 / +0.5 / −1.2 /
+    +0.4 / +1.2 %; exact decay alone (HVF off) against the next control: +1.0 / +0.9 / +0.8 / +0.7 / +0.3 %. Both
+    inside the ~3 % spread a 210 W server A/B resolves: no regression, the kernel gain is too small to show
+    end to end. Three runs of the day (one of them a pure 1.9.0 control) had one stalled request (1,660-2,230
+    tok/s) and ran ~4 % lower afterwards; that state followed the run, not the build.
+  - KV4 (`int4_per_token_head`, TETRA for target and drafter), `R4D_KV4I=1` against `R4D_KV4I=0`, T R R T:
+    +0.2 / +1.2 / +2.7 / +5.5 / +10.7 % (repeats within 0.4 %). Against fp8 KV the KV4 deficit drops from
+    −1.6 / −0.7 / −3.0 / −6.0 / −10.4 % to −1.4 / +0.5 / −0.4 / −0.8 / −0.8 % (means of the two fp8 controls of
+    the same window, which drifted 2-6 % between them, so read the KV4-vs-fp8 row as approximate).
+    Accuracy of the route was not re-measured here (PR #200: KL 0.0171 vs Tetra 0.0203 against fp8 KV).
 
 ## [1.9.0] - 2026-10-25
 

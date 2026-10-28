@@ -68,9 +68,14 @@ def solve_A(inp, g):
     return A
 
 
+SPLIT_MAX_SPAN = 160.0  # r4d_gdn_exact_decay.patch: a chunk with g_0 - g_last above this takes the exact form
+
+
 def chunked(inp, split=False, clamp=80.0):
     """The kernel's math. split=False: exact e^{g_i-g_j}. split=True: the kernel's factorisation
-    e^{g_i-c} * e^{c-g_j} about the chunk midpoint c with the growing half clamped at `clamp`."""
+    e^{g_i-c} * e^{c-g_j} about the chunk midpoint c with the growing half clamped at `clamp`.
+    split="hybrid": the patched kernel (EXACT=1), split per chunk while g_0 - g_last <= SPLIT_MAX_SPAN
+    (both halves <= e^80, the clamp cannot fire) and exact otherwise."""
     q, k, v, beta, cu = (inp[x] for x in ("q", "k", "v", "beta", "cu"))
     g = chunk_cumsum(inp["glog"], cu)
     A = solve_A(inp, g)
@@ -86,7 +91,8 @@ def chunked(inp, split=False, clamp=80.0):
                 c = 0.5 * (gg[0] + gg[-1])
                 ge = torch.exp(gg)
                 W = beta[c0:c1, h, None] * (vv - ge[:, None] * (kk @ S.T))
-                if split:
+                use_split = split is True or (split == "hybrid" and float(gg[0] - gg[-1]) <= SPLIT_MAX_SPAN)
+                if use_split:
                     gv = torch.exp(torch.clamp(c - gg, max=clamp)); rs = inp["scale"] * torch.exp(torch.clamp(gg - c, max=clamp))
                     Vp = gv[:, None] * (A[c0:c1, h, :m] @ W)
                     sA = rs[:, None] * torch.tril(qq @ kk.T) * 1.0
@@ -96,7 +102,7 @@ def chunked(inp, split=False, clamp=80.0):
                     S = lam * (torch.exp(c) * S + Vp.T @ kk)
                 else:
                     u = A[c0:c1, h, :m] @ W
-                    D = torch.exp(gg[:, None] - gg[None])
+                    D = torch.exp((gg[:, None] - gg[None]).tril())  # j > i is masked anyway; tril keeps e^{+span} from overflowing to inf*0
                     o[c0:c1, h] = inp["scale"] * (ge[:, None] * (qq @ S.T)) + inp["scale"] * (torch.tril(qq @ kk.T) * D) @ u
                     S = torch.exp(gg[-1]) * S + (torch.exp(gg[-1] - gg)[:, None] * u).T @ kk
             ht[n, h] = S

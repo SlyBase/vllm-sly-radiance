@@ -19,6 +19,12 @@ Reports from `hipcc -Rpass-analysis=kernel-resource-usage`, gfx1201; the fixture
 189 VGPR of `s3` are the moved prefetch's doing, not a forced register budget — that distinction is what
 the fixtures pin.
 
+Since 1.9.0 the image also applies `sly/r4d/r4d_gdn_exact_decay.patch` on top: chunks with a gate span
+above 160 take the exact decay form ([libr4d#4](https://github.com/StillDeadcode/libr4d/issues/4)). This
+costs registers: `s3` 228 VGPR, still no spill, still 6 waves/SIMD, LDS unchanged. Stock and s1 lose
+their spill. The table above is the unpatched build; `sly/tests/fixtures/gdn_scan_exact/` pins the patched
+one. Below the threshold the arithmetic is unchanged, so the DIGEST gate below still compares bit for bit.
+
 ## Arithmetic is untouched
 
 No arithmetic statement, operand order or rounding site changes; only LDS addresses and the issue point of
