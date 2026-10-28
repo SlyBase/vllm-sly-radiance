@@ -30,6 +30,7 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -57,6 +58,7 @@ jobs:
 
   patch-dryrun:
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -122,6 +124,7 @@ jobs:
     # constraints.txt must be exactly what pip resolves for the pinned vLLM (no missing, stale or
     # out-of-range pin): the guard that makes a Renovate bump of it mergeable without an image build
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -188,6 +191,7 @@ jobs:
 
   consistency:
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -211,6 +215,7 @@ jobs:
     # release and the ROCm base derive (ci/resolve_stack.py; deliberate deviations: ci/stack_overrides.json).
     # On a stack PR this is the "incompatible" check: no AMD wheel / unreadable vLLM pins = red = never merged.
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -232,6 +237,7 @@ jobs:
   cpu-tests:
     # GPU-less unit tests under sly/tests (numpy / torch-cpu; GPU checks stay in the GPU-window scripts)
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -256,6 +262,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       vars.AUTO_MAINTAIN != 'off'
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -311,6 +318,7 @@ jobs:
     needs: [lint, patch-dryrun, constraints, consistency, resolve, cpu-tests]
     if: always()
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - name: all jobs succeeded?
         env:
