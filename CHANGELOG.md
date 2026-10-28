@@ -96,6 +96,13 @@ drafts 15 tokens instead of 7 (+10 % single-stream decode at 210 W, concurrency 
   `envs.compile_factors()`, because they change the traced graph.
 - CPU test `sly/tests/test_inductor_waste_cpu.py`: bit-identical eager and compiled, no gate buffer in Inductor's
   code.
+- **`R4D_ATTN_HVF=1`** (default `0`, `sly/r4d/r4d_attn_heavy_first.patch`): heaviest-first dispatch of the tile-16
+  double-buffered prefill attention (new OPT bit `O_HVF`). Under the causal limit a query block's key-tile count
+  grows with its index, and the stock grid (q-block, kv head) is handed out q-block fastest, so the launch ends on
+  the heaviest blocks with most of the 32 WGP slots idle (24-wave workgroups at 216 VGPR: one per WGP). With
+  `O_HVF` the grid is (kv head, q-block) and the q-blocks are walked in reverse; every workgroup computes what it
+  did before. `R4D_ATTN_HVF_MAX_CTX=N` (default `0` = no bound) limits it to launches with at most N keys.
+  Reaches the production path: the image ENV already sets `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`.
 
 ### Changed
 - **DFlash2 speculative depth 7 -> 15 in `serve-mxfp4.sh` (`SPEC`), and the adaptive-width ladder follows the
@@ -202,6 +209,19 @@ drafts 15 tokens instead of 7 (+10 % single-stream decode at 210 W, concurrency 
   that level. A loop can still start while the fade is running (the one fadecap loop began at 12.5k output
   tokens, where delta is 0.16, not 0).
 - Not measured: decode, GSM8K, the 262k production context, and each knob alone.
+- `R4D_ATTN_HVF`, one layer (`r4d_attn_paged` prefill, production instance), R9700 300 W, 1.8.1 image, A/H/A/H x3, output hashes
+  identical in every pair: chunk 4089 at ctx 4,089 1435.8 -> 1183 us (−17.6 %), 24,534 −3.3 %, 28,623-44,979
+  −1.5 / −1.8 / −0.9 / −0.3 / −0.3 %; chunk 2560 at 2,560 −18.1 %, 23,040 −2.2 %, 28-43.5k −0.1 to −1.2 %; 1,514
+  tokens −19.7 %. Deep contexts are neutral (ranges overlap), never slower. A context bound of 32,768 measured
+  equal to stock above it and gave up 0.7-1.8 % at 28-33k, hence the default of no bound.
+- `R4D_ATTN_HVF` build: all 32 kernels of the 1.8.1 `r4d.so` are instruction-identical with the patch applied; the two new
+  instances (`O_QF8` on and off) pass `ci/attn_sched_lint.py` at 216 VGPR, 0 spill (loop 368 instructions vs 367).
+- `R4D_ATTN_HVF` end to end (1.8.1 via a podman launcher with the production arguments, the patched `r4d.so` in every arm, arms
+  differing only by the knob, A H A H, prefill tok/s medians of 3 reps at 1514 / 6000 / 12000 / 24000 / 48000):
+  CHUNK 4096 without APC +0.03 / +0.30 / +0.24 / +0.44 / +0.36 % (A-to-A drift <= 0.11 %); CHUNK 2560 with APC
+  +0.12 / +0.14 / +0.14 / +0.07 / +0.03 % (inside the A-to-A drift of up to 0.16 %, not resolved). Greedy text
+  and spec-decode counters identical in every pair. Small because attention is a small share of prefill (about
+  1 % at 1514 tokens).
 
 ## [1.8.1] - 2026-10-24
 
