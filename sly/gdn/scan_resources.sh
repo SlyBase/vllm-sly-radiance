@@ -9,7 +9,8 @@
 set -euo pipefail
 SRC=${1:?usage: scan_resources.sh <libr4d checkout>}
 IMG=${IMG:-ghcr.io/slybase/vllm-sly-radiance:1.6.0-rocm10.1}
-DEST=$(cd "$(dirname "$0")/../tests/fixtures/gdn_scan" && pwd)
+# DEST=sly/tests/fixtures/gdn_scan_exact with r4d_gdn_exact_decay.patch applied on top makes that patch's fixtures.
+DEST=$(cd "${DEST:-$(dirname "$0")/../tests/fixtures/gdn_scan}" && pwd)
 
 cat > "$SRC/_res_probe.sh" <<'SH'
 set -u
