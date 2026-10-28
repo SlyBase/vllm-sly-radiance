@@ -354,7 +354,7 @@ a commercial license is granted; (c) the vLLM tree verify works with a quantized
 
 | Item | Why not |
 |---|---|
-| libr4d int4-KV prefill route (`R4D_KV4I`, variants A/B/B2) to close the KV4 prefill gap | KV4 (Tetra) prefill is 11.7-11.8 % slower than fp8 KV at 64k (210 W and 300 W); the kernel is 1.80x (rocprof). B2 is more accurate than Tetra against an fp8-KV reference (KL 0.01557 vs 0.01702, GSM8K-200 0.855 vs 0.845) but not faster (-1.3...+3.4 %, noise). KV4 itself stays supported (528,722 vs 342,950 KV tokens, prefill -11.7 % at 64k); only this route is dropped. Experiment branch `exp/kv4i-dump` (parked, not merged). |
+| libr4d int4-KV prefill route (`R4D_KV4I`, variants A/B/B2) to close the KV4 prefill gap | KV4 (Tetra) prefill is 11.7-11.8 % slower than fp8 KV at 64k (210 W and 300 W); the kernel is 1.80x (rocprof). B2 is more accurate than Tetra against an fp8-KV reference (KL 0.01557 vs 0.01702, GSM8K-200 0.855 vs 0.845) but not faster (-1.3...+3.4 %, noise). KV4 itself stays supported (528,722 vs 342,950 KV tokens, prefill -11.7 % at 64k); only this route is dropped. Experiment branch `exp/kv4i-dump` (parked, not merged). **Superseded in 1.9.1:** the cost was the torch glue (fp32 256x256 rotate + un-rotate, ~3 ms per layer launch at 4096 tokens), not the kernel. With the Triton glue of PR #200 and no context gate the route ships opt-in (`R4D_KV4I=1`): +0.2 ... +10.7 % over Tetra at 1.5k-47k, 210 W (CHANGELOG 1.9.1). |
 
 ## W4A4 prefill (int4 activations) from the hipfire engine (2026-10-26)
 

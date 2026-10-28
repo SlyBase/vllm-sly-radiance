@@ -28,8 +28,9 @@ everything for clients that need full continuity.
   Reaches the production path: the image ENV already sets `R4D_ATTN_DB=1 R4D_ATTN_TILE=16`.
 - **`R4D_KV4I=1`** (default `0`, `sly/r4d/r4d_kv4i.patch`, `sly/kv4/kv4i_route.py`; PR #200): int4 per-token-head KV route
   (Tetra, `--kv-cache-dtype int4_per_token_head`) through the r4d attention kernel (OPT bit `O_KV4I` = 1 << 25),
-  with `RADIANCE_KV4I_GLUE` / `RADIANCE_KV4I_MIN_CTX`. Opt-in; with the knob off nothing changes. Not measured
-  end to end on 1.9.1 yet.
+  with `RADIANCE_KV4I_GLUE` / `RADIANCE_KV4I_MIN_CTX`. Opt-in; with the knob off nothing changes. The Triton glue
+  (`rotate_query` / `unrotate_output`) replaces the fp32 matmul rotate, so the route no longer needs a context
+  gate (`MIN_CTX` default 0): KV4 prefill +0.2 to +10.7 % over Tetra at 210 W (see Measured).
 
 ### Fixed
 - **`/opt/qwen-fixed.jinja` is now `qwen3.8-froggeric-v22.5-sly2`.** Without an explicit
@@ -124,8 +125,24 @@ Quality:
     −0.0003 nats/token. 0.0107 is this harness's floor: two exact implementations (the patch and a full
     exact port) differ from each other by 0.0106. Moby-Dick perplexity 7.040 -> 6.831 (reference 6.839).
   - GSM8K-200, the accept gate's command: 0.860 as shipped, 0.860 patched (2 items flip each way).
-  - Not measured: engine prefill with the patch (the s3 kernel ties as shipped; a full exact port measured
-    −0.2 to −0.3 % at 1.5k-48k), decode, 210 W, the 262k production context.
+  - Not measured: decode, the 262k production context.
+- **1.9.1 release check, 210 W** (one R9700, 1.9.0 image, production unit arguments with `--max-model-len 65536`,
+  CHUNK 4096, APC off, `--no-async-scheduling`; one `r4d.so` built from this tree with all three libr4d patches,
+  mounted; BetterBench `--prefill`, median of 8 per depth, 1,514 / 5,917 / 11,793 / 23,543 / 47,055 tokens):
+  - Kernels: GDN exact-decay gate as shipped 20/20 WRONG above span 160, patched ALL OK; DIGEST of the
+    `gpu_chunk_scan_variants.py` shapes identical; s3 0.4342 / 0.1808 / 0.0920 -> 0.4341 / 0.1765 / 0.0911 ms at
+    T = 4089 / 1760 / 880. `R4D_ATTN_HVF` one layer, A/H x3, one output hash per shape: −19.0 % (1,514),
+    −18.9 % (2,560), −15.8 % (4,089), −1.6 % (2,560 + 20k past), −2.9 / −2.7 / −0.4 % (24.5k / 28.6k / 45k keys).
+  - fp8 KV, exact decay + `R4D_ATTN_HVF=1` against 1.9.0 (X C C X, plus a third control): +0.5 / +0.5 / −1.2 /
+    +0.4 / +1.2 %; exact decay alone (HVF off) against the next control: +1.0 / +0.9 / +0.8 / +0.7 / +0.3 %. Both
+    inside the ~3 % spread a 210 W server A/B resolves: no regression, the kernel gain is too small to show
+    end to end. Three runs of the day (one of them a pure 1.9.0 control) had one stalled request (1,660-2,230
+    tok/s) and ran ~4 % lower afterwards; that state followed the run, not the build.
+  - KV4 (`int4_per_token_head`, TETRA for target and drafter), `R4D_KV4I=1` against `R4D_KV4I=0`, T R R T:
+    +0.2 / +1.2 / +2.7 / +5.5 / +10.7 % (repeats within 0.4 %). Against fp8 KV the KV4 deficit drops from
+    −1.6 / −0.7 / −3.0 / −6.0 / −10.4 % to −1.4 / +0.5 / −0.4 / −0.8 / −0.8 % (means of the two fp8 controls of
+    the same window, which drifted 2-6 % between them, so read the KV4-vs-fp8 row as approximate).
+    Accuracy of the route was not re-measured here (PR #200: KL 0.0171 vs Tetra 0.0203 against fp8 KV).
 
 ## [1.9.0] - 2026-10-25
 
