@@ -508,10 +508,12 @@ ARG R4D_VERSION
 # a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
 # original check was actually protecting against), not the self-reported semver string, which prints
 # only as informational context alongside it.
+# sly/r4d/r4d_kv4i.patch (1.9.1): O_KV4I int4-KV prefill attention entry, inert unless R4D_KV4I=1 (sly/kv4/kv4i_route.py).
+# exact_decay, heavy_first and kv4i apply in any order after rx10 + scan_variants (same tree, checked).
 # sly/r4d/r4d_gdn_exact_decay.patch (1.9.0): libr4d issue #4 -- a chunk whose gate span exceeds 160
 # took the clamped split-decay form and came out attenuated. Such a chunk now takes the exact form
 # (StillDeadcode/radiance engine libr4d); every other chunk runs the split form unchanged.
-COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch sly/r4d/r4d_gdn_exact_decay.patch sly/r4d/r4d_attn_heavy_first.patch /opt/kernels/
+COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch sly/r4d/r4d_gdn_exact_decay.patch sly/r4d/r4d_attn_heavy_first.patch sly/r4d/r4d_kv4i.patch /opt/kernels/
 RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && git init -q && git remote add origin ${R4D_REPO} \
  && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
@@ -522,6 +524,7 @@ RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
  && git apply /opt/kernels/r4d_gdn_scan_variants.patch \
  && git apply /opt/kernels/r4d_gdn_exact_decay.patch \
  && git apply /opt/kernels/r4d_attn_heavy_first.patch \
+ && git apply /opt/kernels/r4d_kv4i.patch \
  && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
  && PYTHONPATH=/out python -c "import sys, torch, r4d; \
 print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
