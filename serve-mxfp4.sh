@@ -885,7 +885,9 @@ echo "[run] chat-template=$CHAT_TEMPLATE"
 echo "[run] follow the log with: $RUNTIME logs -f $NAME    stop with: $RUNTIME stop $NAME"
 
 # docker has no --replace, so a container left behind by a previous run has to go first.
-if [ "$RUNTIME" != podman ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true; fi
+# Not under DRY_RUN: it only prints the run command, so it must not take down a server that is
+# already running under this name -- the command it prints is meant to be compared against it.
+if [ "$RUNTIME" != podman ] && [ -z "${DRY_RUN:-}" ]; then "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true; fi
 
 # ---------------------------------------------------------------------------
 # KVCACHE: opt-in KV-cache offload (off by default; see kv-cache/README.md).
