@@ -139,4 +139,4 @@ jobs:
             -H "X-GitHub-Event: pull_request" \
             -H "X-Hub-Signature-256: sha256=$SIG" \
             --data-binary @"$PAYLOAD_FILE" \
-            https://hooks.timonds.de/webhooks/upstream-sync-triage-slybase
+            https://hooks.timonds.de/p/daidalos/webhooks/upstream-sync-triage-slybase
