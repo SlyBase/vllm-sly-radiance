@@ -148,6 +148,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_FUSED_NORM_QUANT` | `1` | fused norm/activation + fp8 quant in front of every W4A8 GEMM |
 | `RADIANCE_KV_GROUP_SIZE` | `8` | groups the KV cache pages 2+6+1 instead of padding to the drafter's bucket: more KV tokens |
 | `RADIANCE_EMBED_INT8` + `RADIANCE_EMBED_BITS` | `1` + `4` | int4 embedding table, 1.76 GiB more KV |
+| `RADIANCE_EMBED_HOST` | `0` | keep `embed_tokens` in pinned host RAM behind a UVA view (PCIe read), 2.37 GiB → KV, served ceiling 130k → 196k tokens; ~1 % step cost |
 | `GPU_MAX_HW_QUEUES` | `2` | the ROCm default picks a random queue layout per start; 2 is consistently fastest |
 
 ### Defaults that are already on

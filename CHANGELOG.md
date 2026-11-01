@@ -10,6 +10,11 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [0.5.0] - 2026-11-01
+
+### Added
+- Optional `embed_tokens` host offload (`sly/patch_embed_host.py` + `sly/radiance_embed_host.py`, knob `RADIANCE_EMBED_HOST`, default 0): the target's input embedding (248320 × 5120 bf16 = 2.37 GiB, 13 % of the card) moves to pinned host memory behind a UVA (zero-copy) device view read over PCIe. The forward reads one row per token (10 KB) — ~16 rows/decode step, 26 MB/prefill chunk — so the table leaves VRAM without the GPU streaming it back; a tied or quantized table (and `lm_head`, which is multiplied in full every step) is refused. *Measured* (2026-09-22, one R9700 TP=1, MAXSEQS=4, CHUNK=2560, dflash SPEC=7, Gen4 x8): model 20.0 → 17.63 GiB, KV pool 136,441 → 199,920 tokens, served ceiling 130,240 → 196,608; gather cost +12 us/decode step, +1.8 ms/prefill chunk, A/B (flag off vs on) within 0.1 ms/step — the difference is under the noise floor (≈1 %). Taken from ggz14/radiance-vllm-mxfp4 (aalb PR #56, "embed-host"); ported to this image's `sly/` tree and vLLM 0.30.0, off by default.
+
 ## [0.4.1] - 2026-09-27
 
 ### Added

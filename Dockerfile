@@ -303,6 +303,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
+     sly/radiance_embed_host.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
@@ -426,6 +427,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
              sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse sly/patch_mamba_align_retire \
+             sly/patch_embed_host \
              sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
       echo "== applying $p =="; \
