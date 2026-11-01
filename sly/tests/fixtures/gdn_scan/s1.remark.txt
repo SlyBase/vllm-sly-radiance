@@ -1,0 +1,8 @@
+Function Name: _Z28r4d_gdn_chunk_scan_kernel_s1PKtS0_S0_S0_PKfS2_S2_PtPfPKiiif
+    TotalSGPRs: 69
+    VGPRs: 256
+    ScratchSize [bytes/lane]: 20
+    Occupancy [waves/SIMD]: 4
+    SGPRs Spill: 0
+    VGPRs Spill: 4
+    LDS Size [bytes/block]: 60928

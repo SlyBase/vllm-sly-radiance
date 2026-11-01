@@ -31,12 +31,33 @@ nibble conversion with zero point and scale folded into the tile result) and an 
 (UNPACK 1: 8 dots against stride-8 activation columns), selectable per table entry. Entries of
 _GFX12X_SPLITK take precedence over the tile table; split_k 1 with the stock dequant runs the stock kernel,
 so such a row is bit-identical to the tile table. RADIANCE_W4A16_SPLITK=0 disables the table.
+
+RADIANCE_DFLASH_BF16 (default 0): the drafter's own W4A16 row sets are also dequantized once at the
+post-load hook into a per-layer bf16 weight (layer._radiance_w_bf16); apply_weights then runs one
+plain GEMM instead of unpacking the packed rows on every step. The packed rows stay (the int4
+context-KV path reads them), the drafter's silu / conv int4 transforms are skipped in this mode so
+all rows keep their natural order, and the lm_head (a ParallelLMHead scheme without .kernel) is
+never touched. Cost: +3.2 GiB VRAM for this drafter (context-expansion.md); check_w4a16_fuse.py
+covers the expansion, the apply_weights short-circuit and the guards on the CPU path.
+
+RADIANCE_DFLASH_FC_TILED_MIN_M (default 0 = off): the drafter's fc (combine_hidden_states,
+ReplicatedLinear N=5120 K=25600) is the one drafter linear that runs at a PREFILL token count -- 12
+calls at M = 4089 in the 47k request, 24.6 ms each -- and the gfx12x heuristic serves it with the
+128x64x64 tile it was measured for on decode batches. Per call it re-dequantizes the whole 65 MiB
+weight M / BLOCK_M times, so above the tile table's horizon (M > 64) this knob routes to a wider
+tile (256x128x64, 8 warps, 1 stage; bit-identical, DIGEST M = 513..4096). Cell bench 2026-10-19 vs the
+stock tile: M = 513 +5 %, 880 -7 %, 1514 -5 %, 1760 -16 %, 4096 -43 % (24.4 -> 13.9 ms). Threshold: 2048 for
+chunk 4096 (takes the 4089-token chunks only), 1024 for chunk 2048 (M = 1760). Server A/B (210 W, ABBA, two
+windows): +1.0 / +0.8 % and -0.4 / 0.0 % at 16k / 47k with the first tile (+0.7 % expected at 47k) -- below the drift.
+RADIANCE_DFLASH_FC_TILED_CFG="BM,BN,BK,warps[,stages]"
+overrides the tile (the sweep in sly/check_w4a16_fc_big_m.py --gpu --bench writes the winner back).
+Off by default: the heuristic is untouched and the tile table still owns M <= 64.
 """
 
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 F = Path(sysconfig.get_paths()["purelib"]) / "vllm/model_executor/kernels/linear/mixed_precision/rdna_hybrid_w4a16.py"
 
@@ -141,6 +162,60 @@ apply(F,
       '        elif M <= 32:\n',
       '_radiance_override = _gfx12x_draft_override(',
       'rdna_hybrid_w4a16: gfx12x branch consults the drafter tile table')
+
+# --- 2b. wide tile for the large-M rows of the drafter's fc (RADIANCE_DFLASH_FC_TILED_MIN_M) ---
+# A separate hunk with its own sentinel: hunk 2 is already applied in the shipped image, so an edit
+# inside it would NOOP there. Anchors are text from after hunk 2 / untouched stock text.
+apply(F,
+      'def triton_w4a16_skinny_fmt_gemm(\n'
+      '    a: torch.Tensor,  # [M, K] fp16/bf16\n',
+      '# --- radiance (sly/patch_w4a16_tiles.py): wide tiles for the large-M rows of the drafter\'s fc ---\n'
+      'def _radiance_w4a16_big_m_cfg(group_size, K, N, M):\n'
+      '    """BLOCK sizes for large-M rows, None to keep the heuristic.\n'
+      '\n'
+      '    The gfx12x heuristic below was measured on decode batches. The drafter\'s fc\n'
+      '    (combine_hidden_states, N=5120, K=25600) is the one drafter linear that sees a prefill token\n'
+      '    count: 12 calls at M = 4089 in a 47k request, 24.6 ms each on the stock 128x64x64 tile. Its\n'
+      '    cost is the dequantized weight volume per call, (M / BLOCK_M) x the whole 65 MiB weight, so\n'
+      '    BLOCK_M 256 halves it. Only M above the tile table\'s horizon (64) is eligible;\n'
+      '    RADIANCE_DFLASH_FC_TILED_MIN_M is the smallest M that takes this path (0 = off, default),\n'
+      '    RADIANCE_DFLASH_FC_TILED_CFG overrides the tile as "BM,BN,BK,num_warps[,num_stages]" (the\n'
+      '    shape `sly/check_w4a16_fc_big_m.py --gpu --bench` sweeps). BLOCK_K is clamped to group_size\n'
+      '    by the caller (one scale per K tile).\n'
+      '    """\n'
+      '    import os\n'
+      '\n'
+      '    try:\n'
+      '        min_m = int(os.environ.get("RADIANCE_DFLASH_FC_TILED_MIN_M", "0"))\n'
+      '    except ValueError:\n'
+      '        return None\n'
+      '    if min_m <= 0 or M < min_m or M <= 64:  # 64 = _GFX12X_DRAFT_BUCKETS[-1]: the table\'s horizon\n'
+      '        return None\n'
+      '    cfg = (256, 128, 64, 8, 1)\n'
+      '    parts = [p for p in os.environ.get("RADIANCE_DFLASH_FC_TILED_CFG", "").replace(" ", "").split(",") if p]\n'
+      '    if len(parts) in (4, 5):\n'
+      '        try:\n'
+      '            vals = [int(p) for p in parts]\n'
+      '        except ValueError:\n'
+      '            return cfg\n'
+      '        cfg = (vals[0], vals[1], vals[2], vals[3], vals[4] if len(vals) == 5 else None)\n'
+      '    return cfg\n'
+      '\n'
+      '\n'
+      'def triton_w4a16_skinny_fmt_gemm(\n'
+      '    a: torch.Tensor,  # [M, K] fp16/bf16\n',
+      'def _radiance_w4a16_big_m_cfg(group_size, K, N, M):',
+      'rdna_hybrid_w4a16: large-M tile config for the drafter fc')
+apply(F,
+      '        _radiance_override = _gfx12x_draft_override(group_size, K, N, M)\n'
+      '        if _radiance_override is not None:\n',
+      '        _radiance_override = _gfx12x_draft_override(group_size, K, N, M)\n'
+      '        _radiance_big_m = _radiance_w4a16_big_m_cfg(group_size, K, N, M)  # radiance: prefill rows\n'
+      '        if _radiance_big_m is not None:\n'
+      '            BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _radiance_big_m\n'
+      '        elif _radiance_override is not None:\n',
+      '_radiance_w4a16_big_m_cfg(group_size, K, N, M)  # radiance: prefill rows',
+      'rdna_hybrid_w4a16: gfx12x branch takes the large-M tile')
 
 # --- 3. split-K / fast-dequant / tiled-layout kernel, epilogues, reduce, table, fused ops, post-load ---
 # Plain source (not a chain of string literals) so it reads like the kernel it becomes.
@@ -690,18 +765,61 @@ def _radiance_postload_gdn(mod):
     return True
 
 
+def _radiance_w4_unpack_bf16(w_q, w_s, group_size, chunk_rows=1024):
+    """Full dequant of one packed symmetric weight to the scales' dtype, [N, K]: the same elements
+    the GEMM kernels unpack per call -- nibble j of word i is K index 8*i + j, shift (j // 2) * 4 +
+    (j % 2) * 16, value (nibble - 8) * scale of its group (skinny or tiled w_q, scales [N, K/G])."""
+    rows_i32 = radiance_w4a16_untile(w_q).contiguous().view(torch.int32)
+    n, k8 = rows_i32.shape
+    k = k8 * 8
+    shifts = torch.tensor([(j // 2) * 4 + (j % 2) * 16 for j in range(8)], dtype=torch.int32,
+                          device=rows_i32.device)
+    out = torch.empty((n, k), dtype=w_s.dtype, device=rows_i32.device)
+    for r0 in range(0, n, chunk_rows):  # keep the shift / scale transients small at load time
+        r1 = min(r0 + chunk_rows, n)
+        q = ((rows_i32[r0:r1, :, None] >> shifts[None, None, :]) & 0xF).to(w_s.dtype).reshape(r1 - r0, k)
+        out[r0:r1] = q.sub_(8).mul_(w_s[r0:r1].repeat_interleave(group_size, dim=1))
+    return out
+
+
+def _radiance_postload_bf16(layer):
+    """RADIANCE_DFLASH_BF16=1: stash the full dequant of one W4A16 layer as _radiance_w_bf16 so
+    apply_weights runs a plain GEMM on it. The packed rows and scales stay in place (the int4
+    context-KV path of radiance_dflash_kv_project reads them), so the cost is the extra copy.
+    Returns True when the layer was expanded."""
+    if (getattr(layer, "_radiance_silu", False) or getattr(layer, "_radiance_ba", 0)
+            or getattr(layer, "_radiance_w_bf16", None) is not None):
+        return False  # rows interleaved for a fused op, or already expanded
+    parts = _radiance_w4_parts(layer)
+    if parts is None:
+        return False
+    kern, w_q, w_s = parts
+    layer._radiance_w_bf16 = _radiance_w4_unpack_bf16(w_q, w_s, kern.config.group_size)
+    return True
+
+
 def radiance_w4a16_postload(model, drafter=None):
     import os
     import sys
 
-    counts = {"silu": 0, "gdn_ba": 0, "conv_w4": 0}
+    counts = {"silu": 0, "gdn_ba": 0, "conv_w4": 0, "bf16": 0}
     silu_on = os.environ.get("RADIANCE_W4A16_SILU", "1") == "1"
     # GDN qkvz + ba merge: off by default -- the 96 extra rows add a 129th tile (a nearly empty third wave on
     # 64 CUs): 93.9 us merged vs 79.2 + 3.6 us separate at M = 8 (window E sweep, 2026-09-29)
     ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "0") == "1"
     conv_on = os.environ.get("RADIANCE_DFLASH_CONV_W4", "1") == "1"
+    # RADIANCE_DFLASH_BF16: the drafter runs plain GEMMs on load-expanded bf16 weights, so skip
+    # its silu / conv int4 transforms and keep every row set in its natural order
+    bf16_on = os.environ.get("RADIANCE_DFLASH_BF16", "0") == "1"
     for root in (model, drafter):
         if root is None:
+            continue
+        if bf16_on and root is drafter and model is not drafter:
+            for name, mod in list(root.named_modules()):
+                try:
+                    counts["bf16"] += _radiance_postload_bf16(mod)
+                except Exception as exc:  # never fail a model load on a speed transform
+                    sys.stderr.write(f"[radiance.w4a16] post-load bf16 expansion skipped for {name}: {exc!r}\n")
             continue
         for name, mod in list(root.named_modules()):
             try:
@@ -722,8 +840,11 @@ def radiance_w4a16_postload(model, drafter=None):
             _radiance_sk_locks(next(model.parameters()).device)  # MODE 2 counters, outside any capture
         except StopIteration:
             pass
-    sys.stderr.write(f"[radiance.w4a16] post-load: gate_up+silu fused {counts['silu']}, GDN qkvz+ba merged "
-                     f"{counts['gdn_ba']}, drafter conv projections int4 {counts['conv_w4']}\n")
+    msg = (f"[radiance.w4a16] post-load: gate_up+silu fused {counts['silu']}, GDN qkvz+ba merged "
+           f"{counts['gdn_ba']}, drafter conv projections int4 {counts['conv_w4']}")
+    if counts["bf16"]:
+        msg += f", drafter W4A16 rows expanded to bf16 {counts['bf16']}"
+    sys.stderr.write(msg + "\n")
     return counts
 
 
@@ -874,19 +995,34 @@ apply(F,
       'rdna_hybrid_w4a16: dispatch consults the split-K table')
 
 # --- 5. the stock kernel reads LAYOUT 1 (tiled) weights too: prefill and tile-table calls ---
-apply(F,
-      '    BLOCK_K: tl.constexpr,\n'
-      '):\n'
-      '    """\n'
-      '    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
-      '    BLOCK_K: tl.constexpr,\n'
-      '    LAYOUT: tl.constexpr = 0,  # radiance: 1 = radiance_w4a16_tile blocks [N/16, K/128, 16, 16]\n'
-      '):\n'
-      '    """\n'
-      '    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
-      'LAYOUT: tl.constexpr = 0,  # radiance',
-      'rdna_hybrid_w4a16: stock kernel LAYOUT parameter')
-apply(F,
+# (0.31 folded the docstring's opening line into the quotes: `"""Fused W4A16 GEMM ...`)
+_LAYOUT_NEW = ('    BLOCK_K: tl.constexpr,\n'
+               '    LAYOUT: tl.constexpr = 0,  # radiance: 1 = radiance_w4a16_tile blocks [N/16, K/128, 16, 16]\n'
+               '):\n')
+apply_any(F,
+          [('    BLOCK_K: tl.constexpr,\n):\n    """\n    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
+            _LAYOUT_NEW + '    """\n    Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n'),
+           ('    BLOCK_K: tl.constexpr,\n):\n    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n',
+            _LAYOUT_NEW + '    """Fused W4A16 GEMM reading weights from skinny format [N, K//8].\n')],
+          'LAYOUT: tl.constexpr = 0,  # radiance',
+          'rdna_hybrid_w4a16: stock kernel LAYOUT parameter')
+
+# vLLM 0.32.0: the stock kernel's b_ptrs now carry stride_bn (0.31 was implicitly K8 =
+# contiguous K//8). LAYOUT==0 keeps stride_bn (identical to stock); the radiance tile layout
+# is addressed absolutely and the stride is not part of it, so the tiled path is unchanged.
+apply_any(F,
+      [
+      (
+      '        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
+      '        if LAYOUT == 1:\n'
+      '            b_ptrs = b_ptr + (((offs_n[:, None] // 16) * (K8 // 16) + offs_k8[None, :] // 16) * 256\n'
+      '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
+      '        else:\n'
+      '            b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n'
+      ),
+      (
       '        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
       '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
       '        if LAYOUT == 1:\n'
@@ -894,15 +1030,40 @@ apply(F,
       '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
       '        else:\n'
       '            b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
-      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n',
+      '        mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)\n'
+      )],
       '                              + (offs_n[:, None] % 16) * 16 + offs_k8[None, :] % 16)\n'
       '        else:\n'
-      '            b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]\n'
+      '            b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]\n'
       '        mask_b = (offs_n[:, None] < N)',
       'rdna_hybrid_w4a16: stock kernel tiled addressing')
 
 # --- 6. stock launcher: tiled b_q, pass LAYOUT ---
-apply(F,
+# vLLM 0.32.0 added `b_q.stride(1) == 1` and scales asserts plus stride_bn / stride_am locals
+# inside the old anchor; the 0.32 shape anchors wider and keeps them (a packed tile tensor is
+# innermost-contiguous, so the assert passes; LAYOUT 1 never reads stride_bn).
+apply_any(F,
+      [
+      (
+      '    M, K = a.shape\n'
+      '    N = b_q.shape[0]\n'
+      '    K8 = K // 8\n'
+      '    num_groups = K // group_size\n'
+      '    stride_bn = b_q.stride(0)\n'
+      '    stride_am = a.stride(0)\n'
+      '\n'
+      '    assert b_q.shape == (N, K8), f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    M, K = a.shape\n'
+      '    layout = 1 if b_q.dim() == 4 else 0  # radiance: 1 = radiance_w4a16_tile blocks\n'
+      '    N = b_q.shape[0] * 16 if layout else b_q.shape[0]\n'
+      '    K8 = K // 8\n'
+      '    num_groups = K // group_size\n'
+      '    stride_bn = b_q.stride(0)\n'
+      '    stride_am = a.stride(0)\n'
+      '\n'
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      ),
+      (
       '    M, K = a.shape\n'
       '    N = b_q.shape[0]\n'
       '    K8 = K // 8\n'
@@ -915,7 +1076,8 @@ apply(F,
       '    K8 = K // 8\n'
       '    num_groups = K // group_size\n'
       '\n'
-      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      )],
       'layout = 1 if b_q.dim() == 4 else 0  # radiance',
       'rdna_hybrid_w4a16: stock launcher accepts tiled weights')
 apply(F,
@@ -933,8 +1095,53 @@ apply(F,
       '        LAYOUT=layout,\n        num_warps=num_warps,\n        **extra_kwargs,',
       'rdna_hybrid_w4a16: stock launch passes LAYOUT')
 
+# --- 6b. 0.32 stride asserts vs tiled weights (found at the first 1.7.0 UltraQuant start) ---
+# vLLM 0.32.0 added `b_q.stride(1) == 1` / "Weight rows must be contiguous" to
+# triton_w4a16_skinny_fmt_gemm. The assert means innermost-contiguity and is written for 2-D
+# weights; on a 4-D radiance_w4a16_tile weight stride(1) is the block stride != 1, and the LAYOUT
+# 1 addressing computes its indices instead of reading stride_bn -- so the assert fires exactly
+# when the tile store is in play (drafter `fc` projection, M-skinny). Pre-0.32 trees carry no
+# stride asserts; the second shape only attaches a comment, so a cross-version launch replay
+# on the previous image stays green instead of failing on a tree that was already fine.
+apply_any(F,
+      [
+      (
+      '    assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n',
+      '    # radiance: 4-D tiled weights are block-addressed (LAYOUT 1 computes the indices;\n'
+      '    # stride_bn is never read). stride(1) is the innermost-contiguity check and only\n'
+      '    # applies to 2-D weights; for the tile blocks K8 numel equality is asserted below.\n'
+      '    if b_q.dim() == 2:\n'
+      '        assert b_q.stride(1) == 1, "Weight rows must be contiguous"\n'
+      ),
+      (
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n',
+      '    # radiance: this tree has no 0.32-style stride asserts; a 4-D tiled weight runs the\n'
+      '    # same index-addressed kernel here without a stride(1) guard.\n'
+      '    assert b_q.numel() == N * K8, f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"\n'
+      ),
+      ],
+      '# radiance: 4-D tiled weights are block-addressed',
+      'rdna_hybrid_w4a16: 0.32 stride assert tolerates tiled weights')
+
 # --- 7. apply op: tiled weights have N = 16 * dim 0 and never take the HIP skinny path ---
-apply(F,
+# vLLM 0.32.0: the skinny limit is now MEDIUM_SKINNY_LIMIT_ELEMENTS (1.2x the LDS elements,
+# see _pad_activation_rows); was LDS_CAPACITY_ELEMENTS. `w_q.dim() == 2` keeps the HIP
+# skinny path off the tiled layout regardless of the constant.
+apply_any(F,
+      [
+      (
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0]\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:\n',
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS and w_q.dim() == 2:\n'
+      ),
+      (
       '    M = x_2d.shape[0]\n'
       '    K = x_2d.shape[1]\n'
       '    N = w_q.shape[0]\n'
@@ -944,8 +1151,9 @@ apply(F,
       '    K = x_2d.shape[1]\n'
       '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
       '\n'
-      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:\n',
-      'K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:',
+      '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:\n'
+      )],
+      'K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS and w_q.dim() == 2:',
       'rdna_hybrid_w4a16: apply op handles tiled weights')
 apply(F,
       '    M = x_2d.size(0)\n'
@@ -956,11 +1164,23 @@ apply(F,
       'rdna_hybrid_w4a16: fake impl handles tiled weights')
 
 # --- 8. load: store W4A16 weights tiled (RADIANCE_W4A16_TILED, default on) ---
-apply(F,
+# vLLM 0.32.0 moved the pack into pack_skinny_int4 (which also carries a gfx1151 row pad), so
+# `shuffled` left the load scope; the tile insert anchors on the new call and reads the shape
+# off w_q_skinny (int8 [N, K//2]: K = shape[1] * 2, exactly the convention line 825 uses).
+apply_any(F,
+      [
+      (
+      '        w_q_skinny = pack_skinny_int4(unpacked)\n',
+      '        w_q_skinny = pack_skinny_int4(unpacked)\n'
+      '        if _on_gfx12x() and _radiance_tiled_enabled(w_q_skinny.shape[0], w_q_skinny.shape[1] * 2):\n'
+      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n'
+      ),
+      (
       '        w_q_skinny = shuffled.contiguous().view(torch.int8)\n',
       '        w_q_skinny = shuffled.contiguous().view(torch.int8)\n'
       '        if _on_gfx12x() and _radiance_tiled_enabled(shuffled.shape[0], shuffled.shape[1] * 8):\n'
-      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n',
+      '            w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance: LAYOUT 1\n'
+      )],
       'w_q_skinny = radiance_w4a16_tile(w_q_skinny)  # radiance',
       'rdna_hybrid_w4a16: tiled weight layout at load')
 
@@ -969,11 +1189,16 @@ apply(F,
       '        x_2d = x.reshape(-1, x.shape[-1])\n'
       '        N = w_q.shape[0]\n'
       '        out_shape = x.shape[:-1] + (N,)\n',
+      '        _radiance_w = getattr(layer, "_radiance_w_bf16", None)\n'
+      '        if _radiance_w is not None:\n'
+      '            # radiance (RADIANCE_DFLASH_BF16): the packed rows were dequantized to this bf16\n'
+      '            # weight once at load -- one plain GEMM, no per-call nibble unpack / scale fold\n'
+      '            return torch.nn.functional.linear(x, _radiance_w, bias)\n'
       '        x_2d = x.reshape(-1, x.shape[-1])\n'
       '        N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
       '        out_shape = x.shape[:-1] + (N,)\n',
-      'N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n        out_shape',
-      'rdna_hybrid_w4a16: apply_weights handles tiled weights')
+      'no per-call nibble unpack / scale fold',
+      'rdna_hybrid_w4a16: apply_weights handles tiled weights + a load-time bf16 expansion')
 apply(F,
       '            cu_count,\n'
       '            c.group_size,\n'

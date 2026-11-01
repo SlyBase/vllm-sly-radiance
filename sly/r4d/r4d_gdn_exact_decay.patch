@@ -1,0 +1,164 @@
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+index 1088050..62f0722 100644
+--- a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+@@ -21,6 +21,10 @@
+ //   O  = scale*ge*(Q@S) + sA@V'
+ //   S  = lam*(e^c*S + V'^T@K)
+ // A is FLA's solve_tril output (decay already folded in), so no decay enters W or V'.
++// A chunk whose gate span g_0 - g_last exceeds 160 cannot be split safely (one half leaves e^80); with
++// EXACT=1 (default) it takes the exact form instead, see EXACT below:
++//   rs[i] holds g_i (raw)   gs[j]=e^{g_last-g_j}
++//   sA = scale*e^{g_i-g_j}*tril(P)     V' = A@W (undecayed)     S = e^{g_last}*S + V'^T@(gs*K)
+ #include <hip/hip_runtime.h>
+ #include "r4d.h"
+ #include "r4d_gdn_wmma.h"
+@@ -61,6 +65,15 @@
+ #ifndef PLATE
+ #define PLATE 0
+ #endif
++// EXACT (libr4d issue #4): the split form e^{g_i-c}.e^{c-g_j} about the chunk midpoint c is exact while
++// both halves stay inside e^80, i.e. while the chunk's gate span g_0 - g_last <= 160; past that the clamp
++// attenuates the chunk. With EXACT=1 the choice is made per chunk (workgroup-uniform, SALU): a chunk inside
++// the bound runs the split form unchanged (bit-identical to EXACT=0), a chunk past it runs the exact form
++// from StillDeadcode/radiance's engine libr4d (1.0.x): the (i,j) weight e^{g_i-g_j} is formed per element
++// in the score step and e^{gl-g_t} <= 1 rides on K for the state update, so no factor leaves (0, 1].
++#ifndef EXACT
++#define EXACT 1
++#endif
+ // LDSBAR: __syncthreads() is an ALL-address-space fence, so the barrier that follows
+ // the global O store compiles to s_wait_storecnt_dscnt 0x0 -- every wave waits for its
+ // output stores to reach cache before an LDS-only rendezvous. Scoping the fence to
+@@ -495,6 +508,9 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+   PREFETCH(0);
+ 
+   const char* const sbase = (const char*)&s;
++#if EXACT
++  const float lgs = __logf(scale);
++#endif
+   for (int ci = 0; ci < nchunk; ++ci) {
+     const int c0 = tb + ci * BT, nval = min(BT, te - c0);
+     const int lim = nval - 1;
+@@ -502,7 +518,13 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+     const unsigned short* ag = Amat + ((size_t)c0 * H + hv) * BT;
+     const size_t qrs = (size_t)Hg * KD, ars = (size_t)H * BT;
+     const float gl = gcs[(size_t)(c0 + lim) * H + hv];
+-    const float cref = 0.5f * (gcs[(size_t)c0 * H + hv] + gl);
++    const float g0 = gcs[(size_t)c0 * H + hv];
++    const float cref = 0.5f * (g0 + gl);
++#if EXACT
++    const bool split = g0 - gl <= 160.0f;   // both halves of the split inside e^80: the clamp cannot fire
++#else
++    constexpr bool split = true;
++#endif
+ 
+     // Issued before the staging store so the LDS writes below cover their latency:
+     // only waves 0-1 (tid < BT) run this, and every other wave waits for them at (1).
+@@ -538,6 +560,8 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+       // state, which the next chunk reads -- are damped by e^{80-(cref-g_t)}. This bounds the
+       // damage; it does not remove the cause. The cause is splitting a weight that is provably
+       // <= 1 into a huge x tiny pair: stage V' in fp32, or apply e^{gl-g_t} on the state path.
++      // EXACT=1 does the latter for exactly those chunks (span > 160, the else branch below), so
++      // with it the clamp is reached only where it cannot fire.
+       //
+       // 80 rather than 88 because the binding ceiling is not fp32's: V' = gv[t].(A@W)[t] is staged
+       // in bf16 (s.D) and then accumulated over BT tokens into V'^T @ K, so gv must leave room for
+@@ -545,8 +569,15 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+       // value is measured, not assumed: WikiText-2 PPL over 208,539 tokens, no other mitigation --
+       // 70 -> 8.3841, 80 -> 8.3706, 83 -> 8.3728, reference 8.3335, stock 653586. Where both
+       // halves fit (every ordinary chunk) nothing changes.
+-      VEC_GV(tid) = ok ? __expf(fminf(cref - ggr, 80.0f)) : 0.f;
+-      VEC_RS(tid) = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;
++      if (split) {
++        VEC_GV(tid) = ok ? __expf(fminf(cref - ggr, 80.0f)) : 0.f;
++        VEC_RS(tid) = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;
++      } else {
++        // exact form: the rs slot holds the raw g. A padding row gets gl, not 0: it is scored against
++        // live j, and gl - g_j <= 0 keeps that exponent finite. gs = e^{gl-g_t} <= 1.
++        VEC_RS(tid) = ok ? ggr : gl;
++        VEC_GV(tid) = ok ? __expf(gl - ggr) : 0.f;
++      }
+     }
+     BAR();                                                   // (1)
+ #if PFIN && PFV == 4
+@@ -723,13 +754,22 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+     // sA = rs * tril(P): one multiply per element, no exp
+     {
+       const int ii = mt * 16 + lo;            // now constant per lane: one rs load
+-      const float r = VEC_RS(ii);
++      const float r = VEC_RS(ii);             // split: rs_i; exact: g_i
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         const int j0 = (ntb + i) * 16 + 8 * hi;
+         float a[8];
++        if (split) {
++#pragma unroll
++          for (int e = 0; e < 8; ++e) a[e] = (j0 + e <= ii) ? p[i][e] * r : 0.f;
++        } else {
++#if EXACT
++          const float gis = r + lgs;          // log(scale) inside the exponent; kept j have g_i <= g_j
+ #pragma unroll
+-        for (int e = 0; e < 8; ++e) a[e] = (j0 + e <= ii) ? p[i][e] * r : 0.f;
++          for (int e = 0; e < 8; ++e)
++            a[e] = (j0 + e <= ii) ? p[i][e] * __expf(gis - VEC_RS(j0 + e)) : 0.f;
++#endif
++        }
+         if (doP[i]) {
+           *(uint2*)&s.A[ii][j0]     = F2BF4I(a[0], a[1], a[2], a[3]);
+           *(uint2*)&s.A[ii][j0 + 4] = F2BF4I(a[4], a[5], a[6], a[7]);
+@@ -786,7 +826,7 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+ #endif
+       float gvv[8];
+ #pragma unroll
+-      for (int e = 0; e < 8; ++e) gvv[e] = VEC_GV(mt * 16 + 8 * hi + e);
++      for (int e = 0; e < 8; ++e) gvv[e] = split ? VEC_GV(mt * 16 + 8 * hi + e) : 1.f;
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         unsigned short* dp = &s.D[(ntb + i) * 16 + lo][mt * 16 + 8 * hi];
+@@ -796,6 +836,22 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+                                    d[i][6]*gvv[6], d[i][7]*gvv[7]);
+       }
+     }
++#if EXACT
++    if (!split) {
++      // K <- gs * K in place for the state's V'^T @ K: (diag(gs) V')^T K == V'^T (diag(gs) K), and K is
++      // dead (U = K@S and P = Q@K^T retired before barrier (2); s.k is restaged at the top of the next
++      // chunk). Only columns < KD are written, so ALIAS's ge/gv words in k's row padding survive.
++#pragma unroll
++      for (int u = 0; u < BT * (KD / 4) / NTHR; ++u) {
++        const int idx = tid + u * NTHR;
++        const int t = idx / (KD / 4), c = (idx % (KD / 4)) * 4;
++        const float f = VEC_GV(t);
++        unsigned short* kp = &s.k[t][c];
++        *(uint2*)kp = F2BF4O(bf2f(kp[0]) * f, bf2f(kp[1]) * f,
++                             bf2f(kp[2]) * f, bf2f(kp[3]) * f);
++      }
++    }
++#endif
+     BAR();                                                   // (3)
+ #if PLATE == 3
+     PREFETCH(min(ci + 1, nchunk - 1));       // issue only; consumed at the top of the next chunk
+@@ -853,7 +909,7 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+ 
+     // ---- S = lam * (e^c * S + V'^T @ K)   (B needs K as [dim][token] -> strided fragT)
+     {
+-      const float ec = __expf(cref), lam = __expf(gl - cref);
++      const float ec = split ? __expf(cref) : __expf(gl), lam = split ? __expf(gl - cref) : 1.f;
+ #pragma unroll
+       for (int t = 0; t < NST; ++t)
+ #pragma unroll
+@@ -902,10 +958,12 @@ __global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN
+         __builtin_amdgcn_sched_group_barrier(0x008, NST * SS, SIDS);
+       }
+ #endif
++      if (split) {
+ #pragma unroll
+-      for (int t = 0; t < NST; ++t)
++        for (int t = 0; t < NST; ++t)
+ #pragma unroll
+-        for (int e = 0; e < 8; ++e) St[t][e] *= lam;
++          for (int e = 0; e < 8; ++e) St[t][e] *= lam;
++      }
+     }
+ #if !ALIAS
+     // no barrier: s.S aliases nothing, and barrier (2) already proves every wave

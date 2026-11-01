@@ -95,6 +95,35 @@ if grep -q '^  OK ' "$WORK/pass2.log"; then
   echo "FAIL: pass 2 applied hunks again (patch not idempotent):"; grep '^  OK ' "$WORK/pass2.log"; exit 1
 fi
 
+# --- kv-cache ram-mode patches (serve-mxfp4.sh KVCACHE=ram applies them at container start, not
+#     the Dockerfile) against the same pinned vLLM, launcher order, same two-pass rule. A hunk the
+#     pinned tree carries prints SKIP (see _patchlib.skip_if_upstream), which is neither OK nor NOOP.
+#     The list is the launcher's: every kv-cache/patch_*.py serve-mxfp4.sh names in a `_kvp` line
+#     outside the disk-only branches.
+mapfile -t KV_PATCHES < <(sed -n '/^KVCACHE=.{KVCACHE:-off}/,/^esac/p' "$ROOT/serve-mxfp4.sh" \
+  | awk '/KVCACHE" = disk/{d=1} d&&/^    fi/{d=0;next} !d' \
+  | grep -o 'kv-cache/patch_[a-z_]*\.py' | awk '!seen[$0]++')
+[ "${#KV_PATCHES[@]}" -gt 0 ] || { echo "FAIL: no kv-cache patches found in serve-mxfp4.sh"; exit 1; }
+export RADIANCE_OFFLOAD_MIXED_HIT=1 RADIANCE_OFFLOAD_EAGLE_GROUPS=1 RADIANCE_MAMBA_STORE_STRIDE=4
+run_kv_pass() { # <pass no>
+  local pass=$1 log="$WORK/kv-pass$1.log"
+  : > "$log"
+  for p in "${KV_PATCHES[@]}"; do
+    echo "== kv pass $pass: $p ==" | tee -a "$log"
+    (cd "$ROOT" && PYTHONPATH="$ROOT" "$VPY" "$p") 2>&1 | tee -a "$log"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "FAIL: $p exited non-zero in kv pass $pass"; exit 1; }
+  done
+}
+run_kv_pass 1
+if grep -q '^  NOOP ' "$WORK/kv-pass1.log"; then
+  echo "FAIL: kv pass 1 had NOOP hunks (a sentinel already matches the pinned vLLM):"; grep '^  NOOP ' "$WORK/kv-pass1.log"; exit 1
+fi
+run_kv_pass 2
+if grep -q '^  OK ' "$WORK/kv-pass2.log"; then
+  echo "FAIL: kv pass 2 applied hunks again (patch not idempotent):"; grep '^  OK ' "$WORK/kv-pass2.log"; exit 1
+fi
+echo "kv-cache dry run OK: ${#KV_PATCHES[@]} patches, $(grep -c '^  OK ' "$WORK/kv-pass1.log") hunks applied, $(grep -c '^  SKIP ' "$WORK/kv-pass1.log" || true) upstream, pass 2 all NOOP"
+
 # same final check as the Dockerfile loop: every radiance module still parses
 "$VPY" -c "import ast,glob,sys; fs=glob.glob('$SP/radiance_*.py'); [ast.parse(open(f).read()) for f in fs]; print(f'radiance modules parse OK ({len(fs)})')"
 echo "patch dry run OK: $(grep -c '^  OK ' "$WORK/pass1.log") hunks applied, pass 2 all NOOP, $(grep -c '^SKIP ' "$WORK/pass1.log" || true) skipped"

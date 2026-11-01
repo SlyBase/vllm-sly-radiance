@@ -371,11 +371,20 @@ __global__ __launch_bounds__(DWN * 32) void escha_gemm_decode(
         const int m = i * 16 + kh + e;
         if (m < M) P[((size_t)ks * M + m) * N + n_lane] = acc[i][e];
       }
+  // Release on EVERY thread: a fence orders only the executing thread's stores, and
+  // __syncthreads is workgroup scope, so a fence on thread 0 alone let the reducer on
+  // another CU read partials the other threads had not drained yet (libr4d's tiled W4A8
+  // split tail documents the same bug). Then an agent-scope acq_rel counter bump, and an
+  // acquire on the reducing block before it reads the other blocks' partials.
+  __threadfence();
   __syncthreads();
-  if (tid == 0) { __threadfence(); s_last = (atomicAdd(&cnt[blockIdx.x], 1) == DKS - 1); }
+  if (tid == 0)
+    s_last = (__hip_atomic_fetch_add(&cnt[blockIdx.x], 1, __ATOMIC_ACQ_REL,
+                                     __HIP_MEMORY_SCOPE_AGENT) == DKS - 1);
   __syncthreads();
   if (!s_last) return;
   if (tid == 0) cnt[blockIdx.x] = 0;
+  __threadfence();
   const int nhi = min(n0 + BND, N);
   for (int nn = n0 + tid; nn < nhi; nn += DWN * 32)
     for (int m = 0; m < M; ++m) {
@@ -722,11 +731,20 @@ __global__ __launch_bounds__(DWN * 32) void escha_gemm_decode_fp8(
         const int m = i * 16 + kh + e;
         if (m < M) P[((size_t)ks * M + m) * N + n_lane] = acc[i][e];
       }
+  // Release on EVERY thread: a fence orders only the executing thread's stores, and
+  // __syncthreads is workgroup scope, so a fence on thread 0 alone let the reducer on
+  // another CU read partials the other threads had not drained yet (libr4d's tiled W4A8
+  // split tail documents the same bug). Then an agent-scope acq_rel counter bump, and an
+  // acquire on the reducing block before it reads the other blocks' partials.
+  __threadfence();
   __syncthreads();
-  if (tid == 0) { __threadfence(); s_last = (atomicAdd(&cnt[blockIdx.x], 1) == DKS - 1); }
+  if (tid == 0)
+    s_last = (__hip_atomic_fetch_add(&cnt[blockIdx.x], 1, __ATOMIC_ACQ_REL,
+                                     __HIP_MEMORY_SCOPE_AGENT) == DKS - 1);
   __syncthreads();
   if (!s_last) return;
   if (tid == 0) cnt[blockIdx.x] = 0;
+  __threadfence();
   const int nhi = min(n0 + BND, N);
   for (int nn = n0 + tid; nn < nhi; nn += DWN * 32)
     for (int m = 0; m < M; ++m) {

@@ -1,0 +1,375 @@
+diff --git a/build.sh b/build.sh
+index d02982f..e86bc86 100755
+--- a/build.sh
++++ b/build.sh
+@@ -39,6 +39,9 @@ UNITS=(
+   "r4d_attn_paged_h256_gqa6:"
+   "r4d_attn_vit_h72_bf16:"
+   "r4d_gdn_chunk_scan_k128_v128_c64_bf16:-mcumode"
++  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1:"
++  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_s2:"
++  "r4d_gdn_chunk_scan_k128_v128_c64_bf16_s3:"
+   "r4d_gdn_conv_w4_h128_bf16:"
+   "r4d_gdn_kkt_solve_k128_c64_bf16:"
+   "r4d_gdn_recurrent_update_k128_v128_bf16_fp32state:"
+diff --git a/r4d.h b/r4d.h
+index 1e9fd78..87983d3 100644
+--- a/r4d.h
++++ b/r4d.h
+@@ -103,6 +103,23 @@ int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
+         const void* cu, int N, int H, int Hg, int K, int V, int bt,
+         float scale, void* stream);
+ void r4d_gdn_dims(int* head_k, int* head_v, int* chunk);
++// Opt-in build variants of the entry point above: same contract, same arithmetic, byte-identical
++// outputs; they differ in how the kernel is built and laid out. Selected with
++// select("gdn_chunk_scan", ..., variant="s1"|"s2"|"s3"); a build without them ignores the unknown key
++// and answers with the stock name.
++//   s1  workgroup-processor mode instead of CU mode
++//   s2  s1 + LDS 60,928 -> 43,008 B (state aliased onto sA + W) and a 6-waves/SIMD register budget,
++//       so three workgroups fit one WGP
++//   s3  s2 + the next chunk's staging loads issued just before the O accumulate loop
++#define R4D_GDN_SCAN_DECL(sfx)                                                      \
++int r4d_gdn_chunk_scan_k128_v128_c64_bf16_##sfx(                                    \
++        const void* q, const void* k, const void* v, const void* A,                 \
++        const void* g, const void* beta, const void* h0, void* o, void* ht,         \
++        const void* cu, int N, int H, int Hg, int K, int V, int bt,                 \
++        float scale, void* stream)
++R4D_GDN_SCAN_DECL(s1);
++R4D_GDN_SCAN_DECL(s2);
++R4D_GDN_SCAN_DECL(s3);
+ 
+ // The chunk preamble: A = (I + strict_lower(diag(beta) K K^T e^{g_i-g_j}))^-1 per chunk, which is
+ // FLA's chunk_scaled_dot_kkt_fwd followed by solve_tril with the fp32 gram in between never
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+index 9ed27e4..1088050 100644
+--- a/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip
+@@ -35,6 +35,32 @@
+ #ifndef TRIL
+ #define TRIL 0
+ #endif
++// SCAN_SFX: suffix of the entry point and kernel names, so the same source can be compiled into extra
++// translation units (r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1.hip ...) that sit next to the stock one in
++// one r4d.so. The stock unit leaves it empty. The variants below are opt-in; the stock build is
++// byte-for-byte what it was.
++#ifndef SCAN_SFX
++#define SCAN_SFX
++#endif
++#define SCAN_CAT_(a, b) a##b
++#define SCAN_CAT(a, b) SCAN_CAT_(a, b)
++// ALIAS: LDS 60,928 -> 43,008 B so that three workgroups fit one WGP (build without -mcumode). The bf16
++// state mirror S lives in the same bytes as sA + W: S is read only by the main loop and written only
++// after the state update, sA / W are written after the main loop and dead at the state update. The four
++// per-token vectors (ge, gv, rs, bt) go into the row padding of the k and D buffers, which no fragment
++// ever reads. Same values, same arithmetic order, different addresses.
++// Hazards this opens, and what closes them: (1b) a new barrier between the main loop and the first
++// sA / W write (a slow wave may still be reading S); SWRITE moves from the end of a chunk to the top
++// of the next one, behind barrier (4), which also proves every wave is done with the last sA read.
++#ifndef ALIAS
++#define ALIAS 0
++#endif
++// PLATE: where the next chunk's staging prefetch is issued. 0 = right after barrier (1) (stock; the
++// 24 staging VGPRs stay live across the main WMMA loop, where pressure peaks), 3 = right after
++// barrier (3), just before the O += sA@V' loop. Same addresses and loads, only the issue point moves.
++#ifndef PLATE
++#define PLATE 0
++#endif
+ // LDSBAR: __syncthreads() is an ALL-address-space fence, so the barrier that follows
+ // the global O store compiles to s_wait_storecnt_dscnt 0x0 -- every wave waits for its
+ // output stores to reach cache before an LDS-only rendezvous. Scoping the fence to
+@@ -106,6 +132,27 @@
+ #endif
+ #define NST (SKT * SVT)         // state tiles per wave
+ 
++#if ALIAS
++struct Smem {
++  unsigned short k[BT][KP];     // A: K   /  B: K^T for P=Q@K^T
++  union {
++    unsigned short S[BV][KP];   // B: state, V-major (matches FLA's [V,K] layout)
++    struct {
++      unsigned short A[BT][AP]; // B-source for sA (written as [i][j])
++      unsigned short W[BV][WP]; // B: W (transposed)
++    };
++  };
++  unsigned short D[BV][AP];     // staged V as [token][v]; then V' as [v][token].
++};
++static_assert(sizeof(Smem) == 43008, "ALIAS: three workgroups per WGP need <= 43,690 B");
++static_assert(sizeof(((Smem*)0)->S) <= sizeof(((Smem*)0)->A) + sizeof(((Smem*)0)->W), "S fits sA+W");
++// per-token vectors in the row padding (4 shorts = 8 bytes per row): ge, gv after k's 128 columns,
++// rs, bt after D's 64 columns
++#define VEC_GE(t) (((float*)&s.k[t][KD])[0])
++#define VEC_GV(t) (((float*)&s.k[t][KD])[1])
++#define VEC_RS(t) (((float*)&s.D[t][BV])[0])
++#define VEC_BT(t) (((float*)&s.D[t][BV])[1])
++#else
+ struct Smem {
+   unsigned short k[BT][KP];     // A: K   /  B: K^T for P=Q@K^T
+   unsigned short A[BT][AP];     // B-source for sA (written as [i][j])
+@@ -116,6 +163,11 @@ struct Smem {
+                                 // in the W update, V' is written after barrier (2).
+   float ge[BT], gv[BT], rs[BT], bt[BT];
+ };
++#define VEC_GE(t) s.ge[t]
++#define VEC_GV(t) s.gv[t]
++#define VEC_RS(t) s.rs[t]
++#define VEC_BT(t) s.bt[t]
++#endif
+ 
+ // LDSO: hold each LDS row pointer as one opaque 32-bit byte offset (see fragO).
+ #ifndef LDSO
+@@ -248,7 +300,7 @@ struct Smem {
+   ((unsigned)((const char*)&(buf)[0][0] - (const char*)&s) + \
+    (unsigned)((((base) + lo) * (pitch) + 4 * hi) * 2))
+ 
+-__global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
++__global__ __launch_bounds__(NTHR) void SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN_SFX)(
+     const unsigned short* __restrict__ q, const unsigned short* __restrict__ k,
+     const unsigned short* __restrict__ v, const unsigned short* __restrict__ Amat,
+     const float* __restrict__ gcs, const float* __restrict__ beta,
+@@ -433,9 +485,13 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     *(uint2*)sp       = F2BF4O(St[t][0], St[t][1], St[t][2], St[t][3]);                \
+     *(uint2*)(sp + 4) = F2BF4O(St[t][4], St[t][5], St[t][6], St[t][7]);                \
+   }
++#if !ALIAS
+   SWRITE();
++#endif
+   PFHOIST();
++#if !ALIAS
+   BAR();
++#endif
+   PREFETCH(0);
+ 
+   const char* const sbase = (const char*)&s;
+@@ -456,6 +512,9 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+       ggr = ok ? gcs[(size_t)(c0 + tid) * H + hv] : 0.f;
+       btr = ok ? beta[(size_t)(c0 + tid) * H + hv] : 0.f;
+     }
++#if ALIAS
++    SWRITE();   // behind barrier (4) of the previous chunk: sA / W (S's bytes) are dead for every wave
++#endif
+     { // consume the previous iteration's prefetch: the s_wait_loadcnt for these
+       // loads now sits a whole chunk of compute after they were issued
+ #pragma unroll
+@@ -465,8 +524,8 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     }
+     if (tid < BT) {
+       bool ok = tid < nval;
+-      s.bt[tid] = btr;
+-      s.ge[tid] = __expf(ggr);
++      VEC_BT(tid) = btr;
++      VEC_GE(tid) = __expf(ggr);
+       // The split form e^{g_i-c}.e^{c-g_j} is one exp per token instead of eight per tile, but each
+       // half leaves range on its own where the PRODUCT never does: cref sits at the chunk midpoint,
+       // so each half spans +/-(gate span)/2, and a span past ~176 sends one to +INF while the other
+@@ -486,13 +545,13 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+       // value is measured, not assumed: WikiText-2 PPL over 208,539 tokens, no other mitigation --
+       // 70 -> 8.3841, 80 -> 8.3706, 83 -> 8.3728, reference 8.3335, stock 653586. Where both
+       // halves fit (every ordinary chunk) nothing changes.
+-      s.gv[tid] = ok ? __expf(fminf(cref - ggr, 80.0f)) : 0.f;
+-      s.rs[tid] = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;
++      VEC_GV(tid) = ok ? __expf(fminf(cref - ggr, 80.0f)) : 0.f;
++      VEC_RS(tid) = ok ? scale * __expf(fminf(ggr - cref, 80.0f)) : 0.f;
+     }
+     BAR();                                                   // (1)
+ #if PFIN && PFV == 4
+     PFBASE(min(ci + 1, nchunk - 1))          // issued one per k step in the loop below
+-#else
++#elif PLATE == 0
+     PREFETCH(min(ci + 1, nchunk - 1));       // issue only; consumed next iteration
+ #endif
+ 
+@@ -633,8 +692,11 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #endif
+     }
+     PRIO_LO();
++#if ALIAS
++    BAR();                                                   // (1b) every wave is done reading S
++#endif
+     {
+-      float g = scale * s.ge[mt * 16 + lo];             // token index is constant per lane
++      float g = scale * VEC_GE(mt * 16 + lo);             // token index is constant per lane
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i)
+ #pragma unroll
+@@ -646,7 +708,7 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #pragma unroll
+       for (int e = 0; e < 8; ++e) {           // beta / ge read once for both tiles
+         const int tok = mt * 16 + 8 * hi + e;
+-        const float f = s.bt[tok], g = s.ge[tok];
++        const float f = VEC_BT(tok), g = VEC_GE(tok);
+ #pragma unroll
+         for (int i = 0; i < NTV; ++i)
+           wa[i][e] = f * (bf2f(s.D[tok][(ntb + i) * 16 + lo]) - g * u[i][e]);
+@@ -661,7 +723,7 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+     // sA = rs * tril(P): one multiply per element, no exp
+     {
+       const int ii = mt * 16 + lo;            // now constant per lane: one rs load
+-      const float r = s.rs[ii];
++      const float r = VEC_RS(ii);
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         const int j0 = (ntb + i) * 16 + 8 * hi;
+@@ -724,7 +786,7 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #endif
+       float gvv[8];
+ #pragma unroll
+-      for (int e = 0; e < 8; ++e) gvv[e] = s.gv[mt * 16 + 8 * hi + e];
++      for (int e = 0; e < 8; ++e) gvv[e] = VEC_GV(mt * 16 + 8 * hi + e);
+ #pragma unroll
+       for (int i = 0; i < NTV; ++i) {
+         unsigned short* dp = &s.D[(ntb + i) * 16 + lo][mt * 16 + 8 * hi];
+@@ -735,6 +797,9 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+       }
+     }
+     BAR();                                                   // (3)
++#if PLATE == 3
++    PREFETCH(min(ci + 1, nchunk - 1));       // issue only; consumed at the top of the next chunk
++#endif
+ 
+     // ---- O += sA @ V' ; store.  V' also feeds the state update, unchanged.
+     {
+@@ -842,9 +907,11 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+ #pragma unroll
+         for (int e = 0; e < 8; ++e) St[t][e] *= lam;
+     }
++#if !ALIAS
+     // no barrier: s.S aliases nothing, and barrier (2) already proves every wave
+     // finished its U/O reads of s.S this chunk
+     SWRITE();
++#endif
+     BAR();                                                   // (4)
+   }
+ 
+@@ -856,20 +923,21 @@ __global__ __launch_bounds__(NTHR) void r4d_gdn_chunk_scan_kernel(
+   }
+ }
+ 
+-extern "C" int r4d_gdn_chunk_scan_k128_v128_c64_bf16(
++extern "C" int SCAN_CAT(r4d_gdn_chunk_scan_k128_v128_c64_bf16, SCAN_SFX)(
+     const void* q, const void* k, const void* v, const void* A, const void* g,
+     const void* beta, const void* h0, void* o, void* ht, const void* cu,
+     int N, int H, int Hg, int K, int V, int bt, float scale, void* stream)
+ {
+   if (K != KD || V != VD || bt != BT) return -1;
+   dim3 grid(V / BV, H, N), blk(NTHR);
+-  r4d_gdn_chunk_scan_kernel<<<grid, blk, 0, (hipStream_t)stream>>>(
++  SCAN_CAT(r4d_gdn_chunk_scan_kernel, SCAN_SFX)<<<grid, blk, 0, (hipStream_t)stream>>>(
+       (const unsigned short*)q, (const unsigned short*)k, (const unsigned short*)v,
+       (const unsigned short*)A, (const float*)g, (const float*)beta, (const float*)h0,
+       (unsigned short*)o, (float*)ht, (const int*)cu, H, Hg, scale);
+   return (int)hipGetLastError();
+ }
+ 
++#ifndef SCAN_VARIANT
+ // The geometry baked into the kernel above, so a caller can test a model's GDN shape against it
+ // instead of hardcoding a copy of these three numbers.
+ extern "C" void r4d_gdn_dims(int* head_k, int* head_v, int* chunk) {
+@@ -877,3 +945,4 @@ extern "C" void r4d_gdn_dims(int* head_k, int* head_v, int* chunk) {
+   if (head_v) *head_v = VD;
+   if (chunk)  *chunk  = BT;
+ }
++#endif
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1.hip
+new file mode 100644
+index 0000000..ea5fe2c
+--- /dev/null
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1.hip
+@@ -0,0 +1,5 @@
++// Opt-in variant s1: the stock body compiled in its own translation unit WITHOUT -mcumode, i.e. in
++// workgroup-processor mode. Nothing else differs -- same source, same LDS, same arithmetic.
++#define SCAN_VARIANT 1
++#define SCAN_SFX _s1
++#include "r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip"
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s2.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s2.hip
+new file mode 100644
+index 0000000..2abaf26
+--- /dev/null
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s2.hip
+@@ -0,0 +1,6 @@
++// Opt-in variant s2 = s1 + the LDS diet (ALIAS): 60,928 -> 43,008 B, so three workgroups fit one WGP.
++// The bf16 state mirror shares bytes with sA + W and the per-token vectors move into row padding.
++#define SCAN_VARIANT 1
++#define SCAN_SFX _s2
++#define ALIAS 1
++#include "r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip"
+diff --git a/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s3.hip b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s3.hip
+new file mode 100644
+index 0000000..1ce6901
+--- /dev/null
++++ b/r4d_gdn_chunk_scan_k128_v128_c64_bf16_s3.hip
+@@ -0,0 +1,7 @@
++// Opt-in variant s3 = s2 + the next chunk's staging loads issued after barrier (3) (PLATE 3) instead of
++// after barrier (1), so their 24 registers are not live across the main WMMA loop.
++#define SCAN_VARIANT 1
++#define SCAN_SFX _s3
++#define ALIAS 1
++#define PLATE 3
++#include "r4d_gdn_chunk_scan_k128_v128_c64_bf16.hip"
+diff --git a/r4d_module.hip b/r4d_module.hip
+index 3a6fa1d..56f102f 100644
+--- a/r4d_module.hip
++++ b/r4d_module.hip
+@@ -134,11 +134,14 @@ static int64_t attn_decode_scratch_bytes(int num_seqs, int q_len, int q_heads, i
+ // =================================================================================================
+ // gated delta net
+ // =================================================================================================
++template <int (*Fn)(const void*, const void*, const void*, const void*, const void*, const void*,
++                    const void*, void*, void*, const void*, int, int, int, int, int, int, float,
++                    void*)>
+ static void gdn_chunk_scan(int64_t q, int64_t k, int64_t v, int64_t A, int64_t g, int64_t beta,
+                            int64_t h0, int64_t o, int64_t ht, int64_t cu, int num_seqs,
+                            int num_v_heads, int num_k_heads, int head_k, int head_v, int chunk,
+                            double scale, int64_t stream) {
+-  int rc = r4d_gdn_chunk_scan_k128_v128_c64_bf16(
++  int rc = Fn(
+       (const void*)q, (const void*)k, (const void*)v, (const void*)A, (const void*)g,
+       (const void*)beta, (const void*)h0, (void*)o, (void*)ht, (const void*)cu, num_seqs,
+       num_v_heads, num_k_heads, head_k, head_v, chunk, (float)scale, (void*)stream);
+@@ -681,7 +684,10 @@ PYBIND11_MODULE(r4d, m) {
+   }
+ 
+   // ---- gated delta net ----
+-  m.def("gdn_chunk_scan_k128_v128_c64_bf16", &gdn_chunk_scan);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16", &gdn_chunk_scan<r4d_gdn_chunk_scan_k128_v128_c64_bf16>);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16_s1", &gdn_chunk_scan<r4d_gdn_chunk_scan_k128_v128_c64_bf16_s1>);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16_s2", &gdn_chunk_scan<r4d_gdn_chunk_scan_k128_v128_c64_bf16_s2>);
++  m.def("gdn_chunk_scan_k128_v128_c64_bf16_s3", &gdn_chunk_scan<r4d_gdn_chunk_scan_k128_v128_c64_bf16_s3>);
+   m.def("gdn_kkt_solve_k128_c64_bf16", &gdn_kkt_solve);
+   m.def("dflash_conv_t2_g16_bf16", &dflash_conv);
+   m.def("gdn_conv_prep_w4_h128_bf16", &gdn_conv_prep);
+diff --git a/r4d_registry.hip b/r4d_registry.hip
+index c886dfd..8fa6458 100644
+--- a/r4d_registry.hip
++++ b/r4d_registry.hip
+@@ -55,6 +55,15 @@ static const R4DConstraint cAttnVit[] = {
+ static const R4DConstraint cGdnChunkScan[] = {
+     C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64),
+ };
++// The opt-in scan variants carry the key that selects them. select() returns the FIRST match, so these
++// rows sit above the stock one: a query with variant="s2" would otherwise be answered by the stock row,
++// which has no variant constraint and so ignores the key.
++#define GDN_SCAN_VARIANT_ROW(v) \
++    static const R4DConstraint cGdnChunkScan_##v[] = { \
++        C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64), C_IN("variant", #v), }
++GDN_SCAN_VARIANT_ROW(s1);
++GDN_SCAN_VARIANT_ROW(s2);
++GDN_SCAN_VARIANT_ROW(s3);
+ static const R4DConstraint cGdnConvPrep[] = {
+     C_EQ("conv_width", 4), C_EQ("head_k", 128), C_EQ("head_v", 128), C_EQ("chunk", 64),
+ };
+@@ -189,6 +198,15 @@ static const R4DKernelInfo kKernels[] = {
+      "one cu_seqlens segment per image",
+      "bf16 query / key / value / out, f16 operands, fp32 accumulate",
+      ROW(cAttnVit)},
++#define GDN_SCAN_VARIANT_INFO(v, what)                                                       \
++    {"gdn_chunk_scan_k128_v128_c64_bf16_" #v, "gdn", "gdn_chunk_scan",                       \
++     "gated delta net chunked scan, " #v ": same arithmetic as the stock kernel, " what,      \
++     "head_k 128, head_v 128, chunk 64, varlen; only for select(..., variant=\"" #v "\")",   \
++     "bf16 q/k/v/A, fp32 gate/beta/state, bf16 out, fp32 final state",                      \
++     ROW(cGdnChunkScan_##v)}
++    GDN_SCAN_VARIANT_INFO(s1, "built in workgroup-processor mode"),
++    GDN_SCAN_VARIANT_INFO(s2, "s1 + 43,008 B LDS (3 workgroups per WGP)"),
++    GDN_SCAN_VARIANT_INFO(s3, "s2 + staging prefetch issued late in the chunk"),
+     {"gdn_chunk_scan_k128_v128_c64_bf16", "gdn", "gdn_chunk_scan",
+      "gated delta net chunked scan: WY recompute, state recurrence and output in one kernel",
+      "head_k 128, head_v 128, chunk 64, varlen, state resident in WMMA accumulators",

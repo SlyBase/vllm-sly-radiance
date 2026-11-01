@@ -36,9 +36,19 @@ By hand: *Actions → accept → Run workflow* (image, profile, `fast`/`full`, `
 ```bash
 python3 ci/accept/accept.py \
   --profile ci/accept/profiles/vllm7-mxfp4.json \
-  --image vllm-sly-radiance:0.2.5-rocm10.0 \
-  --mode fast --out out/accept-0.2.5
+  --image vllm-sly-radiance:0.4.5-rocm10.0 \
+  --mode fast --owner manual --out out/accept-manual
 ```
+
+### While production is busy
+
+If `acquire` is refused because production is serving traffic (or a window is
+already held), `accept.py` does not fail the gate. It backs off (default 90 s,
+`ACCEPT_ACQUIRE_DELAY`) and retries until either the window opens or the total
+patience runs out (default 60 min, `ACCEPT_ACQUIRE_WAIT`). `--force` is **not**
+escalated automatically — it remains an explicit opt-in for planned maintenance
+windows. Any other refusal (foreign lock owner, bad TTL, …) still fails the
+gate immediately.
 
 `--dry-run` prints the `gpu-window` calls without running anything.
 
@@ -70,10 +80,10 @@ fail open.
 
 ## Modes
 
-| | `fast` (~25 min) | `full` (~70 min) |
+| | `fast` (~22 min) | `full` (~27 min) |
 | --- | --- | --- |
 | when | every build | major/minor VERSION bump, or by hand |
-| BetterBench | conc 1, 8 · 24 requests | conc 1, 2, 4, 8, 16 · 48 requests |
+| BetterBench | conc 1, 8 · 24 requests | conc 1, 2, 4, 8 · 48 requests |
 | GSM8K | — | 200 items |
 | everything else | yes | yes |
 
@@ -86,10 +96,39 @@ fail open.
 | KV pool | `GPU KV cache size: N tokens` | `< 98 %` of the baseline |
 | smoke | 4 chat completions | wrong answer, no reasoning content, no tool call, needle not found |
 | throughput | BetterBench `aggregate_tps` | `< 95 %` of the baseline at any level |
+| throughput per category | BetterBench `single_stream` medians | any category `< 95 %` of the baseline (`category_decode_tps_min_ratio`) |
+| chat replay | 3-turn conversation at 4k/8k/16k, cold prefix cache | decode t/s `< 95 %` of the baseline (`chat_tps_min_ratio`); hard in `full`, soft in `fast` |
 | tokens/step | `/metrics` delta over the benchmark | more than 0.1 below the baseline (drafter regression) |
 | preemptions | `vllm:num_preemptions_total` delta | `> 0` |
 | GSM8K | lm-eval | more than 0.05 below the baseline (`full` only) |
 | production restore | `gpu-window release` + `curl /health` | production is not back up |
+
+### Why per category and not only weighted (1.9.0, k=15)
+
+The weighted decode median is a MIXTURE over `configs/*.json` weights. On 1.9.0 the DFlash2
+depth change to k=15 raised it +10.3 % and the release shipped with it — while `prose` lost
+7.2 %, `chat` 8.6 %, and a real chat lost half its throughput (1k context: 72 → 34 t/s, 16k:
+28 → 21 t/s, measured 2026-10-26, same image, step time 39 ms in both arms). The mixture
+carries 55 % weight on code/json/file_edit, so a category can lose without moving the number.
+
+Two consequences, both in the gate now:
+
+* **every category is its own check.** A lever that trades prose for code has to say so in the
+  PR and re-calibrate the category that loses (threshold + baseline in the same PR).
+* **the gate measures the profile the weights cannot describe.** BetterBench single-stream
+  prompts are 60–120 tokens; the chat replay phase walks 4k → 16k with a cold prefix cache and
+  reports decode-only t/s (TTFT excluded, thinking off).
+
+`ci/accept/prod_mix.py` attacks the same problem from the data side: it reads the *production*
+counters (per-position draft acceptance → the depth that still pays, plus the concurrency mix)
+and prints the JSON to paste into a PR body. It states what it cannot do: **content mix
+(code/prose/chat) is not in any metric** — the weights stay a declared assumption in
+`configs/*.json`, and the per-category checks are what keep that assumption honest.
+
+```bash
+python3 ci/accept/prod_mix.py --prometheus http://192.168.178.21:30090   # live Prometheus
+python3 ci/accept/prod_mix.py --metrics-file /tmp/prod-metrics.txt --json
+```
 
 Startup time is a soft check (reported, never blocking): the first start after a compile-cache
 invalidation legitimately takes twice as long.
@@ -118,6 +157,7 @@ logged at the first real decode step and is not required: the gate's smoke reque
 ```
 profiles/vllm7-mxfp4.json   production MXFP4 + DFlash2 k=7: markers, smoke cases, thresholds
 profiles/vllm5-int4.json    the INT4 fallback service (same LXC, disabled unit)
+profiles/vllm7-kv4.json     KV4/TETRA start smoke (needs a unit carrying launch_args; baselines/vllm7-kv4.json = KV pool floor)
 baselines/*.json            the numbers of the image currently in production
 configs/{fast,full}.json    BetterBench configs (full == betterbench config/default.json)
 accept.py                   orchestrator: window, checks, verdict, report.json + report.md
@@ -157,7 +197,7 @@ sudoers whitelist and an SSH forced command.
 
 ### Alerts during a window
 
-A window takes port 8000 down for 13–25 minutes and `VllmDown` has `for: 10m`, so every single
+A window takes port 8000 down for 20-30 minutes and `VllmDown` has `for: 10m`, so every single
 acceptance run used to page. `acquire` therefore creates two Alertmanager silences — `job="vllm"`
 for `VllmDown`/`TargetDown`, and `alertname=~"Vllm.*"` for the two alerts built on `vllm:*`
 recording rules, which drop the `job` label — and `release` winds them down to `now + 300 s` so the

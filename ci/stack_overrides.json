@@ -1,0 +1,19 @@
+{
+  "_comment": "Deliberate deviations from what ci/resolve_stack.py derives from the vLLM tag and the ROCm base. An entry is ACTIVE only for the vLLM version it names (and the ROCm version, when given), so it expires by itself on the next vLLM bump: the resolver then derives the stack again and a stale pin is a red `resolve` check, never a silent carry-over. Every entry needs a reason a reviewer can judge. `pins` are Dockerfile ARG names (TORCH_VERSION, TORCH_AMD_ROCM, TORCHVISION_VERSION, TRITON_VERSION / TRITON_BUILD / TRITON_SHA256 as a group, AITER_VERSION, TRANSFORMERS_VERSION). Only a human adds or edits entries; the Hermes re-anchor agent must not (docs/MAINTENANCE.md).",
+  "overrides": [
+    {
+      "vllm": "0.30.0",
+      "pins": {
+        "TRITON_VERSION": "3.6.0"
+      },
+      "reason": "1.0.0 deliberately runs the PyPI triton 3.6.0: vLLM 0.30.0 builds ROCm/triton f0b55c0 (release/internal/3.7.x), of which AMD ships no rocm10.1 wheel, and one moving part less kept the 1.0.0 A/B clean. Expires with the move to vLLM 0.31.0 (1.1.0), whose triton (669b31a = 3.8.0+git669b31ac.rocm10.1.0) AMD ships."
+    },
+    {
+      "vllm": "0.30.0",
+      "pins": {
+        "AITER_VERSION": "0.1.22.post1"
+      },
+      "reason": "1.0.0 holds aiter at 0.1.22.post1 (vLLM 0.30.0's AITER_BRANCH is v0.1.21.post2): 0.1.24 dropped the aiter.ops.triton.unified_attention alias vLLM's rocm_aiter_unified_attn imports, and the 0.1.22 line is what the 1.0 A/B and the accept runs were made on. Expires with vLLM 0.31.0, whose own AITER_BRANCH v0.1.23 still has the alias."
+    }
+  ]
+}

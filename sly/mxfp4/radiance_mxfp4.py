@@ -39,6 +39,12 @@ if A_TILED_MIN_M and A_TILED_MIN_M <= max(512, DECODE_MAX_M):
     raise RuntimeError("RADIANCE_MXFP4_A_TILED_MIN_M must exceed 512 and RADIANCE_MXFP4_DECODE_MAX_M")
 _A_TILED: dict = {}
 _A_TILED_STATS = [0]
+# Wide decode band (lever 2 from the Radiance mixed-band work): the split-K decode kernel in a wider
+# form (BK=64, 9..16 M-fragments) for M in (128, WIDE_MAX_M]. The launcher in the .hip reads the same
+# env var (cached static); this copy only validates it and announces it. 0 = off (default), max 256.
+# Needs WPERM=1 and DECODE_MAX_M >= 128 so the two decode bands are contiguous; otherwise the .so
+# simply never takes it (M > 128 stays on the folded kernel) and the log says so.
+WIDE_MAX_M = int(os.environ.get("RADIANCE_MXFP4_WIDE_MAX_M", "0"))
 
 
 def a_tiled_wanted(M: int) -> bool:
@@ -83,6 +89,54 @@ def a_tiled_take(q, M: int, K: int) -> bool:
 # as garbage -- one env var drives both.
 CHECK_MAX_M = int(os.environ.get("RADIANCE_MXFP4_CHECK_MAX_M", "128"))
 WPERM = os.environ.get("RADIANCE_MXFP4_WPERM", "0") == "1"
+if WIDE_MAX_M:
+    _why = []
+    if WIDE_MAX_M < 129 or WIDE_MAX_M > 256:
+        _why.append("value outside 129..256 (the .so clamps to 256 and ignores <= 128)")
+    if os.environ.get("RADIANCE_MXFP4_WPERM", "0") != "1":
+        _why.append("RADIANCE_MXFP4_WPERM != 1 (the wide kernel reads fragment order only)")
+    if DECODE_MAX_M < 128:
+        _why.append("RADIANCE_MXFP4_DECODE_MAX_M < 128 (bands would not be contiguous)")
+    sys.stderr.write(f"[radiance.mxfp4] wide decode band M in (128, {min(WIDE_MAX_M, 256)}]"
+                     + (f" INACTIVE: {'; '.join(_why)}\n" if _why else " ON\n"))
+# PSW weight layout in production (RADIANCE_MXFP4_AT_PSW, default "auto": 2 when nothing below
+# conflicts, else off with the reasons logged; 2 = on and refused on a conflict, 0 = off). At load every
+# layer our kernel serves is repacked IN PLACE (psw_pack_w mode 2 on the fragment-order bytes,
+# psw_fold_ws on the [K/32, N] scale; same shapes, same storage, zero extra memory) and the .so is
+# switched with set_at_psw(2), after which every MXFP4 e4m3 kernel (A-tiled, folded, decode, wide
+# decode) unpacks the same bytes. Bit-identical output by construction. Refused -- never silently
+# wrong -- wherever a reader of layer.weight / weight_scale has no PSW unpack: the r4d decode
+# kernel, the Python reference / debug paths, the per-block path, NT decode loads, an .so without
+# the decode reader. Mode 1 exists for the A-tiled cell bench only.
+_psw_auto = os.environ.get("RADIANCE_MXFP4_AT_PSW", "auto") == "auto"
+AT_PSW = 2 if _psw_auto else int(os.environ["RADIANCE_MXFP4_AT_PSW"])
+if AT_PSW:
+    _why = []
+    if AT_PSW != 2:
+        _why.append("only mode 2 has a decode reader")
+    if not WPERM:
+        _why.append("needs RADIANCE_MXFP4_WPERM=1")
+    if os.environ.get("RADIANCE_MXFP4_DECODE_NT", "0") not in ("", "0"):
+        _why.append("RADIANCE_MXFP4_DECODE_NT has no PSW variant")
+    if MIN_M > 0:
+        _why.append("RADIANCE_MXFP4_W4A8_MIN_M > 0 hands small M to aiter, which reads the checkpoint bytes")
+    for _k in ("RADIANCE_MXFP4_R4D_DECODE_MAX_M", "RADIANCE_MXFP4_DEBUG", "RADIANCE_MXFP4_CHECKALL",
+               "RADIANCE_MXFP4_REFLINEAR", "RADIANCE_MXFP4_SHADOW", "RADIANCE_MXFP4_PERBLOCK_NK"):
+        if os.environ.get(_k, "0").strip() not in ("", "0"):
+            _why.append(f"{_k} reads the checkpoint byte layout")
+    if _psw_auto and os.environ.get("RADIANCE_PAROQUANT", "0") not in ("", "0"):
+        _why.append("RADIANCE_PAROQUANT loads its own weight layout")
+    if _why and _psw_auto:
+        AT_PSW = 0
+        sys.stderr.write("[radiance.mxfp4] PSW weight layout off (auto): " + "; ".join(_why) + "\n")
+    elif _why:
+        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW refused: " + "; ".join(_why))
+    else:
+        sys.stderr.write("[radiance.mxfp4] weight layout: PSW mode 2 (RADIANCE_MXFP4_AT_PSW="
+                         + ("auto" if _psw_auto else "2") + "), repacked in place at load\n")
+_psw_on = [False]
+
+
 if WPERM:
     # Announce it: this launcher only forwards env vars it declares with -e, and a silently
     # unforwarded flag reads as "the change did nothing" rather than as a mistake. A whole
@@ -143,6 +197,42 @@ def permute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
                   .view(N, K // 2))
 
 
+def psw_pack_w(wp: "torch.Tensor", mode: int = 2) -> "torch.Tensor":
+    """Fragment-order weights (permute_w) -> the A-tiled kernel's PSW nibble layout, same shape.
+
+    Per 32-bit lane word with elements e0..e7 (fragment order: byte b = e[2b] | e[2b+1] << 4):
+      mode 1: byte b = e[b] | e[b+4] << 4
+      mode 2: byte b = mag(e[b]) | sign(e[(b+3)%4+4]) << 3 | mag(e[b+4]) << 4 | sign(e[b]) << 7
+    A byte permutation of the same bits (in place at load = no extra memory). Only the A-tiled
+    kernel reads it (set_at_psw); every other consumer of the weight must be PSW-aware too.
+    """
+    w = wp.reshape(-1, 4).to(torch.int32)
+    e = torch.stack([w & 15, w >> 4], -1).reshape(-1, 8)        # e[0..7]
+    lo, hi = e[:, 0:4], e[:, 4:8]
+    if mode == 1:
+        out = lo | (hi << 4)
+    else:
+        out = (lo & 7) | ((hi.roll(1, 1) >> 3) << 3) | ((hi & 7) << 4) | ((lo >> 3) << 7)
+    return out.to(torch.uint8).reshape(wp.shape).contiguous()
+
+
+def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
+    """psw_pack_w(mode 2) IN PLACE, a row band at a time: a row of [N, K/2] holds whole lane words,
+    so the band split is exact, and the int32 transient stays ~16x one band (default 1 MiB of
+    weight per band, ~16 MiB transient -- below the full-layer copy permute_w already makes, so the
+    pack adds no allocator segment that could shrink the KV pool)."""
+    step = rows or max(16, (1 << 20) // max(1, w.shape[1]))
+    for a in range(0, w.shape[0], step):
+        w[a:a + step].copy_(psw_pack_w(w[a:a + step], 2))
+
+
+def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
+    """[K/32, N] e8m0 block scales -> 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset the
+    PSW kernel adds to its LDS table base. Same shape and dtype (uint8); Wref stays as is."""
+    d = (wref.to(torch.int32)[None, :] - weight_scale.to(torch.int32)).clamp(0, 15)
+    return (d * 8).to(torch.uint8).contiguous()
+
+
 def unpermute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
     """Inverse of permute_w: fragment order -> the checkpoint's [N, K/2].
 
@@ -155,6 +245,44 @@ def unpermute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
                   .permute(0, 3, 1, 2, 4)      # [n-tile][row][k-step][half][4 bytes]
                   .contiguous()
                   .view(N, K // 2))
+
+
+def split_fp6(packed: "torch.Tensor", N: int, K: int, rows: int = 0):
+    if K % 32 or tuple(packed.shape) != (N, 3 * K // 4):
+        raise ValueError(f"radiance.mxfp6: packed weight {tuple(packed.shape)} is not [N, 3K/4] "
+                         f"for N={N} K={K} (K must be a multiple of 32)")
+    nib = torch.empty((N, K // 2), dtype=torch.uint8, device=packed.device)
+    wh = torch.empty((N, K // 4), dtype=torch.uint8, device=packed.device)
+    step = rows or max(1, (1 << 28) // (12 * K))
+    for a in range(0, N, step):
+        b = min(a + step, N)
+        t = packed[a:b].reshape(b - a, K // 4, 3).to(torch.int32)
+        comb = t[..., 0] | (t[..., 1] << 8) | (t[..., 2] << 16)
+        del t
+        codes = torch.stack([(comb >> (6 * i)) & 63 for i in range(4)], -1).view(b - a, K).to(torch.uint8)
+        del comb
+        nib[a:b] = (codes[:, 0::2] & 15) | ((codes[:, 1::2] & 15) << 4)
+        h = (codes >> 4).view(b - a, K // 4, 4)
+        wh[a:b] = h[..., 0] | (h[..., 1] << 2) | (h[..., 2] << 4) | (h[..., 3] << 6)
+    return nib, wh
+
+
+def permute_wh(wh: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
+    nt, ks = N // 16, K // 16
+    return (wh.view(nt, 16, ks, 2, 2)
+              .permute(0, 2, 3, 1, 4)
+              .contiguous()
+              .view(N, K // 4))
+
+
+def unpermute_wh(wh: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
+    nt, ks = N // 16, K // 16
+    return (wh.view(nt, ks, 2, 16, 2)
+              .permute(0, 3, 1, 2, 4)
+              .contiguous()
+              .view(N, K // 4))
+
+
 # Hoist the activation quant into the traced graph so the rms+quant fusion can match it.
 # Needs MIN_M <= 0 (see apply_weights); refuses rather than producing wrong results.
 HOIST_QUANT = os.environ.get("RADIANCE_MXFP4_HOIST_QUANT", "0") == "1"
@@ -313,6 +441,33 @@ def _exact_ref(x_fp8, x_scale, weight, weight_scale, N, K, chunk=2048):
         codes = torch.stack([wc & 0x0F, (wc >> 4) & 0x0F], -1).reshape(b - a, K)
         sc = torch.pow(2.0, weight_scale[:, a:b].float() - 127.0).T.repeat_interleave(32, dim=1)
         outs.append(xr @ (_E2M1[codes.long()] * sc).T.float())
+    return torch.cat(outs, dim=1)
+
+
+_E2M3 = None
+
+
+def _dequant6(nib, wh, ws, K):
+    global _E2M3
+    if _E2M3 is None or _E2M3.device != nib.device:
+        mag = [(c & 7) / 8.0 if c < 8 else 2.0 ** ((c >> 3) - 1) * (1 + (c & 7) / 8.0)
+               for c in range(32)]
+        _E2M3 = torch.tensor(mag + [-v for v in mag], dtype=torch.float32, device=nib.device)
+    R = nib.shape[0]
+    lo = torch.stack([nib & 0x0F, (nib >> 4) & 0x0F], -1).reshape(R, K)
+    hi = torch.stack([(wh >> (2 * t)) & 3 for t in range(4)], -1).reshape(R, K)
+    sc = torch.pow(2.0, ws.float() - 127.0).T.repeat_interleave(32, dim=1)
+    return _E2M3[(lo | (hi << 4)).long()] * sc
+
+
+def _exact_ref6(x_fp8, x_scale, weight, wh, weight_scale, N, K, chunk=2048):
+    nib = unpermute_w(weight, N, K)
+    whr = unpermute_wh(wh, N, K)
+    xr = x_fp8.float() * x_scale.view(-1, 1).float()
+    outs = []
+    for a in range(0, N, chunk):
+        b = min(a + chunk, N)
+        outs.append(xr @ _dequant6(nib[a:b], whr[a:b], weight_scale[:, a:b], K).T)
     return torch.cat(outs, dim=1)
 
 
@@ -485,7 +640,7 @@ def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tens
         if _mk not in _dbg_seen:
             _dbg_seen.add(_mk)
             sys.stderr.write(f"[radiance.mxfp4.mhist] N={N} K={K} M={M} "
-                             f"decode_kernel={'yes' if 0 < M <= DECODE_MAX_M else 'NO'}\n")
+                             f"decode_kernel={'yes' if 0 < M <= DECODE_MAX_M else ('wide' if 128 < M <= WIDE_MAX_M else 'NO')}\n")
     # CHECK_MAX_M narrows the gate to a band. Without it the profile run's large-M calls use
     # up the per-shape reporting budget and the decode band is never checked at all, which
     # is exactly the band a decode kernel has to be right in.
@@ -603,6 +758,32 @@ def mxfp4_linear_pqp(a: torch.Tensor, x_scale: torch.Tensor, weight: torch.Tenso
 
 @mxfp4_linear_pqp.register_fake
 def _(a, x_scale, weight, weight_scale, weight_ref, M, pb1, pb2):
+    return torch.empty((M, weight.shape[0]), device=a.device, dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("radiance::mxfp6_linear_pqp", mutates_args=())
+def mxfp6_linear_pqp(a: torch.Tensor, x_scale: torch.Tensor, weight: torch.Tensor,
+                     wh: torch.Tensor, weight_scale: torch.Tensor, weight_ref: torch.Tensor,
+                     M: int, pb1: int, pb2: int) -> torch.Tensor:
+    if not _stats_reported[0]:
+        report_stats()
+    N = weight.shape[0]
+    K = weight_scale.shape[0] * 32
+    P = x_scale.shape[0]
+    astride = a.numel() // P
+    out = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
+    tiled = bool(A_TILED_MIN_M) and a_tiled_take(a, M, K)
+    if tiled:
+        _A_TILED_STATS[0] += 1
+    launch = _ext.launch6_at_p if tiled else _ext.launch6_p
+    launch(a.data_ptr(), weight.data_ptr(), wh.data_ptr(), weight_scale.data_ptr(),
+           weight_ref.data_ptr(), x_scale.data_ptr(), out.data_ptr(), M, N, K, pb1, pb2, astride,
+           torch.cuda.current_stream().cuda_stream)
+    return out
+
+
+@mxfp6_linear_pqp.register_fake
+def _(a, x_scale, weight, wh, weight_scale, weight_ref, M, pb1, pb2):
     return torch.empty((M, weight.shape[0]), device=a.device, dtype=torch.bfloat16)
 
 
@@ -813,6 +994,18 @@ def _make_kernel_class():
                 # 384,316, prod unit, 2026-09-23). The permuted copy is a transient of one
                 # layer's size, freed before the next layer.
                 layer.weight.data.copy_(permute_w(layer.weight.data, N_, K))
+                if AT_PSW:
+                    if _ext is None or getattr(_ext, "psw_reader_mode", lambda: 0)() < 2:
+                        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW=2 needs a "
+                                           "radiance_mxfp4_fp8.so whose decode kernel reads PSW")
+                    if perblock:
+                        raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW: the per-block "
+                                           "path has no PSW reader")
+                    psw_pack_w_(layer.weight.data)
+                    layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
+                    if not _psw_on[0]:
+                        _psw_on[0] = True
+                        _ext.set_at_psw(2)
             layer.radiance_w4a8_ok = bool(ok)   # record only; never read in the forward
 
         def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,

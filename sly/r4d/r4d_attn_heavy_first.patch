@@ -1,0 +1,70 @@
+diff --git a/r4d_attn_paged_h256_gqa6.hip b/r4d_attn_paged_h256_gqa6.hip
+index a10d16c..5a1a4ed 100644
+--- a/r4d_attn_paged_h256_gqa6.hip
++++ b/r4d_attn_paged_h256_gqa6.hip
+@@ -93,7 +93,8 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+     do {                                                                                          \
+         hipLaunchKernelGGL((r4d_attn_prefill_kernel<P_NWARPS, TILEX, A_HEAD_DIM, A_GQA,           \
+                                                     A_BLOCK_SIZE, KVP, OPTX>),                    \
+-                           grid, dim3(P_NWARPS * 32), 0, s, ab);                                  \
++                           ((OPTX) & O_HVF) ? dim3(grid.y, grid.x, grid.z) : grid,                \
++                           dim3(P_NWARPS * 32), 0, s, ab);                                        \
+     } while (0)
+ #define P_LAUNCH(OPTX) P_LAUNCHT(P_TILE, OPTX)
+ #define P_LAUNCHTQ(TILEX, OPTX)                                                                   \
+@@ -110,8 +111,24 @@ static int prefill_launch(const R4DArgs* a, hipStream_t s) {
+             const char* ed = getenv("R4D_ATTN_DB");
+             const int t = et ? atoi(et) : P_TILE;
+             const bool db = ed && atoi(ed) != 0;
++            // R4D_ATTN_HVF=1 (default 0): heaviest query blocks first (O_HVF), tile-16 DB only.
++            // R4D_ATTN_HVF_MAX_CTX (default 0 = no bound) limits it to launches whose context bound is at
++            // most that many keys; measured neutral at 33-45k keys, so unbounded by default.
++            static const bool hvf = [] {
++                const char* e = getenv("R4D_ATTN_HVF");
++                return e && atoi(e) != 0;
++            }();
++            static const int hvf_max = [] {
++                const char* e = getenv("R4D_ATTN_HVF_MAX_CTX");
++                return e ? atoi(e) : 0;
++            }();
++            const bool hvf_on = hvf && (hvf_max == 0 || a->max_ctx <= hvf_max);
+             constexpr int B = P_OPT | O_QK8 | O_PV8;
+-            if      (t == 16) { if (db) P_LAUNCHTQ(16, B | O_DB); else P_LAUNCHTQ(16, B); }
++            if      (t == 16) {
++                if (db && hvf_on) P_LAUNCHTQ(16, B | O_DB | O_HVF);
++                else if (db)   P_LAUNCHTQ(16, B | O_DB);
++                else           P_LAUNCHTQ(16, B);
++            }
+             else if (t == 32) { if (db) P_LAUNCHTQ(32, B | O_DB); else P_LAUNCHTQ(32, B); }
+             else              { if (db) P_LAUNCHTQ(48, B | O_DB); else P_LAUNCHTQ(48, B); }
+         }
+diff --git a/r4d_attn_prefill_h256_gqa6.hip b/r4d_attn_prefill_h256_gqa6.hip
+index 090be45..5b8064f 100644
+--- a/r4d_attn_prefill_h256_gqa6.hip
++++ b/r4d_attn_prefill_h256_gqa6.hip
+@@ -98,6 +98,13 @@
+ // the single-buffered loop; only the staging schedule changes. Needs the 8-bit legs (byte tiles),
+ // KWIDE and BTS: LDS is 2 x (TILE*264 + 256*(TILE+8)) bytes.
+ #define O_DB    4194304
++// HVF: heaviest query blocks first. Under the causal limit a query block's key-tile count grows with
++// its index, and the dispatcher hands out workgroups in linear order (x fastest), so the stock grid
++// (q-block, kv head) starts every head's sweep with its lightest blocks and ends the launch on the
++// heaviest ones -- the last round runs with most of the WGPs idle. HVF launches the grid as
++// (kv head, q-block) and walks the q-blocks in reverse, so the work is handed out longest first.
++// Every workgroup computes exactly what it computed before; only the dispatch order moves.
++#define O_HVF  67108864   // 1 << 26: 1 << 25 is O_KV4I on Sly's exp/kv4i-dump branch
+ // QF8: the caller hands over the e4m3 query the attention layer already quantised (static scale,
+ // for the fp8 KV cache) instead of a bf16 copy of it. The glue used to run `q.to(bf16)` and, when the
+ // static scale is not 1, `q * q_scale` on it before every launch -- 25 MB read + 50 MB write per
+@@ -215,7 +222,10 @@ void r4d_attn_prefill_kernel(const R4DArgs a)
+     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+     const int c = lane & 15, h = lane >> 4;
+ 
+-    const int qb = blockIdx.x, kvh = blockIdx.y, seq = blockIdx.z;
++    constexpr int HVF = (OPT & O_HVF) ? 1 : 0;
++    const int qb  = HVF ? (int)(gridDim.y - 1 - blockIdx.y) : (int)blockIdx.x;
++    const int kvh = HVF ? (int)blockIdx.x : (int)blockIdx.y;
++    const int seq = blockIdx.z;
+     const int ctx = a.seqused_k[seq];
+     if (ctx <= 0) return;
+ 

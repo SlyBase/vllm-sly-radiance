@@ -7,7 +7,9 @@ rdna_hybrid_w4a16.py (patch_w4a16_tiles); this only wires them in:
      right after the drafter is loaded -- inside the load memory profile, before profiling and graph
      capture. It interleaves the gate/up rows of every W4A16 MLP (fused silu), merges each GDN layer's
      bf16 in_proj_ba into its W4A16 in_proj_qkvz as int4 rows, and re-quantizes the DFlash2 grouped-conv
-     kernel_projection (bf16, 10 calls per step) to int4.
+     kernel_projection (bf16, 10 calls per step) to int4. With RADIANCE_DFLASH_BF16=1 the drafter arm
+     instead dequantizes its W4A16 row sets to bf16 weights once (apply_weights runs plain GEMMs) and
+     skips the silu / conv int4 transforms.
   2. qwen2_moe.py Qwen2MoeMLP.forward (the dense MLP of Qwen3.5/3.8) and qwen2.py Qwen2MLP.forward (the
      drafter's Qwen3MLP): gate_up GEMM + silu(gate) * up in one kernel (radiance_w4a16_silu) when the
      layer was interleaved. Sets _RADIANCE_W4_SILU so the post-load step knows the call site exists.
@@ -18,12 +20,15 @@ rdna_hybrid_w4a16.py (patch_w4a16_tiles); this only wires them in:
 
   5. envs.py compile_factors: RADIANCE_W4A16_*, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_*,
      RADIANCE_LMHEAD_INT4_TILED -- the transforms
-     change the traced graph (fused ops instead of gate_up + act, one merged GEMM, a replaced module),
-     so a knob flip must not replay an AOT graph compiled with the other setting.
+     change the traced graph (fused ops instead of gate_up + act, one merged GEMM, a replaced module,
+     or a plain GEMM on a load-time bf16 weight), so a knob flip must not replay an AOT graph compiled
+     with the other setting.
 
 Every site keeps the stock path when its layer was not transformed (MXFP4 target, bf16, other
 quantizations). Knobs: RADIANCE_W4A16_SILU, RADIANCE_GDN_BA_W4, RADIANCE_DFLASH_CONV_W4,
-RADIANCE_DFLASH_KV_W4 (default 1; RADIANCE_GDN_BA_W4 default 0 since window E). Runs after sly/patch_fused_norm_quant (its anchors include the
+RADIANCE_DFLASH_KV_W4 (default 1; RADIANCE_GDN_BA_W4 default 0 since window E), RADIANCE_DFLASH_BF16
+(default 0: the load-time bf16 expansion of the drafter's W4A16 rows, see patch_w4a16_tiles).
+Runs after sly/patch_fused_norm_quant (its anchors include the
 fused-norm lines) and sly/patch_nvfp4_compile_key (the compile_factors line).
 """
 import sysconfig
@@ -153,8 +158,11 @@ apply(F,
       IMPORT + "\n_DFLASH_FP8 = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)\n",
       "rdna_hybrid_w4a16 as _radiance_w4a16",
       "qwen3_dflash: W4A16 fusion import")
+# vLLM 0.31 split the projection into `if self._fused_kv_weight is not None: F.linear ... else:
+# per-layer quant-method path`; patch_dflash_fused_kv_fp8 puts the deferred build in front of it.
+# The int4 rows take precedence over both, everything else falls through unchanged.
 apply(F,
-      "        if self._fused_kv_weight is None:\n"
+      "        if self._fused_kv_weight is None and self._kv_lazy:\n"
       "            self._fused_kv_weight = torch.cat(\n"
       "                [\n"
       "                    _dflash_kv_weight_rows(a.qkv_proj, a.q_size)\n"
@@ -162,9 +170,11 @@ apply(F,
       "                ],\n"
       "                dim=0,\n"
       "            )\n"
-      "        all_kv_flat = F.linear(\n"
-      "            normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
-      "        )\n",
+      "        if self._fused_kv_weight is not None:\n"
+      "            all_kv_flat = F.linear(\n"
+      "                normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
+      "            )\n"
+      "            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)\n",
       "        all_kv_flat = None\n"
       "        if _radiance_w4a16 is not None:\n"
       "            # radiance (sly/patch_w4a16_fuse.py): the drafter's own int4 K/V rows, no bf16 copy\n"
@@ -172,7 +182,7 @@ apply(F,
       "                self, normed_context_states\n"
       "            )\n"
       "        if all_kv_flat is None:\n"
-      "            if self._fused_kv_weight is None:\n"
+      "            if self._fused_kv_weight is None and self._kv_lazy:\n"
       "                self._fused_kv_weight = torch.cat(\n"
       "                    [\n"
       "                        _dflash_kv_weight_rows(a.qkv_proj, a.q_size)\n"
@@ -180,9 +190,12 @@ apply(F,
       "                    ],\n"
       "                    dim=0,\n"
       "                )\n"
-      "            all_kv_flat = F.linear(\n"
-      "                normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
-      "            )\n",
+      "            if self._fused_kv_weight is not None:\n"
+      "                all_kv_flat = F.linear(\n"
+      "                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias\n"
+      "                )\n"
+      "        if all_kv_flat is not None:\n"
+      "            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)\n",
       "all_kv_flat = _radiance_w4a16.radiance_dflash_kv_project(",
       "qwen3_dflash: int4 context-KV projection")
 

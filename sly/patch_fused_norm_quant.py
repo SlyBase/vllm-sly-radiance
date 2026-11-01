@@ -23,7 +23,7 @@ Anchors were taken from the patched 0.1.5 image, so this runs last in the Docker
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 V = Path(sysconfig.get_paths()["purelib"]) / "vllm"
 NEXT = V / "model_executor/models/qwen3_next.py"
@@ -124,18 +124,19 @@ apply(GDN, A,
       "            hidden_states = mixed_qkvz\n",
       "radiance fused-norm carrier (forward_cuda)", "gdn: forward_cuda takes the (q, scale) pair")
 
-A = ("        by the compilation pass when fuse_norm_quant is enabled.\n"
-     "        \"\"\"\n"
-     "        z_shape_og = z.shape\n")
-apply(GDN, A,
-      "        by the compilation pass when fuse_norm_quant is enabled.\n"
-      "        \"\"\"\n"
-      "        if _rfn is not None and _rfn.GDN and _rfn.gdn_ok(self):\n"
-      "            # radiance: per-head gated rms_norm + fp8 quant in one launch -> out_proj\n"
-      "            output, _ = self.out_proj(_rfn.gdn_norm_quant(self, core_attn_out, z))\n"
-      "            return output\n"
-      "        z_shape_og = z.shape\n",
-      "_rfn.gdn_ok(self)", "gdn: _output_projection -> radiance::gdn_norm_quant")
+_HOOK = ("        if _rfn is not None and _rfn.GDN and _rfn.gdn_ok(self):\n"
+         "            # radiance: per-head gated rms_norm + fp8 quant in one launch -> out_proj\n"
+         "            output, _ = self.out_proj(_rfn.gdn_norm_quant(self, core_attn_out, z))\n"
+         "            return output\n")
+_DOC = ("        by the compilation pass when fuse_norm_quant is enabled.\n"
+        "        \"\"\"\n")
+# 0.31 folded the reshape / flatten of the output projection into the norm call (and forward_cuda now
+# calls _output_projection too): the hook goes in front of the unchanged `self.norm(core_attn_out, z)`.
+apply_any(GDN,
+          [(_DOC + "        z_shape_og = z.shape\n", _DOC + _HOOK + "        z_shape_og = z.shape\n"),
+           (_DOC + "        core_attn_out = self.norm(core_attn_out, z)\n",
+            _DOC + _HOOK + "        core_attn_out = self.norm(core_attn_out, z)\n")],
+          "_rfn.gdn_ok(self)", "gdn: _output_projection -> radiance::gdn_norm_quant")
 
 # ---- envs.py ------------------------------------------------------------------------------------
 A = "    return factors\n"

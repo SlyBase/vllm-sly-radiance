@@ -39,6 +39,9 @@ ENABLED = _flag("RADIANCE_FUSED_NORM_QUANT", "0")
 ADD_RMS = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_ADD_RMS", "1")
 SILU = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_SILU", "1")
 GDN = ENABLED and _flag("RADIANCE_FUSED_NORM_QUANT_GDN", "1")
+# gdn_norm_quant writes the fragment-tiled layout (out_proj consumer) when A_TILED_MIN_M asks for it.
+# Default off until a GPU window decides; off = the row-major kernel, byte-for-byte as before.
+TILED_OPROJ = ENABLED and _flag("RADIANCE_MXFP4_TILED_OPROJ", "0")
 
 # Kernel launcher limits (radiance_mxfp4_fp8.hip): add_rms K <= 10240, silu N <= 18432 (MAXG 9,
 # 0.1.6), gdn N <= 10240 with 128-wide heads; all 8-aligned.
@@ -103,8 +106,8 @@ def _check_bf16(name: str, *ts: torch.Tensor) -> None:
 # in LDS; measured 12-16% faster than the folded kernel at M >= 2048, radiance_mxfp4_fp8.hip). The
 # decision is per call inside the opaque op body (eager ints, no traced guard); the consumer finds
 # it through radiance_mxfp4's data_ptr registry. The storage is padded to whole 16-row fragments and
-# q is the [M, K] view of it, so real and fake shapes agree. gdn_norm_quant has no tiled variant and
-# stays row-major (out_proj takes the folded kernel). Values are identical in both layouts.
+# q is the [M, K] view of it, so real and fake shapes agree. gdn_norm_quant has a tiled variant behind
+# RADIANCE_MXFP4_TILED_OPROJ=1 (default off: out_proj then takes the folded kernel). Values are identical in both layouts.
 
 def _tiled(M: int, K: int) -> bool:
     return (_rmx_tiled_wanted is not None and _rmx_tiled_wanted(M) and K % 128 == 0)
@@ -184,7 +187,8 @@ def _gdn_norm_quant_op(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor,
     contiguous run; weight: [128] bf16. Returns (q [M, N] e4m3, scale [M] f32)."""
     _check_bf16("gdn_norm_quant", x, z, weight)
     M, N = x.shape
-    q = torch.empty((M, N), device=x.device, dtype=torch.float8_e4m3fn)
+    tiled = TILED_OPROJ and _tiled(M, N)
+    q = _q_alloc(M, N, x.device, tiled)
     s = torch.empty((M,), device=x.device, dtype=torch.float32)
     if M:
         x = x.contiguous()
@@ -197,7 +201,9 @@ def _gdn_norm_quant_op(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor,
         _once("gdn_norm_quant", f"M={M} N={N} z_row_stride={zs}")
         _ext.launch_gdn_norm_quant(x.data_ptr(), z.data_ptr(), zs, weight.data_ptr(), q.data_ptr(),
                                    s.data_ptr(), M, N, float(eps),
-                                   torch.cuda.current_stream().cuda_stream)
+                                   torch.cuda.current_stream().cuda_stream, 1 if tiled else 0)
+        if tiled:
+            _rmx_tiled_register(q, M, N)
     return q, s
 
 

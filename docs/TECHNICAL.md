@@ -385,8 +385,9 @@ within 0.03 ms):
 
 Not bit-identical to the FLA path (different rounding of the bf16 state), so greedy text drifts
 after a few sentences; accuracy is unchanged. The extras' other kernels stay opt-in:
-`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain) and `R4D_ATTN_FP8`
-(8-bit legs of the R4D prefill attention, R4D backend only). The lazy-snapshot kernels are built
+`RADIANCE_GDN_FUSED_UPDATE=1` (fused decode step, measured: no further gain). `R4D_ATTN_FP8` (8-bit legs
+of the R4D prefill attention, R4D backend only) is the exception: `serve-mxfp4.sh` ships it at 3 since
+1.6.0, and `R4D_ATTN_FP8=0` restores the f16 legs. The lazy-snapshot kernels are built
 but not wired (`patch_gdn_lazy` is not applied, see *Considered and not adopted*).
 
 ## NVFP4 checkpoints via load-time MXFP4 requantization (0.3.6)
@@ -437,6 +438,65 @@ tensor ("Cannot copy out of meta tensor" at the first requant).
 Launch: the production command below with `-e RADIANCE_NVFP4_MXFP4=1`, `--model unsloth/Qwen3.8-27B-NVFP4`
 and `--quantization compressed-tensors` instead of `quark`; the other flags stay. The boot log prints one
 `[radiance.nvfp4]` line per converted layer with its requant error.
+
+**Weight-only NVFP4 (NVFP4A16, 0.4.3).** A checkpoint without `input_activations`
+(`bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4`, built by llm-compressor with the GDN a/b gates, lm_head,
+MTP head and vision tower in bf16) takes a different branch in `_get_scheme_from_parts`:
+`CompressedTensorsW4A4Fp4(use_a16=True)`, whose kernel selection forces Marlin outside SM100/103 and
+aborts the load on ROCm. `patch_nvfp4_mxfp4.py` now routes that branch to the same requant scheme; the
+scheme declares `input_global_scale` only as a loader home, so the checkpoint loads unchanged. That
+checkpoint's snapshot symlinks may point into an Xet blob store outside a mounted HF cache -- mount the
+model directory and pass it as `--model` with `--served-model-name` if the loader reports missing files.
+
+### What the requantization costs (0.4.3)
+
+`radiance_nvfp4_diag.py` (`RADIANCE_NVFP4_DIAG`, measurement only, `--enforce-eager`) serves the NVFP4
+linears without the W4A8 kernel, dequantized to bf16 per forward: `native` (the checkpoint exactly),
+`requant` (this image's MXFP4 requant, bf16 activations) and `fold` (see below);
+`RADIANCE_NVFP4_DIAG_A8=1` adds the kernel's per-token e4m3 activations. `sly/bench_fidelity.py` records
+top-20 prompt logprobs of every arm on 14,125 tokens (code, legal prose, a German and an English
+Markdown text), `sly/check_fidelity.py` compares them with the `native` arm. ThinkingCap NVFP4A16,
+0.4.1-rc3 image, 2026-09-29:
+
+| arm | dNLL vs native (95 %) | KL | top-1 agreement |
+|---|---|---|---|
+| `requant`, bf16 activations | +0.088 (±0.012) | 0.126 | 91.3 % |
+| serve path (W4A8 kernel), eager | +0.094 (±0.012) | 0.133 | 91.1 % |
+| serve path, compiled + DFlash2 (the live server) | +0.093 (±0.012) | 0.133 | 91.3 % |
+| serve path with `RADIANCE_NVFP4_BF16_LAYERS=` (a/b gates bf16) | +0.094; vs serve path +0.000 (±0.005) | 0.133 | 91.1 % |
+| `fold`, bf16 activations | +0.002 (±0.003) | 0.007 | 97.9 % |
+| `fold` + e4m3 activations | +0.005 (±0.004) | 0.013 | 97.2 % |
+
+The requantization is the whole loss: on code the NLL rises from 0.29 to 0.42 and the top-1 token changes
+at 9 % of all positions, while the fp8 activations cost 0.006 and compile vs eager nothing. The cause is
+the scale, not the block size: an NVFP4 block is 16 e2m1 values times an e4m3 scale (3 mantissa bits),
+MXFP4 only has powers of two, so every value is rounded again onto a coarser grid. Offline, on six real
+layers (relRMS against the NVFP4 weights): MXFP4/32 0.108–0.112, MXFP4 with 16-blocks 0.106–0.109,
+**fold 0.021–0.022**. The GDN a/b gates are not the problem either (row 4), and keeping them bf16
+costs +0.6 ms/step (34.53 -> 35.14 ms, 300 W, compiled + DFlash2), so `RADIANCE_NVFP4_BF16_LAYERS` keeps its
+`in_proj_ba` default. The serve path itself runs at the Quark step gap.
+
+**NV fold.** The W4A8 kernel already folds the MX block exponent into the weight byte: `kMag[d]` holds the
+eight e2m1 magnitudes shifted down by `d = Wref[n] - Ws[blk, n]` binades as e4m3 bytes, resolved four at
+a time by `v_perm_b32`, and the per-row factor is applied once in the epilogue. The same lookup indexed by
+`(d, m)` -- `m` the 3-bit mantissa of the e4m3 block scale -- stores e2m1 x m x 2^-d rounded to e4m3,
+which is exact for every even code and within one e4m3 ulp otherwise. That is the `fold` arm: +0.005 NLL
+with fp8 activations instead of +0.093, i.e. ~95 % of the loss back, with the checkpoint's packed weights
+used as stored (no requant pass at load). Cost: a 16x8x2-word table instead of 16x2, 16-blocks instead of
+32 (one scale byte per 16 weights: +5.9 % weight bytes, ~-4 % decode estimated), and a per-row fp32
+factor for the per-partition global scale where the epilogue now applies 2^Wref. The three fold sites
+(folded GEMM, A-tiled prefill, decode band) share the pattern. Not built yet.
+
+**Direct MXFP4 from bf16.** ggz14's study puts NVFP4 at 0.113 relRMS against bf16 and a direct bf16 ->
+MXFP4 quantization at 0.112, against 0.158 for the requant. Where the bf16 original is available, an
+offline MXFP4 conversion (compressed-tensors `mxfp4-pack-quantized` loads through
+`CompressedTensorsW4A4Mxfp4` -> `init_mxfp4_linear_kernel` -> this kernel, no code change) should land
+near the `native` row at the Quark speed; not measured.
+
+**int4 lm_head and int4 embedding** (both on in production for every checkpoint) measured the same way,
+against the `native` arm with a bf16 head and bf16 embedding: `RADIANCE_LMHEAD_INT4=1` +0.003 (±0.002),
+top-1 96.5 %; plus `RADIANCE_EMBED_BITS=4` +0.006 (±0.003) in total. Small next to the requant and paid for
+with ~3.5 GiB of KV pool, so they stay on.
 
 **INT4 (compressed-tensors W4A16, `RedHatAI/Qwen3.8-27B-INT4`)** runs on vLLM's `rdna_hybrid_w4a16` kernels,
 not on the W4A8 kernel, so the MXFP4 GEMM work (cells, A-tiled, WPERM, fused norm quant) does not apply.
@@ -499,14 +559,246 @@ Launch: the production command with `-e RADIANCE_PAROQUANT=1` (or `RADIANCE_AUTO
 `RADIANCE_ESCHA=1`), `--model <checkpoint>` and **no** `--quantization` flag (the config is picked
 from the checkpoint).
 
+## 1.0.0: what the release adds, and the measurements behind it
+
+All numbers: 2026-10-07/08, 210 W, one R9700, production launch with the Swift-1.5 Qwen3.8-27B GPTQ-MXFP4 target and
+DFlash2 k = 7, A/B/A in one GPU window, measured on the second start. Lessons ported from the Radiance engine fork
+([StillDeadcode/radiance](https://codeberg.org/StillDeadcode/radiance), our fork slydlake/radiance): the adaptive verify
+width and the M-band findings. The test packages are in `sly/tests/lessons/`.
+
+### R4D_HYBRID: libr4d prefill attention, AITER for everything else (`--attention-backend R4D_HYBRID`)
+
+`--attention-backend R4D` (libr4d for prefill and decode) prefills 64k +19 % faster, but decode costs 60.9 ms per step
+against 34.9 and c8 falls to 302 from ~402 tok/s; the constant ~25 ms (flat over all prompt categories, so not acceptance
+or context dependent) is the R4D backend's host side, not the decode kernel: it subclasses the Triton backend (different
+metadata builder, a 16-token kernel block, so manager page 880 and a 16384-column block table expanded 55x per step, no
+verify tune, bf16 instead of fp8 queries). The cause was not isolated further; the hybrid sidesteps it.
+
+`R4D_HYBRID` is `ROCM_AITER_UNIFIED_ATTN` (AITER's builder, layout, block size 896, graph class, verify tune) plus one
+routing rule: per step, runs of equal-length requests with q >= `RADIANCE_R4D_PREFILL_MIN_Q` (512) go to one libr4d paged
+prefill launch, the rest (decodes riding along with a chunk) to one AITER sub-batch. On a decode or verify step
+(`max_query_len < 512`) no plan is computed and `forward` is `super().forward`, so decode, graphs and KV pool are the
+control's by construction.
+
+- **KV layout.** libr4d wants 16-slot blocks but takes block and head strides as arguments. A 896-slot block `b` is read as
+  56 sub-blocks with `block_stride = 16*C` and kernel block id `b*(S0/(16*C)) + j`; the expanded table is built once per
+  step (first R4D layer, cached on the metadata, shared by the 16 attention layers), only on steps with a long run. Geometry
+  (stride(3) = 1, stride(2) = C, N % 16, S0 % (16*C)) is checked at the first call of each layer; a cache that fails it runs
+  AITER only and logs why once.
+- **Fallback to AITER for the whole step** on: no libr4d, geometry other than head_dim 256 / GQA 6 / decoder, sliding
+  window, alibi, sinks, soft cap, non-causal, fused output quantization, non-bf16 output, graph capture.
+- **Precision.** The AITER path already does QK^T in fp8 and P.V with fp8 P (the layer hands the kernel an fp8 q with
+  static scale 1.0; K/V tiles are cast to the q dtype), so the hybrid's f16-leg libr4d attention is the more accurate of the
+  two; the fp8 q is widened to bf16 exactly. `R4D_ATTN_FP8` (QK8/PV8 legs) ships at 3 since 1.6.0 (both
+  legs, part of the measured prefill stack); the note above was taken with plain R4D, where the legs gave
+  64k 1918 tok/s (+2 % over the f16 legs) on their own. `R4D_ATTN_FP8=0` restores the f16 legs.
+- **Measured** (tok/s, A/B/A control, hybrid, control): prefill 2k/8k/32k/64k C1 2375/2410/1976/1555, H
+  2428/2506/2229/1919, C2 2380/2450/1970/1554, i.e. +2/+3/+13/+23 %. Greedy step 35.12/35.05/35.14 ms, c8 arrivals
+  395.7/391.8/395.9 tok/s, short-prompt greedy text identical, prompt NLL delta -0.0007. Prompts that reach libr4d (one chunk
+  >= 512 tokens) can differ from the control late in the text (different rounding). Prefix-cache hits shorten q and may drop
+  a run below 512 (AITER, intended).
+- The new backend name changes the compile cache key: the first start compiles fresh, start twice.
+
+### Memory: util 0.98 + FULL_DECODE_ONLY
+
+`--compilation-config.cudagraph_mode FULL_DECODE_ONLY` captures only the FULL decode graphs, not the ~65-piece PIECEWISE
+set. CUDA graph memory 1.24 -> 0.22 GiB and the profiled peak activation 1.69 -> 0.65 GiB; with
+`--gpu-memory-utilization 0.98` the KV pool grows 391,193 -> **436,097 tokens (+11.5 %)** (util 0.98 alone: 404,947). Greedy
+34.89 ms (control 34.88 / 36.68), c8 401.9 (control 401.7 / 414.4), TTFT 72/256/904 tokens unchanged, 64k prefill 1572 with
+no OOM. The price: steps that are not a pure uniform decode batch (a prefill chunk, a mixed step) run eagerly instead of
+on piecewise graphs; at 210 W with 2048-token chunks this showed no TTFT or c8 difference. Keep the capture-size list.
+
+### MXFP4 wide decode band: `RADIANCE_MXFP4_WIDE_MAX_M=192`
+
+M in 1..128 is served by the split-K decode kernel; 129..512 fell to the folded 256-row tile (M = 129 computes 256 rows, up
+to 49 % padding). Radiance's `dec=1` finding transfers: `launch_impl()` now dispatches M in (128, WIDE_MAX_M] to the same
+decode kernel with 9..16 M fragments (`DWN=8, BK=64, TM=9..16`; TM16 = 225 VGPRs, 27.6 KB LDS, 0 spills). Split table: N
+blocks >= 48 -> 1 (gate_up, qkvz, qkv), <= 8 -> 4 (in_proj_ba), K >= 6144 -> 4 for M <= 192 else 2, else 1; a split that does
+not fit the existing 72 MiB scratch falls to the folded kernel (no VRAM added, KV pool unchanged). Needs `WPERM=1`, plain
+MXFP4 (no MXFP6 plane), N <= 36864. With split 2/4 fp32 partials sum in a different order (bf16 may differ by 1 ulp).
+
+Why 192 and not 256: kernel bench, GEMM sum per step, M160 -16.8 %, M192 -6.1 %, **M256 +11.3 %**: near 256 the folded tile
+is full and wins. Server A/B/A (run with 256): TTFT of a 160-token prompt 109.6/109.4 -> 94.4 ms (-13.8 %), other prompts
+within 0.6 % except 256 tokens, which got 9.7 % slower with the edge at 256 (the wide kernel loses to the full folded tile there); c8 arrivals 405.4/406.2 ->
+412.8 tok/s; greedy identical for prompts <= 160 tokens. Set 192 to keep the gain and drop the 256 loss.
+
+### Adaptive verify width: `RADIANCE_ADAPTIVE_WIDTH=perseq`
+
+The drafter emits all 7 tokens in one pass, so the verify width only decides how many target rows a step spends (about
+0.39 ms each: 33 ms at M 8, 55 ms at M 64) plus the drafter's context K/V rows, which mirror the target step. Requests with
+poor acceptance waste rows. Port of Radiance's `core/sched/adaptive_k`: maximise `sum_i E_i(k_i) / T(M)` with
+`E_i(k) = 1 + sum_{j<=k} q_i^j`, `T(M) = a + b*M` (`RADIANCE_AW_COST_A/B`, 29.9 / 0.393), widths from {1,3,5,7}, nothing
+shrunk below 32 unshrunk rows (single stream untouched), censored per-request acceptance estimates (decay 0.25, prior of 2
+pseudo-positions to the pool mean), total rows a multiple of 8. Lossless: the drafts stay 7 per request on the GPU and the
+worker verifies a prefix.
+
+**Why ggz14's `patch_dynwidth` lost (-3 % at conc 4/8/16) and this one wins.** V2's FULL graph dispatch needs a uniform decode
+batch (`get_uniform_decode_token_count`: `num_tokens == max_query_len * num_reqs`, no prefill row) and FULL descriptors are
+captured for exactly one query length. ggz14 capped each request to `ceil(EMA)+2`; one capped request makes the batch
+non-uniform, i.e. almost every step, and the step falls to PIECEWISE: ~65 pieces (16 attention + 48 GDN layers, with
+`unified_attention_with_output` and `qwen_gdn_attention_core` as splitting ops run eagerly in between). That costs about as
+much as the ~10 % of rows trimming saves (2-3 ms at c8). Upstream's `AdaptiveVerificationManager` is no way out (needs
+every builder `ALWAYS` plus the cpu-query-len flag; the GDN builder is `UNIFORM_BATCH`) and its static per-batch-size width
+only has graphs at `round_up(size, q)` token counts. This patch keeps the FULL graph for non-uniform batches: it captures
+**varlen FULL decode graphs** (capture sizes 16..64 tokens, 8 request slots, promised `max_query_len` 8) next to the uniform
+ones. Unified attention, `causal_conv1d_update`, the GDN recurrent kernels and the sampler read `query_start_loc` at run
+time; padded requests are zero-length rows with `NULL_BLOCK_ID` state (the case a partially filled graph already has). The
+uniform graph stays first in the candidate order, so full-width batches replay as before. A dispatch guard gives batches with
+a prefill row or a row without drafts `max_query_len=None`, so they never match a varlen graph. Capture uses the promised
+`max_query_len` in `mamba_hybrid.prepare_attn`. Under async scheduling every decode request shares one placeholder list; the
+patch copies it per request after the decision (ggz14's first patch trimmed in `update_draft_token_ids`, which async never
+calls). Observations lag one step, which the exponential estimate absorbs. `uniform` (one width per batch, tier graphs per
+(requests, width+1)) and `RADIANCE_AW_VARLEN_GRAPH=0` (per-request widths on PIECEWISE, the diagnosis arm) remain as modes.
+
+Measured, c8 with arrivals (tok/s): off 401.7, uniform 408.8, **perseq 421.4**, off2 403.5, i.e. +4.7 %; c4 steady unchanged;
+30 % of decisions shortened, 4.15 verify rows saved per step; single-stream greedy bit-identical. 8-way concurrent greedy
+diverges at near-ties, attributed to batch-shape numerics (different M changes GEMM rounding).
+GSM8K gate: pending. Diagnostics: `RADIANCE_AW_LOG_EVERY`, `RADIANCE_AW_GRAPH_STATS=1`. Not for data parallelism; the sync
+scheduler path is implemented but untested.
+
+### ROCm 10.1 base (-rocm10.1)
+
+`rocm/dev-ubuntu-24.04:10.1.0-full` (HIP 7.16, clang 24), AMD's `torch==2.12.0+rocm10.1.0` wheel (there is no 2.11 build for
+10.1), torchvision 0.27.0 compiled against it, triton 3.6.0 (PyPI) and aiter 0.1.22.post1 unchanged. torch 2.12.0 is the
+lowest AMD ships for 10.1 (2.13 with triton 3.7.1 is the combination that hung the GPU in 0.5.0-0.5.4). The torch >= 2.12
+CPU spin (ROCm/ROCm#6406, backoff in libhsa-runtime64's `AsyncEventsLoop`) is fixed in 10.1; Renovate's torch cap is 2.12.x.
+ROCm 10.1 ships amdsmi's Python package without setup.py: an `amdsmi_rocm.pth` puts `/opt/rocm/share/amd_smi` on sys.path
+and the build asserts the library loaded. The image grows by 0.34 GB (5.62 vs 5.28). To stay on 10.0: `--build-arg
+ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full TORCH_AMD_ROCM=10.0.0 TORCH_VERSION=2.11.0 TORCHVISION_VERSION=0.24.1`.
+Measured A/B/A (base1 / rc / base3): greedy 35.35 / 35.59 / 35.13 ms, prefill 2k 2357/2344/2385, 8k 2432/2382/2401 tok/s, KV
+385,934 on the rc's second start (391,193 base; the rc used fresh cache dirs and logged inductor cubin-reload warnings),
+greedy text 4 of 8 identical against 8 of 8 in an A/A: neutral within ~1-2 %. Production cache directories hold 10.0
+artefacts; mount fresh ones or accept the double start on rollout.
+
+### Measured and not merged
+
+See docs/NOT-ADOPTED.md, section *Own measurements, 1.0*: gated gate_up + SwiGLU fold, int4 lm_head LEAN configs, fp16 SSM
+state, draft refill after a prefix hit, plain R4D and `R4D_ATTN_FP8`.
+
+## 1.1.0: vLLM 0.31.0 on the AMD torch trio
+
+The stack is what vLLM 0.31.0's own `docker/Dockerfile.rocm_base` builds (`PYTORCH_BRANCH` release/2.13, `TRITON_BRANCH`
+669b31a = release/internal/3.8.x, `PYTORCH_VISION_BRANCH` v0.28.0, `AITER_BRANCH` v0.1.23), taken as AMD's prebuilt wheels for
+ROCm 10.1 from `stable.repo.amd.com/rocm/whl-next`: torch 2.13.0, `triton-3.8.0+git669b31ac.rocm10.1.0` (the exact commit;
+hash-pinned, `TRITON_BUILD` + `TRITON_SHA256`), torchvision 0.28.0 with `amd-torchvision-device-gfx1201` (no source build any
+more; the builder still compiles it for a source-built torch). The 0.5.0 – 0.5.4 hang was torch 2.13 with triton 3.7.1 and
+torchvision 0.28 *outside* upstream's pairing; this is upstream's pairing. torch 2.14 is available but not what vLLM pins.
+transformers goes back to 5.17.0 because vLLM 0.31 declares `< 5.18.0`. aiter 0.1.23 still carries the
+`aiter.ops.triton.unified_attention` alias that vLLM's `rocm_aiter_unified_attn` imports; Renovate stays below 0.1.24.
+
+Patches re-anchored for 0.31.0 (behaviour unchanged): `patch_dflash_fused_kv_fp8`, `sly/patch_dflash_w4_packed`,
+`sly/patch_w4a16_fuse` (DFlash context-KV: upstream now routes a quantized `qkv_proj` through one quant-method GEMM per layer;
+the fused deferred bf16 weight and the int4 rows keep precedence), `patch_gdn_metadata` (new uniform-spec-length probe),
+`sly/patch_w4a16_tiles` (docstring reflow), `sly/patch_fused_norm_quant` (`_output_projection` now serves `forward_cuda` too),
+`sly/patch_adaptive_width` (`decode_stagger`), `sly/radiance_lookup_draft` (`DFlash2Speculator.top_k` /
+`candidate_sampler.cached_candidate_ids`), `radiance_r4d_attn` (`get_supported_kernel_block_sizes(kv_cache_spec=None)`).
+Not applied any more, native in 0.31.0: `sly/patch_short_prefill`, `sly/patch_gdn_nonspec_mask`, `sly/patch_mamba_align_retire`
+(already native in 0.30.0), `sly/patch_rocm_load_max_split`.
+
+What the CPU dry run cannot show, for the GPU window: 0.31 moves the DFlash context-KV precompute *into* the FULL draft graph
+(`_precompute_context_kv` inside `capture`), so the W4A16 context-KV GEMM now runs under capture; `_scoped_allocator_max_split`
+also wraps `profile_run` (KV pool size); `GDNAttentionMetadataBuilder` gained `update_block_table` / `uniform_spec_sequence_length`
+and `mamba_hybrid` prefers the promised `max_query_len` for varlen graphs (what `patch_adaptive_width` did by hand, now redundant).
+
+## Nucleus Speculative Decoding: `RADIANCE_NSD=1` (opt-in, default 0)
+
+NSD ([arxiv 2610.07822](https://arxiv.org/abs/2610.07822)) relaxes the verifier for sampled (non-greedy)
+requests. A draft token x is accepted if the standard test passes (`u <= min(1, p(x)/q(x))`) **or** x is in
+the target nucleus S_theta(p): the mass of the tokens with a strictly higher target logit than x is <=
+theta (default 0.95). The residual distribution on a rejection and the bonus token are unchanged, so the
+only change is *more* acceptances.
+
+Where: `rejection_sample` in `vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py` (V2 runner, the
+path production runs). Its `target_logits` argument is already the sampled distribution (temperature,
+min-p, top-k, top-p applied by `Sampler.apply_sampling_params`), so p is what the paper needs. A token the
+sampler removed has logit -inf and is never in the nucleus. The lookup draft (point-mass q) and the
+probabilistic DFlash2 draft take the same branch; greedy rows, synthetic rates and block verification do
+not.
+
+How, without sorting the vocabulary: the nucleus test needs `sum(p_j for logit_j > logit_x)`. Per request
+and vocab block (8192 logits, the stock stats kernel's block) `_nsd_nucleus_mass_kernel` loads the draft
+token's logit, the global logsumexp (from the stock per-block max/sumexp) and streams the block once:
+`sum(where(l > l_x, exp(l - lse), 0))`. `_rejection_kernel` adds the blocks' partials of the step and ORs
+`mass <= theta` into `accepted`. One extra read of the target logits per draft row, a small fp32 scratch of
+`[num_logits, num_blocks]`, no atomics. Fixed shapes and no host sync, so FULL_DECODE_ONLY capture is
+unaffected; `USE_NSD` is a `constexpr`, so with `RADIANCE_NSD=0` the second kernel is never launched and the
+compiled rejection kernel is the stock one (checked bit for bit in the Triton interpreter,
+`sly/tests/nsd_kernel_check.py`).
+
+Knobs: `RADIANCE_NSD` (0|1, default 0), `RADIANCE_NSD_THETA` in [0, 1), one module-level read each, so a
+per-process constant. Cactus (`sly/patch_cactus.py`, default delta 0.5) hooks the same Leviathan branch and
+the paper's single-step bound does not cover a union of both rules: NSD=1 with the Cactus knob at anything
+but 0 raises at import, and because that knob defaults to 0.5 in this image the supported combination is
+`RADIANCE_NSD=1 RADIANCE_CACTUS_DELTA=0`. The patch is in the Dockerfile loop after `sly/patch_cactus`; the
+two apply in either order to the same file (`sly/tests/test_spec_knobs_cpu.py`).
+
+Status: default off, and it stays off until the numerics gate is run. The branch A/B reads +26 % weighted
+decode against the stock acceptance rule and ~+5 % against the Cactus-0.5 production config at concurrency 1
+(the latter inside the window noise). Open: GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparison
+against the Cactus-0.5 serve, plus step time and KV pool at concurrency 1 and 8.
+
 ## Build details
 
-- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.0.0-full@sha256:…` (the
+- ROCm base: `ARG ROCM_BASE` defaults to `rocm/dev-ubuntu-24.04:10.1.0-full@sha256:…` (the
   production image is built on exactly that digest, Renovate tracks it); overridable with
   `--build-arg ROCM_BASE=…`.
-- PyTorch 2.14.0, torchvision 0.29.0, Triton 3.8.0, aiter 0.1.22.post1, transformers 5.17.0, vLLM 0.30.0; libr4d pinned
+- PyTorch 2.13.0, torchvision 0.28.0, Triton 3.8.0+git669b31ac (all AMD's rocm10.1 wheels), aiter 0.1.23, transformers 5.17.0, vLLM 0.31.0; libr4d pinned
   by commit.
 - `MAX_JOBS` capped (PyTorch compile OOM-killed the host at 16 jobs), retry loop around PyTorch's
   submodule clone, torch wheel build fixed for 2.14's deprecated `setup.py bdist_wheel`.
 - The HIP kernel is a single-file pybind11 extension compiled with the image's own `hipcc` in the
   assemble stage; the patch scripts (`/opt/patches`) never reach the final image.
+
+## Sharded checkpoints: measured effect on host memory (PR #125, 1.2.0)
+
+Test host: Proxmox node with 29 GiB RAM and 8 GiB swap, LXC with the vLLM container
+(PR image `1.2.0-pr125`, production launch arguments, `--max-model-len 8192`). Two
+checkpoint layouts of the same weights (the production `swift-heretic-gptq` checkpoint,
+compressed-tensors format, 1695 tensors, 19.8 GB; resharded and verified tensor by tensor
+against the source by SHA-256):
+
+- single file: one `model.safetensors`
+- sharded: 4 shards of at most 5 GiB, `model.safetensors.index.json`
+
+Each run started with the LXC freshly booted (page cache of the container empty), the
+container memory capped at 16 GiB (`--memory`), and the EngineCore process sampled once
+per second from `/proc/<pid>/status`.
+
+| Run | Other guests | Engine ready | File-backed RSS peak | Anonymous RSS peak | OOM kills |
+|---|---|---|---|---|---|
+| single, r1 | stopped | 251 s | 12.27 GiB | 2.17 GiB | 0 |
+| single, r2 | stopped | 211 s | 12.68 GiB | 2.17 GiB | 0 |
+| shards, r1 | stopped | 211 s | 5.30 GiB | 2.17 GiB | 0 |
+| shards, r2 | stopped | 222 s | 4.96 GiB | 2.17 GiB | 0 |
+| shards, r1 | running | 231 s | 5.25 GiB | 2.17 GiB | 0 |
+| shards, r2 | running | 212 s | 5.02 GiB | 2.17 GiB | 0 |
+
+Findings:
+
+- Sharding lowers the file-backed memory of the engine process from about 12.5 GiB to about
+  5 GiB. Anonymous memory is unchanged at about 2.2 GiB, so the change does not add memory.
+- Load time did not change measurably (about 210 to 250 s to ready in all runs).
+- The container cgroup still reached its 16 GiB limit in every run. Page cache fills free
+  memory, and sharding does not change that. The gain is in what the engine process maps,
+  not in what the container's cgroup counts.
+
+Host-pressure runs (the host had other guests running; the container had no or a 16 GiB limit):
+
+| Run | Host RAM available, minimum | Host swap | Pages swapped out / in | Memory pressure (PSI), peak | Engine ready |
+|---|---|---|---|---|---|
+| single, no container limit, vLLM and tts stopped, talosc3 and omv8 running | 8.8 GiB | 3.1 GiB before and during | about 15 MiB / 20 MiB | 2.4 % | 208 s |
+| single, LXC capped at 16 GiB, all other guests running (vllmci, radiance, talosc3, omv8) | 3.6 GiB | filled to 8 GiB | about 2.9 GiB / 1.6 GiB | 30.7 % | 241 s |
+
+Interpretation: with the host under real pressure, the single-file load swapped heavily
+even with the container capped at 16 GiB. The container limit does not protect against host
+pressure. The 16 GiB test with all guests running was done with the single file only; the
+shard variant under the same host pressure was not measured in the final series, so this
+document does not claim a crash-free result for shards on a fully loaded host.
+
+Limitations:
+
+- One host, one model, and one or two runs per configuration.
+- The sampling interval is one second and can miss short peaks.
+- The container's cgroup numbers include page cache; they show the limit being reached, not
+  the actual need.
+- No 16 GiB host was tested. The 16 GiB figure is a container cap on a 29 GiB host.

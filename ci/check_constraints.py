@@ -67,6 +67,10 @@ LIMITING = ("<", "<=", "!=", "~=", "==", "===")
 RAW = "https://raw.githubusercontent.com/vllm-project/vllm/v{ver}/{path}"
 # Installed by the Dockerfile before the pinned resolution, not from PyPI.
 BOOTSTRAP = ("pip", "setuptools", "wheel")
+# Pinned by hand: the Dockerfile installs these --no-deps next to aiter (aiter's own runtime pins, derived by
+# ci/resolve_stack.py from aiter's requirements.txt). Nothing in vLLM's resolution asks for them, so they are
+# neither "stale" here nor dropped by --update.
+HAND_PINS = ("flydsl",)
 
 
 def canon(name):
@@ -151,7 +155,18 @@ def resolve(pins_file, reqs, pins=None):
         cons = ["-c", str(pins_file)] if pins_file else []
 
         # the Dockerfile's first pip call
-        r = pip(py, "install", "-U", *BOOTSTRAP, *cons)
+        # setuptools inside vLLM's own range (vLLM 0.31: >=77.0.3,<81): an unconstrained `-U setuptools`
+        # in an --update run picks the newest release and the resolution below then fails on it
+        # vLLM can name setuptools more than once (0.31: <81 and <80): intersect every specifier it gives
+        specs = []
+        for q in reqs:
+            head = q.split(";")[0].strip()
+            name = re.split(r"[\s<>=!~\[]", head, maxsplit=1)[0]
+            if canon(name) == "setuptools":
+                specs += [x.strip() for x in head[len(name):].strip().split(",") if x.strip()]
+        st = "setuptools" + (",".join(dict.fromkeys(specs)) if specs else "")
+        boot = [st if b == "setuptools" else b for b in BOOTSTRAP]
+        r = pip(py, "install", "-U", *boot, *cons)
         if r.returncode:
             raise SystemExit(f"FAIL: bootstrap install\n{r.stdout[-2000:]}{r.stderr[-3000:]}")
         (tmp / "reqs.txt").write_text("\n".join(reqs) + "\n")
@@ -261,7 +276,8 @@ def main(argv):
 
     if args.update:
         resolved, rules = resolve(None, reqs)
-        lines = header + [f"{n}=={v}" for n, v in sorted(resolved.values(), key=lambda x: canon(x[0]))]
+        keep = {canon(n): (n, v) for n, v in pins.values() if canon(n) in {canon(h) for h in HAND_PINS}}
+        lines = header + [f"{n}=={v}" for n, v in sorted({**resolved, **keep}.values(), key=lambda x: canon(x[0]))]
         CONSTRAINTS.write_text("\n".join(lines) + "\n")
         changed = {k for k in resolved.keys() | pins.keys() if resolved.get(k, (0, 0))[1] != pins.get(k, (0, 0))[1]}
         print(f"constraints.txt rewritten: {len(resolved)} pins, {len(changed)} changed")
@@ -297,7 +313,8 @@ def main(argv):
                     print(f"repair: {label} does not resolve: {str(e)[:300]}")
         else:
             return 1
-        lines = header + [f"{n}=={v}" for n, v in sorted(resolved.values(), key=lambda x: canon(x[0]))]
+        keep = {canon(n): (n, v) for n, v in pins.values() if canon(n) in {canon(h) for h in HAND_PINS}}
+        lines = header + [f"{n}=={v}" for n, v in sorted({**resolved, **keep}.values(), key=lambda x: canon(x[0]))]
         CONSTRAINTS.write_text("\n".join(lines) + "\n")
         sync_caps(rules, write=True)
         for k in sorted(pins.keys() | resolved.keys()):
@@ -313,7 +330,7 @@ def main(argv):
               f"({len(rules)} rules)")
         return 0
     missing = sorted(set(resolved) - set(pins))
-    stale = sorted(set(pins) - set(resolved))
+    stale = sorted(set(pins) - set(resolved) - {canon(h) for h in HAND_PINS})
     for k in missing:
         n, v = resolved[k]
         print(f"::error file=constraints.txt::{n}=={v} is installed but not pinned -- add the line")

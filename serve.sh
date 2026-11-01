@@ -69,7 +69,11 @@ case "$QUANT" in
          SERVED=Qwen3.8-PARO
          DRAFTER_REL=Qwen3.8-27B-DFlash2-FP8
          GPU_UTIL=${GPU_UTIL:-0.92} ;;
-  *) echo "unknown QUANT=$QUANT (mxfp4 / int4 / int5)" >&2; exit 2 ;;
+  mxfp6) SNAP_REL=Qwen3.8-27B-PARO-MXFP6
+         SERVED=Qwen3.8-PARO
+         DRAFTER_REL=Qwen3.8-27B-DFlash2-FP8
+         GPU_UTIL=${GPU_UTIL:-0.92} ;;
+  *) echo "unknown QUANT=$QUANT (mxfp4 / int4 / int5 / mxfp6)" >&2; exit 2 ;;
 esac
 
 SNAP="$MODELS/$SNAP_REL"
@@ -84,7 +88,7 @@ e() { # e NAME VALUE  -> add -e only if NAME is not already set in the shell
 }
 
 case "$QUANT" in
-  int4|int5)
+  int4|int5|mxfp6)
     # The ParoQuant profile (run_paroquant.sh, MODE=prod): the rotation_supply
     # producers on, the int4-default I8/PG/ZPE (int5 reads them off the
     # checkpoint, exactly as the launcher does), GDN merge off (in_proj_a/b are
@@ -115,6 +119,10 @@ case "$QUANT" in
       e RADIANCE_PQ_PG 0
       e RADIANCE_PQ_ZPE 0
     fi
+    if [ "$QUANT" = mxfp6 ]; then
+      . "$(dirname "$0")/gpu-detect.sh"
+      rad_require_tp2 MXFP6-PARO || exit 1
+    fi
     ;;
   mxfp4)
     # The measured profile is the image ENV; nothing extra to export. (Override
@@ -133,12 +141,17 @@ else
 fi
 
 # --------------------------------------------------------- drafter spec --------
+# DRAFT_SAMPLE: draft-side sampling for the DFlash2 drafter. `greedy` (default, the arm both
+# launchers ship) takes the draft head's argmax; `probabilistic` samples it with vLLM's shared-Gumbel
+# coupling (needs the full draft-logits head). Lossless either way -- the verifier decides the
+# emitted token -- so this is an acceptance/cost lever, not a numerics one.
+DRAFT_SAMPLE=${DRAFT_SAMPLE:-greedy}
 SPEC_ARGS=()
 if [ "$SPEC_METHOD" = dflash ] && [ -z "${NO_DRAFTER:-}" ]; then
   DRAFTER="$MODELS/$DRAFTER_REL"
   [ -d "$DRAFTER" ] || { echo "ERROR: drafter not at $DRAFTER (setup.sh)" >&2; exit 1; }
   SPEC_ARGS=(--speculative-config \
-    "{\"method\":\"dflash\",\"model\":\"/models/$DRAFTER_REL\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"TRITON_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"greedy\"}")
+    "{\"method\":\"dflash\",\"model\":\"/models/$DRAFTER_REL\",\"num_speculative_tokens\":$SPEC,\"attention_backend\":\"TRITON_ATTN\",\"disable_padded_drafter_batch\":$UNPAD,\"draft_sample_method\":\"$DRAFT_SAMPLE\"}")
 elif [ "$SPEC_METHOD" = mtp ]; then
   # mtp uses the head inside the target (no extra download); measured default 4.
   mspec=${SPEC:-4}

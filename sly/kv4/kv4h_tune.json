@@ -1,0 +1,378 @@
+{
+ "meta": {
+  "key": "format 'qplanes:kgroup' -> mode (decode1 | verify | prefill | drafter) -> sequences (prefill: context) -> knobs",
+  "source": "/tmp/claude-1000/-home-tom/64b0777d-f386-4b75-af27-1bbb3ab50ab9/scratchpad/tune/kv4h_tune.csv"
+ },
+ "table": {
+  "1:128": {
+   "decode1": {
+    "1": {
+     "num_segments": 64,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 568.3
+    },
+    "4": {
+     "num_segments": 16,
+     "row_tiles": 2,
+     "tile": 16,
+     "us": 1266.1
+    },
+    "8": {
+     "num_segments": 16,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 2460.1
+    }
+   },
+   "drafter": {
+    "1": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 46.8
+    },
+    "4": {
+     "num_segments": 16,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 85.8
+    },
+    "8": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 102.0
+    }
+   },
+   "prefill": {
+    "16384": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 8758.2
+    },
+    "2048": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 873.1
+    },
+    "65536": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 31392.7
+    }
+   },
+   "verify": {
+    "1": {
+     "num_segments": 16,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 721.1
+    },
+    "4": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 1869.2
+    },
+    "8": {
+     "num_segments": 16,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 3592.4
+    }
+   }
+  },
+  "1:256": {
+   "decode1": {
+    "1": {
+     "num_segments": 64,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 506.9
+    },
+    "4": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 1263.2
+    },
+    "8": {
+     "num_segments": null,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 2462.6
+    }
+   },
+   "prefill": {
+    "16384": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 7594.3
+    },
+    "2048": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 799.2
+    },
+    "65536": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 27654.1
+    }
+   },
+   "verify": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 625.5
+    },
+    "4": {
+     "num_segments": 16,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 1668.1
+    },
+    "8": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 3205.7
+    }
+   }
+  },
+  "2:128": {
+   "decode1": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 497.7
+    },
+    "4": {
+     "num_segments": 16,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 1564.8
+    },
+    "8": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 2674.2
+    }
+   },
+   "drafter": {
+    "1": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 47.9
+    },
+    "4": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 89.6
+    },
+    "8": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 111.0
+    }
+   },
+   "prefill": {
+    "16384": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 10774.5
+    },
+    "2048": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 1636.5
+    },
+    "65536": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 39140.7
+    }
+   },
+   "verify": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 688.2
+    },
+    "4": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 2309.1
+    },
+    "8": {
+     "num_segments": 16,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 4330.7
+    }
+   }
+  },
+  "2:256": {
+   "decode1": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 579.8
+    },
+    "4": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 64,
+     "us": 1288.5
+    },
+    "8": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 2483.6
+    }
+   },
+   "prefill": {
+    "16384": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 9987.0
+    },
+    "2048": {
+     "num_segments": null,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 943.6
+    },
+    "65536": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 35614.7
+    }
+   },
+   "verify": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 32,
+     "us": 823.6
+    },
+    "4": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 2023.0
+    },
+    "8": {
+     "num_segments": 8,
+     "row_tiles": 4,
+     "tile": 64,
+     "us": 3976.3
+    }
+   }
+  },
+  "2:64": {
+   "decode1": {
+    "1": {
+     "num_segments": 64,
+     "row_tiles": 2,
+     "tile": 16,
+     "us": 569.4
+    },
+    "4": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 16,
+     "us": 1396.7
+    },
+    "8": {
+     "num_segments": null,
+     "row_tiles": 2,
+     "tile": 16,
+     "us": 2835.7
+    }
+   },
+   "drafter": {
+    "1": {
+     "num_segments": 32,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 51.1
+    },
+    "4": {
+     "num_segments": 16,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 92.0
+    },
+    "8": {
+     "num_segments": 8,
+     "row_tiles": 2,
+     "tile": 32,
+     "us": 116.7
+    }
+   },
+   "prefill": {
+    "16384": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 14387.0
+    },
+    "2048": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 1210.6
+    },
+    "65536": {
+     "num_segments": null,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 52585.7
+    }
+   },
+   "verify": {
+    "1": {
+     "num_segments": 64,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 932.8
+    },
+    "4": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 2899.9
+    },
+    "8": {
+     "num_segments": 32,
+     "row_tiles": 4,
+     "tile": 16,
+     "us": 5557.8
+    }
+   }
+  }
+ }
+}

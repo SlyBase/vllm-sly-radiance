@@ -53,6 +53,20 @@ def _bind(op: str, **geometry):
 # for, so writing them here would be a second copy of the constants just read out of the library --
 # ask it which kernel it has instead, and the names stay in the registry next to the kernels.
 _CHUNK_SCAN = _bind("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK)
+# RADIANCE_GDN_SCAN_VARIANT=s1|s2|s3: an opt-in build variant of the chunk_scan, same arithmetic and
+# byte-identical outputs (docs/GDN-CHUNK-SCAN-VARIANTS.md). s1 = workgroup-processor mode, s2 = s1 + 43 KB
+# LDS (3 workgroups per WGP), s3 = s2 + late staging prefetch. Default off. A libr4d without them ignores
+# the unknown `variant` key and answers with the stock name, so the name -- not the answer being
+# non-None -- tells whether the variant is really there.
+SCAN_VARIANT = os.environ.get("RADIANCE_GDN_SCAN_VARIANT", "")
+if SCAN_VARIANT and _CHUNK_SCAN is not None and _r4d is not None:
+    _var_name = _r4d.select("gdn_chunk_scan", head_k=HEAD_K, head_v=HEAD_V, chunk=CHUNK,
+                            variant=SCAN_VARIANT)
+    if _var_name and _var_name.endswith("_" + SCAN_VARIANT) and hasattr(_r4d, _var_name):
+        _CHUNK_SCAN = getattr(_r4d, _var_name)
+    else:
+        sys.stderr.write(f"[radiance.gdn] RADIANCE_GDN_SCAN_VARIANT={SCAN_VARIANT} is not in this libr4d, "
+                         "keeping the stock chunk_scan\n")
 _CONV_PREP = _bind("gdn_conv_prep", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V,
                    chunk=CHUNK)
 _CONV_UPDATE = _bind("gdn_conv_update", conv_width=CONV_WIDTH, head_k=HEAD_K, head_v=HEAD_V)
@@ -124,6 +138,16 @@ STRIDED_GATES = os.environ.get("RADIANCE_GDN_STRIDED_GATES", "0") == "1"
 # itself (vLLM PR 28182 is why the fill exists), and the non-fused paths below zero the tail in
 # Python. Default 0 until the serving A/B lands.
 EMPTY_OUT = os.environ.get("RADIANCE_GDN_EMPTY_OUT", "0") == "1"
+# RADIANCE_GDN_GATE_INPLACE=1: build the chunk scan's h0 without the copies that only exist to
+# reshape the paged state. The stock glue runs three kernels per (GDN layer, prefill chunk) --
+# gather ssm_state[indices], widen to fp32, then masked_fill the rows that carry no state. Two of
+# them are removable without touching a number: a row without a state IS zero, so a shared zero
+# buffer replaces gather+widen+fill, and a batch where every row carries a state needs no fill at
+# all. Same bytes by construction; `prefill_h0` below is the only place that decides. Default 0
+# until the GPU gate (bit-identity + ABBA) has run.
+GATE_INPLACE = os.environ.get("RADIANCE_GDN_GATE_INPLACE", "0") == "1"
+_H0_ZEROS: dict = {}
+_H0_SAID = [False]          # the proof line: first step that actually takes the in-place path
 
 
 # RADIANCE_GDN_TRACE_SIDX=1: log, once per decode step for the first two sequences, the resident
@@ -154,6 +178,52 @@ def _zero_tail(core_attn_out, T):
     """Pad rows [T, num_tokens) of the padded batch buffer, for paths that do not write them."""
     if EMPTY_OUT and T < core_attn_out.shape[0]:
         core_attn_out[T:].zero_()
+
+
+def _h0_mode(md) -> str:
+    """Which h0 expression the chunk scan gets: "zeros", "nomask" or the stock "gather".
+
+    Decided once per metadata object, because both answers cost a device sync: the mask lives on
+    the GPU, and asking it per layer would serialize the step 48 times.
+    """
+    if not GATE_INPLACE:
+        return "gather"
+    mode = getattr(md, "_radiance_h0_mode", None)
+    if mode is None:
+        mask = md.prefill_has_initial_state
+        mode = "zeros" if not bool(mask.any()) else ("nomask" if bool(mask.all()) else "gather")
+        try:
+            md._radiance_h0_mode = mode      # metadata is rebuilt per step; one sync per step
+        except Exception:                    # slotted/foreign metadata: just pay it again next layer
+            pass
+        if mode != "gather" and not _H0_SAID[0]:
+            _H0_SAID[0] = True
+            sys.stderr.write(
+                f"[radiance.gdn] RADIANCE_GDN_GATE_INPLACE: chunk scan takes the in-place h0 path "
+                f"({mode}: {'all' if mode == 'nomask' else 'no'} rows carry a state)\n")
+    return mode
+
+
+def _prefill_h0(ssm_state, indices, mask, mode: str):
+    """The chunk scan's fp32 initial state, built with the fewest kernels that give the same bytes.
+
+    "zeros"  no row carries a state, so h0 is zero: one buffer, shared by every layer of the step,
+             read-only in the kernel (h0 is a const pointer in the entry point).
+    "nomask" every row carries one: gather + widen, no fill.
+    "gather" the stock expression, verbatim.
+    """
+    if mode == "zeros":
+        shape = (int(indices.numel()), *ssm_state.shape[1:])
+        key = (shape, ssm_state.device)
+        buf = _H0_ZEROS.get(key)
+        if buf is None:
+            buf = _H0_ZEROS[key] = torch.zeros(shape, dtype=torch.float32, device=ssm_state.device)
+        return buf
+    h0 = ssm_state[indices].float()
+    if mode == "gather":
+        h0[~mask, ...] = 0
+    return h0
+
 # The barrier counter must exist BEFORE any CUDA-graph capture replays the kernel, and must NOT
 # be allocated at import -- that grabs a CUDA context before vLLM sets the device and breaks its
 # memory snapshot (the split-K decode scratch learned the same lesson; it allocates at weight
@@ -698,8 +768,8 @@ def forward_core_fused(self, mixed_qkv, b, a, core_attn_out) -> bool:
     _nt("kkt_solve.out", A=A)
     # chunk_scan takes an fp32 initial state (it bails otherwise); the paged cache may be
     # bf16, and the write-back below already narrows with .to(ssm_state.dtype).
-    initial_state = ssm_state[md.prefill_state_indices].float()
-    initial_state[~md.prefill_has_initial_state, ...] = 0
+    initial_state = _prefill_h0(ssm_state, md.prefill_state_indices, md.prefill_has_initial_state,
+                                _h0_mode(md))
     o_buf = (core_attn_out[:tp].view(1, tp, H, HEAD_V) if spec_o is None
              else torch.empty((1, tp, H, HEAD_V), device=mixed_qkv.device,
                               dtype=torch.bfloat16))

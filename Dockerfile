@@ -1,24 +1,34 @@
 # vllm-radiance: vLLM/torch/triton/aiter stack for RDNA4 (gfx1201 / R9700), plus the radiance
 # patches and kernels. Single multistage build on the official AMD ROCm image, in five stages:
-#   1. builder    compile torch/triton/torchvision/aiter/vLLM from source into /wheels
+#   1. buildbase  build toolchain + venv shared by 1a and 1b
+#   1a. torch     AMD's prebuilt torch wheel for this ROCm release (torch-amd-wheel, default), or
+#                 torch compiled from source (torch-build / torch-wheel) -- see TORCH_FROM below
+#   1b. builder   AMD's triton wheel, torchvision (AMD's wheel, or compiled), aiter/vLLM compiled, into /wheels
 #   2. rocmprune  cut the 19 GB ROCm tree down to this one GPU architecture
-#   3. assemble   install the wheels, apply the patches, build the R4D kernel library
-#   3b. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
+#   3. stack      install the wheels, trim and snapshot the stack
+#   3a. kernels   compile radiance's own HIP extensions (R4D, MXFP4, GDN, quant plugins)
+#   3b. assemble  apply the patches on top of the stack, add the kernels from 3a
+#   3c. venvsplit split the venv into a cold (stack) and a hot (radiance) layer
 #   4. final      the release image: a clean Ubuntu with only the pruned ROCm and the venv
-# No prebuilt component wheels and no checked-in binaries. The release image carries neither the
+# Prebuilt from upstream: torch (AMD's TheRock wheel for ROCm 10.1, loaded against this image's
+# /opt/rocm -- see the torch-amd stage), triton (AMD's wheel of the commit vLLM builds against, from
+# the same index, hash-pinned -- it bundles its own LLVM and HIP headers and loads libamdhip64 at
+# runtime, so a source build produced the same thing in 25 min), torchvision (AMD's wheel) and
+# transformers. No checked-in binaries. The release image carries neither the
 # build toolchain nor the wheels, which is most of the reason it is far smaller than the base.
 #
-# stack: torch 2.14.0, triton 3.8.0, torchvision 0.24.1, aiter v0.1.21.post2, vLLM v0.29.0,
-# all compiled for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.0 (the default
-# ROCM_BASE below is what the homelab's production image is built from; 7.14 needs --build-arg).
+# stack: torch 2.13.0 (AMD wheel, +rocm10.1.0), triton 3.8.0 (AMD wheel, git669b31ac), torchvision 0.28.0
+# (AMD wheel) -- the trio vLLM 0.31's ROCm base builds, unchanged at the 0.32.0 bump -- aiter v0.1.24.post1,
+# vLLM v0.32.0; the compiled parts built for PYTORCH_ROCM_ARCH=gfx1201 against the base image's ROCm 10.1 (the default
+# ROCM_BASE below is what the homelab's production image is built from; 10.0 needs --build-arg ROCM_BASE and TORCH_AMD_ROCM / TORCH_VERSION=2.11.0 / TORCHVISION_VERSION=0.24.1 / TRITON_BUILD=git4cff872c.rocm10.0.0 and a torch that AMD ships for 10.0).
 # renovate: datasource=docker depName=rocm/dev-ubuntu-24.04 versioning=regex:^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-full$
-ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
+ARG ROCM_BASE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
 ARG GFX_ARCH=gfx1201
 # The release stage starts from a clean distro image rather than the ROCm base, and COPYs in only
 # the pruned ROCm tree plus the venv. Same Ubuntu release as the ROCm base (24.04), so the venv's
 # interpreter (python 3.12.3) matches.
 # renovate: datasource=docker depName=ubuntu versioning=ubuntu
-ARG RELEASE_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+ARG RELEASE_BASE=ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60
 
 # Component pins, in one place. Each is both the git tag that gets compiled and the version the
 # resulting wheel reports, so `pip show`, `importlib.metadata`, and the startup banner all agree
@@ -38,21 +48,49 @@ ARG RELEASE_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1
 # needs; flagged here rather than silently assumed safe -- watch for the same symptom (fluent
 # startup, hang under load) and be ready to fall back to upstream's own pinned trio if it appears.
 # renovate: datasource=github-releases depName=pytorch/pytorch extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCH_VERSION=2.14.0
+# 1.1.0: the newest stack vLLM 0.31.0 itself builds its ROCm base image with (docker/Dockerfile.rocm_base:
+# PYTORCH_BRANCH release/2.13, TRITON_BRANCH 669b31a = release/internal/3.8.x, PYTORCH_VISION_BRANCH
+# v0.28.0, AITER_BRANCH v0.1.23), taken as AMD's prebuilt wheels for ROCm 10.1 from whl-next: torch
+# 2.13.0, triton 3.8.0+git669b31ac (exactly that commit), torchvision 0.28.0. AMD ships 2.12 / 2.13 /
+# 2.14 for rocm10.1; 2.14 is not what vLLM pins, so it is not used. (1.0.0 ran torch 2.12 with the PyPI
+# triton 3.6.0 and a compiled torchvision 0.27.0 -- a combination upstream never tested.) The 2.11
+# pin existed because torch >= 2.12 hit ROCm/ROCm#6406 (CPU spins at 100% after the first GPU op,
+# an AsyncEventsLoop busy-wait in libhsa-runtime64); the fix landed in TheRock on 2026-08-22 and is
+# part of ROCm 10.1 -- sly/tests/lessons/F/test.sh checks the idle CPU of the engine.
+ARG TORCH_VERSION=2.13.0
 # renovate: datasource=github-releases depName=triton-lang/triton extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 ARG TRITON_VERSION=3.8.0
+# AMD's triton wheel carries a local version: triton-<TRITON_VERSION>+<TRITON_BUILD>-cp312-cp312-linux_x86_64.whl
+# on https://stable.repo.amd.com/rocm/whl-next (the same index as torch). 669b31a is the commit vLLM's
+# docker/Dockerfile.rocm_base builds (release/internal/3.8.x); the PyPI wheels do not carry it.
+ARG TRITON_BUILD=git669b31ac.rocm10.1.0
+# sha256 of that wheel. Bump together with TRITON_VERSION / TRITON_BUILD: a stale hash fails the
+# build at the download, it never installs the wrong file.
+ARG TRITON_SHA256=2f745c62aebb33167bfb6d586f569fbea67f8fc5181b03798b91a6b9187a625e
 # renovate: datasource=github-releases depName=pytorch/vision extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG TORCHVISION_VERSION=0.29.0
+ARG TORCHVISION_VERSION=0.28.0
+# The 0.1.23 hold is lifted at the 0.32.0 bump: vLLM 0.32.0's AITER_BRANCH is v0.1.24.post1 and
+# vLLM still imports aiter.ops.triton.unified_attention, whose alias IS back in 0.1.24.post1
+# (aiter/ops/triton/__init__.py: "unified_attention": "attention.unified_attention", checked in
+# the v0.1.24.post1 tree). rocm_aiter_unified_attn stays usable, so nothing holds the pin here.
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.22.post1
+ARG AITER_VERSION=0.1.24.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.30.0
+ARG VLLM_VERSION=0.32.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
 # turned the global read into AmbiguousGlobalPerLayerAttributeError, which no released vLLM config
 # convertor handled at the time -- a Gemma-4 checkpoint then failed during argument parsing, before
 # a model or an attention backend exists. 5.14.1 was the last release before that change.
+# vLLM 0.31.0 caps transformers at < 5.18.0 (requirements/common.txt: >= 5.10.4, < 5.18.0), so 1.1.0
+# goes from 5.18.0 back to 5.17.0, the newest release it allows (pip would otherwise fail the
+# resolution). 5.17.0 is the version of the 0.29.0 stack and of the 0.6.x accept run.
+# vLLM 0.32.0 widens the cap to >= 5.16.1, < 5.20.0, so 1.7.0 takes 5.19.0, the newest release the
+# range allows. NOTE (0.27.1-line comment above): the Gemma-4 head_dim story was re-verified as
+# designed-away only up to 5.17.0 -- 5.19.0 is inferred safe the same way (shape, not a passing
+# load test). 0.32.0 also takes MiniCPM-V 4.7 (#58674) natively, which needs transformers >= 5.18
+# for its AutoProcessor, so the newer pin and the native model go together.
 # BUMPED to 5.17.0 for the vLLM 0.29.0 stack. NOT independently re-verified against a live Gemma-4
 # checkpoint load (no GPU in this environment) -- static check only: the exact
 # `AmbiguousGlobalPerLayerAttributeError` class name is absent from configuration_utils.py and
@@ -60,9 +98,10 @@ ARG VLLM_VERSION=0.30.0
 # (`per_layer_config` / HeterogeneousConfigMixin) reads as a broader rewrite of that mechanism, not
 # merely a patch on top of 5.15.0's -- consistent with the bug having been designed away rather than
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
-# first time a Gemma-4 checkpoint is actually served on this image.
+# first time a Gemma-4 checkpoint is actually served on this image. Same-inference caveat for
+# 5.19.0 (see the 0.32.0 note above): still no live Gemma-4 load test.
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.17.0
+ARG TRANSFORMERS_VERSION=5.19.0
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
@@ -81,12 +120,29 @@ ARG RBT_VERSION=rocm-6.4.4
 # homelab, which is the entire reason this is a SHA and not just `main`.
 ARG R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
 # renovate: datasource=git-refs depName=https://codeberg.org/StillDeadcode/libr4d.git branch=main (digest pin; keep R4D_REPO above in sync)
-ARG R4D_VERSION=5dc6302b87d598d1d3bf2ad3b50aab365461a63c
+ARG R4D_VERSION=a3e4833d29c3c7e6c36f43277ff9a7c9193950a3
+# Where the torch wheel comes from:
+#   torch-amd-wheel (default)  AMD's wheel from stable.repo.amd.com/rocm/whl-next, TORCH_VERSION +
+#                  rocm${TORCH_AMD_ROCM}; seconds instead of a 2 h compile. Gate-tested 2026-10-04
+#                  (accept run 37202109954, torch 2.11 / ROCm 10.0): throughput 0.97-1.05x, GSM8K 0.835.
+#   torch-wheel    compiled here from source (~2 h at MAX_JOBS=3) -- for a ROCm release AMD has no
+#                  wheel for yet (e.g. a beta).
+#   ghcr.io/slybase/vllm-sly-radiance-torch:<key>  that source build, pushed once by build.yml
+#                  (input torch_from_source); <key> from ci/torch_key.py.
+ARG TORCH_FROM=torch-amd-wheel
+# ROCm release of AMD's torch wheel; must match ROCM_BASE (the wheel's rocm_sdk check_version).
+ARG TORCH_AMD_ROCM=10.1.0
 
 # =====================================================================================
-# STAGE 1 builder: compile the stack from source into /wheels
+# STAGE 1 buildbase: build toolchain and venv for the torch build and the builder stage
 # =====================================================================================
-FROM ${ROCM_BASE} AS builder
+FROM ${ROCM_BASE} AS buildbase
+# Only GFX_ARCH, TORCH_VERSION and MAX_JOBS are used here. TRITON/TORCHVISION/AITER_VERSION are
+# declared anyway, in this order, because a declared ARG is part of every RUN's cache key below it
+# and the torch layer on the runner was built with them; removing them would re-run the ~2 h
+# compile for an identical wheel. The ghcr.io wheel (TORCH_FROM) is what keeps torch from being
+# rebuilt now -- drop these three with the next torch bump. (Until then an aiter bump re-runs
+# this stage's apt/venv steps, ~2 min, and leaves the ghcr.io wheel's key untouched.)
 ARG GFX_ARCH
 ARG TORCH_VERSION
 ARG TRITON_VERSION
@@ -120,6 +176,18 @@ ENV PATH=/opt/py/bin:$PATH
 RUN pip install -U pip wheel setuptools "setuptools-scm>=8.0" "cmake<4" ninja pybind11 numpy \
       pyyaml typing_extensions cffi requests build
 RUN mkdir -p /wheels
+
+# =====================================================================================
+# STAGE 1a torch-build / torch-wheel: torch from source (skipped when TORCH_FROM is an image)
+# =====================================================================================
+FROM buildbase AS torch-build
+# Same ARG list as buildbase, same order: see the cache-key note there.
+ARG GFX_ARCH
+ARG TORCH_VERSION
+ARG TRITON_VERSION
+ARG TORCHVISION_VERSION
+ARG AITER_VERSION
+ARG MAX_JOBS=4
 
 # --- torch (AOTriton off: its gfx1201 source-configure fails and vLLM never uses torch
 #     SDPA-flash; USE_MAGMA=0: base has no magma) ---
@@ -157,24 +225,99 @@ RUN cd /src/pytorch \
        python -m build --wheel --no-isolation --outdir /wheels . \
     && pip install /wheels/torch-*.whl && rm -rf /src/pytorch
 
-# --- triton ---
-RUN git clone --depth 1 -b v${TRITON_VERSION} https://github.com/triton-lang/triton.git /src/triton \
-    && cd /src/triton && pip wheel --no-build-isolation --no-deps . -w /wheels \
-    && pip install /wheels/triton-*.whl && rm -rf /src/triton
+# The wheel alone, as an image of its own: build.yml pushes this target to ghcr.io (see TORCH_FROM).
+FROM scratch AS torch-wheel
+COPY --from=torch-build /wheels/ /
+
+# AMD's own torch wheel for this ROCm release (TheRock build, stable.repo.amd.com whl-next). The
+# device code for GFX_ARCH ships in the separate amd-torch-device-<arch> wheel as a .kpack file that
+# the ROCm 10 HIP runtime (itself TheRock-built, librocm_kpack) loads. Four things make it fit:
+#   * --no-deps + fix_amd_torch_metadata.py: the wheels declare rocm[libraries] (a second ROCm in
+#     the venv next to /opt/rocm), rocm-bootstrap and triton==3.8.0+git. Left in, pip replaces torch
+#     with the newest PyPI (CUDA) torch the first time anything resolves against it; the script drops
+#     them and pins triton==TRITON_VERSION (binaries untouched, RECORD rebuilt).
+#   * rocm_sdk/ (a stand-in package): torch/_rocm_init.py preloads its ROCm libraries through
+#     rocm_sdk; the stand-in loads them from /opt/rocm, so there is one HIP runtime in the process.
+#   * the stack trim does not strip torch/lib (strip breaks TheRock's libtorch_hip.so ELF layout).
+#   * the stack stage fails if pip ever swaps in a non-ROCm torch.
+FROM buildbase AS torch-amd
+ARG TORCH_VERSION
+ARG TORCH_AMD_ROCM
+ARG TRITON_VERSION
+ARG TORCHVISION_VERSION
+ARG GFX_ARCH
+COPY fix_amd_torch_metadata.py /tmp/
+# torchvision comes from the same index, built against exactly this torch (its wheel metadata asks for
+# a bare `torch` and `rocm-bootstrap`, which the script drops); the builder compiles torchvision only
+# when /wheels has no torchvision wheel (the TORCH_FROM source-build path).
+RUN pip download --no-deps --index-url https://stable.repo.amd.com/rocm/whl-next \
+      "torch==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" "amd-torch-device-${GFX_ARCH}==${TORCH_VERSION}+rocm${TORCH_AMD_ROCM}" \
+      "torchvision==${TORCHVISION_VERSION}+rocm${TORCH_AMD_ROCM}" "amd-torchvision-device-${GFX_ARCH}==${TORCHVISION_VERSION}+rocm${TORCH_AMD_ROCM}" \
+      -d /dl \
+    && for w in /dl/*.whl; do python /tmp/fix_amd_torch_metadata.py "${TRITON_VERSION}" "$w" /wheels; done \
+    && rm -rf /dl
+FROM scratch AS torch-amd-wheel
+COPY --from=torch-amd /wheels/ /
+
+# Resolves to the stage above by default, or to the ghcr.io image of it; BuildKit then skips
+# torch-build entirely.
+FROM ${TORCH_FROM} AS torch
+
+# =====================================================================================
+# STAGE 1b builder: triton (AMD wheel), torchvision (AMD wheel or compiled), aiter/vLLM from source into /wheels
+# =====================================================================================
+FROM buildbase AS builder
+ARG GFX_ARCH
+ARG TRITON_VERSION
+ARG TRITON_BUILD
+ARG TRITON_SHA256
+ARG TORCHVISION_VERSION
+ARG AITER_VERSION
+
+COPY --from=torch / /wheels/
+COPY rocm_sdk/ /opt/py/lib/python3.12/site-packages/rocm_sdk/
+RUN pip install --no-deps /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
+    && pip install filelock "typing-extensions>=4.10.0" "setuptools<82" "sympy>=1.13.3" "networkx>=2.5.1" jinja2 "fsspec>=0.8.5" \
+    && python -c "import torch; print('builder torch', torch.__version__, torch.version.hip)"
+
+# --- ccache for the compiles below (torchvision, aiter, vLLM) ---
+# A BuildKit cache mount keeps the ccache directory on the runner across builds, outside every layer,
+# so a stack bump (an aiter or vLLM patch release) recompiles only the translation units that
+# actually changed. vLLM's setup.py picks ccache up on its own; `ccache -s` after the vLLM build
+# prints the hit rate into build.log. The mount is subject to BuildKit's garbage collection like the
+# layer cache (builder.gc in the runner's daemon.json); CCACHE_MAXSIZE caps it from the inside.
+ARG CCACHE_MAXSIZE=20G
+ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=${CCACHE_MAXSIZE}
+
+# --- triton: AMD's wheel of the pinned commit, hash-checked ---
+# Not compiled here any more (was 25 min): the wheel carries the AMD backend (triton/backends/amd,
+# with its own HIP headers and device bitcode) and its own LLVM, and finds ROCm only at runtime by
+# dlopen("libamdhip64.so") -- which is all a source build against this base produced too. It comes from
+# AMD's whl-next index (the PyPI triton has no 3.8 build of the commit vLLM pins). patch_gfx1201.py's
+# driver.py anchor is checked by ci/patch_dryrun.sh against the same commit.
+RUN echo "triton==${TRITON_VERSION}+${TRITON_BUILD} --hash=sha256:${TRITON_SHA256}" > /tmp/triton.txt \
+    && pip download --no-deps --require-hashes --only-binary=:all: --index-url https://stable.repo.amd.com/rocm/whl-next \
+         -r /tmp/triton.txt -d /wheels \
+    && pip install --no-deps /wheels/triton-*.whl && rm /tmp/triton.txt
 
 # --- torchvision ---
+# Normally AMD's prebuilt wheel from the torch-amd stage is already in /wheels. Compiled only for a
+# source-built torch (TORCH_FROM=torch-wheel or the ghcr.io image):
 # FORCE_CUDA=1 is REQUIRED: torchvision's BUILD_CUDA_SOURCES gates on torch.cuda.is_available(),
 # which is false in `docker build` (no GPU) -> it picks CppExtension, where torch's build-time hipify
 # double-compiles vision.cpp + vision_hip.cpp -> "multiple definition of vision::cuda_version()".
 # FORCE_CUDA=1 forces CUDAExtension (correct hipify source replacement); hipcc needs no GPU to compile.
-RUN git clone --depth 1 -b v${TORCHVISION_VERSION} https://github.com/pytorch/vision.git /src/vision \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    if ls /wheels/torchvision-*.whl >/dev/null 2>&1; then echo "torchvision: AMD wheel, no compile"; else \
+    git clone --depth 1 -b v${TORCHVISION_VERSION} https://github.com/pytorch/vision.git /src/vision \
     && cd /src/vision && FORCE_CUDA=1 USE_ROCM=1 pip wheel --no-build-isolation --no-deps . -w /wheels \
-    && rm -rf /src/vision
+    && rm -rf /src/vision; fi
 
 # --- aiter (gfx1201; kernels JIT at runtime, PREBUILD_KERNELS=0) ---
 # PRETEND_VERSION: the checkout is shallow, so setuptools-scm cannot describe the tag and would fall
 # back to a placeholder version; pin it to the tag being built.
-RUN git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://github.com/ROCm/aiter.git /src/aiter \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://github.com/ROCm/aiter.git /src/aiter \
     && cd /src/aiter && GPU_ARCHS=${GFX_ARCH} PREBUILD_KERNELS=0 \
        SETUPTOOLS_SCM_PRETEND_VERSION=${AITER_VERSION} \
        pip wheel --no-build-isolation --no-deps . -w /wheels \
@@ -184,17 +327,23 @@ RUN git clone --recursive --shallow-submodules -b v${AITER_VERSION} https://gith
 #     pip does not try to fetch them; the versions built above ARE the pinned ones, so this is now
 #     just "use what was compiled above", not an override.
 #     setuptools-rust is a pyproject build requirement that --no-build-isolation does not install.
+#     vLLM 0.31 moved use_existing_torch.py to tools/ and added an OPTIONAL Rust frontend (vllm-rs,
+#     vllm._rust_tool_parser; setup.py builds them with optional=True unless VLLM_REQUIRE_RUST_FRONTEND
+#     is set). The image has no Rust toolchain and uses neither (VLLM_USE_RUST_FRONTEND is off, the
+#     qwen3 tool parsers are Python), so the extensions are simply not built.
 #     VLLM_VERSION_OVERRIDE pins the reported version to the tag: the tree is dirty (use_existing_torch
 #     rewrites the requirements files) and shallow, so setuptools-scm would otherwise stamp the wheel
 #     with a guessed next-release dev version plus the build date. ---
 # ARG at the point of use, not at the top of the stage: an ARG line is a cache-key instruction, so
 # declaring it up there would make a vLLM bump rebuild torch, triton, torchvision and aiter too.
 ARG VLLM_VERSION
-RUN git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
-    && cd /src/vllm && python use_existing_torch.py \
+RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
+    git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
+    && cd /src/vllm && python $([ -f tools/use_existing_torch.py ] && echo tools/use_existing_torch.py || echo use_existing_torch.py) \
     && pip install "setuptools-rust>=1.9.0" \
     && VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
        pip wheel --no-build-isolation --no-deps . -w /wheels \
+    && ccache -s \
     && rm -rf /src/vllm
 RUN ls -la /wheels
 
@@ -227,11 +376,11 @@ COPY prune_rocm.sh /tmp/prune_rocm.sh
 RUN bash /tmp/prune_rocm.sh ${GFX_ARCH} && rm -f /tmp/prune_rocm.sh
 
 # =====================================================================================
-# STAGE 3 assemble: install the wheels and apply the patches and kernels
+# STAGE 3 stack: install the wheels, trim and snapshot the installed stack
 # =====================================================================================
-# Runs on the FULL base because it needs the toolchain (hipcc, headers, static archives) to
-# compile the HIP kernels. Only the resulting /opt/vllm venv is carried into the release image.
-FROM ${ROCM_BASE} AS assemble
+# Runs on the FULL base because the kernels stage built on top of it needs the toolchain (hipcc,
+# headers, static archives). Only the resulting /opt/vllm venv is carried into the release image.
+FROM ${ROCM_BASE} AS stack
 ARG GFX_ARCH
 ARG AITER_VERSION
 ARG VLLM_VERSION
@@ -249,20 +398,36 @@ ENV SP=/opt/vllm/lib/python3.12/site-packages
 # --- install the wheels ---
 # torch/triton/vision/aiter with --no-deps so pip does not replace them; vLLM with its pure-python
 # dependencies. amdsmi (the ROCm python bindings the base image ships) is required for vLLM's ROCm
-# platform detection. The transformers pin goes in the SAME pip invocation as the vLLM wheel so the
+# platform detection: ROCm <= 10.0 ships it as an installable package (setup.py), ROCm 10.1 only as a
+# bare relocatable tree (/opt/rocm/share/amd_smi/amdsmi, no setup.py/pyproject), which resolves
+# <root>/lib/libamd_smi.so.27 relative to itself -- so it is put on sys.path with a .pth (named so it
+# sorts before radiance_amdsmi.pth, which imports it at site-init) instead of being installed.
+# The transformers pin goes in the SAME pip invocation as the vLLM wheel so the
 # resolver sees it as a constraint -- installing it afterwards would first pull the newest release
 # and then downgrade it, leaving both in the layer.
 # Everything that comes from PyPI is pinned by constraints.txt (see its header; Renovate keeps it
 # current, ci/check_constraints.py keeps it complete): without it a rebuild that misses the cache
 # resolves vLLM's open ranges to whatever is newest that day.
 COPY --from=builder /wheels /wheels
+COPY rocm_sdk/ ${SP}/rocm_sdk/
 COPY constraints.txt /tmp/constraints.txt
 RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
  && pip install --no-cache-dir --no-deps \
-      /wheels/torch-*.whl /wheels/triton-*.whl /wheels/torchvision-*.whl /wheels/*aiter-*.whl \
+      /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
+      /wheels/triton-*.whl /wheels/torchvision-*.whl $(ls /wheels/amd_torchvision_device_*.whl 2>/dev/null) \
+      /wheels/*aiter-*.whl \
  && pip install --no-cache-dir -c /tmp/constraints.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
- && pip install --no-cache-dir -c /tmp/constraints.txt /opt/rocm/share/amd_smi pillow pybind11 \
+ && pip install --no-cache-dir -c /tmp/constraints.txt pillow pybind11 \
+ # aiter 0.1.23 imports flydsl at `import aiter` (aiter/ops/topk_select.py -> aiter.ops.flydsl); aiter is
+ # installed --no-deps above, so its pinned runtime dep comes here. Without it every aiter import fails and
+ # the backward-compat finder for aiter.ops.triton.unified_attention swallows the error
+ # (ModuleNotFoundError at engine start).
+ && pip install --no-cache-dir --no-deps -c /tmp/constraints.txt flydsl \
+ && if [ -f /opt/rocm/share/amd_smi/setup.py ]; then pip install --no-cache-dir /opt/rocm/share/amd_smi; \
+    else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
+ && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
+ && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
  && rm -rf /wheels /root/.cache /tmp/constraints.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
@@ -283,29 +448,171 @@ ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm HIP_PLATFORM=amd \
 #   * aiter's prebuilt assembly kernels for other archs (hsa/gfx942, gfx950, gfx1250, ~115 MB):
 #     aiter looks them up under hsa/<device arch>, and there is none for gfx1201.
 #   * debug symbols of the installed extensions (worth ~1 GB): release builds, but they still carry
-#     .debug_* sections that nothing reads at runtime. The radiance kernels built further down
+#     .debug_* sections that nothing reads at runtime. Not torch/lib and not torchvision (AMD's wheel
+#     is TheRock-built like torch: strip leaves its _C.so with an unloadable ELF layout). The radiance kernels built further down
 #     (R4D, the MXFP4 GEMM, the GDN decode kernel) are not stripped: tiny, and they carry device fatbins.
 COPY split_venv.py /opt/split_venv.py
 RUN set -eu; \
     rm -rf ${SP}/triton/backends/nvidia/bin ${SP}/triton/backends/nvidia/lib; \
     find ${SP}/aiter_meta/hsa -mindepth 1 -maxdepth 1 -type d -name 'gfx*' ! -name "${GFX_ARCH}" \
       -exec rm -rf {} +; \
-    find /opt/vllm -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    find /opt/vllm -type f -name '*.so*' ! -path '*/torch/lib/*' ! -path '*/torchvision/*' -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} +; \
     /usr/bin/python3 /opt/split_venv.py snapshot /opt/vllm /opt/vllm.stable.json
+
+# =====================================================================================
+# STAGE 3a kernels: radiance's own HIP extensions, compiled beside the patch chain
+# =====================================================================================
+# Every kernel here depends on the installed stack (torch for the import checks, the full ROCm dev
+# tree for hipcc) and on its own sources -- never on the radiance Python modules or the patch chain.
+# Built in assemble, behind `COPY sly/` and the radiance_*.py COPY, they recompiled (~2 min) on
+# every Python-only change; as their own stage, each one copies only its own sources, so they stay
+# cached until those change, and BuildKit runs this stage in parallel with assemble's patch chain.
+# Output goes to /out, which assemble COPYs into site-packages; the import checks find it via
+# PYTHONPATH=/out.
+FROM stack AS kernels
+ARG GFX_ARCH
+RUN mkdir -p /out /opt/kernels
+
+# --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
+# sly/r4d/r4d_extras_rx10.patch is ggz14's r4d_radiance_extras_rx10.patch (written against libr4d
+# b9e42ab) rebased onto this pin: the kernel sources applied as-is, the four registry files
+# (build.sh, r4d.h, r4d_module.hip, r4d_registry.hip) were merged by hand -- every conflict was
+# additive, the pin's N-rank all-reduce family next to the extras. It adds the narrow-state (bf16 /
+# fp16 SSM cache) gated-delta-net decode kernels that radiance_gdn.py binds when
+# --mamba-ssm-cache-dtype is 16-bit, the lazy-snapshot GDN kernels (RADIANCE_GDN_LAZY), the fused
+# GDN decode step (RADIANCE_GDN_FUSED_UPDATE), the 8-bit legs of the R4D prefill attention
+# (R4D_ATTN_FP8, R4D backend only) and the TP=2 all-reduce with a fused decoder epilogue. ggz14's
+# three-rank all-reduce is left out: it was written for the older two-rank radiance_allreduce.py,
+# and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
+# ride RCCL.
+# One shared object holding every hand-written kernel this image runs: paged attention (prefill and
+# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
+# its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
+# fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
+# path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
+# builder stage because it has to be compiled by the same hipcc the venv loads it against.
+# ARGs are declared at the point of use: they are cache-key instructions, so putting them at the top
+# of the stage would invalidate the wheel install above on every kernel bump.
+ARG R4D_REPO
+ARG R4D_VERSION
+# R4D_VERSION is a commit SHA (see the ARG's own comment at the top of the file for why), so the
+# clone can't use `git clone --depth 1 -b <ref>` -- that resolves tags and branches, not arbitrary
+# SHAs. `git fetch <sha>` instead, confirmed against Codeberg's Gitea directly (a live
+# `git fetch --depth 1 origin <sha>` against this exact repo returned the object, i.e.
+# uploadpack.allowAnySHA1InWant is on) -- so this stays a shallow single-object fetch, not a full
+# clone. This ALSO changes the shape of the correctness check below: the previous version compared
+# `r4d.__version__` (from `#define R4D_VERSION "..."` in r4d.h) against the pinned tag, but that
+# macro was NOT bumped by either of the two PRs merged into main after v0.5.0 -- confirmed via
+# `git log -p -- r4d.h` against the live repo, it still reads "0.5.0" at this exact commit. Asserting
+# a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
+# original check was actually protecting against), not the self-reported semver string, which prints
+# only as informational context alongside it.
+# sly/r4d/r4d_kv4i.patch (1.9.1): O_KV4I int4-KV prefill attention entry, inert unless R4D_KV4I=1 (sly/kv4/kv4i_route.py).
+# exact_decay, heavy_first and kv4i apply in any order after rx10 + scan_variants (same tree, checked).
+# sly/r4d/r4d_gdn_exact_decay.patch (1.9.0): libr4d issue #4 -- a chunk whose gate span exceeds 160
+# took the clamped split-decay form and came out attenuated. Such a chunk now takes the exact form
+# (StillDeadcode/radiance engine libr4d); every other chunk runs the split form unchanged.
+COPY sly/r4d/r4d_extras_rx10.patch sly/r4d/r4d_gdn_scan_variants.patch sly/r4d/r4d_gdn_exact_decay.patch sly/r4d/r4d_attn_heavy_first.patch sly/r4d/r4d_kv4i.patch /opt/kernels/
+RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
+ && git init -q && git remote add origin ${R4D_REPO} \
+ && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
+ && GOT=$(git rev-parse HEAD) \
+ && [ "$GOT" = "${R4D_VERSION}" ] \
+    || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
+ && git apply /opt/kernels/r4d_extras_rx10.patch \
+ && git apply /opt/kernels/r4d_gdn_scan_variants.patch \
+ && git apply /opt/kernels/r4d_gdn_exact_decay.patch \
+ && git apply /opt/kernels/r4d_attn_heavy_first.patch \
+ && git apply /opt/kernels/r4d_kv4i.patch \
+ && GFX_ARCH=${GFX_ARCH} OUT=/out/r4d.so ./build.sh \
+ && PYTHONPATH=/out python -c "import sys, torch, r4d; \
+print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
+      'upstream past 0.5.0 since the tag -- informational only) built:'); \
+[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$GOT" \
+ && cd / && rm -rf /src/libr4d
+
+# --- RADIANCE MXFP4 W4A8: the hand-written fp8-WMMA GEMM kernel for gfx1201, compiled here for the
+#     same reason as R4D above -- it has to link against the same hipcc/ROCm toolchain the venv
+#     loads it against, and this is the only stage that has the full (unpruned) ROCm dev tree. ---
+# sly/mxfp4/radiance_mxfp4_fp8.hip is a SINGLE-FILE pybind11 extension (no torch/ATen headers --
+# every exported fn takes raw `uintptr_t` addresses, see its own PYBIND11_MODULE block), unlike
+# R4D's multi-translation-unit build.sh, so it compiles with one hipcc invocation rather than a
+# library build script. It has to be importable as the bare module name `radiance_mxfp4_fp8`
+# (`import radiance_mxfp4_fp8 as _ext` in sly/mxfp4/radiance_mxfp4.py, copied to ${SP}/ in assemble) --
+# same trick as r4d.so above: CPython's default EXTENSION_SUFFIXES includes plain ".so", so an
+# unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
+# renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
+# never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
+# torch is imported before the extension for the same reason as R4D's check above and the
+# release-stage JIT probe below: a bare HIP extension has no ROCm entry in ld.so.conf and cannot
+# resolve libamdhip64 on its own, so `import radiance_mxfp4_fp8` alone fails with
+# "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
+# fine -- torch's import is what actually pulls the runtime into the process.
+COPY sly/mxfp4/radiance_mxfp4_fp8.hip /opt/kernels/
+# RADIANCE_GROUPM (K2, default 0 = off): M-band raster grouping of the folded and A-tiled prefill GEMMs.
+# 0 adds no compiler flag, so the default build is the same object as before. See the macro
+# RAD_RASTER_GROUP in radiance_mxfp4_fp8.hip. Opt-in test builds only, pending a measured gain.
+ARG RADIANCE_GROUPM=0
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $([ "${RADIANCE_GROUPM}" != "0" ] && echo "-DRADIANCE_GROUPM=${RADIANCE_GROUPM}") \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_mxfp4_fp8.hip -o /out/radiance_mxfp4_fp8.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
+
+# sly/gdn/radiance_gdn_decode.hip: HIP port of vLLM's fused GDN MTP decode kernel (0.3.3, see the file
+# header). Same single-file pybind11 build as above; registered as torch.ops._C.fused_gdn_decode_post_conv_mtp
+# by radiance_gdn_decode.py only under RADIANCE_GDN_FUSED_DECODE=1.
+COPY sly/gdn/radiance_gdn_decode.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_gdn_decode.hip -o /out/radiance_gdn_decode_ext.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
+
+# ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
+# above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
+# paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
+# asked: RADIANCE_AUTOROUND=1 (patch_autoround), RADIANCE_ESCHA=1 (patch_escha),
+# RADIANCE_PAROQUANT=1 (radiance_quant_plugins.pth). Dispatch is by the checkpoint's quant_method.
+COPY radiance_autoround.hip radiance_autoround_kernels.h radiance_escha.hip /opt/quant/
+COPY escha/escha_kernels.h escha/escha_act.h /opt/quant/escha/
+COPY paroquant/radiance_paroquant.hip paroquant/par_kernels.h /opt/quant/
+# The three are independent single-file compiles (~20 s each), so they run side by side; each `wait`
+# returns its own hipcc's exit status, so one failed compile still fails the step.
+RUN cd /opt/quant \
+ && pids= \
+ && for k in autoround escha paroquant; do \
+      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=${GFX_ARCH} $(python -m pybind11 --includes) \
+        radiance_$k.hip -o /out/radiance_${k}_kernel.so & pids="$pids $!"; \
+    done \
+ && for pid in $pids; do wait "$pid" || exit 1; done \
+ && PYTHONPATH=/out python -c "import torch, radiance_autoround_kernel, radiance_escha_kernel, radiance_paroquant_kernel; print('quant plugin kernels built')" \
+ && cd / && rm -rf /opt/quant
+
+# =====================================================================================
+# STAGE 3b assemble: the stack plus radiance's modules, patches and kernels
+# =====================================================================================
+FROM stack AS assemble
 
 # --- runtime modules and configs ---
 # radiance_amdsmi.py and .pth: amdsmi init-order fix. amdsmi must init before HIP at site-init in
 # every process, otherwise it enumerates 0 devices and platform detection fails.
+# tile_layout.py is not imported by the runtime, but sly/mxfp4/bench_prefill_cells.py and
+# ci/bench_at_psw.py (both meant to run inside this image) do `from tile_layout import untile`
+# with site-packages on sys.path -- it goes flat next to the other mxfp4 modules so the benches
+# do not need an extra bind mount.
 COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_kernels.py radiance_vit_attn.py radiance_allreduce.py \
      radiance_draft.py radiance_draft_gpu.py radiance_drafthead.py radiance_gemm.py \
-     radiance_r4d_attn.py radiance_gdn.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
+     radiance_r4d_attn.py radiance_r4d_hybrid_attn.py radiance_gdn.py radiance_gdn_lazy.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
+     sly/mxfp4/radiance_lmhead_int2.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
      sly/radiance_embed_host.py \
+     sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
-     radiance_tp3pad.py radiance_nvfp4.py radiance_autoround.py radiance_escha.py \
+     sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
+     radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
@@ -362,13 +669,14 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # separately relaxes aiter's CDNA-only MXFP4 gates so its own Triton gemm_afp4wfp4 path is reachable
 # on gfx1201 -- RADIANCE_MXFP4=1 for the aiter path, RADIANCE_MXFP4_W4A8=1 for the hand-written
 # kernel layered on top; see sly/README.md for why both are needed rather than either alone.
-# sly/patch_short_prefill.py fixes a gated-delta-net metadata-classification bug where a 1-token
-# prefill (the common case for a cache-hit continuation) is misclassified as a decode step.
+# DROPPED at the vLLM 0.31.0 bump, now native upstream: sly/patch_short_prefill.py (a 1-token prefill,
+# the common case for a cache-hit continuation, misclassified as a GDN decode step: 0.31's
+# GDNAttentionMetadataBuilder.build classifies first chunks via is_prefilling / seq_len and passes
+# treat_short_extends_as_decodes=False itself) and sly/patch_gdn_nonspec_mask.py (0.31's counts block
+# keeps `non_spec_sequence_masks_cpu` defined at the top, which patch_gdn_metadata's 0.31 shape preserves).
 # sly/patch_dflash_w4_packed.py lets the DFlash drafter be a compressed-tensors W4A16 checkpoint
-# (qkv_proj has weight_packed, no raw .weight -- deferred + dequantised like the fp8 case);
-# sly/patch_gdn_nonspec_mask.py defines non_spec_sequence_masks_cpu on patch_gdn_metadata's numpy
-# path (UnboundLocalError at engine init as soon as --speculative-config is set). Both are
-# prerequisites for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
+# (qkv_proj has weight_packed, no raw .weight -- deferred + dequantised like the fp8 case); a
+# prerequisite for DFlash2 on the MXFP4 target (vllm7), verified 2026-09-15.
 # sly/patch_lmhead_fp8.py hooks radiance_lmhead_fp8.py into QuarkConfig.get_quant_method: with
 # RADIANCE_LMHEAD_FP8=1 the (Quark-excluded, otherwise bf16) lm_head is quantised to fp8 per
 # output channel after loading and applied via row-wise torch._scaled_mm -- halves the 2.54 GB
@@ -394,14 +702,14 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # gated norm each end in the per-token fp8 quant (radiance_add_rms_quant / _silu_mul_quant /
 # _gdn_norm_quant in the .hip below) and hand (q, scale) straight to the W4A8 GEMM's pq entry,
 # plus the knob in vLLM's compile cache key. Anchors are the already-patched files, so it runs last.
-# sly/patch_mamba_align_retire.py backports vllm#55450 (0.2.3): align-mode Mamba state retirement
-# skips null gaps instead of stopping at them -- with async scheduling the stock code pinned one
-# gated-delta-net block per group per prefill chunk until the request finished (258k prompt: KV
-# pool exhausted, two self-preemptions).
-# sly/patch_rocm_load_max_split.py lets Worker.load_model's max_split_size_mb:20 allocator scope run
-# on ROCm (stock gates it on is_cuda()): without it, packed W4A16 weights were carved out of the
-# freed 2.37 GiB bf16 embed/lm_head segments and pinned them (INT4 target k=7: 2.9 GiB stranded,
-# 313k -> 386k KV tokens; MXFP4 prod: 376k -> 386k).
+# DROPPED at the 0.31.0 bump, native upstream: sly/patch_mamba_align_retire.py (vllm#55450 is in
+# single_type_kv_cache_manager.py: _remove_blocks_in_range skips null gaps) and
+# sly/patch_rocm_load_max_split.py (Worker._scoped_allocator_max_split now gates on is_cuda_alike() and
+# also wraps profile_run).
+# DROPPED at the 0.32.0 bump, native upstream: sly/patch_minicpmv4_7.py (vllm#58674 is in v0.32.0:
+# registry entry, minicpmv4_7.py + the minicpmv4_6.py refactor; the patch SKIPs natively, so
+# RADIANCE_MINICPMV4_7=1 on a 0.32 image cannot overwrite upstream's newer files with the
+# 0.31-era copies it ships).
 # patch_tp3_pad (ggz14) installs the three radiance_tp3pad.py hooks for TP=3 via zero-weight dummy
 # heads; every hook returns immediately unless RADIANCE_TP_PAD=3, so TP 1/2 serves are unchanged.
 # sly/patch_ar_knobs.py makes the TP=2 all-reduce size gate (RADIANCE_AR_MAX_KB) and the 6-bit
@@ -410,6 +718,22 @@ COPY sly/mxfp4-configs/ ${SP}/aiter/ops/triton/configs/
 # (unsloth/Qwen3.8-27B-NVFP4) by requantizing every linear to MXFP4 at load (radiance_nvfp4.py) and
 # handing it to the same W4A8 kernel plugin the Quark checkpoint runs on. Inert unless
 # RADIANCE_NVFP4_MXFP4=1; it only touches compressed-tensors scheme selection, never QuarkConfig.
+# sly/patch_ultraquant_gqa.py rebuilds `_ultraquant_continuation_prefill`'s non-sinks tail
+# (0.32's `ultraquant_4bit` kv dtype): upstream's flash-attn-less fallback passed
+# Hk!=Hq K/V at Hq heads to torch SDPA via tensor.expand() (Qwen3.8, 24 q / 4 kv heads:
+# "expanded size 24 must match existing size 4"), and with enable_gqa it OOMs instead --
+# torch then routes grouped-query SDPA through the math backend, which materializes the
+# Hq x cache_len score tensor (746 MiB/layer at ~40k cached_len) while the pool holds
+# 0 B free (lowering --gpu-memory-utilization does not help). The fallback now calls
+# vLLM's Triton unified kernel (same dense call shape as the sinks/head_dim>256 branch
+# in the same function: GQA-native, online-softmax tiles); the FA2 varlen branch stays
+# for flash-attn-present builds. Hunk 2 drops the per-layer worst-case k_full/v_full
+# concat buffers underneath (block_table capacity = 128 x 2048 tokens at 262k -> 512 MiB
+# per side cached on every full-attention layer, 16 GiB worst case; the follow-up OOM
+# after the SDPA one, live 2026-10-19): both concats now come from the shared workspace
+# manager (same call as the dequant K/V targets -> four adjacent partitions of one
+# scratch), 8 B/token instead of per-layer dead weight.
+# Found live 2026-10-19; `ultraquant_4bit` has no 0.31 shape.
 COPY patch_*.py install_radiance_hooks.py _patchlib.py /opt/patches/
 COPY sly/ /opt/patches/sly/
 # PYTHONPATH=/opt/patches: `python sly/patch_quark_mxfp4.py` puts the SCRIPT's own directory
@@ -421,113 +745,25 @@ RUN set -eu; cd /opt/patches; \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
              patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
-             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata \
-             sly/patch_quark_mxfp4 sly/patch_short_prefill \
-             sly/patch_dflash_w4_packed sly/patch_gdn_nonspec_mask sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct patch_nvfp4_mxfp4 \
+             patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_gdn_lazy \
+             sly/patch_quark_mxfp4 \
+             sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
+             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse sly/patch_mamba_align_retire \
-             sly/patch_embed_host \
-             sly/patch_rocm_load_max_split sly/patch_gdn_fused_decode \
-             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha; do \
+             sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_embed_host sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
+             sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
+             patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
+             sly/patch_dflash_prefill_skip \
+             sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
+             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
     python -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('${SP}/radiance_*.py')]; print('radiance modules parse OK')"
 
-# --- R4D: the gfx1201 kernel library, cloned and compiled from source ---
-# sly/r4d/r4d_extras_rx10.patch is ggz14's r4d_radiance_extras_rx10.patch (written against libr4d
-# b9e42ab) rebased onto this pin: the kernel sources applied as-is, the four registry files
-# (build.sh, r4d.h, r4d_module.hip, r4d_registry.hip) were merged by hand -- every conflict was
-# additive, the pin's N-rank all-reduce family next to the extras. It adds the narrow-state (bf16 /
-# fp16 SSM cache) gated-delta-net decode kernels that radiance_gdn.py binds when
-# --mamba-ssm-cache-dtype is 16-bit, the lazy-snapshot GDN kernels (RADIANCE_GDN_LAZY), the fused
-# GDN decode step (RADIANCE_GDN_FUSED_UPDATE), the 8-bit legs of the R4D prefill attention
-# (R4D_ATTN_FP8, R4D backend only) and the TP=2 all-reduce with a fused decoder epilogue. ggz14's
-# three-rank all-reduce is left out: it was written for the older two-rank radiance_allreduce.py,
-# and this image ships StillDeadcode's N-rank module, which has no binding for it -- TP=3 all-reduces
-# ride RCCL.
-# One shared object holding every hand-written kernel this image runs: paged attention (prefill and
-# decode, fp8 or bf16 KV), the fused gated-delta-net prefill scan, the TP=2 P2P all-reduce in both
-# its exact and its 6-bit-packed form, the skinny bf16 GEMM, and (since this pin) the OCP-MXFP4 x
-# fp8 skinny GEMM gemm_mxfp4a8_nt_m64 that sly/mxfp4/radiance_mxfp4.py's RADIANCE_MXFP4_R4D_DECODE_MAX_M
-# path reads via `r4d.select("gemm_nt", ..., dtype="mxfp4a8")`. Built here rather than in the
-# builder stage because it has to be compiled by the same hipcc the venv loads it against.
-# ARGs are declared at the point of use: they are cache-key instructions, so putting them at the top
-# of the stage would invalidate the wheel install above on every kernel bump.
-ARG R4D_REPO
-ARG R4D_VERSION
-# R4D_VERSION is a commit SHA (see the ARG's own comment at the top of the file for why), so the
-# clone can't use `git clone --depth 1 -b <ref>` -- that resolves tags and branches, not arbitrary
-# SHAs. `git fetch <sha>` instead, confirmed against Codeberg's Gitea directly (a live
-# `git fetch --depth 1 origin <sha>` against this exact repo returned the object, i.e.
-# uploadpack.allowAnySHA1InWant is on) -- so this stays a shallow single-object fetch, not a full
-# clone. This ALSO changes the shape of the correctness check below: the previous version compared
-# `r4d.__version__` (from `#define R4D_VERSION "..."` in r4d.h) against the pinned tag, but that
-# macro was NOT bumped by either of the two PRs merged into main after v0.5.0 -- confirmed via
-# `git log -p -- r4d.h` against the live repo, it still reads "0.5.0" at this exact commit. Asserting
-# a stale clone therefore now means asserting the CHECKED-OUT COMMIT equals the pin (what the
-# original check was actually protecting against), not the self-reported semver string, which prints
-# only as informational context alongside it.
-RUN set -eu; mkdir -p /src/libr4d && cd /src/libr4d \
- && git init -q && git remote add origin ${R4D_REPO} \
- && git fetch --depth 1 origin ${R4D_VERSION} && git checkout -q FETCH_HEAD \
- && GOT=$(git rev-parse HEAD) \
- && [ "$GOT" = "${R4D_VERSION}" ] \
-    || { echo "libr4d checked out $GOT, expected ${R4D_VERSION}" >&2; exit 1; } \
- && git apply /opt/patches/sly/r4d/r4d_extras_rx10.patch \
- && GFX_ARCH=${GFX_ARCH} OUT=${SP}/r4d.so ./build.sh \
- && python -c "import sys, torch, r4d; \
-print('r4d commit', sys.argv[1], '(self-reported __version__', r4d.__version__ + ', not bumped ' \
-      'upstream past 0.5.0 since the tag -- informational only) built:'); \
-[print('   ', k['family'], k['name']) for k in r4d.kernels()]" "$GOT" \
- && cd / && rm -rf /src/libr4d
-
-# --- RADIANCE MXFP4 W4A8: the hand-written fp8-WMMA GEMM kernel for gfx1201, compiled here for the
-#     same reason as R4D above -- it has to link against the same hipcc/ROCm toolchain the venv
-#     loads it against, and this is the only stage that has the full (unpruned) ROCm dev tree. ---
-# sly/mxfp4/radiance_mxfp4_fp8.hip is a SINGLE-FILE pybind11 extension (no torch/ATen headers --
-# every exported fn takes raw `uintptr_t` addresses, see its own PYBIND11_MODULE block), unlike
-# R4D's multi-translation-unit build.sh, so it compiles with one hipcc invocation rather than a
-# library build script. It has to be importable as the bare module name `radiance_mxfp4_fp8`
-# (`import radiance_mxfp4_fp8 as _ext` in sly/mxfp4/radiance_mxfp4.py, copied to ${SP}/ above) --
-# same trick as r4d.so above: CPython's default EXTENSION_SUFFIXES includes plain ".so", so an
-# unadorned `<modname>.so` dropped straight into site-packages is importable with no build-tag
-# renaming needed. Placed in ${SP} rather than /opt/patches so a stale copy in the patch tree can
-# never shadow it (see radiance_mxfp4.py's own comment on the exact same risk for this file).
-# torch is imported before the extension for the same reason as R4D's check above and the
-# release-stage JIT probe below: a bare HIP extension has no ROCm entry in ld.so.conf and cannot
-# resolve libamdhip64 on its own, so `import radiance_mxfp4_fp8` alone fails with
-# "ImportError: libamdhip64.so.7: cannot open shared object file" even though the .so just linked
-# fine -- torch's import is what actually pulls the runtime into the process.
-RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
-      $(python -m pybind11 --includes) \
-      /opt/patches/sly/mxfp4/radiance_mxfp4_fp8.hip -o ${SP}/radiance_mxfp4_fp8.so \
- && python -c "import torch, radiance_mxfp4_fp8 as m; print('radiance_mxfp4_fp8 built:', m.__file__)"
-
-# sly/gdn/radiance_gdn_decode.hip: HIP port of vLLM's fused GDN MTP decode kernel (0.3.3, see the file
-# header). Same single-file pybind11 build as above; registered as torch.ops._C.fused_gdn_decode_post_conv_mtp
-# by radiance_gdn_decode.py only under RADIANCE_GDN_FUSED_DECODE=1.
-RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
-      $(python -m pybind11 --includes) \
-      /opt/patches/sly/gdn/radiance_gdn_decode.hip -o ${SP}/radiance_gdn_decode_ext.so \
- && python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
-
-# ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
-# above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
-# paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
-# asked: RADIANCE_AUTOROUND=1 (patch_autoround), RADIANCE_ESCHA=1 (patch_escha),
-# RADIANCE_PAROQUANT=1 (radiance_quant_plugins.pth). Dispatch is by the checkpoint's quant_method.
-COPY radiance_autoround.hip radiance_autoround_kernels.h radiance_escha.hip /opt/quant/
-COPY escha/escha_kernels.h escha/escha_act.h /opt/quant/escha/
-COPY paroquant/radiance_paroquant.hip paroquant/par_kernels.h /opt/quant/
-RUN cd /opt/quant \
- && for k in autoround escha paroquant; do \
-      hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=${GFX_ARCH} $(python -m pybind11 --includes) \
-        radiance_$k.hip -o ${SP}/radiance_${k}_kernel.so || exit 1; \
-    done \
- && python -c "import torch, radiance_autoround_kernel, radiance_escha_kernel, radiance_paroquant_kernel; print('quant plugin kernels built')" \
- && cd / && rm -rf /opt/quant
+# radiance's own HIP extensions, compiled in the kernels stage above. Plain .so files straight into
+# site-packages, as before: CPython imports an unadorned `<modname>.so` without a build tag.
+COPY --from=kernels /out/ ${SP}/
 
 # The installed extensions were stripped before the snapshot above; only bytecode is left to drop.
 RUN find /opt/vllm -name '__pycache__' -type d -prune -exec rm -rf {} + || true
@@ -607,6 +843,17 @@ ENV RADIANCE_USE_R4D=1 \
     RADIANCE_DYNAMIC_DRAFT=1 RADIANCE_DRAFT_SCHEDULE=1:8,2:7,4:6,8:5,16:4 RADIANCE_DRAFT_TAU=0.35 \
     RADIANCE_RUN_BWTEST=1
 
+# --- the measured prefill stack (1.8.0), on by default. Each knob reverts with an explicit `-e` (the
+#     flags with =0, RADIANCE_MXFP4_TN4_MIN_M=2048, RADIANCE_GDN_SCAN_VARIANT= empty, R4D_ATTN_FP8=0 is
+#     a different arm); kernel-side fallbacks stay at the stock path. RADIANCE_MXFP4_TILED_OPROJ acts
+#     with RADIANCE_FUSED_NORM_QUANT=1 (the launch sets it). The drafter skip disables itself under
+#     prefix caching. RADIANCE_MXFP4_AT_PSW defaults to "auto" in radiance_mxfp4.py (PSW unless the
+#     launch conflicts with it), so it is not here. ---
+ENV RADIANCE_MXFP4_TN4_MIN_M=513 RADIANCE_FUSED_NQ_REG=1 RADIANCE_MXFP4_AT_SKIP_PAD=1 \
+    RADIANCE_MXFP4_TILED_OPROJ=1 RADIANCE_MXFP4_TALL=1 RADIANCE_ATTN_Q_FP8=1 \
+    R4D_ATTN_FP8=3 R4D_ATTN_DB=1 R4D_ATTN_TILE=16 RADIANCE_GDN_SCAN_VARIANT=s3 \
+    RADIANCE_DFLASH_PREFILL_WINDOW_SKIP=1 RADIANCE_DFLASH_FC_TILED_MIN_M=513
+
 # Fail the build if the native stack does not import, or if a wheel reports a version that does not
 # match the source it was built from (a silently mis-stamped wheel is how "aiter 0.0.0" shipped).
 # Running this in the RELEASE stage also proves the allowlist above is complete: a library left
@@ -617,9 +864,11 @@ RUN WANT_VLLM=${VLLM_VERSION} WANT_AITER=${AITER_VERSION} WANT_TF=${TRANSFORMERS
     python -c 'import os, torch, vllm._C, amdsmi, importlib.metadata as m; \
 import r4d; \
 v, a, t = m.version("vllm"), m.version("amd-aiter"), m.version("transformers"); \
+m.version("flydsl"); \
 assert v.startswith(os.environ["WANT_VLLM"]), "vllm wheel reports " + v + ", built tag is " + os.environ["WANT_VLLM"]; \
 assert a.startswith(os.environ["WANT_AITER"]), "aiter wheel reports " + a + ", built tag is " + os.environ["WANT_AITER"]; \
 assert t == os.environ["WANT_TF"], "transformers is " + t + ", pinned is " + os.environ["WANT_TF"]; \
+import torchvision, torchvision.ops; \
 print("stack OK | vllm", v, "| torch", torch.__version__, "| aiter", a, \
       "| torchvision", m.version("torchvision"), "| triton", m.version("triton"), \
       "| transformers", t, "| r4d", r4d.__version__)'
@@ -656,6 +905,8 @@ COPY VERSION /opt/radiance_version
 # and maps client effort aliases (high/max -> xhigh, none/off -> thinking off). Serve with
 # `--chat-template /opt/qwen-fixed.jinja`; the path stays the same across template versions, the
 # version is in the label io.slybase.radiance.chat-template and in the file's first line.
+# Local change "sly2": only the newest assistant turn is rendered with its reasoning; older turns keep
+# an empty think block unless the request sets preserve_thinking / preserve_reasoning (CHANGELOG 1.9.1).
 COPY qwen-fixed-v22.5.jinja /opt/qwen-fixed.jinja
 COPY ci/check_chat_template.py /tmp/check_chat_template.py
 RUN python /tmp/check_chat_template.py && rm -f /tmp/check_chat_template.py
@@ -696,4 +947,4 @@ LABEL org.opencontainers.image.title="vllm-sly-radiance" \
       io.slybase.radiance.aiter="${AITER_VERSION}" \
       io.slybase.radiance.transformers="${TRANSFORMERS_VERSION}" \
       io.slybase.radiance.r4d="${R4D_VERSION}" \
-      io.slybase.radiance.chat-template="qwen3.8-froggeric-v22.5 (/opt/qwen-fixed.jinja)"
+      io.slybase.radiance.chat-template="qwen3.8-froggeric-v22.5-sly2 (/opt/qwen-fixed.jinja)"

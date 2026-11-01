@@ -3,9 +3,25 @@
 # vllm7 container, so this workflow never starts a GPU container and never deploys (that stays
 # with Ansible + systemctl, see the homelab repo).
 #
-# Triggers: a VERSION bump on main, a v* tag, or manual dispatch. Never pull_request -- a PR
-# from a fork must not reach the self-hosted runner. Pushes the image to ghcr.io only for tags
-# or when asked (push_ghcr); a main-branch build is a build check, nothing more.
+# Triggers:
+#   - a VERSION bump on main or a v* tag (the production build: a main-branch build is a build
+#     check, nothing more);
+#   - pull_request -- a PR builds ONCE when it leaves draft (opened / ready_for_review) and again on
+#     every push only if it carries the label `stack` (accept-night gates exactly that head) or
+#     `build` (opt-in). The label `build` itself also starts a build. A feature PR leaves VERSION
+#     alone (notes under `## [Unreleased]`); the release PR (ci/cut_release.py) moves VERSION and
+#     is the one whose merge builds on main, gates and tags. ONLY for non-draft PRs from this repo's own branches (head_repo == repo
+#     check): a PR from a fork must not reach the self-hosted runner (its code would execute
+#     on it). Own-branch PRs (the renovate/* trio PRs, feature branches) are the classic
+#     case where a build catches a compile-level break BEFORE the merge, at CPU-only cost
+#     instead of after it;
+#   - manual dispatch.
+#
+# Pushes the image to ghcr.io only for tags or when asked (push_ghcr); a PR or a
+# main-branch build never publishes -- the `if:` guards on the push step enforce it.
+# The one exception is build-internal: a torch_from_source build may push the torch wheel image
+# (ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>) when its key is not there yet --
+# a wheel, not a runnable image, so nothing that could be mistaken for a release.
 name: build
 
 on:
@@ -13,6 +29,29 @@ on:
     branches: [main]
     paths: [VERSION]
     tags: ["v*"]
+  pull_request:
+    # a draft PR does not build (see the job `if:`); ready_for_review starts the build when it
+    # leaves draft
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    # only when something that ends up in the image can have moved (the stack PRs bump the pins in
+    # Dockerfile / constraints.txt, and the Hermes re-anchor agent pushes patch fixes into sly/ and the
+    # patch_*.py files to the same branch -- accept-night needs an image of exactly the head it gates,
+    # in the local docker of LXC 2408); a pure ci/ or docs PR would burn hours of runner time for a
+    # build that cannot change anything
+    paths:
+      - Dockerfile
+      - VERSION
+      - constraints.txt
+      - "sly/**"
+      - "dflash2/**"
+      - "patch_*.py"
+      - "radiance_*"
+      - "*.hip"
+      - "r4d_*.patch"
+      - "fix_amd_torch_metadata.py"
+      - "split_venv.py"
+      - "prune_rocm.sh"
+      - "rocm_sdk/**"
   workflow_dispatch:
     inputs:
       push_ghcr:
@@ -23,6 +62,14 @@ on:
         description: override ARG ROCM_BASE (empty = Dockerfile default)
         type: string
         default: ""
+      torch_from_source:
+        description: compile torch from source (via the ghcr.io torch image) instead of AMD's wheel
+        type: boolean
+        default: false
+      push_zstd:
+        description: push zstd-compressed layers (smaller download, needs a reader with the containerd image store)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -34,6 +81,20 @@ concurrency:
 
 jobs:
   image:
+    # never for a PR from a fork (its code would execute on the self-hosted runner); own-
+    # branch PRs are the build-check use case (a compile break before the merge, CPU-only).
+    # For a fork PR, head.repo.full_name is the fork's full name -> != -> skipped; for an
+    # own-branch PR it equals github.repository -> runs. Only evaluated when the trigger is a
+    # pull_request (the left side short-circuits every other event).
+    # A draft PR is skipped: experiments and WIP pushes need no image (hours of runner time).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       !github.event.pull_request.draft &&
+       (github.event.action != 'synchronize' ||
+        contains(github.event.pull_request.labels.*.name, 'stack') ||
+        contains(github.event.pull_request.labels.*.name, 'build')) &&
+       (github.event.action != 'labeled' || github.event.label.name == 'build'))
     runs-on: [self-hosted, linux, x64, rocm-build]
     timeout-minutes: 300
     env:
@@ -49,26 +110,81 @@ jobs:
           VER=$(tr -d '[:space:]' < VERSION)
           eval "$(python3 ci/read_pins.py --shell)"
           ROCM_BASE=${ROCM_BASE_INPUT:-$ROCM_BASE}
-          # rocm/dev-ubuntu-24.04:10.0.0-full@sha256:... -> rocm10.0
+          # rocm/dev-ubuntu-24.04:10.1.0-full@sha256:... -> rocm10.1
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           TAG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          TORCH_REMOTE="${REGISTRY_IMAGE}-torch:$(python3 ci/torch_key.py --rocm-base "$ROCM_BASE")"
           {
             echo "version=$VER"; echo "rocm_base=$ROCM_BASE"; echo "tag=$TAG"
             echo "remote_tag=${REGISTRY_IMAGE}:${VER}-rocm${ROCM_MM}"
+            echo "torch_remote=$TORCH_REMOTE"
           } >> "$GITHUB_OUTPUT"
-          echo "building $TAG from $ROCM_BASE"
+          echo "building $TAG from $ROCM_BASE, torch wheel $TORCH_REMOTE"
           docker version --format 'docker {{.Server.Version}}'
           df -h /var/lib/docker | tail -1
+
+      # Every build logs in: the torch wheel image is read (and, once per key, written) by PR
+      # and main builds too, not only by the publishing ones.
+      - name: login to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Default: the Dockerfile's TORCH_FROM (AMD's prebuilt wheel), nothing to do here.
+      # torch_from_source: torch compiled here (~2 h) for a ROCm release AMD has no wheel for yet.
+      # That compile lives in its own image (Dockerfile target torch-wheel, tag from
+      # ci/torch_key.py) instead of only in the runner's BuildKit cache, which a full disk or a
+      # prune wipes. Present -> TORCH_FROM points at it. Missing -> compile it once and push it;
+      # a failed push only costs the next such build the same.
+      - name: torch wheel (AMD wheel, or source via ghcr.io)
+        id: torch
+        env:
+          ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
+          TORCH_REMOTE: ${{ steps.meta.outputs.torch_remote }}
+          FROM_SOURCE: ${{ inputs.torch_from_source }}
+        run: |
+          set -o pipefail
+          if [ "$FROM_SOURCE" != "true" ]; then
+            echo "torch wheel: Dockerfile default (AMD whl-next)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if docker buildx imagetools inspect "$TORCH_REMOTE" >/dev/null 2>&1; then
+            echo "torch wheel: $TORCH_REMOTE (from ghcr.io)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=$TORCH_REMOTE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "torch wheel $TORCH_REMOTE not on ghcr.io yet -> torch-wheel target"
+          DOCKER_BUILDKIT=1 docker build --progress=plain --target torch-wheel \
+            --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            -t "$TORCH_REMOTE" . 2>&1 | tee torch-build.log
+          if docker push "$TORCH_REMOTE"; then
+            echo "torch wheel: built and pushed $TORCH_REMOTE" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "from=$TORCH_REMOTE" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::push of $TORCH_REMOTE failed; this build uses the local torch-wheel stage"
+            echo "from=torch-wheel" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: docker build
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
           VER: ${{ steps.meta.outputs.version }}
+          TORCH_FROM: ${{ steps.torch.outputs.from }}
         run: |
           set -o pipefail
+          # MAX_JOBS=2: 4 OOM-killed the vllm-wheel stage on 2026-10-17 (24 GB
+          # LXC cgroup; a hipcc unit peaks well past 6 GB RSS). 2 keeps any OOM
+          # contained in the cgroup instead of taking the runner (and the host)
+          # down. The Dockerfile ARG default stays 4 for manual builds on an
+          # idle box.
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
+            ${TORCH_FROM:+--build-arg "TORCH_FROM=${TORCH_FROM}"} \
+            --build-arg "MAX_JOBS=2" \
             --build-arg "RADIANCE_VERSION=${VER}" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -93,22 +209,32 @@ jobs:
           LV=$(docker image inspect "$TAG" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
           [ "$LV" = "$VER" ] || { echo "::error::label org.opencontainers.image.version is '$LV', not $VER"; exit 1; }
 
-      - name: login to ghcr.io
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: push to ghcr.io
         if: startsWith(github.ref, 'refs/tags/v') || inputs.push_ghcr
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           REMOTE: ${{ steps.meta.outputs.remote_tag }}
+          ZSTD: ${{ inputs.push_zstd }}
         run: |
           docker tag "$TAG" "$REMOTE"
-          docker push "$REMOTE"
+          if [ "$ZSTD" = "true" ]; then
+            # Default. `docker push` has no compression knob, and with the containerd image store it
+            # uploads the blobs it already holds (gzip) -- so the layers are re-encoded here. Readers
+            # must know application/vnd.oci.image.layer.v1.tar+zstd: Docker >= 23 with the containerd
+            # image store (Engine 29 defaults to it), containerd >= 1.5, podman; a classic overlay2
+            # graphdriver store cannot pull it -- set push_zstd=false for such a registry consumer.
+            # Level 19, not the usual 3: on this image's .so-heavy layers it is ~1/4 smaller than
+            # gzip -6 (level 3 gets ~1/10), and the re-compression cost is a one-off in a publish job.
+            # Measured on the 1.9.1 trees: /opt/vllm gzip -6 1.00 GB, zstd -3 0.91 GB, zstd -19 0.73 GB.
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$HOME/.docker/config.json:/auth/auth.json:ro" \
+              quay.io/skopeo/stable:v1.16 \
+              copy --dest-authfile /auth/auth.json \
+                   --dest-compress-format zstd --dest-compress-level 19 \
+                   "docker-daemon:$TAG" "docker://$REMOTE"
+          else
+            docker push "$REMOTE"
+          fi
           # Registry-side OCI annotations (ghcr.io shows the index's description and links the
           # package to its repo by source). `docker build --annotation` is dropped by the docker
           # image-store exporter, so they are added here: imagetools re-creates the index around
@@ -138,7 +264,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: build-log-${{ steps.meta.outputs.version }}
-          path: build.log
+          path: |
+            build.log
+            torch-build.log
           if-no-files-found: ignore
 
       - name: prune dangling images

@@ -31,6 +31,7 @@
 #include <hip/hip_bf16.h>
 #include <pybind11/pybind11.h>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <cstdlib>
 namespace py = pybind11;
@@ -79,6 +80,42 @@ __device__ __constant__ unsigned int kMag[16][2] = {
   {0x00000000u, 0x00000000u},
   {0x00000000u, 0x00000000u},
 };
+
+// E2M3 (MXFP6) staging. The 6-bit code is split across two planes -- MXFP4's nibble plane carries
+// bits 0-3, a second plane 2 bits per weight -- and rejoins here. Every E2M3 magnitude is k/8, so
+// every code is an exact e4m3 byte and the block exponent still folds into it, but only 6 binades
+// below the row's largest (the builder clamps the spread and the loader rechecks it), hence 7 rows
+// of d. Per d: t0/t1 are the 8 subnormal bytes (exponent field 0, magnitude k/8) for one v_perm,
+// and b4 is the bias the normal half takes as ONE bytewise add, since its e4m3 byte is affine in
+// the code. The fourth word pads the row to a uint4 for the A-tiled kernel's LDS copy.
+__device__ __constant__ unsigned int kE2M3[7][4] = {
+  {0x2c282000u, 0x36343230u, 0x30303030u, 0u},
+  {0x24201800u, 0x2e2c2a28u, 0x28282828u, 0u},
+  {0x1c181000u, 0x26242220u, 0x20202020u, 0u},
+  {0x14100800u, 0x1e1c1a18u, 0x18181818u, 0u},
+  {0x0c080400u, 0x16141210u, 0x10101010u, 0u},
+  {0x06040200u, 0x0e0c0a08u, 0x08080808u, 0u},
+  {0x03020100u, 0x07060504u, 0x00000000u, 0u},
+};
+
+static __device__ __forceinline__ unsigned int e2m3_spread2(unsigned int x) {
+  return (__umul24(x & 0x3003u, 0x00010010u) | __umul24(x & 0x0330u, 0x00001100u)) & 0x30303030u;
+}
+static __device__ __forceinline__ unsigned int e2m3_fold4(unsigned int c6, unsigned int t0,
+                                                          unsigned int t1, unsigned int b4) {
+  const unsigned int sub = __builtin_amdgcn_perm(t1, t0, c6 & 0x07070707u);
+  const unsigned int arit = (c6 & 0x1F1F1F1Fu) + b4;
+  const unsigned int nz = (((c6 >> 3) & 0x03030303u) + 0x03030303u) & 0x04040404u;
+  return __builtin_amdgcn_perm(arit, sub, 0x03020100u | nz) | ((c6 & 0x20202020u) << 2);
+}
+static __device__ __forceinline__ uint2_t e2m3_unpack8(unsigned int wv, unsigned int h2,
+                                                       unsigned int t0, unsigned int t1,
+                                                       unsigned int b4) {
+  const unsigned int be = e2m3_fold4((wv & 0x0F0F0F0Fu) | e2m3_spread2(h2), t0, t1, b4);
+  const unsigned int bo = e2m3_fold4(((wv >> 4) & 0x0F0F0F0Fu) | e2m3_spread2(h2 >> 2), t0, t1, b4);
+  return uint2_t{__builtin_amdgcn_perm(bo, be, 0x05010400u),
+                 __builtin_amdgcn_perm(bo, be, 0x07030602u)};
+}
 
 #define BM 128
 #define BN 64
@@ -224,7 +261,46 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 #define NTHREADS (NWAVE * 32)
 #define BMF (WM * TM * 16)
 #define BNF_OF(tn) (WN * (tn) * 16)
+
+// K2: M-band raster grouping of the folded and A-tiled prefill GEMMs (build option, default off).
+// The plain grid is N-fastest: blocks dispatch in flattened-id order, so a long run of consecutive
+// blocks shares one activation band and streams the whole weight; once the weight is bigger than the
+// 64 MB MALL (gate_up: 89 MB, down: 45 MB) every M band re-reads it from DRAM. With
+// -DRADIANCE_GROUPM=G the blocks are re-numbered in groups of G activation bands, M-fastest inside
+// a group: the G blocks that share a weight tile are resident together, so the weight is read once
+// per group. The map is a bijection over the grid (the last group may be shorter), so every output
+// tile is still computed exactly once with the same arithmetic. Same idea as kGroupM in libr4d's
+// fp8a8 GEMM. RAD_TILE_ORIGIN declares m0 / n0 (needs BMF and BNF_T in scope). Without the define it
+// expands to the one statement the kernels always had, token for token, so the default object code
+// does not move.
+#if defined(RADIANCE_GROUPM) && RADIANCE_GROUPM > 0
+#define RAD_TILE_ORIGIN_BM(BM_)                                                               \
+  unsigned rad_bx = blockIdx.x, rad_by = blockIdx.y;                                          \
+  if (gridDim.y > 1) {                                                                        \
+    const unsigned gm_full = (unsigned)RADIANCE_GROUPM < gridDim.y ? (unsigned)RADIANCE_GROUPM \
+                                                                    : gridDim.y;              \
+    const unsigned per = gm_full * gridDim.x;                                                 \
+    const unsigned lin = blockIdx.y * gridDim.x + blockIdx.x;                                 \
+    const unsigned first = (lin / per) * gm_full, r = lin % per;                              \
+    const unsigned gm = min(gridDim.y - first, gm_full);                                      \
+    rad_by = first + r % gm;                                                                  \
+    rad_bx = r / gm;                                                                          \
+  }                                                                                           \
+  const int m0 = rad_by * (BM_), n0 = rad_bx * BNF_T
+#else
+#define RAD_TILE_ORIGIN_BM(BM_) const int m0 = blockIdx.y * (BM_), n0 = blockIdx.x * BNF_T
+#endif
+#define RAD_TILE_ORIGIN RAD_TILE_ORIGIN_BM(BMF)
 #define BNF BNF_OF(2)
+
+// PSW=2 unpack of one fragment-order lane word (layout: A-tiled kernel comment, psw_pack_w) into
+// the 8 e4m3 bytes the plain path writes; t0/t1 = the kMag row already selected by the folded
+// scale byte (8 * clamp(Wref - Ws, 0, 15)). The A-tiled kernel keeps its own inline copy.
+static __device__ __forceinline__ uint2_t psw2_unpack8(unsigned int wq, unsigned int t0, unsigned int t1) {
+  const unsigned int hi = __builtin_amdgcn_alignbit(wq, wq, 4);
+  return uint2_t{__builtin_amdgcn_perm(t1, t0, wq & 0x07070707u) | (wq & 0x80808080u),
+                 __builtin_amdgcn_perm(t1, t0, hi & 0x07070707u) | (hi & 0x80808080u)};
+}
 
 // TN is templated because the winner depends on M. Widening the N tile (TN=4 -> BNF=128) amortises
 // the A-tile staging, which an ablation prices at 24% of runtime -- A is BMF*BK = 16 KB per K-slab
@@ -233,18 +309,22 @@ __global__ __launch_bounds__(NWAVE * 32) void radiance_mxfp4_fp8_gemm(
 //   M=8192 +10.0%  M=6144 +9.7%  M=4096 +8.5%  M=3072 +6.9%
 //   M=2048 +1.3%   M=1536 -1.6%  M=1024 -4.2%  M=512 -8.8%
 // Below the crossover the wide tile cannot fill: it halves the block count in N while BMF still
-// masks most of a short M. Hence TN=4 only from M >= 2048; RADIANCE_MXFP4_TN4_MIN_M overrides.
+// masks most of a short M. Hence TN=4 only from M >= 2048 here; RADIANCE_MXFP4_TN4_MIN_M overrides
+// (serve-mxfp4.sh ships 513: a long prefill only ends on a short chunk, the stack measures net-positive).
 // WPERM selects the weight layout. false is the checkpoint's own [N, K/2]; true is fragment
 // order, one 32-lane uint32 slot per (n-tile, k-step), which is what libr4d's
 // r4d_gemm_mxfp4a8_nt_m64 reads and what makes a wave's weight read 128 contiguous bytes instead
 // of sixteen rows K/2 bytes apart. Both paths produce the SAME sW tile, so everything downstream
 // of the staging loop is untouched.
-template <int TN, bool WPERM, bool EPIFAST = true>
+// PSW (0 or 2, WPERM e4m3 only): the PSW=2 weight layout of the A-tiled kernel (see there), so a
+// process whose weights were repacked at load stays correct when a call lands here (M in the
+// 193..512 band, row-major A). Same e4m3 bytes in sW, so the output is bit-identical.
+template <int TN, bool WPERM, bool EPIFAST = true, bool E6 = false, int PSW = 0>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
     const unsigned char *__restrict__ A, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
     const float *__restrict__ As, __bf16 *__restrict__ C, int M, int N, int K,
-    int pb1, int pb2, long astride) {
+    int pb1, int pb2, long astride, const unsigned char *__restrict__ WH = nullptr) {
   __shared__ unsigned char sA[BMF * ASTR];
   __shared__ unsigned char sW[WN * TN * 16 * WSTR];
 
@@ -252,7 +332,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
   constexpr int BNF_T = WN * TN * 16;
-  const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T;
+  RAD_TILE_ORIGIN;
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.
@@ -332,6 +412,17 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
           const uint2_t v = *(const uint2_t *)src;
           wq[0] = v[0]; wq[1] = v[1];
         }
+        unsigned int hq[WSLOTS];
+        if constexpr (E6) {
+          const unsigned char *srch = &WH[(((size_t)(gc >> 4) * ksteps_g + kstep0 + kst) * 32 + lanec) * 2];
+          if constexpr (WSLOTS == 4) {
+            const uint2_t h = *(const uint2_t *)srch;
+            hq[0] = h[0] & 0xFFFFu; hq[1] = h[0] >> 16; hq[2] = h[1] & 0xFFFFu; hq[3] = h[1] >> 16;
+          } else {
+            const unsigned int h = *(const unsigned int *)srch;
+            hq[0] = h & 0xFFFFu; hq[1] = h >> 16;
+          }
+        }
         const int blk = (k0 + kst * 16) / 32;
         // One dword read each for the WSLOTS reference and block exponents instead of 2*WSLOTS
         // byte reads: gc is WSLOTS-aligned and N % 16 == 0, so both reads are aligned.
@@ -343,8 +434,22 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
           refw = *(const unsigned short *)(Wref + gc);
           wsw = *(const unsigned short *)(Ws + (size_t)blk * N + gc);
         }
+        if constexpr (E6) {
+#pragma unroll
+          for (int q = 0; q < WSLOTS; ++q) {
+            int d = (int)((refw >> (8 * q)) & 0xFF) - (int)((wsw >> (8 * q)) & 0xFF);
+            d = d < 0 ? 0 : (d > 6 ? 6 : d);
+            const unsigned int t0 = kE2M3[d][0], t1 = kE2M3[d][1], b4 = kE2M3[d][2];
+            *(uint2_t *)(&sW[(r + q) * WSTR + kloc]) = e2m3_unpack8(wq[q], hq[q], t0, t1, b4);
+          }
+        } else
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
+          if constexpr (PSW != 0) {
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + ((wsw >> (8 * q)) & 0xFF));
+            *(uint2_t *)(&sW[(r + q) * WSTR + kloc]) = psw2_unpack8(wq[q], t[0], t[1]);
+            continue;
+          }
           int d = (int)((refw >> (8 * q)) & 0xFF) - (int)((wsw >> (8 * q)) & 0xFF);
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const unsigned int t0 = kMag[d][0], t1 = kMag[d][1];
@@ -530,12 +635,28 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
-template <int TN, bool WPERM, int LBK = BK>
+// SKIPPAD (RADIANCE_MXFP4_AT_SKIP_PAD=1, default off): a wave whose TMT M-fragments all lie past
+// M -- pure tile padding -- still stages its share of W and meets every barrier, but skips its A
+// loads, LDS fragment reads and WMMAs. Wave-uniform test, one scalar branch per slab, same output
+// bytes (those accumulators only ever reach rows the epilogue drops). It pays where the last
+// M-block is mostly padding: M=880 (1024 rows, 2 of the last block's 4 M-waves dead) measured
+// 0.89-0.90x time on gate_up and down (checkpoint weights, 210 W, 2 ABBA pairs each), and nothing
+// at M=1514/1760/4096, which have no all-padding wave.
+// PSW (set_at_psw, default 0 = off; WPERM e4m3 only): preshuffled nibbles + pre-folded
+// scale. Same logical weights, same e4m3 bytes in sW, so the output is bit-identical; the weights
+// must be repacked at load (psw_pack_w / psw_fold_ws in radiance_mxfp4.py, same bytes, no extra
+// memory). Ws holds 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset, so the per-slot
+// sub/clamp/shift vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
+//   PSW=1: byte b = e[b] | e[b+4] << 4 (no interleave perms; 8 VALU per 8 weights).
+//   PSW=2: byte b bits 0-2 mag(e[b]), 7 sign(e[b]), 4-6 mag(e[b+4]), 3 sign(e[(b+3)%4 + 4]);
+//          rotr(w, 4) then carries e[b+4] with its sign at bit 7 (7 VALU per 8 weights).
+template <int TN, bool WPERM, int LBK = BK, bool E6 = false, int TMT = TM, bool SKIPPAD = false,
+          int PSW = 0>
 __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     const unsigned char *__restrict__ AT, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
     const float *__restrict__ As, __bf16 *__restrict__ C, int M, int N, int K,
-    int pb1, int pb2, long astride) {
+    int pb1, int pb2, long astride, const unsigned char *__restrict__ WH = nullptr) {
   constexpr int NS = LBK / 16;
   constexpr int LWSTR = LBK + PAD;
   constexpr int BNF_T = WN * TN * 16;
@@ -543,11 +664,12 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   static_assert(NIT >= 1 && NIT * NTHREADS * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
   __shared__ unsigned char sW[BNF_T * LWSTR];
   __shared__ unsigned int sMag[32];   // kMag, 128 B: ds_load keeps the lookup off the loadcnt chain
+  __shared__ unsigned int sTab[7 * 4];
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
-  const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BNF_T;
+  RAD_TILE_ORIGIN_BM(WM * TMT * 16);
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
   // (launcher-checked), so a block never straddles one. pb1 = pb2 = 1<<30 (the default) is p = 0.
@@ -559,17 +681,18 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   const int ksteps_g = K / 16;
   const int Mt = (M + 15) >> 4;
 
-  if (tid < 32) sMag[tid] = ((const unsigned int *)kMag)[tid];
+  if constexpr (E6) { if (tid < 28) sTab[tid] = ((const unsigned int *)kE2M3)[tid]; }
+  else if (tid < 32) sMag[tid] = ((const unsigned int *)kMag)[tid];
   radiance_lds_barrier();
 
   // A tile bases, one per M-fragment: wave-uniform, forced into SGPRs; the lane part is an
   // unsigned 32-bit offset so the loads take the SADDR form (max offset < 2^31 for all prod).
   // Tile-granular clamp, never predicate: rows of a clamped tile only reach accumulators the
   // epilogue drops.
-  const unsigned char *abase[TM];
+  const unsigned char *abase[TMT];
 #pragma unroll
-  for (int i = 0; i < TM; ++i) {
-    int mt = (m0 >> 4) + wm * TM + i; mt = mt < Mt - 1 ? mt : Mt - 1;
+  for (int i = 0; i < TMT; ++i) {
+    int mt = (m0 >> 4) + wm * TMT + i; mt = mt < Mt - 1 ? mt : Mt - 1;
     abase[i] = AT + (size_t)__builtin_amdgcn_readfirstlane(mt * ksteps_g * 256);
   }
   const unsigned int aoff = lane * 8;
@@ -619,25 +742,20 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     } else wref[it] = Wref[n0 + wrc[it]];
   }
 
-  floatx8 acc[TM][TN];
+  floatx8 acc[TMT][TN];
 #pragma unroll
-  for (int i = 0; i < TM; ++i)
+  for (int i = 0; i < TMT; ++i)
 #pragma unroll
     for (int j = 0; j < TN; ++j)
 #pragma unroll
       for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
 
-  for (int k0 = 0; k0 < K; k0 += LBK) {
-    // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
-    int2_t af[TM][NS];
-#pragma unroll
-    for (int i = 0; i < TM; ++i)
-#pragma unroll
-      for (int st = 0; st < NS; ++st)
-        af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
-
+  const bool mlive = !SKIPPAD || (m0 >> 4) + wm * TMT < Mt;
+  // W staging (loads + fold to sW), shared by the live loop and the SKIPPAD dead-wave loop below.
+  auto stage_w = [&](const int k0) {
     // ---- W tile -> LDS, folded to e4m3 (kMag[d] via v_perm, see the folded kernel) ----
     uint4_t pk[NW]; unsigned int wsv[NW];
+    uint2_t hp[NW];
     if constexpr (WPERM) {
       const unsigned int *__restrict__ Wp = (const unsigned int *)W;
       const int kstep0 = k0 / 16;
@@ -646,6 +764,11 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
         const unsigned int *src = &Wp[((size_t)(wrc[it] >> 4) * ksteps_g + kstep0 + wkst[it]) * 32 + wlanec[it]];
         if constexpr (WSLOTS == 4) pk[it] = *(const uint4_t *)src;
         else { const uint2_t v = *(const uint2_t *)src; pk[it] = uint4_t{v[0], v[1], 0u, 0u}; }
+        if constexpr (E6) {
+          const unsigned char *srch = &WH[(((size_t)(wrc[it] >> 4) * ksteps_g + kstep0 + wkst[it]) * 32 + wlanec[it]) * 2];
+          if constexpr (WSLOTS == 4) hp[it] = *(const uint2_t *)srch;
+          else                       hp[it] = uint2_t{*(const unsigned int *)srch, 0u};
+        }
         const int blk = (k0 + wkst[it] * 16) / 32;
         if constexpr (WSLOTS == 4) wsv[it] = *(const unsigned int *)(Ws + (size_t)blk * N + wrc[it]);
         else                       wsv[it] = *(const unsigned short *)(Ws + (size_t)blk * N + wrc[it]);
@@ -661,10 +784,33 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       }
     }
     if constexpr (WPERM) {
+      if constexpr (E6) {
+#pragma unroll
+        for (int it = 0; it < NW; ++it)
+#pragma unroll
+          for (int q = 0; q < WSLOTS; ++q) {
+            int d = (int)((wref[it] >> (8 * q)) & 0xFF) - (int)((wsv[it] >> (8 * q)) & 0xFF);
+            d = d < 0 ? 0 : (d > 6 ? 6 : d);
+            const uint4_t t = *(const uint4_t *)&sTab[d * 4];
+            *(uint2_t *)(&sW[(wrow[it] + q) * LWSTR + wcol[it]]) =
+                e2m3_unpack8(pk[it][q], (hp[it][q >> 1] >> (16 * (q & 1))) & 0xFFFFu, t[0], t[1], t[2]);
+          }
+      } else
 #pragma unroll
       for (int it = 0; it < NW; ++it)
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
+          if constexpr (PSW != 0) {
+            const uint2_t t = *(const uint2_t *)((const unsigned char *)sMag + ((wsv[it] >> (8 * q)) & 0xFF));
+            const unsigned int wq = pk[it][q];
+            const unsigned int hi = PSW == 1 ? wq >> 4 : __builtin_amdgcn_alignbit(wq, wq, 4);
+            const unsigned int be = __builtin_amdgcn_perm(t[1], t[0], wq & 0x07070707u)
+                                  | (PSW == 1 ? (wq & 0x08080808u) << 4 : wq & 0x80808080u);
+            const unsigned int bo = __builtin_amdgcn_perm(t[1], t[0], hi & 0x07070707u)
+                                  | (PSW == 1 ? wq : hi) & 0x80808080u;
+            *(uint2_t *)(&sW[(wrow[it] + q) * LWSTR + wcol[it]]) = uint2_t{be, bo};
+            continue;
+          }
           int d = (int)((wref[it] >> (8 * q)) & 0xFF) - (int)((wsv[it] >> (8 * q)) & 0xFF);
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const uint2_t t = *(const uint2_t *)&sMag[d * 2];
@@ -701,6 +847,32 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
         *(uint4_t *)(&sW[wrow[it] * LWSTR + wcol[it] * 2]) = uint4_t{outw[0], outw[1], outw[2], outw[3]};
       }
     }
+  };
+
+  // SKIPPAD: an all-padding wave runs its own loop -- it stages its share of W and meets both barriers
+  // per slab, nothing else -- so the live waves below run exactly the plain kernel's code. With the
+  // skip as a branch inside the loop, the A loads could not be issued after the W loads (the fold
+  // waited loadcnt 0) and the second barrier could not be signalled before the last WMMAs: every
+  // SKIPPAD GEMM paid ~2.5 %, dead wave or not. Its epilogue would write nothing (all rows >= M).
+  if constexpr (SKIPPAD) {
+    if (!mlive) {
+      for (int k0 = 0; k0 < K; k0 += LBK) {
+        stage_w(k0);
+        radiance_lds_barrier();
+        radiance_lds_barrier();
+      }
+      return;
+    }
+  }
+  for (int k0 = 0; k0 < K; k0 += LBK) {
+    // A fragments straight from global: one SADDR clause, consumed only at the WMMAs.
+    int2_t af[TMT][NS];
+#pragma unroll
+    for (int i = 0; i < TMT; ++i)
+#pragma unroll
+      for (int st = 0; st < NS; ++st)
+        af[i][st] = *(const int2_t *)(abase[i] + (aoff + (unsigned int)(k0 * 16) + (unsigned int)(st * 256)));
+    stage_w(k0);
     radiance_lds_barrier();
 
 #pragma unroll
@@ -714,7 +886,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
       }
       __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
-      for (int i = 0; i < TM; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j)
           acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i][step], wf[j], acc[i][j]);
@@ -730,13 +902,13 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     rf[j] = (n < N) ? __int_as_float((int)Wref[n] << 23) : 0.f;
   }
   {
-    __bf16 *__restrict__ Cb = C + (size_t)(m0 + wm * TM * 16) * N;
-    const float *__restrict__ Asb = As + m0 + wm * TM * 16;
-    const bool full = (m0 + wm * TM * 16 + (TM - 1) * 16 + kb8 + 7 < M) &&
+    __bf16 *__restrict__ Cb = C + (size_t)(m0 + wm * TMT * 16) * N;
+    const float *__restrict__ Asb = As + m0 + wm * TMT * 16;
+    const bool full = (m0 + wm * TMT * 16 + (TMT - 1) * 16 + kb8 + 7 < M) &&
                       (n0 + wn * TN * 16 + (TN - 1) * 16 + col < N);
     if (full) {
 #pragma unroll
-      for (int i = 0; i < TM; ++i)
+      for (int i = 0; i < TMT; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j)
 #pragma unroll
@@ -749,12 +921,12 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
     }
   }
 #pragma unroll
-  for (int i = 0; i < TM; ++i)
+  for (int i = 0; i < TMT; ++i)
 #pragma unroll
     for (int j = 0; j < TN; ++j)
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        const int m = m0 + wm * TM * 16 + i * 16 + kb8 + e;
+        const int m = m0 + wm * TMT * 16 + i * 16 + kb8 + e;
         const int n = n0 + wn * TN * 16 + j * 16 + col;
         if (m < M && n < N) C[(size_t)m * N + n] = (__bf16)(acc[i][j][e] * rf[j] * As[m]);
       }
@@ -793,12 +965,16 @@ static __device__ __forceinline__ T ld_w(const T *p) {
 // at SPEC=7, which reaches 64 at max_num_seqs=8. DTM 1..4 covers every reachable batch of both.
 // Use the SMALLEST DTM that covers M: measured at M=20, DTM=2 beats DTM=3 by 12% (89.1 vs 99.9 us
 // on gate_up) purely because the wider tile computes rows nobody asked for.
-template <int DWN, int DBK, int DKS, int DTM, bool WPERM, bool DIRECT = true, bool NT = false>
+// PSW (0 or 2, WPERM e4m3 only): weights repacked at load (psw_pack_w / psw_fold_ws), the same
+// layout the A-tiled kernel reads, so decode and prefill share one copy of the weight bytes.
+template <int DWN, int DBK, int DKS, int DTM, bool WPERM, bool DIRECT = true, bool NT = false,
+          bool E6 = false, int PSW = 0>
 __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
     const unsigned char *__restrict__ A, const unsigned char *__restrict__ W,
     const unsigned char *__restrict__ Ws, const unsigned char *__restrict__ Wref,
     const float *__restrict__ As, float *__restrict__ P, int *__restrict__ cnt,
-    __bf16 *__restrict__ C, int M, int N, int K, int pb1, int pb2, long astride) {
+    __bf16 *__restrict__ C, int M, int N, int K, int pb1, int pb2, long astride,
+    const unsigned char *__restrict__ WH = nullptr) {
   constexpr int BND = DWN * 16;
   constexpr int DASTR = DBK + DEC_PAD, DWSTR = DBK + DEC_PAD;
   constexpr int DNTHREADS = DWN * 32;
@@ -895,9 +1071,28 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
         const int lanec = (lane_ & 16) | (gc & 15);
         const uint2_t wv = ld_w<NT>(
             (const uint2_t *)&Wp[((size_t)(gc >> 4) * ksteps_g + kstep0 + kst) * 32 + lanec]);
+        unsigned int hv = 0;
+        if constexpr (E6)
+          hv = ld_w<NT>((const unsigned int *)&WH[(((size_t)(gc >> 4) * ksteps_g + kstep0 + kst) * 32 + lanec) * 2]);
         const int blk = (k0 + kst * 16) / 32;
+        if constexpr (E6) {
+#pragma unroll
+          for (int q = 0; q < 2; ++q) {
+            int d = (int)Wref[gc + q] - (int)Ws[(size_t)blk * N + gc + q];
+            d = d < 0 ? 0 : (d > 6 ? 6 : d);
+            const unsigned int t0 = kE2M3[d][0], t1 = kE2M3[d][1], b4 = kE2M3[d][2];
+            *(uint2_t *)(&sW[(r + q) * DWSTR + kloc]) =
+                e2m3_unpack8(wq_dec(wv, q), (hv >> (16 * q)) & 0xFFFFu, t0, t1, b4);
+          }
+        } else
 #pragma unroll
         for (int q = 0; q < 2; ++q) {
+          if constexpr (PSW != 0) {
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + Ws[(size_t)blk * N + gc + q]);
+            *(uint2_t *)(&sW[(r + q) * DWSTR + kloc]) = psw2_unpack8(wq_dec(wv, q), t[0], t[1]);
+            if constexpr (DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
+            continue;
+          }
           int d = (int)Wref[gc + q] - (int)Ws[(size_t)blk * N + gc + q];
           d = d < 0 ? 0 : (d > 15 ? 15 : d);
           const unsigned int t0 = kMag[d][0], t1 = kMag[d][1];
@@ -927,6 +1122,10 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
       }
       const unsigned char *pw = &sW[(wave * 16 + col) * DWSTR + kk];
       wf[0] = *(const int *)pw; wf[1] = *(const int *)(pw + 4);
+      // PSW instantiations only: without the fence LLVM hoists every k-step's fragment loads
+      // above the first WMMA at DTM >= 6, BK=128 (TM=8: 133 -> 254 VGPRs, occupancy 6 -> 5); elsewhere
+      // the fence costs registers (TM=8 BK=64 +4), so it is limited to those cells.
+      if constexpr (PSW != 0 && DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
       for (int i = 0; i < DTM; ++i)
         acc[i] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i], wf, acc[i]);
@@ -991,14 +1190,20 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
   // (-5.5% on gate_up to -29% on gdn.out) because the partials are still in cache when the
   // reduction reads them. The last block resets the counter, leaving it zeroed for the next
   // launch; launches on one stream are serialised, so no separate clearing pass is needed.
+  // Release on EVERY thread: a fence orders only the executing thread's stores, and
+  // __syncthreads is workgroup scope, so a fence on thread 0 alone let the reducer on
+  // another CU read partials the other threads had not drained yet (libr4d's tiled W4A8
+  // split tail documents the same bug). Then an agent-scope acq_rel counter bump, and an
+  // acquire on the reducing block before it reads the other blocks' partials.
+  __threadfence();
   __syncthreads();
-  if (tid == 0) {
-    __threadfence();
-    s_last = (atomicAdd(&cnt[blockIdx.x], 1) == DKS - 1);
-  }
+  if (tid == 0)
+    s_last = (__hip_atomic_fetch_add(&cnt[blockIdx.x], 1, __ATOMIC_ACQ_REL,
+                                     __HIP_MEMORY_SCOPE_AGENT) == DKS - 1);
   __syncthreads();
   if (!s_last) return;
   if (tid == 0) cnt[blockIdx.x] = 0;
+  __threadfence();
 
   const int nhi = min(n0 + BND, N);
   for (int nn = n0 + tid; nn < nhi; nn += DNTHREADS) {
@@ -1143,14 +1348,24 @@ static void set_decode_scratch(uintptr_t ptr, size_t bytes, uintptr_t cnt) {
   g_decode_cnt = (int *)cnt;        // must be ZEROED by the caller, once
 }
 
+// PSW weight layout (0 = off, 1/2 = psw_pack_w mode). Process-global like WPERM: set once by the
+// loader (radiance_mxfp4.py, RADIANCE_MXFP4_AT_PSW) after it repacked every weight this .so serves,
+// or toggled by the cell benches. Mode 2 is read by every MXFP4 e4m3 fragment-order kernel (A-tiled,
+// folded, decode, wide decode); mode 1 by the A-tiled kernel only. Any other path throws while it
+// is set -- the checkpoint-order, per-block, E6 and streaming-decode kernels do not read PSW bytes.
+static int g_at_psw = 0;
+static void set_at_psw(int v) { g_at_psw = v; }
 static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                         uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
-                        uintptr_t stream) {
+                        uintptr_t stream, uintptr_t wh = 0) {
   if (K % BK) throw std::runtime_error("radiance_mxfp4_fp8: K must be a multiple of 64");
   // partition boundaries must be n-tile aligned for every kernel below (decode 128, folded 64/128)
   if ((pb1 < N && pb1 % 128) || (pb2 < N && pb2 % 128))
     throw std::runtime_error("radiance_mxfp4_fp8: partition boundaries must be multiples of 128");
   if (!wref && pb1 < N) throw std::runtime_error("radiance_mxfp4_fp8: partitions need the folded path");
+  if (g_at_psw != 0 && (g_at_psw != 2 || !wref || wh))
+    throw std::runtime_error("radiance_mxfp4_fp8: PSW weights reached a path without a PSW reader "
+                             "(needs mode 2, the folded wref path and MXFP4 e4m3)");
   dim3 block(NWAVE * 32);
   dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
   // the tuned folded kernel wins at every shape measured, so it is the default whenever the
@@ -1185,6 +1400,10 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       const char *e = getenv("RADIANCE_MXFP4_DECODE_NT");
       return e && atoi(e) != 0;
     }();
+    if (g_at_psw != 0 && (!dec_wperm || dec_nt))
+      throw std::runtime_error("radiance_mxfp4_fp8: PSW needs RADIANCE_MXFP4_WPERM=1 and "
+                             "RADIANCE_MXFP4_DECODE_NT=0");
+    const bool psw = g_at_psw != 0;
     dim3 fblock(NTHREADS);
     constexpr int DWN = DEC_DWN;                 // tuned: ~/mxfp4_work/tier5 + tier6/grid.hip
     constexpr int DBND = DWN * 16;
@@ -1268,12 +1487,12 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       if (bkx == 0) bkx = decode_bk64(tm, dks) ? 64 : 128;
 #define RAD_DEC_LAUNCH(BK_, KS_, TM_)                                                         \
       hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, BK_, KS_, TM_, RAD_WPERM, true,  \
-                                                          RAD_NT>),                           \
+                                                          RAD_NT, RAD_E6, RAD_PSW>),          \
                          dim3(dec_nblk, 1, KS_), dblock,                                       \
                          0, (hipStream_t)stream, (const unsigned char *)a,                     \
                          (const unsigned char *)w, (const unsigned char *)ws,                  \
                          (const unsigned char *)wref, (const float *)as, P, g_decode_cnt,      \
-                         (__bf16 *)c, M, N, K, pb1, pb2, astride)
+                         (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh)
 #define RAD_DEC_BY_TM(BK_, KS_)                                                               \
       if (tm == 1)      RAD_DEC_LAUNCH(BK_, KS_, 1);                                           \
       else if (tm == 2) RAD_DEC_LAUNCH(BK_, KS_, 2);                                           \
@@ -1297,9 +1516,35 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
       // Two restagings that batch a thread's loads for the whole line (8 B x G, then one 16 B
       // per lane / 4 rows per wave) were STILL 1.4-1.8x under NT and -5..-19% without it, so
       // the row layout keeps plain loads and dec_nt is ignored there.
-      if (dec_wperm) {
+#define RAD_PSW 0
+      if (wh) {
+#define RAD_E6 true
 #define RAD_WPERM true
         if (dec_nt) {
+#define RAD_NT true
+          RAD_DEC_BY_KS;
+#undef RAD_NT
+        } else {
+#define RAD_NT false
+          RAD_DEC_BY_KS;
+#undef RAD_NT
+        }
+#undef RAD_WPERM
+#undef RAD_E6
+        return;
+      }
+#define RAD_E6 false
+      if (dec_wperm) {
+#define RAD_WPERM true
+        if (psw) {
+#undef RAD_PSW
+#define RAD_PSW 2
+#define RAD_NT false
+          RAD_DEC_BY_KS;
+#undef RAD_NT
+#undef RAD_PSW
+#define RAD_PSW 0
+        } else if (dec_nt) {
 #define RAD_NT true
           RAD_DEC_BY_KS;
 #undef RAD_NT
@@ -1316,32 +1561,112 @@ static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
 #undef RAD_NT
 #undef RAD_WPERM
       }
+#undef RAD_E6
+#undef RAD_PSW
 #undef RAD_DEC_BY_KS
 #undef RAD_DEC_BY_TM
 #undef RAD_DEC_LAUNCH
       return;
       // no scratch (alloc failed) -- fall through to the folded kernel, never produce nothing
     }
-#define RAD_FOLDED_E(TN_, WP_, EF_)                                                             \
+    // WIDE decode band, M in (128, wide_max_m] (RADIANCE_MXFP4_WIDE_MAX_M, default 0 = dark, max 256).
+    // Radiance measured a 2.5x cliff just above the decode band (M=72..128 ~89 ms against 35 ms at
+    // M=64 per prefill step) because the only kernel left was the 256-row tile; its fix was the
+    // decode kernel in a wider form (DTM 9..16 here, BK=64 so LDS stays 27.6 KB, split 1/2/4) with a
+    // per-shape table. Here the folded kernel is the fallback at M > 128: it computes a full 256-row
+    // block for M=129 (49% of the rows are padding), the decode kernel only ceil(M/16)*16.
+    // Needs the fragment-order weight (dec_wperm), the plain MXFP4 weight (no wh plane) and the
+    // split-K scratch; anything else falls through. Which M actually win is measured per shape by
+    // sly/tests/lessons/A/bench_wide_cells.py -- WIDE_MAX_M is the knob that picks the edge.
+    static const int wide_max_m = [] {
+      const char *e = getenv("RADIANCE_MXFP4_WIDE_MAX_M");
+      int v = e ? atoi(e) : 0;
+      return v > 256 ? 256 : v;
+    }();
+    static const int wide_ks_forced = [] {         // sweep knob for the bench, 0 = table
+      const char *e = getenv("RADIANCE_MXFP4_WIDE_KS");
+      return e ? atoi(e) : 0;
+    }();
+    if (wide_max_m > 128 && M > 128 && M <= wide_max_m && !wh && dec_wperm && N <= DEC_MAX_N) {
+      int wks;
+      if (wide_ks_forced == 1 || wide_ks_forced == 2 || wide_ks_forced == 4) wks = wide_ks_forced;
+      else if (dec_nblk >= 48) wks = 1;                  // gate_up, qkvz, qkv: grid already full
+      else if (dec_nblk <= 8)  wks = DEC_KS;             // in_proj_ba: one n-block, widest split
+      else if (K >= 6144)      wks = (M <= 192) ? DEC_KS : 2;   // down / o_proj / out_proj
+      else                     wks = 1;
+      const bool wide_scratch = g_decode_partial && g_decode_cnt &&
+          (size_t)wks * M * N * sizeof(float) <= g_decode_partial_bytes;
+      if (wks == 1 || wide_scratch) {
+        float *P = g_decode_partial;
+        const dim3 dblock(DWN * 32);
+        const int tm = (M + DEC_MTILE - 1) / DEC_MTILE;          // 9..16
+#define RAD_WIDE_LAUNCH(KS_, TM_, NT_)                                                        \
+        hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_decode<DWN, 64, KS_, TM_, true, true, NT_, \
+                                                            false, (NT_ ? 0 : RAD_WPSW)>),    \
+                           dim3(dec_nblk, 1, KS_), dblock, 0, (hipStream_t)stream,            \
+                           (const unsigned char *)a, (const unsigned char *)w,                \
+                           (const unsigned char *)ws, (const unsigned char *)wref,            \
+                           (const float *)as, P, g_decode_cnt, (__bf16 *)c, M, N, K, pb1,     \
+                           pb2, astride, (const unsigned char *)nullptr)
+#define RAD_WIDE_BY_TM(KS_, NT_)                                                              \
+        switch (tm) {                                                                         \
+          case 9:  RAD_WIDE_LAUNCH(KS_, 9, NT_);  break;                                      \
+          case 10: RAD_WIDE_LAUNCH(KS_, 10, NT_); break;                                      \
+          case 11: RAD_WIDE_LAUNCH(KS_, 11, NT_); break;                                      \
+          case 12: RAD_WIDE_LAUNCH(KS_, 12, NT_); break;                                      \
+          case 13: RAD_WIDE_LAUNCH(KS_, 13, NT_); break;                                      \
+          case 14: RAD_WIDE_LAUNCH(KS_, 14, NT_); break;                                      \
+          case 15: RAD_WIDE_LAUNCH(KS_, 15, NT_); break;                                      \
+          default: RAD_WIDE_LAUNCH(KS_, 16, NT_); break;                                      \
+        }
+#define RAD_WIDE_BY_KS(NT_)                                                                   \
+        if (wks == 1)      { RAD_WIDE_BY_TM(1, NT_); }                                        \
+        else if (wks == 2) { RAD_WIDE_BY_TM(2, NT_); }                                        \
+        else               { RAD_WIDE_BY_TM(4, NT_); }
+        if (psw) {
+#define RAD_WPSW 2
+          RAD_WIDE_BY_KS(false);
+#undef RAD_WPSW
+        } else {
+#define RAD_WPSW 0
+          if (dec_nt) { RAD_WIDE_BY_KS(true); } else { RAD_WIDE_BY_KS(false); }
+#undef RAD_WPSW
+        }
+#undef RAD_WIDE_BY_KS
+#undef RAD_WIDE_BY_TM
+#undef RAD_WIDE_LAUNCH
+        return;
+      }
+    }
+#define RAD_FOLDED_E(TN_, WP_, EF_, E6_, PSW_)                                                  \
     do {                                                                                        \
       constexpr int B_ = BNF_OF(TN_);                                                           \
       dim3 fgrid((N + B_ - 1) / B_, (M + BMF - 1) / BMF);                                       \
-      hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_folded<TN_, WP_, EF_>), fgrid, fblock, 0,     \
+      hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_folded<TN_, WP_, EF_, E6_, PSW_>), fgrid, fblock, 0, \
                          (hipStream_t)stream, (const unsigned char *)a,                         \
                          (const unsigned char *)w, (const unsigned char *)ws,                   \
                          (const unsigned char *)wref, (const float *)as, (__bf16 *)c, M, N, K, \
-                         pb1, pb2, astride);                                                    \
+                         pb1, pb2, astride, (const unsigned char *)wh);                         \
     } while (0)
-#define RAD_FOLDED(TN_, WP_)                                                                    \
-    do { if (epifast) RAD_FOLDED_E(TN_, WP_, true); else RAD_FOLDED_E(TN_, WP_, false); } while (0)
+#define RAD_FOLDED(TN_, WP_, E6_)                                                               \
+    do { if (epifast) RAD_FOLDED_E(TN_, WP_, true, E6_, 0); else RAD_FOLDED_E(TN_, WP_, false, E6_, 0); } while (0)
     // TN=4 only when the shape is wide enough to use the 128-wide tile: at N=48 (gdn gate)
     // TN=4 computes 128 columns against 48 real ones and measures 1.8-2x SLOWER than TN=2 at
     // every M >= 2048 (56 vs 101-115 us, ~/mxfp4_work/tier7 tnx). The M crossover itself
     // re-measured within noise of 2048 on all large-N shapes with branchless staging.
+    if (psw) {
+      if (M >= tn4_min_m && N >= BNF_OF(4)) {
+        if (epifast) RAD_FOLDED_E(4, true, true, false, 2); else RAD_FOLDED_E(4, true, false, false, 2);
+      } else {
+        if (epifast) RAD_FOLDED_E(2, true, true, false, 2); else RAD_FOLDED_E(2, true, false, false, 2);
+      }
+    } else
     if (M >= tn4_min_m && N >= BNF_OF(4)) {
-      if (dec_wperm) RAD_FOLDED(4, true); else RAD_FOLDED(4, false);
+      if (wh) RAD_FOLDED(4, true, true);
+      else if (dec_wperm) RAD_FOLDED(4, true, false); else RAD_FOLDED(4, false, false);
     } else {
-      if (dec_wperm) RAD_FOLDED(2, true); else RAD_FOLDED(2, false);
+      if (wh) RAD_FOLDED(2, true, true);
+      else if (dec_wperm) RAD_FOLDED(2, true, false); else RAD_FOLDED(2, false, false);
     }
 #undef RAD_FOLDED
 #undef RAD_FOLDED_E
@@ -1363,6 +1688,11 @@ static void launch_p(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uin
                      uintptr_t stream) {
   launch_impl(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream);
 }
+static void launch6_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, uintptr_t wref,
+                      uintptr_t as, uintptr_t c, int M, int N, int K, int pb1, int pb2,
+                      long astride, uintptr_t stream) {
+  launch_impl(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream, wh);
+}
 
 
 // ---- fused residual-add + Gemma RMSNorm + per-token fp8 quant -------------------------------
@@ -1381,9 +1711,26 @@ static void launch_p(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uin
 // One workgroup per row; latency-bound at decode M<=8 like everything else in the step, and at
 // prefill M=chunk there are thousands of rows so occupancy takes care of itself.
 #define ARNQ_T 256
+// Row-slice walk shared by the producers below. REG=false: the original runtime loop. REG=true
+// (RADIANCE_FUSED_NQ_REG=1, default off): a compile-time trip count of MAXG guarded by g < NV, so the
+// per-thread slice array is indexed by constants and stays in VGPRs; the runtime-indexed original is
+// placed in scratch memory by the compiler (176-304 bytes/lane: a scratch store + reload of every
+// element). Same elements in the same order, same arithmetic -> bit-identical output.
+#define NQ_FOR(NV_, F_)                                                                         \
+  do {                                                                                          \
+    if constexpr (REG) {                                                                        \
+      _Pragma("unroll") for (int i_ = 0; i_ < MAXG; ++i_) {                                    \
+        const int g_ = tid + i_ * ART;                                                          \
+        if (g_ < (NV_)) F_(g_, i_);                                                             \
+      }                                                                                         \
+    } else {                                                                                    \
+      int i_ = 0;                                                                               \
+      for (int g_ = tid; g_ < (NV_); g_ += ART, ++i_) F_(g_, i_);                               \
+    }                                                                                           \
+  } while (0)
 typedef unsigned int uint32_tt;
 union ArnqVec8 { uint4 u4; __bf16 h[8]; };
-template <int ART, bool TILED = false>
+template <int ART, bool TILED = false, bool REG = false>   // REG: see NQ_FOR
 __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
     const __bf16 *__restrict__ y, const __bf16 *__restrict__ res, const __bf16 *__restrict__ w,
     unsigned char *__restrict__ q, float *__restrict__ scale, __bf16 *__restrict__ res_out,
@@ -1400,12 +1747,11 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
   // this kernel measured 12.5 us at M=8 under graph replay -- 20 independent 2-byte loads per
   // thread per tensor is pure latency serialization at 8 workgroups. Vectorized it is one
   // uint4 load per tensor per group. K must be a multiple of 8 (5120/8704/2048 all are).
-  constexpr int MAXG = 5;                       // 8704 / (256*8) rounds up to 5
+  constexpr int MAXG = REG ? (10240 / 8 + ART - 1) / ART : 5;   // 8704 / (256*8) rounds up to 5
   const int KV = K >> 3;                        // groups of 8
   float sv[MAXG][8];
-  int ng = 0;
   float ssq = 0.f;
-  for (int g = tid; g < KV; g += ART, ++ng) {
+  auto p1 = [&](int g, int ng) {
     ArnqVec8 vy, vr;
     vy.u4 = ((const uint4 *)y)[g];
     vr.u4 = ((const uint4 *)res)[g];
@@ -1418,7 +1764,8 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
       ssq += v * v;
     }
     ((uint4 *)res_out)[g] = vo.u4;
-  }
+  };
+  NQ_FOR(KV, p1);
   __shared__ float lds[ART / 32];
   for (int o = 16; o; o >>= 1) ssq += __shfl_down(ssq, o);
   if ((tid & 31) == 0) lds[tid >> 5] = ssq;
@@ -1432,8 +1779,7 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
   const float inv = rsqrtf(lds[0] / (float)K + eps);
   __syncthreads();                       // lds[0] is reused for the amax reduction below
   float amax = 0.f;
-  int mg = 0;
-  for (int g = tid; g < KV; g += ART, ++mg) {
+  auto p2 = [&](int g, int mg) {
     ArnqVec8 vw;
     vw.u4 = ((const uint4 *)w)[g];
 #pragma unroll
@@ -1442,7 +1788,8 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
       sv[mg][j] = nv;
       amax = fmaxf(amax, fabsf(nv));
     }
-  }
+  };
+  NQ_FOR(KV, p2);
   for (int o = 16; o; o >>= 1) amax = fmaxf(amax, __shfl_down(amax, o));
   if ((tid & 31) == 0) lds[tid >> 5] = amax;
   __syncthreads();
@@ -1455,8 +1802,7 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
-  mg = 0;
-  for (int g = tid; g < KV; g += ART, ++mg) {
+  auto p3 = [&](int g, int mg) {
     uint32_tt lo = 0, hi = 0;
 #pragma unroll
     for (int j = 0; j < 4; j += 2) {
@@ -1472,7 +1818,8 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
     }
     if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
     else ((uint2 *)q)[g] = make_uint2(lo, hi);
-  }
+  };
+  NQ_FOR(KV, p3);
 }
 
 // ---- fused SiLU-mul + per-token fp8 quant ----------------------------------------------------
@@ -1480,7 +1827,7 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
 // Same skeleton and precision contract as radiance_add_rms_quant: every intermediate is rounded
 // exactly where the traced path rounds (silu to bf16, product to bf16, amax over the rounded
 // product). One workgroup per row.
-template <int ART, bool TILED = false>
+template <int ART, bool TILED = false, bool REG = false>   // REG: see NQ_FOR
 __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
     const __bf16 *__restrict__ gu, unsigned char *__restrict__ q, float *__restrict__ scale,
     int N) {
@@ -1491,12 +1838,11 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
   const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in add_rms_quant
   // N <= 72*256 = 18432 (Qwen3.8-27B TP=1: 17408). MAXG only sizes this thread-private
   // scratch (NV/ART groups per thread), so raising it changes no arithmetic.
-  constexpr int MAXG = 9;
+  constexpr int MAXG = REG ? (18432 / 8 + ART - 1) / ART : 9;
   const int NV = N >> 3;
   float pv[MAXG][8];
-  int ng = 0;
   float amax = 0.f;
-  for (int g = tid; g < NV; g += ART, ++ng) {
+  auto p1 = [&](int g, int ng) {
     ArnqVec8 vg, vu;
     vg.u4 = ((const uint4 *)gu)[g];
     vu.u4 = ((const uint4 *)(gu + N))[g];
@@ -1508,7 +1854,8 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
       pv[ng][j] = p;
       amax = fmaxf(amax, fabsf(p));
     }
-  }
+  };
+  NQ_FOR(NV, p1);
   __shared__ float lds[ART / 32];
   for (int o = 16; o; o >>= 1) amax = fmaxf(amax, __shfl_down(amax, o));
   if ((tid & 31) == 0) lds[tid >> 5] = amax;
@@ -1522,8 +1869,7 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
-  int mg = 0;
-  for (int g = tid; g < NV; g += ART, ++mg) {
+  auto p3 = [&](int g, int mg) {
     uint32_tt lo = 0, hi = 0;
 #pragma unroll
     for (int j = 0; j < 4; j += 2) {
@@ -1539,30 +1885,64 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
     }
     if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
     else ((uint2 *)q)[g] = make_uint2(lo, hi);
-  }
+  };
+  NQ_FOR(NV, p3);
 }
 
-static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N,
+// RADIANCE_FUSED_NQ_REG=1 (default off): register-resident row slice in the norm/act quant producers.
+// set_nq_reg() overrides it at runtime (A/B benches inside one process only).
+static int nq_reg_v = [] { const char *e = getenv("RADIANCE_FUSED_NQ_REG"); return e && atoi(e) != 0; }();
+static bool nq_reg() { return nq_reg_v != 0; }
+static void set_nq_reg(int v) { nq_reg_v = v; }
+
+template <bool REG>
+static void launch_silu_mul_quant_t(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N,
                                   uintptr_t stream, int tiled) {
   if (N > 72 * ARNQ_T || (N & 7))
     throw std::runtime_error("radiance_silu_mul_quant: N must be 8-aligned and <= 18432");
   if (tiled && (N & 15)) throw std::runtime_error("radiance_silu_mul_quant: tiled needs N % 16 == 0");
   if (tiled) {
     if (M >= 2048)
-      hipLaunchKernelGGL((radiance_silu_mul_quant<512, true>), dim3(M), dim3(512), 0,
+      hipLaunchKernelGGL((radiance_silu_mul_quant<512, true, REG>), dim3(M), dim3(512), 0,
                          (hipStream_t)stream, (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
     else
-      hipLaunchKernelGGL((radiance_silu_mul_quant<ARNQ_T, true>), dim3(M), dim3(ARNQ_T), 0,
+      hipLaunchKernelGGL((radiance_silu_mul_quant<ARNQ_T, true, REG>), dim3(M), dim3(ARNQ_T), 0,
                          (hipStream_t)stream, (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
     return;
   }
   if (M >= 2048)
-    hipLaunchKernelGGL((radiance_silu_mul_quant<512>), dim3(M), dim3(512), 0, (hipStream_t)stream,
+    hipLaunchKernelGGL((radiance_silu_mul_quant<512, false, REG>), dim3(M), dim3(512), 0, (hipStream_t)stream,
                        (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
   else
-    hipLaunchKernelGGL((radiance_silu_mul_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
+    hipLaunchKernelGGL((radiance_silu_mul_quant<ARNQ_T, false, REG>), dim3(M), dim3(ARNQ_T), 0,
                        (hipStream_t)stream, (const __bf16 *)gu, (unsigned char *)q,
                        (float *)scale, N);
+}
+// RADIANCE_FUSED_NQ_ART=128|512|1024 (default 0 = the launcher's choice; only with NQ_REG): workgroup size of the
+// silu_mul_quant / gdn_norm_quant producers. Both reduce only a max across the workgroup (gdn's sum of squares is
+// per 16-lane head segment, independent of ART), and max is exact in any order, so any ART is bit-identical.
+// add_rms_quant is excluded: its row sum of squares would change association order with ART.
+static int nq_art_v = [] { const char *e = getenv("RADIANCE_FUSED_NQ_ART"); return e ? atoi(e) : 0; }();
+static void set_nq_art(int v) { nq_art_v = v; }
+template <int ART>
+static void launch_silu_reg_art(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N, uintptr_t stream,
+                                int tiled) {
+  if (tiled)
+    hipLaunchKernelGGL((radiance_silu_mul_quant<ART, true, true>), dim3(M), dim3(ART), 0, (hipStream_t)stream,
+                       (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
+  else
+    hipLaunchKernelGGL((radiance_silu_mul_quant<ART, false, true>), dim3(M), dim3(ART), 0, (hipStream_t)stream,
+                       (const __bf16 *)gu, (unsigned char *)q, (float *)scale, N);
+}
+static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, int M, int N,
+                                  uintptr_t stream, int tiled) {
+  if (nq_reg() && nq_art_v && !(N > 72 * ARNQ_T || (N & 7) || (tiled && (N & 15)))) {
+    if (nq_art_v == 128) return launch_silu_reg_art<128>(gu, q, scale, M, N, stream, tiled);
+    if (nq_art_v == 512) return launch_silu_reg_art<512>(gu, q, scale, M, N, stream, tiled);
+    if (nq_art_v == 1024) return launch_silu_reg_art<1024>(gu, q, scale, M, N, stream, tiled);
+  }
+  if (nq_reg()) launch_silu_mul_quant_t<true>(gu, q, scale, M, N, stream, tiled);
+  else launch_silu_mul_quant_t<false>(gu, q, scale, M, N, stream, tiled);
 }
 
 // ---- fused per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input) ----------------
@@ -1575,20 +1955,21 @@ static void launch_silu_mul_quant(uintptr_t gu, uintptr_t q, uintptr_t scale, in
 // multiple of 16 and N a multiple of 128, every 16-lane segment is either fully active or fully
 // idle in each pass. x: [M, N] contiguous bf16; z: [M, N] bf16 with row stride zs (a column
 // slice of the fused qkvz projection, no copy); w: [128] bf16 shared by all heads.
-template <int ART>
+template <int ART, bool TILED = false, bool REG = false>   // REG: see NQ_FOR
 __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
     const __bf16 *__restrict__ x, const __bf16 *__restrict__ z, long zs,
     const __bf16 *__restrict__ w, unsigned char *__restrict__ q, float *__restrict__ scale,
     int N, float eps) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
-  x += (long)row * N; z += (long)row * zs; q += (long)row * N;
-  constexpr int MAXG = 5;                       // N <= ART*8*5 = 10240 (3072 in this model)
+  x += (long)row * N; z += (long)row * zs;
+  if (!TILED) q += (long)row * N;
+  const int mt = row >> 4, lrow = row & 15, kst = N >> 4;   // TILED: as in add_rms_quant
+  constexpr int MAXG = REG ? (10240 / 8 + ART - 1) / ART : 5;   // N <= ART*8*5 = 10240 (3072 in this model)
   const int NV = N >> 3;                        // 8-element groups; 16 per head
   float sv[MAXG][8];
-  int ng = 0;
   float amax = 0.f;
-  for (int g = tid; g < NV; g += ART, ++ng) {
+  auto p1 = [&](int g, int ng) {
     ArnqVec8 vx, vz, vw;
     vx.u4 = ((const uint4 *)x)[g];
     float ssq = 0.f;
@@ -1610,7 +1991,8 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
       sv[ng][j] = nv;
       amax = fmaxf(amax, fabsf(nv));
     }
-  }
+  };
+  NQ_FOR(NV, p1);
   __shared__ float lds[ART / 32];
   for (int o = 16; o; o >>= 1) amax = fmaxf(amax, __shfl_down(amax, o));
   if ((tid & 31) == 0) lds[tid >> 5] = amax;
@@ -1624,8 +2006,7 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
-  int mg = 0;
-  for (int g = tid; g < NV; g += ART, ++mg) {
+  auto p3 = [&](int g, int mg) {
     uint32_tt lo = 0, hi = 0;
 #pragma unroll
     for (int j = 0; j < 4; j += 2) {
@@ -1639,32 +2020,62 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
       float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
       hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
     }
-    ((uint2 *)q)[g] = make_uint2(lo, hi);
-  }
+    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
+    else ((uint2 *)q)[g] = make_uint2(lo, hi);
+  };
+  NQ_FOR(NV, p3);
 }
 
-static void launch_gdn_norm_quant(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
-                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream) {
+template <bool REG>
+static void launch_gdn_norm_quant_t(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
+                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream,
+                                  int tiled) {
   if (N > 40 * ARNQ_T || (N & 127))
     throw std::runtime_error("radiance_gdn_norm_quant: N must be a multiple of 128 and <= 10240");
   if (zs & 7) throw std::runtime_error("radiance_gdn_norm_quant: z row stride must be 8-aligned");
-  hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
-                     (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
-                     (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+  if (tiled)  // N % 128 == 0 already implies the fragment layout's N % 16 == 0
+    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T, true, REG>), dim3(M), dim3(ARNQ_T), 0,
+                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
+                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+  else
+    hipLaunchKernelGGL((radiance_gdn_norm_quant<ARNQ_T, false, REG>), dim3(M), dim3(ARNQ_T), 0,
+                       (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,
+                       (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);
+}
+static void launch_gdn_norm_quant(uintptr_t x, uintptr_t z, long zs, uintptr_t w, uintptr_t q,
+                                  uintptr_t scale, int M, int N, double eps, uintptr_t stream,
+                                  int tiled) {
+  if (nq_reg() && (nq_art_v == 128 || nq_art_v == 512 || nq_art_v == 1024) && !(N > 40 * ARNQ_T || (N & 127) || (zs & 7))) {
+#define RAD_GNQ(A_)                                                                                   \
+    do {                                                                                              \
+      if (tiled) hipLaunchKernelGGL((radiance_gdn_norm_quant<A_, true, true>), dim3(M), dim3(A_), 0,    \
+                                    (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,      \
+                                    (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps); \
+      else hipLaunchKernelGGL((radiance_gdn_norm_quant<A_, false, true>), dim3(M), dim3(A_), 0,         \
+                              (hipStream_t)stream, (const __bf16 *)x, (const __bf16 *)z, zs,            \
+                              (const __bf16 *)w, (unsigned char *)q, (float *)scale, N, (float)eps);    \
+    } while (0)
+    if (nq_art_v == 128) RAD_GNQ(128); else if (nq_art_v == 512) RAD_GNQ(512); else RAD_GNQ(1024);
+#undef RAD_GNQ
+    return;
+  }
+  if (nq_reg()) launch_gdn_norm_quant_t<true>(x, z, zs, w, q, scale, M, N, eps, stream, tiled);
+  else launch_gdn_norm_quant_t<false>(x, z, zs, w, q, scale, M, N, eps, stream, tiled);
 }
 
-static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintptr_t q,
+template <bool REG>
+static void launch_add_rms_quant_t(uintptr_t y, uintptr_t res, uintptr_t w, uintptr_t q,
                                  uintptr_t scale, uintptr_t res_out, int M, int K, double eps,
                                  uintptr_t stream, int tiled) {
   if (K > 40 * ARNQ_T || (K & 7)) throw std::runtime_error("radiance_add_rms_quant: K must be 8-aligned and <= 10240");
   if (tiled) {
     if (K & 15) throw std::runtime_error("radiance_add_rms_quant: tiled needs K % 16 == 0");
     if (M >= 2048)
-      hipLaunchKernelGGL((radiance_add_rms_quant<512, true>), dim3(M), dim3(512), 0, (hipStream_t)stream,
+      hipLaunchKernelGGL((radiance_add_rms_quant<512, true, REG>), dim3(M), dim3(512), 0, (hipStream_t)stream,
                          (const __bf16 *)y, (const __bf16 *)res, (const __bf16 *)w,
                          (unsigned char *)q, (float *)scale, (__bf16 *)res_out, K, (float)eps);
     else
-      hipLaunchKernelGGL((radiance_add_rms_quant<ARNQ_T, true>), dim3(M), dim3(ARNQ_T), 0,
+      hipLaunchKernelGGL((radiance_add_rms_quant<ARNQ_T, true, REG>), dim3(M), dim3(ARNQ_T), 0,
                          (hipStream_t)stream, (const __bf16 *)y, (const __bf16 *)res,
                          (const __bf16 *)w, (unsigned char *)q, (float *)scale,
                          (__bf16 *)res_out, K, (float)eps);
@@ -1677,22 +2088,42 @@ static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintpt
   // original -- its +40 VGPRs/thread costs occupancy exactly when 8192 blocks compete; the
   // M=2048 idle-GPU microbench that justified it was the fill-the-GPU-first trap.
   if (M >= 2048)
-    hipLaunchKernelGGL((radiance_add_rms_quant<512>), dim3(M), dim3(512), 0, (hipStream_t)stream,
+    hipLaunchKernelGGL((radiance_add_rms_quant<512, false, REG>), dim3(M), dim3(512), 0, (hipStream_t)stream,
                        (const __bf16 *)y, (const __bf16 *)res, (const __bf16 *)w,
                        (unsigned char *)q, (float *)scale, (__bf16 *)res_out, K, (float)eps);
   else
-    hipLaunchKernelGGL((radiance_add_rms_quant<ARNQ_T>), dim3(M), dim3(ARNQ_T), 0,
+    hipLaunchKernelGGL((radiance_add_rms_quant<ARNQ_T, false, REG>), dim3(M), dim3(ARNQ_T), 0,
                        (hipStream_t)stream, (const __bf16 *)y, (const __bf16 *)res,
                        (const __bf16 *)w, (unsigned char *)q, (float *)scale,
                        (__bf16 *)res_out, K, (float)eps);
+}
+static void launch_add_rms_quant(uintptr_t y, uintptr_t res, uintptr_t w, uintptr_t q,
+                                 uintptr_t scale, uintptr_t res_out, int M, int K, double eps,
+                                 uintptr_t stream, int tiled) {
+  if (nq_reg()) launch_add_rms_quant_t<true>(y, res, w, q, scale, res_out, M, K, eps, stream, tiled);
+  else launch_add_rms_quant_t<false>(y, res, w, q, scale, res_out, M, K, eps, stream, tiled);
 }
 
 // GEMM on a fragment-tiled activation (see radiance_mxfp4_fp8_gemm_atiled). The caller decides
 // the layout per tensor (radiance_mxfp4.py a_tiled_*); this only dispatches. Prefill-class M
 // only: the decode kernel reads row-major A, so the Python side never tiles below its band.
-static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
-                           uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
-                           uintptr_t stream) {
+// PSW layout: g_at_psw / set_at_psw, defined above launch_impl (mode 2 covers every reader).
+static int g_at_skip_pad = [] { const char *e = getenv("RADIANCE_MXFP4_AT_SKIP_PAD"); return e ? atoi(e) : 0; }();
+static void set_at_skip_pad(int v) { g_at_skip_pad = v; }
+// TALL (RADIANCE_MXFP4_TALL=1, default off): 512x64x64 tile (TMT=8, TN=2, LBK=64, 8 waves of 128x32)
+// for gate_up (N 34816) only -- the one shape where it measures faster -- at
+// tn_m >= RADIANCE_MXFP4_TALL_MIN_M (default 2048). The merged GDN in_proj (N 16480) keeps TN2/TN4:
+// the same tile measured up to 2 % slower there. Same K order and WMMA chain per output as
+// TN=2/TN=4, so the bytes match them (gated by the DIGEST lines of bench_prefill_cells.py --check).
+// Fragment-order e4m3 weights, no PSW/E6 only.
+static int g_at_tall = [] { const char *e = getenv("RADIANCE_MXFP4_TALL"); return e ? atoi(e) : 0; }();
+static int g_at_tall_min_m = [] { const char *e = getenv("RADIANCE_MXFP4_TALL_MIN_M"); return e ? atoi(e) : 2048; }();
+static void set_at_tall(int v, int min_m) { g_at_tall = v; g_at_tall_min_m = min_m; }
+// tn_m: the M that picks the tile variant (TN / short-M tile). Equal to M except for the pieces of an
+// M-split launch (launch_at_impl below), which keep the variant of the full M.
+static void launch_at_one(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
+                          uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
+                          uintptr_t stream, uintptr_t wh, int tn_m) {
   if (K % 128) throw std::runtime_error("radiance_mxfp4_fp8: tiled A needs K % 128 == 0");
   if ((pb1 < N && pb1 % 128) || (pb2 < N && pb2 % 128))
     throw std::runtime_error("radiance_mxfp4_fp8: partition boundaries must be multiples of 128");
@@ -1706,19 +2137,102 @@ static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wre
     return e && atoi(e) != 0;
   }();
   dim3 fblock(NTHREADS);
-#define RAD_AT(TN_, WP_)                                                                        \
+#define RAD_AT_TMS(TN_, WP_, E6_, TM_, SP_) RAD_AT_X(TN_, WP_, E6_, TM_, SP_, 0)
+#define RAD_AT_X(TN_, WP_, E6_, TM_, SP_, PSW_)                                                     \
   do {                                                                                          \
     constexpr int B_ = BNF_OF(TN_);                                                             \
-    dim3 fgrid((N + B_ - 1) / B_, (M + BMF - 1) / BMF);                                         \
-    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 ? 128 : 64)>),      \
+    dim3 fgrid((N + B_ - 1) / B_, (M + WM * (TM_) * 16 - 1) / (WM * (TM_) * 16));              \
+    hipLaunchKernelGGL((radiance_mxfp4_fp8_gemm_atiled<TN_, WP_, (TN_ == 2 && TM_ != 8 ? 128 : 64), E6_, TM_, SP_, PSW_>), \
                        fgrid, fblock, 0,                                                        \
                        (hipStream_t)stream, (const unsigned char *)a, (const unsigned char *)w, \
                        (const unsigned char *)ws, (const unsigned char *)wref, (const float *)as, \
-                       (__bf16 *)c, M, N, K, pb1, pb2, astride);                               \
+                       (__bf16 *)c, M, N, K, pb1, pb2, astride, (const unsigned char *)wh);    \
   } while (0)
-  if (M >= tn4_min_m && N >= BNF_OF(4)) { if (wperm) RAD_AT(4, true); else RAD_AT(4, false); }
-  else                                  { if (wperm) RAD_AT(2, true); else RAD_AT(2, false); }
+#define RAD_AT_TM(TN_, WP_, E6_, TM_) RAD_AT_TMS(TN_, WP_, E6_, TM_, false)
+#define RAD_AT(TN_, WP_, E6_) RAD_AT_TM(TN_, WP_, E6_, TM)
+  // Opt-in short-M tile: M <= RADIANCE_MXFP4_AT_TMS_MAX_M (default 0 = off) at TN=2 uses TM=RADIANCE_MXFP4_AT_TMS
+  // (2 -> BMF 128, 3 -> BMF 192) so a short M pads less and the grid fills the CUs. Same arithmetic per output.
+  static const int tms_max_m = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS_MAX_M"); return e ? atoi(e) : 0; }();
+  static const int tms = [] { const char *e = getenv("RADIANCE_MXFP4_AT_TMS"); return e ? atoi(e) : 2; }();
+  const bool skip_pad = g_at_skip_pad != 0;
+  if (g_at_psw != 0) {   // weights repacked at load: every A-tiled call must take a PSW kernel
+    if (!wperm || wh) throw std::runtime_error("radiance_mxfp4_fp8: AT_PSW needs WPERM e4m3 weights");
+    const bool tn4 = tn_m >= tn4_min_m && N >= BNF_OF(4);
+    const bool sp = skip_pad && (M & (WM * TM * 16 - 1)) != 0;
+#define RAD_AT_P(PSW_) do {                                                                     \
+      if (tn4) { if (sp) RAD_AT_X(4, true, false, TM, true, PSW_); else RAD_AT_X(4, true, false, TM, false, PSW_); } \
+      else     { if (sp) RAD_AT_X(2, true, false, TM, true, PSW_); else RAD_AT_X(2, true, false, TM, false, PSW_); } \
+    } while (0)
+    // The tall tile (gate_up only) is a template-arg twin of TN=2: it reads the same PSW bytes.
+    if (g_at_tall && N == 34816 && tn_m >= g_at_tall_min_m) {
+      if (g_at_psw == 1) RAD_AT_X(2, true, false, 8, false, 1); else RAD_AT_X(2, true, false, 8, false, 2);
+    } else
+    if (g_at_psw == 1) RAD_AT_P(1); else RAD_AT_P(2);
+#undef RAD_AT_P
+  } else
+  if (g_at_tall && wperm && !wh && N == 34816 && tn_m >= g_at_tall_min_m) {   // gate_up only
+    // Proof line for the serving log: the tall tile is only ever a measurement claim until a
+    // served run shows it was actually dispatched, and with which shape.
+    static bool said_tall = false;
+    if (!said_tall) {
+      said_tall = true;
+      fprintf(stderr, "[radiance.mxfp4] RADIANCE_MXFP4_TALL: tall tile dispatched (M %d, N %d, tn_m %d)\n",
+              M, N, tn_m);
+      fflush(stderr);
+    }
+    RAD_AT_TM(2, true, false, 8);
+  } else
+  if (tn_m <= tms_max_m && tn_m < tn4_min_m && (tms == 2 || tms == 3)) {
+    if (tms == 2) {
+      if (wh) RAD_AT_TM(2, true, true, 2); else if (wperm) RAD_AT_TM(2, true, false, 2); else RAD_AT_TM(2, false, false, 2);
+    } else {
+      if (wh) RAD_AT_TM(2, true, true, 3); else if (wperm) RAD_AT_TM(2, true, false, 3); else RAD_AT_TM(2, false, false, 3);
+    }
+  } else
+  if (skip_pad && wperm && !wh && (M & (WM * TM * 16 - 1)) != 0) {   // MXFP4 fragment-order only
+    if (tn_m >= tn4_min_m && N >= BNF_OF(4)) RAD_AT_TMS(4, true, false, TM, true);
+    else                                     RAD_AT_TMS(2, true, false, TM, true);
+  } else
+  if (tn_m >= tn4_min_m && N >= BNF_OF(4)) {
+    if (wh) RAD_AT(4, true, true); else if (wperm) RAD_AT(4, true, false); else RAD_AT(4, false, false);
+  } else {
+    if (wh) RAD_AT(2, true, true); else if (wperm) RAD_AT(2, true, false); else RAD_AT(2, false, false);
+  }
 #undef RAD_AT
+#undef RAD_AT_TM
+#undef RAD_AT_TMS
+#undef RAD_AT_X
+}
+// RADIANCE_MXFP4_AT_MSPLIT=<rows> (default 0 = off): an A-tiled GEMM with M > rows runs as several
+// launches of at most `rows` rows (rounded down to whole 256-row tiles = the tallest row tile). Every kernel that
+// runs longer than ~1.07 ms is followed by a ~123 us idle gap on this platform (measured, cause
+// unknown); shorter launches get the normal ~10-18 us gap. Each output row is computed by the same
+// code over the same K order whichever launch owns it, and every piece keeps the tile variant of the
+// full M, so the result is bit-identical. A rows are contiguous per 16-row fragment band in the tiled
+// layout (piece offset = m0 * K bytes). Single-partition launches only (the partitioned scale layout
+// [P, M] would need the full-M stride). W is re-streamed per piece exactly as per row tile already.
+static int at_msplit_v = [] { const char *e = getenv("RADIANCE_MXFP4_AT_MSPLIT"); return e ? atoi(e) : 0; }();
+static void set_at_msplit(int v) { at_msplit_v = v; }
+static void launch_at_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
+                           uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
+                           uintptr_t stream, uintptr_t wh = 0) {
+  const int maxt = at_msplit_v / 256;                 // whole 256-row tiles per launch
+  const int T = (M + 255) / 256;
+  if (maxt <= 0 || T <= maxt || pb1 < N || pb2 < N) {
+    launch_at_one(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream, wh, M);
+    return;
+  }
+  // Even split in whole tiles (1760 rows at 768 -> 768 + 512 + 512, not 768 + 768 + 224): no extra
+  // partial tiles, so the total tile count (= W re-streams) stays that of one launch.
+  const int P = (T + maxt - 1) / maxt;
+  for (int p = 0, t0 = 0; p < P; ++p) {
+    const int nt = T / P + (p < T % P ? 1 : 0);
+    const int m0 = t0 * 256;
+    t0 += nt;
+    const int mp = (t0 * 256 < M ? t0 * 256 : M) - m0;
+    launch_at_one(a + (uintptr_t)m0 * K, w, ws, wref, as + (uintptr_t)m0 * sizeof(float),
+                  c + (uintptr_t)m0 * N * 2, mp, N, K, pb1, pb2, astride, stream, wh, M);
+  }
 }
 static void launch_at(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                       uintptr_t c, int M, int N, int K, uintptr_t stream) {
@@ -1729,18 +2243,36 @@ static void launch_at_p(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, 
                         uintptr_t stream) {
   launch_at_impl(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream);
 }
+static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, uintptr_t wref,
+                         uintptr_t as, uintptr_t c, int M, int N, int K, int pb1, int pb2,
+                         long astride, uintptr_t stream) {
+  launch_at_impl(a, w, ws, wref, as, c, M, N, K, pb1, pb2, astride, stream, wh);
+}
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
+  m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");
+  m.def("set_at_tall", &set_at_tall, "bench: toggle the tall tile in-process (default from RADIANCE_MXFP4_TALL / _TALL_MIN_M)");
+  // Capability probe for the loader: 2 = mode 2 is read by the decode, wide-decode and folded
+  // kernels too (an older .so only had it in the A-tiled kernel and would decode PSW bytes wrong).
+  m.def("psw_reader_mode", [] { return 2; }, "highest PSW mode every e4m3 fragment-order kernel reads");
+  m.def("set_at_skip_pad", &set_at_skip_pad, "bench: toggle SKIPPAD in-process (default from RADIANCE_MXFP4_AT_SKIP_PAD)");
   m.def("launch", &launch, "MXFP4 x FP8 WMMA GEMM (gfx1201)");
   m.def("launch_p", &launch_p, "MXFP4 x FP8 GEMM over a merged linear: P rotated A copies, partition by n-block (pb1, pb2, astride)");
   m.def("launch_at_p", &launch_at_p, "fragment-tiled A variant of launch_p");
+  m.def("launch6_p", &launch6_p, "MXFP6 (E2M3) x FP8 GEMM: launch_p plus the 2-bit plane wh after w (WPERM=1, wref)");
+  m.def("launch6_at_p", &launch6_at_p, "fragment-tiled A variant of launch6_p");
   m.def("launch_silu_mul_quant", &launch_silu_mul_quant,
         "fused silu(gate)*up + per-token e4m3 quant, one WG per row",
         py::arg("gu"), py::arg("q"), py::arg("scale"), py::arg("M"), py::arg("N"),
         py::arg("stream"), py::arg("tiled") = 0);
+  m.def("set_at_msplit", &set_at_msplit, "A/B hook: override RADIANCE_MXFP4_AT_MSPLIT in this process");
+  m.def("set_nq_reg", &set_nq_reg, "A/B hook: override RADIANCE_FUSED_NQ_REG in this process");
+  m.def("set_nq_art", &set_nq_art, "A/B hook: override RADIANCE_FUSED_NQ_ART in this process");
   m.def("launch_gdn_norm_quant", &launch_gdn_norm_quant,
-        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)");
+        "per-head gated RMSNorm + per-token fp8 quant (GDN out_proj input)",
+        py::arg("x"), py::arg("z"), py::arg("zs"), py::arg("w"), py::arg("q"), py::arg("scale"),
+        py::arg("M"), py::arg("N"), py::arg("eps"), py::arg("stream"), py::arg("tiled") = 0);
   m.def("launch_add_rms_quant", &launch_add_rms_quant,
         "fused residual-add + Gemma rmsnorm + per-token e4m3 quant, one WG per row",
         py::arg("y"), py::arg("res"), py::arg("w"), py::arg("q"), py::arg("scale"),

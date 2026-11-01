@@ -4,13 +4,17 @@ How the image is built, tested and released. Contributor and agent rules are in 
 
 ## Build
 
-Everything the build needs is in this directory (flat Docker context). Multi-stage: **builder**
-(PyTorch, Triton, torchvision, AITER, vLLM from source for gfx1201) → **rocmprune** → **assemble**
+Everything the build needs is in this directory (flat Docker context). Multi-stage: **buildbase**
+→ **torch** (AMD's prebuilt PyTorch wheel for ROCm 10.1 by default, or PyTorch from source, see
+below) → **builder** (Triton as AMD's hash-pinned wheel; AITER, vLLM from source; torchvision is AMD's wheel from the torch stage, compiled only for a source-built torch)
+→ **rocmprune** → **assemble**
 (wheels, upstream RDNA4 patches, then the `sly/` patches, libr4d, the HIP kernel) → **venvsplit**
 → **final** (clean `ubuntu:24.04` + pruned ROCm + venv + entrypoint).
 
 The final image has three large layers, from stable to volatile: the pruned ROCm tree
-([`prune_rocm.sh`](prune_rocm.sh): gfx1201 only, no static archives, no Flang/MLIR), the **cold**
+([`prune_rocm.sh`](prune_rocm.sh): gfx1201 only, no static archives, no Flang/MLIR, no host-side
+tooling or profiler products — rpp, rocprofiler-systems/compute, rocgdb, the 64-bit OpenBLAS twin),
+the **cold**
 venv (the installed stack: torch, triton, aiter's metadata, the Python dependencies) and the **hot**
 venv (the patched vLLM and aiter trees, the few files patched elsewhere, the radiance modules and
 kernels). [`split_venv.py`](split_venv.py) makes the split and resets every mtime, so the cold layer
@@ -25,18 +29,34 @@ release downloads the hot layer only, until the next ROCm or stack bump.
 git clone https://github.com/SlyBase/vllm-sly-radiance.git
 cd vllm-sly-radiance
 
-docker build -t vllm-sly-radiance:$(cat VERSION)-rocm10.0 .
+docker build -t vllm-sly-radiance:$(cat VERSION)-rocm10.1 .
 ```
 
-A cold build compiles PyTorch and takes hours (`MAX_JOBS=4` by default — raise it on a box with
-RAM to spare). With the builder stage cached, a change to the `sly/` layer rebuilds in ~10 minutes.
+A cold build takes about 30 minutes on the runner (`MAX_JOBS=4` by default): PyTorch is AMD's
+wheel from `stable.repo.amd.com/rocm/whl-next` (`torch==2.13.0+rocm10.1.0` plus
+`amd-torch-device-gfx1201`; torchvision 0.28.0 + `amd-torchvision-device-gfx1201` and
+`triton==3.8.0+git669b31ac.rocm10.1.0` come from the same index), installed against the image's own `/opt/rocm`. How that fits
+(metadata rewrite, `rocm_sdk/` stand-in, no strip of `torch/lib`) is in the comment on the
+`torch-amd` stage. With the builder stage cached, a change to the `sly/` layer rebuilds in ~10 minutes.
+
+For a ROCm release AMD has no wheel for yet (a 10.1 beta, say), `--build-arg TORCH_FROM=torch-wheel`
+compiles PyTorch from source instead (~2 h, torch at `MAX_JOBS=3`). That compile can also come from an
+image: `--build-arg TORCH_FROM=<image>` takes the `torch-wheel` target from there. CI keeps one per torch definition at
+`ghcr.io/slybase/vllm-sly-radiance-torch:<tag>`, the tag from [`ci/torch_key.py`](../ci/torch_key.py)
+(torch version, ROCm major.minor, GPU arch, hash of the torch stages and the base image). A local
+build can use it too when logged in to ghcr.io:
+
+```bash
+docker build --build-arg TORCH_FROM=ghcr.io/slybase/vllm-sly-radiance-torch:$(python3 ci/torch_key.py) \
+  -t vllm-sly-radiance:$(cat VERSION)-rocm10.1 .
+```
 The build needs no GPU, so it can run next to a serving container.
 
 Smoke test:
 
 ```bash
 docker run --rm --device=/dev/kfd --device=/dev/dri -e HIP_VISIBLE_DEVICES=0 \
-  --entrypoint python3 vllm-sly-radiance:$(cat VERSION)-rocm10.0 \
+  --entrypoint python3 vllm-sly-radiance:$(cat VERSION)-rocm10.1 \
   -c "from vllm.model_executor.layers.quantization.quark import QuarkConfig; print('OK')"
 ```
 
@@ -50,9 +70,9 @@ patch_*.py, radiance_*.py     upstream vllm-radiance RDNA4 patches and runtime m
 sly/
   README.md                   per-patch reference (German)
   patch_quark_mxfp4.py        Quark/MXFP4 loader gates for vLLM 0.29.0 + kernel plugin registration
-  patch_short_prefill.py      GDN 1-token-prefill fix
+  patch_short_prefill.py      GDN 1-token-prefill fix (not applied since 1.1.0: native in vLLM 0.31)
   patch_dflash_w4_packed.py   W4A16 (compressed-tensors) DFlash drafter
-  patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path
+  patch_gdn_nonspec_mask.py   non_spec_sequence_masks_cpu on the numpy path (not applied since 1.1.0)
   patch_lmhead_fp8.py         hook radiance_lmhead_fp8 into QuarkConfig
   patch_w4a16_tiles.py        gfx1201 tile table, split-K, tiled layout and fused epilogues for the W4A16 GEMMs
   bench_w4a16_tiles.py        tile / split-K sweep that produced the tables
@@ -87,9 +107,10 @@ Workflows (`.github/workflows/`):
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci` | PR, push to `main`, manual | `lint` (ruff E9/F63/F7/F82, shellcheck, hadolint, actionlint, `docker buildx build --check`), `patch-dryrun` (`ci/patch_dryrun.sh`: the pinned upstream sources from the Dockerfile ARGs in a venv, then the Dockerfile patch loop twice — pass 1 must apply every hunk, pass 2 must be all NOOP; `ci/patch_dryrun_skip.txt` is the documented skip allowlist), `constraints` (`ci/check_constraints.py`, see below), `consistency` (`ci/check_consistency.py`: every patch file is in the loop or in `ci/unused_patches.txt`, every `sly/patch_*.py` is documented in `sly/README.md`, image changes bump `VERSION`). The aggregate status **`ci`** is the required check on `main`. |
-| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.0` only for `v*` tags or the `push_ghcr` input. Build log is an artifact. |
+| `build` | push to `main` touching `VERSION`, tags `v*`, manual | Self-hosted runner (`rocm-build`, LXC 2408, CPU only — no `--device`, no GPU test, no deploy): `docker build` with AMD's PyTorch wheel (input `torch_from_source`: PyTorch from `ghcr.io/slybase/vllm-sly-radiance-torch:<ci/torch_key.py>`, missing → `--target torch-wheel` once, ~2 h, and pushed) → import smoke test → push to `ghcr.io/slybase/vllm-sly-radiance:<VERSION>-rocm10.1` only for `v*` tags or the `push_ghcr` input (input `push_zstd`, default on: layers zstd-compressed at level 19 via skopeo instead of gzip, about a third smaller, needs a reader with the containerd image store — `false` for a consumer on the classic overlay2 store). Build log is an artifact. |
 | `upstream-sync` | daily 04:00 UTC, manual | Fast-forwards `upstream/*` from Codeberg (never force) and opens/updates a PR `upstream/<name>` → `main` (label `upstream-sync`) listing the new commits, the test-merge conflict status and the image-relevant files. Never merges. Needs the `SYNC_TOKEN` secret (fine-grained PAT, contents + pull-requests write) to create PRs. |
 | `renovate` | every 6 h, push to `main` touching the config, manual | Self-hosted Renovate (same setup as SlyBase/helm-charts) with the upstream-sync App token (`SYNC_APP_*`). Optional secret `RENOVATE_GITHUB_COM_TOKEN` (read-only PAT) lifts the rate limit for lookups in other repositories. |
+| `stale-issues` | daily 03:17 UTC, manual (`debug_only` = dry run) | `actions/stale` for issues only: no activity for 7 days → comment + label `stale`, 3 more days without activity → closed (10 days in total). Activity removes the label. Exempt: labels `keep-open`, `pinned`, `security`, issues with a milestone (the Renovate dashboard carries `keep-open`). PRs are untouched. |
 
 Renovate (`renovate.json`) tracks every Dockerfile ARG pin via the `# renovate:` markers above the
 ARGs (ROCm base image tag + digest, ubuntu digest, torch/triton/torchvision as one group, vLLM,
@@ -126,11 +147,16 @@ Changing code:
 
 ```bash
 git switch -c feat/my-change main
-# edit; bump VERSION for anything that changes the image (consistency enforces it on PRs)
+# edit; note image changes under '## [Unreleased]' in CHANGELOG.md (consistency enforces it on PRs)
 python3 ci/check_consistency.py --base origin/main && ci/patch_dryrun.sh
 git push -u origin feat/my-change && gh pr create
-# merge when `ci` is green — the VERSION bump on main then triggers `build`
+# merge when `ci` is green
 ```
+
+Releasing (when you want an image): `python3 ci/cut_release.py X.Y.Z` on a branch turns
+`[Unreleased]` into `[X.Y.Z] - <date>` and sets `VERSION`; open that as the release PR (it builds once
+when it leaves draft). Its merge — the VERSION change on main — triggers `build`, then the gate and the tag.
+A PR builds on push only with the label `stack` or `build`.
 
 Merging upstream: take the `upstream-sync` PR (or `git merge origin/upstream/<name>` on a branch),
 resolve the usual conflicts (Dockerfile pins + patch loop, `README.md`, `VERSION`) and re-verify
@@ -143,7 +169,7 @@ every `sly/` anchor — `ci/patch_dryrun.sh` fails hard when an anchor is gone.
 - A green acceptance gate (`accept.yml`) runs `ci/release_tag.sh`: annotated tag `v<VERSION>` on the
   gated commit, then a GitHub release whose body is that CHANGELOG section plus the image reference.
   `release.yml` does the same by hand (reason required). The tag starts `build.yml`, which pushes the
-  image to `ghcr.io/slybase/vllm-sly-radiance:<version>-rocm10.0`.
+  image to `ghcr.io/slybase/vllm-sly-radiance:<version>-rocm10.1`.
 - After a release that changes the numbers, run the reference benchmark (see `AGENTS.md`), put the
   new values into the README's *Performance* table and move the previous table to
   `docs/BENCHMARKS.md`.
@@ -154,3 +180,7 @@ Renovate runs without an hourly or concurrent PR cap (`prHourlyLimit` / `prConcu
 the default 2/h and a cap of 5, updates sat rate-limited on the dashboard for days. Grouping keeps the
 PR count small (torch stack, Python deps, CI tools, actions); a dependency bump with image impact is
 integrated like any other change (VERSION, CHANGELOG, build, GPU gate).
+
+Image-relevant bumps are not made by hand any more: only a vLLM release or a ROCm base tag opens a `stack`
+PR, and `ci/resolve_stack.py` derives the rest. Pipeline, night gate, Hermes rules and the pause switch:
+[MAINTENANCE.md](MAINTENANCE.md).

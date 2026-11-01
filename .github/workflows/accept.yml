@@ -5,19 +5,20 @@
 # and asks the restricted `gpu-window` helper in 2408 over SSH to hand the GPU over for a
 # measurement window and to give it back afterwards (Betriebsregel Nr. 1).
 #
-# Because the window takes production down for 20-70 minutes, the job sits in the protected
+# Because the window takes production down for 20-30 minutes, the job sits in the protected
 # environment `gpu-window`: GitHub waits for a human approval before the runner does anything.
 # `gpu-window acquire` additionally refuses a window while the server is actually serving
 # (running/waiting requests or recent POST /v1/ lines) unless it is forced.
 #
 # Triggers
 #   - build.yml finished successfully on main           -> queued automatically, waits for approval
+#     ONLY while AUTO_MAINTAIN=off; with the automated maintenance on, accept-night.yml gates + releases
 #     (not for a v* tag: a tag only publishes to ghcr and points at a commit that main already
 #     gated; an old tag can even predate ci/accept/ and would fail at the checkout)
 #   - workflow_dispatch                                 -> choose image, profile, mode by hand
 #
-# Mode: `fast` (~25 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
-# for every build; `full` (~70 min: the whole conc sweep plus GSM8K) is selected automatically
+# Mode: `fast` (~22 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
+# for every build; `full` (~27 min: the whole conc sweep plus GSM8K) is selected automatically
 # when the major or minor part of VERSION changed, i.e. for a release, and can be forced by hand.
 #
 # After the gate
@@ -40,7 +41,7 @@ on:
       profile:
         description: profile
         type: choice
-        options: [vllm7-mxfp4, vllm5-int4]
+        options: [vllm7-mxfp4, vllm5-int4, vllm7-kv4]
         default: vllm7-mxfp4
       mode:
         description: gate scope
@@ -67,17 +68,23 @@ concurrency:
 jobs:
   plan:
     # Cheap, unprotected: decide what to test. No GPU, no runner from the homelab.
+    # The automatic path after a main build runs only while the automated maintenance is paused
+    # (AUTO_MAINTAIN=off): with it on, accept-night gates and releases, and a run here would sit in the
+    # gpu-window environment waiting for an approval nobody gives -- holding the shared `gpu-window`
+    # concurrency group, so every night gate behind it stays pending (seen 2026-10-07).
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
+      (vars.AUTO_MAINTAIN == 'off' &&
+       github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       image: ${{ steps.meta.outputs.image }}
       version: ${{ steps.meta.outputs.version }}
       mode: ${{ steps.meta.outputs.mode }}
       profile: ${{ steps.meta.outputs.profile }}
       sha: ${{ steps.meta.outputs.sha }}
+      skip: ${{ steps.meta.outputs.skip }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -110,7 +117,17 @@ jobs:
             echo "VERSION $OLD -> $VER, mode=$MODE"
           fi
 
+          # accept-night.yml already gated and merged this commit (and dispatches the release): a
+          # second, approval-gated gate for the same VERSION would only wait for a click forever
+          SKIP=false
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ -n "$(git tag -l "v${VER}")" ] || git log -1 --format=%s | grep -q "night gate green"; then
+              SKIP=true; echo "v${VER} is released or was gated by accept-night: nothing to do"
+            fi
+          fi
+
           {
+            echo "skip=$SKIP"
             echo "image=$IMAGE"; echo "version=$VER"; echo "mode=$MODE"
             echo "profile=${PROFILE_INPUT:-vllm7-mxfp4}"; echo "sha=$SHA"
           } >> "$GITHUB_OUTPUT"
@@ -130,6 +147,7 @@ jobs:
 
   gate:
     needs: plan
+    if: needs.plan.outputs.skip != 'true'
     runs-on: [self-hosted, linux, gpu-accept]
     # Protected: a reviewer has to approve before production is touched.
     environment: gpu-window
@@ -174,9 +192,11 @@ jobs:
       - name: production health (independent of the gate result)
         if: always()
         env:
-          ACCEPT_HOST: ${{ vars.ACCEPT_HOST || '192.168.178.51' }}
+          # production is Radiance on LXC 2413 (gpu-window GPU_WINDOW_PROD=radiance restores it);
+          # before 2026-10-06 it was vllm7 on 2408:8000 -- set the variable to that to go back
+          PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.54:8000/health' }}
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${ACCEPT_HOST}:8000/health" || echo 000)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PROD_HEALTH_URL" || echo 000)
           echo "production /health = $code"
           test "$code" = "200"
 
@@ -194,7 +214,7 @@ jobs:
       github.event_name == 'workflow_run' ||
       (github.ref == 'refs/heads/main' && inputs.image == '' && inputs.profile == 'vllm7-mxfp4' &&
        !inputs.record_baseline)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       # The App token, not GITHUB_TOKEN: a tag pushed with the latter does not start build.yml.
       - uses: actions/create-github-app-token@v3
@@ -218,6 +238,7 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           PROFILE: ${{ needs.plan.outputs.profile }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_NOTIFY: ${{ vars.RELEASE_NOTIFY || '@slydlake' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

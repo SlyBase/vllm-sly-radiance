@@ -988,14 +988,20 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
   // (-5.5% on gate_up to -29% on gdn.out) because the partials are still in cache when the
   // reduction reads them. The last block resets the counter, leaving it zeroed for the next
   // launch; launches on one stream are serialised, so no separate clearing pass is needed.
+  // Release on EVERY thread: a fence orders only the executing thread's stores, and
+  // __syncthreads is workgroup scope, so a fence on thread 0 alone let the reducer on
+  // another CU read partials the other threads had not drained yet (libr4d's tiled W4A8
+  // split tail documents the same bug). Then an agent-scope acq_rel counter bump, and an
+  // acquire on the reducing block before it reads the other blocks' partials.
+  __threadfence();
   __syncthreads();
-  if (tid == 0) {
-    __threadfence();
-    s_last = (atomicAdd(&cnt[blockIdx.x], 1) == DKS - 1);
-  }
+  if (tid == 0)
+    s_last = (__hip_atomic_fetch_add(&cnt[blockIdx.x], 1, __ATOMIC_ACQ_REL,
+                                     __HIP_MEMORY_SCOPE_AGENT) == DKS - 1);
   __syncthreads();
   if (!s_last) return;
   if (tid == 0) cnt[blockIdx.x] = 0;
+  __threadfence();
 
   const int nhi = min(n0 + BND, N);
   for (int nn = n0 + tid; nn < nhi; nn += DNTHREADS) {

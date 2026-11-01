@@ -39,24 +39,24 @@ vLLM's ROCm builds target datacenter cards (MI300 / CDNA). RDNA4 workstation car
 
 ## Stack
 
-Everything below is compiled from source for `gfx1201` in the image build (0.5.0 onward); nothing is
-pulled from a prebuilt wheel index.
+vLLM and AITER are compiled from source for `gfx1201` in the image build; PyTorch, Triton and torchvision
+are AMD's prebuilt ROCm wheels (1.1.0: the `+rocm10.1.0` builds from `stable.repo.amd.com/rocm/whl-next`).
 
 | Component | Version |
 |---|---|
-| vLLM | 0.27.1 |
-| PyTorch | 2.11.0 |
-| Triton | 3.6.0 |
-| torchvision | 0.24.1 |
-| AITER | 0.1.17 |
-| transformers | 5.14.1 (pinned) |
-| ROCm userspace | 10.0, bundled |
-| Base | `rocm/dev-ubuntu-24.04:10.0.0-full` (Ubuntu 24.04, Python 3.12) |
+| vLLM | 0.31.0 |
+| PyTorch | 2.13.0 |
+| Triton | 3.8.0 (`git669b31ac`) |
+| torchvision | 0.28.0 |
+| AITER | 0.1.23 |
+| transformers | 5.17.0 (pinned; vLLM 0.31 requires < 5.18) |
+| ROCm userspace | 10.1, bundled |
+| Base | `rocm/dev-ubuntu-24.04:10.1.0-full` (Ubuntu 24.04, Python 3.12) |
 
 The PyTorch / Triton / torchvision versions are the ones upstream builds vLLM against **on ROCm**, not a
 newer combination chosen for this image. Read the ROCm numbers, not `pyproject.toml`: 0.27.1's build-system
 asks for `torch == 2.13.0`, which is the CUDA build, while upstream's own ROCm image builds torch
-release/2.11 with torchvision 0.24.1 and pins no torch in `requirements/rocm.txt`. That distinction is
+release/2.11 with torchvision 0.24.1 and pins no torch in `requirements/rocm.txt` (as of 0.27.1; 0.31.0's ROCm base builds release/2.13, torchvision 0.28.0, Triton 669b31a, which is what 1.1.0 ships). That distinction is
 deliberate: see the tensor-parallel hang note below.
 
 transformers is pinned because vLLM does not pin it -- `requirements/common.txt` asks only for
@@ -114,7 +114,7 @@ what it covers. The build clones a pinned tag and compiles it with its own `hipc
 | `RADIANCE_MXFP4` | `0` | native MXFP4 linear GEMM for Quark OCP micro-scaling checkpoints (`quant_method: quark`, mxfp4 weights *and* activations), e.g. `amd/Qwen3.8-27B-Quark-AWQ-MXFP4`. Stock vLLM gates native MX compute to CDNA4 and falls back to emulation, which materialises every weight tensor in bf16 on each forward. Triton 3.6 does lower `tl.dot_scaled` on gfx12x (upconvert + bf16 WMMA), so aiter's `gemm_afp4wfp4` runs here. Output is **bit-identical** to the emulated path -- the activation quantization is the same either way -- so this is a speed change only. Measured on gate_up (17408x5120), speedup vs emulation: **6.1x at M=16, 4.7x at M=32, 2.5x at M=64**, 1.9x at M=128; 65% of the memory-bandwidth roofline at M=16. Ships tuned tiles for the two dominant Qwen3.8-27B TP2 shapes plus a generic per-band table. No effect on any other quantization scheme. |
 | `RADIANCE_MXFP4_W4A8` | `0` | routes large-M (prefill) MXFP4 linears to a hand-written fp8-WMMA HIP kernel. Triton will not emit gfx1201's fp8 matrix instruction -- measured register-resident, fp8 WMMA runs **325 TFLOP/s vs f16's 160**, while Triton's own fp8 `tl.dot` manages only 43 because it upconverts to 16-bit and pays conversion on top. Against the tuned aiter path it replaces this measures **1.47-2.26x faster and 4.2x more accurate** (relative error 0.0265 vs 0.1119 against exact arithmetic), because fp8 activations beat the mxfp4 ones aiter quantizes to. Off by default because it makes the layer W4A8 rather than the checkpoint's declared W4A4: more precise, but no longer bit-identical to emulation. Requires `RADIANCE_MXFP4=1`. |
 | `RADIANCE_MXFP4_W4A8_MIN_M` | `0` | batch size above which `RADIANCE_MXFP4_W4A8` takes over from aiter. **0 means never fall back**, which is both a correctness and a speed choice. Correctness: aiter's W4A4 path returns a wrong result for N=5120 K=3072 (`o_proj`) -- replayed against an fp32 reference it lands at rel=1.066 with ~1/35th of the correct magnitude, against 0.0017 for ours -- because that shape has no tuned table in `mxfp4-configs/` and falls into aiter's generic bands. At the old default of 16 this was invisible in prefill (M=17, our kernel) and silently poisoned decode (M=9, aiter). Speed: 0 used to cost ~55% of decode because the only kernel below M=16 was the prefill-tiled one; `RADIANCE_MXFP4_DECODE_MAX_M` fixes that. Note the comparison is `M > MIN_M`, so 1 would still route M=1 to aiter -- use 0. |
-| `RADIANCE_MXFP4_TN4_MIN_M` | `2048` | batch size above which the W4A8 kernel switches from its TN=2 tile to the wider TN=4 one (BNF 64 -> 128). A-tile staging is 24% of the kernel and the wider tile amortises it, but only once there is enough work to fill it: measured **+10.0% at M=8192, +8.5% at 4096, +1.3% at 2048, -8.8% at 512**. Identical numerics either way. |
+| `RADIANCE_MXFP4_TN4_MIN_M` | `513` | batch size above which the W4A8 kernel switches from its TN=2 tile to the wider TN=4 one (BNF 64 -> 128). A-tile staging is 24% of the kernel and the wider tile amortises it, but only once there is enough work to fill it: measured **+10.0% at M=8192, +8.5% at 4096, +1.3% at 2048, -1.6% at 1536, -4.2% at 1024, -8.8% at 512**. The per-call crossover is near M~1700; `serve-mxfp4.sh` ships `513` anyway because a long prefill runs many full-size M and only ends on a short chunk, and the end-to-end prefill measurement (210 W, 1.5k-47k prompts) is net-positive there. Identical numerics either way. |
 | `RADIANCE_MXFP4_DECODE_MAX_M` | `0` (off; the source repo's `serve-mxfp4.sh` sets **64**, or 128 above 8 concurrent sequences) | **decode-shaped MXFP4 GEMM for small M.** The W4A8 kernel above is tiled BM=256 for prefill; at decode M is `batch x (num_speculative_tokens+1)`, so at batch 1 with SPEC=4 it is 5 -- where that tile issues 4352 WMMA per wave against 5 real rows, **51x more matrix MACs than useful**. This routes `M` up to that bound to a second kernel with TM=`ceil(M/16)` (no wasted M-fragments), split-K to fill the CUs, and BK=128 -- which reverses the prefill tuning, where BK=128 measured -34%, because that loss was purely an LDS occupancy cliff a 16-row A tile never reaches. Needs `RADIANCE_MXFP4_W4A8_MIN_M=0` to be reachable at all; at 16 the M=5 call never enters our launcher. Measured on 2x R9700 against the same build with it off: single-stream step time **35.06 -> 32.16 ms (-8.3%)**, aggregate throughput **+28.5% at 4 concurrent** and **+19.7% at 8**, prefill unchanged within 1.2%. Lossless in practice: GSM8K 500q greedy scored 97.80% both ways, 3/3 discordant, exact sign test p=1.00, at 14% less wall clock. The bound must cover `max_num_seqs x (num_speculative_tokens + 1)` or the widest verify batches fall back onto the prefill tile. Set `0` to send every M to the prefill tile. |
 | `RADIANCE_NVFP4_MXFP4` | `0` | serve compressed-tensors **NVFP4** checkpoints (`nvfp4-pack-quantized`, e.g. `unsloth/Qwen3.8-27B-NVFP4`) by requantizing each linear to MXFP4 (e2m1 + e8m0/32) at load and running it on the W4A8 fp8-WMMA kernel -- the online NVFP4->MXFP4 conversion AMD ships for CDNA4 in SGLang, on RDNA4 in vLLM. Needs `RADIANCE_MXFP4=1 RADIANCE_MXFP4_W4A8=1`. Per-partition global scales are honoured; the block exponent rule is `RADIANCE_NVFP4_EXP` (`mse` default, `ocp`, `noclip`). Lossy in principle (16 dB SQNR vs the bf16 original, 3 dB under NVFP4 itself); GSM8K 500q 97.40%, the same as the PARO-MXFP4 production unit. |
 | `RADIANCE_NVFP4_FP8_LAYERS` | `mxfp4` | what to do with the FP8 per-channel linears such a mixed checkpoint carries (attention, GDN projections, last MLPs). `mxfp4` (default): requantize them to MXFP4 too (never `lm_head`), so every linear is on the radiance kernel and the fp8 residual stream attaches; GSM8K 500q 97.40%. `fp8`: leave them on vLLM's FP8 path (`torch._scaled_mm` -> hipBLASLt) -- diagnostic only: on gfx1201 it wedged the GPU (driver reset) twice under sustained 8-way concurrency, minutes into GSM8K. |
@@ -158,6 +158,7 @@ single-node hosts; needs `--cap-add SYS_NICE` under Docker's default seccomp.
 
 - AMD Radeon AI PRO R9700 (gfx1201). Compiled for gfx1201 only, won't run on other GPUs. Two GPUs (TP=2) is the only configuration tested so far.
 - Linux host with the amdgpu kernel driver and `/dev/kfd` + `/dev/dri`. ROCm userspace is inside the image.
+- Windows 11 works through WSL2 with Adrenalin 26.8.1 or later: see [docs/WINDOWS-WSL2.md](https://github.com/SlyBase/vllm-sly-radiance/blob/main/docs/WINDOWS-WSL2.md) in the source repo.
 - podman or docker, with device passthrough. podman is what this is developed against; the source repo's launcher auto-detects either.
 
 ## Run
@@ -250,6 +251,45 @@ unaffected, and the failure happens while building the payload, before anything 
 launchers pass `-e VLLM_NO_USAGE_STATS=1`; add it to your own `docker run` if you assembled one by
 hand. `VLLM_NO_USAGE_STATS=0` restores both the telemetry and the traceback.
 
+## GPU not detected
+
+`rocm-smi` / `amd-smi` see the card, but every HSA path (`rocminfo`, `rocm-bandwidth-test`,
+torch/vLLM device enumeration) fails with `HSA_STATUS_ERROR_OUT_OF_RESOURCES` ("the runtime
+failed to allocate the necessary resources … spawn threads or create internal OS-specific
+events") and the precheck reports `No CUDA GPUs are available` / `arch check FAIL`. This
+signature isolates the failure to the **HSA runtime's KFD-context setup, not device access** —
+do not chase container device flags or image rebuilds while `rocm-smi` works.
+`rocm-bandwidth-test` is a best-effort, non-blocking startup sweep, so it is the symptom; the
+crash loop comes from vLLM's own HSA init.
+
+**If another container on this same host is already serving on this GPU, the host KFD state is
+healthy — do not reboot.** The failure is then a container *launch/credential* issue on the failing
+container, not a host-side one (a working sibling proves the kernel driver is fine). Check its
+device access and group membership first; rebooting changes nothing in that case.
+
+Recovery, in order (the startup precheck prints this block too):
+
+1. **Fix the container's device access.** `/dev/kfd` is typically `0660` (owner + group only). A
+   rootless container maps its root to your host user (e.g. uid 1000), which is neither the
+   device's owner nor in its group, so `open("/dev/kfd")` returns **EPERM** and HSA init dies with
+   `OUT_OF_RESOURCES` even though `rocm-smi` (a different access path) sees the card. Grant the
+   device's group explicitly — `--device /dev/kfd --device /dev/dri --group-add <gid-of-/dev/kfd>`
+   (works in Podman remote mode) — or launch local-mode with `--group-add keep-groups` (which
+   remote mode rejects), or run rootful. Verify with a bare open: `python3 -c "import os;
+   os.close(os.open('/dev/kfd', os.O_RDWR)); print('kfd ok')"`. Separately, if a sibling already
+   holds the VRAM (e.g. at `gpu_memory_utilization` 0.96), free it or lower the sibling's
+   utilization — otherwise a genuine out-of-resources hits at allocation once access is fixed.
+2. **Reboot the host.** Stale, state-dependent amdgpu/KFD state clears on a clean reboot — this
+   exact signature has been reproduced upstream and clears on reboot. Cheapest fix when no other
+   container is using the GPU, try first.
+3. **Raise the container pids limit or run rootful.** Rootless Podman caps pids at 2048; HSA
+   plus the vLLM workers spawn past it. `ulimit`/`--pids-limit max`.
+4. **If it survives a clean reboot**, it is a host-kernel KFD regression. Capture evidence
+   *before* rebooting or it is gone: `strace -f` of the failing `hsa_init` (which syscall/ioctl
+   fails — KFD ioctl, ENOMEM from thread spawn, fd exhaustion), a `dmesg` diff before/after, and
+   `/sys/class/kfd/kfd/topology`. A 6.x LTS kernel is the workaround until the host-kernel fix
+   lands.
+
 ## Flags
 
 | Flag | Suggested | Notes |
@@ -328,7 +368,7 @@ Tool-calling and reasoning:
 --enable-auto-tool-choice --tool-call-parser <parser> --reasoning-parser <parser>
 ```
 
-For Qwen 3.5 / 3.6 / 3.8 the image ships froggeric's fixed chat template (v22.5) at `/opt/qwen-fixed.jinja`: `--chat-template /opt/qwen-fixed.jinja`. It defaults to `medium` reasoning effort (the official 3.8 template: `xhigh`), keeps the prefix cache across turns and accepts `reasoning_effort` / `enable_thinking` in `chat_template_kwargs`. Any other template works with `--chat-template file.jinja`; the image ships the `from_json` filter those templates often rely on.
+For Qwen 3.5 / 3.6 / 3.8 the image ships froggeric's fixed chat template (v22.5) at `/opt/qwen-fixed.jinja`: `--chat-template /opt/qwen-fixed.jinja`. It defaults to `medium` reasoning effort (the official 3.8 template: `xhigh`), keeps the prefix cache across turns and accepts `reasoning_effort` / `enable_thinking` in `chat_template_kwargs`. Since 1.9.1 (`v22.5-sly2`) only the reasoning of the newest assistant turn is rendered back into the prompt; older turns keep an empty think block (agents that replay all of it lock into repetition loops); `chat_template_kwargs: {"preserve_thinking": true}` restores the upstream behaviour. Any other template works with `--chat-template file.jinja`; the image ships the `from_json` filter those templates often rely on.
 
 ## MXFP4 (4-bit) checkpoints
 

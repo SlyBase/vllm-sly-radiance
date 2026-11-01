@@ -6,7 +6,8 @@
      in ci/unused_patches.txt -- no patch may silently fall out of the image
   3. every `sly/patch_*.py` is documented in sly/README.md
   4. ci/unused_patches.txt and ci/patch_dryrun_skip.txt only name files / loop entries that exist
-  5. (--base <ref>) a change to anything that ends up in the image bumps VERSION
+  5. (--base <ref>) a change to anything that ends up in the image bumps VERSION or adds a note under
+     `## [Unreleased]` in CHANGELOG.md (the release PR, ci/cut_release.py, then moves VERSION)
 
 Exit 1 with a `FAIL` line per finding; `::error::` annotations for GitHub Actions.
 """
@@ -27,7 +28,8 @@ NO_BUMP_FILES = {".gitignore", ".dockerignore", ".hadolint.yaml", "renovate.json
 NO_BUMP_SUFFIXES = (".md",)
 # Offline measurement / check tools under sly/: COPYed into the assemble stage with the rest of
 # sly/, but never executed by a build step and not part of the final image (only /opt/vllm is).
-NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py")
+NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py",
+                "sly/tests/*.py", "sly/kvq/*.py")   # kvq: CPU reference of the KV-cache roadmap, offline only
 
 failures = []
 
@@ -92,11 +94,51 @@ def check_version_bump(base):
     old = subprocess.run(["git", "show", f"{base}:VERSION"], cwd=ROOT, capture_output=True,
                          text=True).stdout.strip()
     new = (ROOT / "VERSION").read_text().strip()
-    if old == new:
-        fail(f"VERSION is still {new} although image-relevant files changed: "
-             + ", ".join(image_files[:8]) + (" ..." if len(image_files) > 8 else ""))
+    tagged = _tag_exists(new) if old == new else False
+    msg = version_rule(old, new, image_files, _unreleased(), tagged)
+    if msg:
+        fail(msg + ": " + ", ".join(image_files[:8]) + (" ..." if len(image_files) > 8 else ""))
     else:
-        print(f"version bump: {old} -> {new} ({len(image_files)} image-relevant files)")
+        print(f"version: {old} -> {new} ({len(image_files)} image-relevant files)")
+
+
+def _unreleased():
+    sys.path.insert(0, str(ROOT / "ci"))
+    from changelog_section import section
+    return section("Unreleased") is not None
+
+
+def version_rule(old, new, image_files, unreleased, tagged):
+    """Return a failure message, or None when the VERSION / CHANGELOG state is allowed.
+
+    Collect-then-release: a feature PR leaves VERSION alone and notes its change under
+    `## [Unreleased]`; the release PR (ci/cut_release.py) is the only one that moves VERSION.
+    """
+    if not image_files:
+        return None
+    if old == new:
+        # One version must never name two different images, which only bites once it is
+        # published: before the v<version> tag exists VERSION is an open frame.
+        if unreleased or not tagged:
+            return None
+        return (f"VERSION is still {new} although image-relevant files changed: add the note under "
+                f"'## [Unreleased]' in CHANGELOG.md (or bump VERSION with ci/cut_release.py)")
+    if unreleased:
+        return ("VERSION moved but CHANGELOG.md still has a non-empty '## [Unreleased]': "
+                "run ci/cut_release.py so the notes ship under the new version")
+    return None
+
+
+def _tag_exists(version):
+    """True when v<version> exists on the remote, or when the lookup itself fails
+    (a failed lookup must not open the frame wide: fall back to the strict rule)."""
+    proc = subprocess.run(["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"],
+                          cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"version frame: tag lookup failed ({proc.stderr.strip()[:120]}), "
+              f"treating v{version} as released")
+        return True
+    return bool(proc.stdout.strip())
 
 
 def check_changelog():

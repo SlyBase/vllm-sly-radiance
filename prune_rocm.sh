@@ -94,6 +94,40 @@ mapfile -t pyb < <(find "$(readlink -f "$R/lib")" -mindepth 1 -maxdepth 1 -type 
 echo "  -$(mb "${pyb[@]}") MB  ROCm Python bindings for other interpreters (${pyb[*]##*/})"
 if [ "${#pyb[@]}" -gt 0 ]; then printf '%s\0' "${pyb[@]}" | xargs -0 rm -rf; fi
 
+# 12. host-side tooling and profiler products nothing in this image calls at runtime. Measured on
+#     1.10.0 against a serving production container's /proc/<pid>/maps (372 mapped files): none of
+#     these is mapped, and no remaining shared object declares a NEEDED edge on them.
+#     Kept on purpose: rocprofv3 and rocprofiler-sdk (ci/ prefills profile in-place through them,
+#     and librocprofiler-sdk is linked into the HIP runtime), rocjitsu (libhsa-runtime64 dlopen()s
+#     the hotswap shim, which links it), libMIOpen + this arch's CK group conv library.
+mapfile -t host_tools < <(
+  # $R/lib, $R/bin and $R/libexec are symlinks into /etc/alternatives (into core-<ver>), and find
+  # does not descend a symlink given as its start path -- resolve them first, or the file patterns
+  # below match nothing and the step silently no-ops.
+  RL=$(readlink -f "$R/lib"); RB=$(readlink -f "$R/bin"); LE=$(readlink -f "$R/libexec")
+  find "$RL" -maxdepth 1 \( -type f -o -type l \) -name 'librpp.so*' -print
+  # rocprofiler-SYSTEMS (a separate product from the SDK): libs, CLI, its python bindings
+  find "$RL/rocprofiler-systems" -mindepth 0 -maxdepth 1 -print 2>/dev/null
+  find "$RL" -maxdepth 1 \( -type f -o -type l \) -name 'librocprof-sys*' -print
+  find "$RB" -maxdepth 1 \( -type f -o -type l \) -name 'rocprof-sys-*' -print
+  find "$RL/python/site-packages/rocprofsys" -mindepth 0 -maxdepth 1 -print 2>/dev/null
+  # rocprofiler-compute (its own python app, ~78 MB)
+  find "$LE/rocprofiler-compute" -mindepth 0 -maxdepth 1 -print 2>/dev/null
+  # the rocgdb launcher set (7 interpreter variants)
+  find "$RB" -maxdepth 1 \( -type f -o -type l \) -name 'rocgdb*' -print
+  # the 64-bit-index OpenBLAS twin: torch and aiter link the plain librocm-openblas
+  find "$RL/host-math/lib" -maxdepth 1 \( -type f -o -type l \) -name 'librocm-openblas64.so*' -print
+  # gallium's video decode driver: nothing in this image decodes video
+  find "$RL/rocm_sysdeps/lib" -maxdepth 1 \( -type f -o -type l \) -name 'librocm_sysdeps_gallium*' -print 2>/dev/null
+  # rocpd python bindings (rocprofiler-systems' database writer)
+  find "$RL/python3.12/site-packages/rocpd" -mindepth 0 -maxdepth 1 -print 2>/dev/null
+  # one-off CLI inspectors/debug tools
+  find "$RB" -maxdepth 1 \( -type f -o -type l \) \
+       \( -name rocshmem_info -o -name hipify-clang -o -name 'rdc*' -o -name MIOpenDriver -o -name mirage \) -print
+)
+echo "  -$(mb "${host_tools[@]}") MB  host-side tools and profilers no runtime path uses ($(( ${#host_tools[@]} )) entries)"
+if [ "${#host_tools[@]}" -gt 0 ]; then printf '%s\0' "${host_tools[@]}" | xargs -0 rm -rf; fi
+
 after=$(du -xs "$R/" 2>/dev/null | cut -f1)
 echo "  ROCm: $((before/1024)) MB -> $((after/1024)) MB (saved $(( (before-after)/1024 )) MB)"
 
@@ -107,12 +141,19 @@ for k in blas rand rccl; do
     || { echo "FATAL: pruned this arch's ${k} kpack"; exit 1; }
 done
 find "$R/" -name "librocshmem_device_${GFX}.bc" | grep -q . || { echo "FATAL: pruned this arch's rocSHMEM bitcode"; exit 1; }
-# Nothing left may link the libMLIR that step 10 removed.
+# Nothing left may link a library this script removed (step 10's libMLIR, step 12's rpp /
+# rocprofiler-systems / gallium / 64-bit OpenBLAS).
+GONE='libMLIR|librocprof-sys|librocm-openblas64|librocm_sysdeps_gallium|librpp\.so'
 while IFS= read -r -d '' f; do
-  if "$LL/bin/llvm-readelf" -d "$f" 2>/dev/null | grep -q 'NEEDED.*libMLIR'; then
-    echo "FATAL: $f links libMLIR, which step 10 removed"; exit 1
-  fi
+  hit=$("$LL/bin/llvm-readelf" -d "$f" 2>/dev/null | grep -Eo "NEEDED.*($GONE)" | head -1)
+  if [ -n "$hit" ]; then echo "FATAL: $f links $hit, which the prune removed"; exit 1; fi
 done < <(find "$(readlink -f "$R/lib")" "$(readlink -f "$R/bin")" "$LL/bin" "$LL/lib" -maxdepth 1 -type f -print0)
+# ... and the things the serving path does use have to still be there.
+for keep in "$R/bin/rocprofv3" "$R/lib/librocprofiler-sdk.so" "$R/lib/libhsa-runtime64.so" \
+            "$R/lib/libhsa_hotswap_rocjitsu.so" "$R/lib/librocjitsu.so" "$R/lib/libMIOpen.so" \
+            "$R/lib/host-math/lib/librocm-openblas.so" "$R/bin/hipcc"; do
+  test -e "$keep" || { echo "FATAL: prune removed $keep, which the runtime needs"; exit 1; }
+done
 
 cat >/tmp/_jit_probe.hip <<'EOF'
 #include <hip/hip_runtime.h>

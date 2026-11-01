@@ -55,6 +55,10 @@ L = PURELIB / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
 # ---- 1. the attention backend enum ---------------------------------------------------------
 REG_OLD = '    ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"\n'
 REG_NEW = REG_OLD + '    R4D = "radiance_r4d_attn.R4DAttentionBackend"\n'
+# R4D_HYBRID: ROCM_AITER_UNIFIED_ATTN with libr4d's prefill kernel for long prefill runs
+# (radiance_r4d_hybrid_attn.py). Opt-in by name like R4D; anchored on the R4D line so it follows it.
+REG_HYB_OLD = '    R4D = "radiance_r4d_attn.R4DAttentionBackend"\n'
+REG_HYB_NEW = REG_HYB_OLD + '    R4D_HYBRID = "radiance_r4d_hybrid_attn.R4DHybridAttentionBackend"\n'
 
 
 # ---- 2. the gated-delta-net layer ------------------------------------------------------------
@@ -164,6 +168,7 @@ BODY_NEW = (
 
 def main():
     apply(REG, REG_OLD, REG_NEW, "radiance_r4d_attn", "R4D attention backend enum")
+    apply(REG, REG_HYB_OLD, REG_HYB_NEW, "radiance_r4d_hybrid_attn", "R4D_HYBRID attention backend enum")
     apply(L, LAYER_IMPORT_OLD, LAYER_IMPORT_NEW, "import radiance_gdn as _radiance_gdn",
           "RADIANCE all-R4D GDN import")
     apply_any(L, [(LAYER_OLD, LAYER_NEW), (LAYER_OLD_029, LAYER_NEW_029)],

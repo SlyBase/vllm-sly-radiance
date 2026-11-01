@@ -192,6 +192,19 @@ def _min_dist(sp):
         return DEFAULT_WINDOW
 
 
+def _cand_ids(sp):
+    """The realized-candidate cache: `sp.candidate_sampler.cached_candidate_ids` since vLLM 0.31 (the
+    CandidateSampler split), `sp._cached_candidate_ids` before."""
+    cs = getattr(sp, "candidate_sampler", None)
+    return cs.cached_candidate_ids if cs is not None else sp._cached_candidate_ids
+
+
+def _top_k(sp):
+    """selector_top_k of the drafter: `sp.top_k` since vLLM 0.31, `sp.selector_top_k` before."""
+    k = getattr(sp, "selector_top_k", None)
+    return int(k if k is not None else sp.top_k)
+
+
 def _prepare(sp, rs):
     """Per-process buffers and the shape guards; raises when this speculator / vLLM is not the one it was written for."""
     import torch
@@ -200,15 +213,15 @@ def _prepare(sp, rs):
         raise RuntimeError(f"all_token_ids is {ids.dtype} {tuple(ids.shape)}")
     if ids.shape[1] >= (1 << POS_BITS):
         raise RuntimeError(f"max_model_len {ids.shape[1]} does not fit {POS_BITS} bits")
-    top_k = int(sp.selector_top_k)
+    top_k = _top_k(sp)
     steps = int(sp.num_speculative_steps)
     dl = sp.draft_logits
     if dl is not None:
         vocab = int(sp.vllm_config.model_config.get_vocab_size())
         if dl.dtype != torch.float32 or dl.dim() != 3 or dl.stride(-1) != 1 or dl.shape[-1] < vocab:
             raise RuntimeError(f"draft_logits {dl.dtype} {tuple(dl.shape)} vs vocab {vocab}")
-        if tuple(sp._cached_candidate_ids.shape) != (dl.shape[0], steps, top_k):
-            raise RuntimeError(f"cached candidates {tuple(sp._cached_candidate_ids.shape)}")
+        if tuple(_cand_ids(sp).shape) != (dl.shape[0], steps, top_k):
+            raise RuntimeError(f"cached candidates {tuple(_cand_ids(sp).shape)}")
     dev = ids.device
     n = int(rs.total_len.gpu.shape[0])
     _state.update(torch=torch, top_k=top_k, steps=steps, block_k=triton.next_power_of_2(top_k),
@@ -235,7 +248,7 @@ def _override(sp, rs, input_batch, num_sampled):
                         S["st_used"], S["stats"], tokens, tokens.stride(0),
                         dl if dl is not None else tokens, dl.stride(0) if dl is not None else 0,
                         dl.stride(1) if dl is not None else 0,
-                        sp._cached_candidate_ids if dl is not None else tokens, S["top_k"],
+                        _cand_ids(sp) if dl is not None else tokens, S["top_k"],
                         K=S["steps"], ENTER=ENTER, STAY=STAY, HOT=HOT, POS_BITS=POS_BITS,
                         HAS_LOGITS=dl is not None, BLOCK_K=S["block_k"], num_warps=1)
     S["calls"] += 1
