@@ -5,10 +5,15 @@ Pure mock: no torch, no vllm, no GPU. The refusal logic (_refusal) is the
 safety gate that keeps the table in VRAM when the swap would break
 correctness — every case must be caught.
 
+Stubs for torch/vllm are installed per-test and restored after, so they do
+not leak into other tests in the same pytest process (CI runs `pytest
+sly/tests` with real torch-cpu; a fake torch there would poison them).
+
 Run:  python3 -m pytest sly/tests/test_embed_host_cpu.py -q
 """
 import sys
 import types
+import contextlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -38,13 +43,19 @@ def _stub_torch():
     sys.modules["torch.cuda"] = torch_mod.cuda
 
 
-def _fresh_import():
-    """Clear cached modules, re-stub torch+vllm, re-import. Returns (mod, ve)."""
-    for k in list(sys.modules):
-        if k.startswith("vllm") or k == "torch" or k.startswith("radiance_embed_host"):
-            del sys.modules[k]
+_STUB_KEYS = ["torch", "torch.nn", "torch.nn.functional", "torch.cuda",
+              "vllm", "vllm.model_executor", "vllm.model_executor.layers",
+              "vllm.model_executor.layers.vocab_parallel_embedding",
+              "radiance_embed_host"]
+
+
+@contextlib.contextmanager
+def _with_stubs():
+    """Install fake torch+vllm, import radiance_embed_host, yield (module, ve),
+    then restore sys.modules so the stubs do not leak into other tests."""
+    saved = {k: sys.modules.pop(k) for k in list(sys.modules) if any(
+        k == s or k.startswith(s + ".") for s in ["torch", "vllm", "radiance_embed_host"])}
     _stub_torch()
-    # vllm stub
     vllm_mod = types.ModuleType("vllm")
     me = types.ModuleType("vllm.model_executor")
     layers = types.ModuleType("vllm.model_executor.layers")
@@ -77,7 +88,13 @@ def _fresh_import():
     sys.modules["vllm.model_executor.layers.vocab_parallel_embedding"] = ve_mod
 
     import radiance_embed_host
-    return radiance_embed_host, ve_mod
+    try:
+        yield radiance_embed_host, ve_mod
+    finally:
+        for k in _STUB_KEYS:
+            sys.modules.pop(k, None)
+        for k, v in saved.items():
+            sys.modules[k] = v
 
 
 def _cuda_weight(dim=2, contiguous=True, dtype="bf16", data_ptr=99):
@@ -107,131 +124,133 @@ def _make_emb(ve, weight, quant_method=None, shared_with=False):
 def test_enabled_default_off():
     import os
     os.environ.pop("RADIANCE_EMBED_HOST", None)
-    mod, _ = _fresh_import()
-    assert mod.ENABLED is False
+    with _with_stubs() as (mod, _):
+        assert mod.ENABLED is False
 
 
 def test_enabled_on():
     import os
     os.environ["RADIANCE_EMBED_HOST"] = "1"
-    mod, _ = _fresh_import()
-    assert mod.ENABLED is True
+    with _with_stubs() as (mod, _):
+        assert mod.ENABLED is True
+    os.environ.pop("RADIANCE_EMBED_HOST", None)
 
 
 def test_enabled_explicit_off():
     import os
     os.environ["RADIANCE_EMBED_HOST"] = "0"
-    mod, _ = _fresh_import()
-    assert mod.ENABLED is False
+    with _with_stubs() as (mod, _):
+        assert mod.ENABLED is False
+    os.environ.pop("RADIANCE_EMBED_HOST", None)
 
 
 # --- _view_fn (no vllm.utils -> None, no crash) ---
 def test_view_fn_returns_none():
-    mod, _ = _fresh_import()
-    assert mod._view_fn() is None
+    with _with_stubs() as (mod, _):
+        assert mod._view_fn() is None
 
 
 # --- _target_embedding ---
 def test_target_embedding_with_language_model():
-    mod, _ = _fresh_import()
-    model = MagicMock()
-    lm = MagicMock()
-    inner = MagicMock()
-    inner.embed_tokens = "THE_EMBED"
-    lm.model = inner
-    model.get_language_model.return_value = lm
-    got_lm, got_emb = mod._target_embedding(model)
-    assert got_lm is lm
-    assert got_emb == "THE_EMBED"
+    with _with_stubs() as (mod, _):
+        model = MagicMock()
+        lm = MagicMock()
+        inner = MagicMock()
+        inner.embed_tokens = "THE_EMBED"
+        lm.model = inner
+        model.get_language_model.return_value = lm
+        got_lm, got_emb = mod._target_embedding(model)
+        assert got_lm is lm
+        assert got_emb == "THE_EMBED"
 
 
 def test_target_embedding_without_language_model():
-    mod, _ = _fresh_import()
-    model = MagicMock(spec=[])  # no attributes -> no get_language_model
-    inner = MagicMock()
-    inner.embed_tokens = "THE_EMBED2"
-    model.model = inner
-    got_lm, got_emb = mod._target_embedding(model)
-    assert got_lm is model
-    assert got_emb == "THE_EMBED2"
+    with _with_stubs() as (mod, _):
+        model = MagicMock(spec=[])  # no attributes -> no get_language_model
+        inner = MagicMock()
+        inner.embed_tokens = "THE_EMBED2"
+        model.model = inner
+        got_lm, got_emb = mod._target_embedding(model)
+        assert got_lm is model
+        assert got_emb == "THE_EMBED2"
 
 
 # --- _refusal: every guard branch ---
 def test_refusal_no_embed_tokens():
-    mod, _ = _fresh_import()
-    r = mod._refusal(MagicMock(), MagicMock(), None)
-    assert r is not None and "no language_model.model.embed_tokens" in r
+    with _with_stubs() as (mod, _):
+        r = mod._refusal(MagicMock(), MagicMock(), None)
+        assert r is not None and "no language_model.model.embed_tokens" in r
 
 
 def test_refusal_wrong_type():
-    mod, _ = _fresh_import()
-    r = mod._refusal(MagicMock(), MagicMock(), object())
-    assert r is not None and "not a VocabParallelEmbedding" in r
+    with _with_stubs() as (mod, _):
+        r = mod._refusal(MagicMock(), MagicMock(), object())
+        assert r is not None and "not a VocabParallelEmbedding" in r
 
 
 def test_refusal_parallel_lm_head():
-    mod, ve = _fresh_import()
-    r = mod._refusal(MagicMock(), MagicMock(), ve.ParallelLMHead())
-    assert r is not None and "not a VocabParallelEmbedding" in r
+    with _with_stubs() as (mod, ve):
+        r = mod._refusal(MagicMock(), MagicMock(), ve.ParallelLMHead())
+        assert r is not None and "not a VocabParallelEmbedding" in r
 
 
 def test_refusal_quantized():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(), quant_method=ve.QuarkEmbeddingMethod())
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "quantized" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(), quant_method=ve.QuarkEmbeddingMethod())
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "quantized" in r
 
 
 def test_refusal_weight_none():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, None)
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "not a contiguous 2-D" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, None)
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "not a contiguous 2-D" in r
 
 
 def test_refusal_weight_not_cuda():
-    mod, ve = _fresh_import()
-    w = MagicMock()
-    w.is_cuda = False
-    w.dim.return_value = 2
-    w.is_contiguous.return_value = True
-    w.dtype = "bf16"
-    w.data_ptr.return_value = 99
-    emb, model = _make_emb(ve, w)
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "not a contiguous 2-D" in r
+    with _with_stubs() as (mod, ve):
+        w = MagicMock()
+        w.is_cuda = False
+        w.dim.return_value = 2
+        w.is_contiguous.return_value = True
+        w.dtype = "bf16"
+        w.data_ptr.return_value = 99
+        emb, model = _make_emb(ve, w)
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "not a contiguous 2-D" in r
 
 
 def test_refusal_weight_not_2d():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(dim=3))
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "not a contiguous 2-D" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(dim=3))
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "not a contiguous 2-D" in r
 
 
 def test_refusal_weight_not_contiguous():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(contiguous=False))
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "not a contiguous 2-D" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(contiguous=False))
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "not a contiguous 2-D" in r
 
 
 def test_refusal_bad_dtype():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(dtype="fp64"))
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "dtype" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(dtype="fp64"))
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "dtype" in r
 
 
 def test_refusal_tied_storage():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(), shared_with=True)
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is not None and "shared with" in r
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(), shared_with=True)
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is not None and "shared with" in r
 
 
 def test_refusal_valid_accept():
-    mod, ve = _fresh_import()
-    emb, model = _make_emb(ve, _cuda_weight(data_ptr=99))
-    r = mod._refusal(model, MagicMock(), emb)
-    assert r is None, f"expected OK, got refusal: {r}"
+    with _with_stubs() as (mod, ve):
+        emb, model = _make_emb(ve, _cuda_weight(data_ptr=99))
+        r = mod._refusal(model, MagicMock(), emb)
+        assert r is None, f"expected OK, got refusal: {r}"
