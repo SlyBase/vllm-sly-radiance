@@ -23,17 +23,25 @@ LOADER = SP / "vllm/model_executor/model_loader/base_loader.py"
 
 ANCHOR = (
     "            process_weights_after_loading(model, model_config, target_device)\n"
+    "            log_online_quantization_time(vllm_config)\n"
+    "\n"
+    "            gc.collect()\n"
+    "            torch.accelerator.empty_cache()\n"
     "\n"
     "        return model.eval()\n"
 )
 NEW = (
     "            process_weights_after_loading(model, model_config, target_device)\n"
+    "            log_online_quantization_time(vllm_config)\n"
     "\n"
     "            # --- RADIANCE embed-host (patch_embed_host.py) ---\n"
     "            if __import__(\"os\").environ.get(\"RADIANCE_EMBED_HOST\", \"0\") == \"1\":\n"
     "                import radiance_embed_host as _radiance_embed_host\n"
     "\n"
     "                _radiance_embed_host.maybe_offload(model, vllm_config, model_config)\n"
+    "\n"
+    "            gc.collect()\n"
+    "            torch.accelerator.empty_cache()\n"
     "\n"
     "        return model.eval()\n"
 )
