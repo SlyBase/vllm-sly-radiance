@@ -347,6 +347,7 @@ everything not listed is off by default and documented in [docs/TECHNICAL.md](do
 | `RADIANCE_FUSED_NORM_QUANT` | `1` | fused norm/activation + fp8 quant in front of every W4A8 GEMM |
 | `RADIANCE_KV_GROUP_SIZE` | `8` | groups the KV cache pages 2+6+1 instead of padding to the drafter's bucket: more KV tokens |
 | `RADIANCE_EMBED_INT8` + `RADIANCE_EMBED_BITS` | `1` + `4` | int4 embedding table, 1.76 GiB more KV |
+| `RADIANCE_EMBED_HOST` | `0` | keep `embed_tokens` in pinned host RAM behind a UVA view (PCIe read), 2.37 GiB → KV, served ceiling 130k → 196k tokens; ~1 % step cost. **Refused with `RADIANCE_EMBED_INT8=1`** (the table is already int4, `dtype uint8` — log line `NOT applied -- dtype torch.uint8`) — it acts only with bf16 embeds, so drop `EMBED_INT8`/`EMBED_BITS` to use it. ABBA decode (2026-11-02, R9700 300 W, bf16 embeds, A/B/A/B, single stream): weighted decode 158.0 → 157.9 tok/s (−0.4 %, within noise), update p99 34.3 → 34.2 ms; KV pool 301,274 → 356,948 tokens (+18 %), model VRAM 16.55 → 14.18 GiB |
 | `GPU_MAX_HW_QUEUES` | `2` | the ROCm default picks a random queue layout per start; 2 is consistently fastest |
 
 ### Defaults that are already on

@@ -608,6 +608,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_lmhead_int2.py \
      sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
+     sly/radiance_embed_host.py \
      sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \
      sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
@@ -749,7 +750,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant \
-             sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
+             sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_embed_host sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
              sly/patch_dflash_prefill_skip \
