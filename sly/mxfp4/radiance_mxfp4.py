@@ -227,10 +227,11 @@ def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
 
 
 def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
-    """[K/32, N] e8m0 block scales -> 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset the
-    PSW kernel adds to its LDS table base. Same shape and dtype (uint8); Wref stays as is."""
+    """[K/32, N] e8m0 block scales -> clamp(Wref[n] - Ws, 0, 15), the kMag ROW the PSW kernel
+    looks up (it shifts the row to a byte offset itself, so MCB can use all 256 rows). Same shape
+    and dtype (uint8); Wref stays as is."""
     d = (wref.to(torch.int32)[None, :] - weight_scale.to(torch.int32)).clamp(0, 15)
-    return (d * 8).to(torch.uint8).contiguous()
+    return d.to(torch.uint8).contiguous()
 
 
 def unpermute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":

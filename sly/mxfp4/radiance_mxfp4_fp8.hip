@@ -62,7 +62,11 @@ __device__ __constant__ unsigned char kLUT[16] = {
 //
 // This is only sound because the gfx12 fp8 WMMA HONOURS e4m3 subnormals rather than flushing them
 // -- verified on hardware, exact for every m*2^-9, m=1..7 (~/mxfp4_work/tier6/subnorm.hip).
-__device__ __constant__ unsigned int kMag[16][2] = {
+// MCB (multi-codebook): rows 16..255 are free. set_mag_table() uploads 256 learned 8-entry e4m3
+// tables (one per block-scale byte value) once at load; PSW readers then index kMag by the folded
+// Ws byte, so a block picks its own table at the same 4.25 bpw and the same instruction count as
+// the OCP fold (rows 0..15 above ARE the OCP fold, so an OCP checkpoint is just the default table).
+__device__ __constant__ unsigned int kMag[256][2] = {
   {0x3c383000u, 0x4c484440u},
   {0x34302800u, 0x44403c38u},
   {0x2c282000u, 0x3c383430u},
@@ -446,7 +450,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
           if constexpr (PSW != 0) {
-            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + ((wsw >> (8 * q)) & 0xFF));
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + (((wsw >> (8 * q)) & 0xFF) << 3));
             *(uint2_t *)(&sW[(r + q) * WSTR + kloc]) = psw2_unpack8(wq[q], t[0], t[1]);
             continue;
           }
@@ -645,8 +649,8 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
 // PSW (set_at_psw, default 0 = off; WPERM e4m3 only): preshuffled nibbles + pre-folded
 // scale. Same logical weights, same e4m3 bytes in sW, so the output is bit-identical; the weights
 // must be repacked at load (psw_pack_w / psw_fold_ws in radiance_mxfp4.py, same bytes, no extra
-// memory). Ws holds 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset, so the per-slot
-// sub/clamp/shift vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
+// memory). Ws holds the kMag ROW index: clamp(Wref[n] - Ws, 0, 15) for OCP, a learned table id for
+// MCB (set_mag_table); the reader shifts it to a byte offset, so the per-slot sub/clamp vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
 //   PSW=1: byte b = e[b] | e[b+4] << 4 (no interleave perms; 8 VALU per 8 weights).
 //   PSW=2: byte b bits 0-2 mag(e[b]), 7 sign(e[b]), 4-6 mag(e[b+4]), 3 sign(e[(b+3)%4 + 4]);
 //          rotr(w, 4) then carries e[b+4] with its sign at bit 7 (7 VALU per 8 weights).
@@ -663,7 +667,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   constexpr int NIT = BNF_T * LBK / 2 / (NTHREADS * 8);   // row-major W staging iterations per slab
   static_assert(NIT >= 1 && NIT * NTHREADS * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
   __shared__ unsigned char sW[BNF_T * LWSTR];
-  __shared__ unsigned int sMag[32];   // kMag, 128 B: ds_load keeps the lookup off the loadcnt chain
+  __shared__ unsigned int sMag[512];  // kMag, 2 KB (MCB): ds_load keeps the lookup off the loadcnt chain
   __shared__ unsigned int sTab[7 * 4];
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
@@ -682,7 +686,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   const int Mt = (M + 15) >> 4;
 
   if constexpr (E6) { if (tid < 28) sTab[tid] = ((const unsigned int *)kE2M3)[tid]; }
-  else if (tid < 32) sMag[tid] = ((const unsigned int *)kMag)[tid];
+  else for (int i = tid; i < 512; i += NTHREADS) sMag[i] = ((const unsigned int *)kMag)[i];
   radiance_lds_barrier();
 
   // A tile bases, one per M-fragment: wave-uniform, forced into SGPRs; the lane part is an
@@ -801,7 +805,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
           if constexpr (PSW != 0) {
-            const uint2_t t = *(const uint2_t *)((const unsigned char *)sMag + ((wsv[it] >> (8 * q)) & 0xFF));
+            const uint2_t t = *(const uint2_t *)((const unsigned char *)sMag + (((wsv[it] >> (8 * q)) & 0xFF) << 3));
             const unsigned int wq = pk[it][q];
             const unsigned int hi = PSW == 1 ? wq >> 4 : __builtin_amdgcn_alignbit(wq, wq, 4);
             const unsigned int be = __builtin_amdgcn_perm(t[1], t[0], wq & 0x07070707u)
@@ -1088,7 +1092,7 @@ __global__ __launch_bounds__(DWN * 32) void radiance_mxfp4_fp8_gemm_decode(
 #pragma unroll
         for (int q = 0; q < 2; ++q) {
           if constexpr (PSW != 0) {
-            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + Ws[(size_t)blk * N + gc + q]);
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + ((unsigned int)Ws[(size_t)blk * N + gc + q] << 3));
             *(uint2_t *)(&sW[(r + q) * DWSTR + kloc]) = psw2_unpack8(wq_dec(wv, q), t[0], t[1]);
             if constexpr (DBK == 128 && DTM >= 6) __builtin_amdgcn_sched_barrier(0);
             continue;
@@ -1355,6 +1359,12 @@ static void set_decode_scratch(uintptr_t ptr, size_t bytes, uintptr_t cnt) {
 // is set -- the checkpoint-order, per-block, E6 and streaming-decode kernels do not read PSW bytes.
 static int g_at_psw = 0;
 static void set_at_psw(int v) { g_at_psw = v; }
+// MCB: replace kMag (256 rows x 8 e4m3 bytes, row-major, 2048 B host buffer). Process-global like
+// PSW; only PSW readers index rows >= 16, so call it before the first PSW launch.
+static void set_mag_table(uintptr_t host) {
+  if (hipMemcpyToSymbol(HIP_SYMBOL(kMag), (const void *)host, sizeof(kMag)) != hipSuccess)
+    throw std::runtime_error("radiance_mxfp4_fp8: set_mag_table failed");
+}
 static void launch_impl(uintptr_t a, uintptr_t w, uintptr_t ws, uintptr_t wref, uintptr_t as,
                         uintptr_t c, int M, int N, int K, int pb1, int pb2, long astride,
                         uintptr_t stream, uintptr_t wh = 0) {
@@ -2251,6 +2261,7 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
+  m.def("set_mag_table", &set_mag_table, "MCB: upload 256 x 8 e4m3 block tables (2048 B host ptr) into kMag");
   m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");
   m.def("set_at_tall", &set_at_tall, "bench: toggle the tall tile in-process (default from RADIANCE_MXFP4_TALL / _TALL_MIN_M)");
   // Capability probe for the loader: 2 = mode 2 is read by the decode, wide-decode and folded

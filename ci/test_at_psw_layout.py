@@ -65,14 +65,16 @@ def test_mode2_round_trip_recovers_every_nibble():
     assert torch.equal(torch.cat([lo, hi], 1), e)
 
 
-def test_fold_ws_is_the_kmag_row_offset():
+def test_fold_ws_is_the_kmag_row():
+    """The fold stores the kMag ROW (0..15 for OCP); the kernel shifts it to a byte offset, which
+    leaves rows 16..255 addressable for MCB tables (set_mag_table)."""
     ws = torch.randint(0, 32, (4, 96), dtype=torch.uint8)
     ref = torch.randint(0, 32, (96,), dtype=torch.uint8)
     out = R.psw_fold_ws(ws, ref)
-    d = (ref.to(torch.int64)[None, :] - ws.to(torch.int64)).clamp(0, 15) * 8
+    d = (ref.to(torch.int64)[None, :] - ws.to(torch.int64)).clamp(0, 15)
     assert out.shape == ws.shape and out.dtype == torch.uint8
     assert torch.equal(out.to(torch.int64), d)
-    assert int(out.max()) <= 120 and int(out.min()) >= 0
+    assert int(out.max()) <= 15 and int(out.min()) >= 0
 
 
 if __name__ == "__main__":
