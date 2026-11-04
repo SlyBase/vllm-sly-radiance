@@ -66,6 +66,9 @@ ZP_BIAS = 8  # unsigned nibble = q + 8, the constant the kernel subtracts (HAS_Z
 # RADIANCE_LMHEAD_INT4_TILED (default 1, needs RADIANCE_W4A16_TILED): store the packed head in the tiled
 # W4A16 layout; 0 keeps the row layout (A/B of the head alone)
 TILED = os.environ.get("RADIANCE_LMHEAD_INT4_TILED", "1") == "1"
+# RADIANCE_LMHEAD_INT4_CODES=<lm_head_int4.pt>: offline (GPTQ) codes {"q": int8 [N, K] in [-8, 7],
+# "s": bf16 [N, K//G], "group": G} replace the load-time RTN; same packing, same kernel.
+CODES = os.environ.get("RADIANCE_LMHEAD_INT4_CODES", "")
 
 
 def quant_method_for(layer: torch.nn.Module, prefix: str, inner=None):
@@ -124,6 +127,27 @@ def quantize_int4_rows(w: torch.Tensor, group_size: int, clip: str | None = None
     return packed, scales
 
 
+def load_codes(n: int, k: int, g: int):
+    """RADIANCE_LMHEAD_INT4_CODES -> (q int8 [N', K], s bf16 [N', K//G]) on CPU; refuses any mismatch."""
+    d = torch.load(CODES, map_location="cpu")
+    q, s = d["q"], d["s"]
+    if (d.get("group") != g or q.dtype != torch.int8 or q.shape[1] != k or q.shape[0] > n
+            or tuple(s.shape) != (q.shape[0], k // g) or int(q.min()) < -ZP_BIAS or int(q.max()) > QMAX):
+        raise RuntimeError(f"[radiance] RADIANCE_LMHEAD_INT4_CODES={CODES}: q {tuple(q.shape)} {q.dtype} "
+                           f"s {tuple(s.shape)} group {d.get('group')} does not fit lm_head [{n}, {k}] g{g}")
+    logger.info("[radiance] lm_head int4 codes from %s (%d of %d rows)", CODES, q.shape[0], n)
+    return q, s.to(torch.bfloat16)
+
+
+def pack_codes(q: torch.Tensor, s: torch.Tensor, device):
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+        pack_int4_exllama_shuffle,
+    )
+
+    nib = (q.to(device).to(torch.int16) + ZP_BIAS).to(torch.uint8)
+    return pack_int4_exllama_shuffle(nib), s.to(device)
+
+
 class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
     """create_weights/embedding as the base class; only the loaded weight and apply() change."""
 
@@ -137,11 +161,19 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
         assert k % g == 0 and k % 8 == 0, f"hidden {k} not divisible by group {g}"
         w_q = torch.empty((n, k // 8), dtype=torch.int32, device=w.device)
         scale = torch.empty((n, k // g), dtype=torch.bfloat16, device=w.device)
+        pre = load_codes(n, k, g) if CODES else None
         for i in range(0, n, CHUNK_ROWS):
-            packed, s = quantize_int4_rows(w[i:i + CHUNK_ROWS], g)
+            if pre is not None and i < pre[0].shape[0]:
+                packed, s = pack_codes(pre[0][i:i + CHUNK_ROWS], pre[1][i:i + CHUNK_ROWS], w.device)
+                if packed.shape[0] < min(CHUNK_ROWS, n - i):  # vocab padding rows past the file: RTN
+                    p2, s2 = quantize_int4_rows(w[i + packed.shape[0]:i + CHUNK_ROWS], g)
+                    packed, s = torch.cat([packed, p2]), torch.cat([s, s2])
+            else:
+                packed, s = quantize_int4_rows(w[i:i + CHUNK_ROWS], g)
             w_q[i:i + CHUNK_ROWS] = packed
             scale[i:i + CHUNK_ROWS] = s
             del packed, s
+        del pre
         # int8 view of the [N, K//8] int32 packing = [N, K//2]; the kernel path re-views it as
         # int32 (that is how RDNAHybridW4A16LinearKernel stores the drafter's weights too).
         w_i8 = w_q.view(torch.int8).contiguous()
