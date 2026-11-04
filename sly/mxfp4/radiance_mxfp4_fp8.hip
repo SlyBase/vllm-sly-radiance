@@ -1772,6 +1772,18 @@ static __device__ __forceinline__ void had128(float (&v)[8], int tid) {
 #pragma unroll
   for (int j = 0; j < 8; ++j) v[j] *= sg[j];
 }
+static int get_had() {
+  int on = -1;
+  if (hipMemcpyFromSymbol(&on, HIP_SYMBOL(kHadOn), sizeof(int)) != hipSuccess) return -2;
+  return on;
+}
+static pybind11::list get_had_signs() {
+  float h[128];
+  pybind11::list out;
+  if (hipMemcpyFromSymbol(h, HIP_SYMBOL(kHadS), sizeof(h)) != hipSuccess) return out;
+  for (int i = 0; i < 128; ++i) out.append(h[i]);
+  return out;
+}
 static void set_had(uintptr_t signs_host, int on) {
   if (on && hipMemcpyToSymbol(HIP_SYMBOL(kHadS), (const void *)signs_host, sizeof(kHadS)) != hipSuccess)
     throw std::runtime_error("radiance_mxfp4_fp8: set_had signs failed");
@@ -2304,6 +2316,8 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
+  m.def("get_had_signs", &get_had_signs, "debug: kHadS as a list");
+  m.def("get_had", &get_had, "debug: current kHadOn (-2 = read failed)");
   m.def("set_had", &set_had, "online H128 on the fp8 producers: (128 float signs/sqrt(128) host ptr, on)");
   m.def("set_mag_table", &set_mag_table, "BCQ: upload 256 x 8 e4m3 block tables (2048 B host ptr) into kMag");
   m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");

@@ -247,19 +247,23 @@ if HAD and not BCQ:
 if HAD and os.environ.get("RADIANCE_MXFP4_HOIST_QUANT", "0") == "1":
     raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD has no traced-quant rotation")
 _had_mat = {}
+_had_keep = []
 
 
 def had_signs(n: int = 128) -> "torch.Tensor":
     """The fq.hadamard32(n) column signs / sqrt(n): torch.Generator seed 0, rand(n) < 0.5 -> -1."""
     g = torch.Generator().manual_seed(0)
-    s = torch.where(torch.rand(n, generator=g, dtype=torch.float32) < 0.5, -1.0, 1.0)
-    return (s / n ** 0.5).contiguous()
+    # explicit fp32 everywhere: vLLM sets the default dtype to bf16 during load, and torch.where with
+    # Python scalars follows it -- a bf16 buffer handed to set_had as 128 floats was garbage (measured)
+    s = torch.where(torch.rand(n, generator=g, dtype=torch.float32) < 0.5,
+                    torch.tensor(-1.0, dtype=torch.float32), torch.tensor(1.0, dtype=torch.float32))
+    return (s / n ** 0.5).to(torch.float32).contiguous()
 
 
 def had_matrix(n: int, device) -> "torch.Tensor":
     key = (n, str(device))
     if key not in _had_mat:
-        H = torch.ones(1, 1)
+        H = torch.ones(1, 1, dtype=torch.float32)
         while H.shape[0] < n:
             H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)])
         _had_mat[key] = (H * had_signs(n)).to(device)
@@ -1132,9 +1136,11 @@ def _make_kernel_class():
                             _ext.set_mag_table(_tb.data_ptr())
                             del _tb
                             if HAD:
-                                _hs = had_signs(HAD)
-                                _ext.set_had(_hs.data_ptr(), 1)
-                                del _hs
+                                _had_keep.append(had_signs(HAD))   # alive for the process lifetime
+                                assert _had_keep[-1].dtype == torch.float32 and _had_keep[-1].numel() == 128
+                                torch.cuda.synchronize()
+                                _ext.set_had(_had_keep[-1].data_ptr(), 1)
+                                torch.cuda.synchronize()
                                 sys.stderr.write(f"[radiance.mxfp4] online Hadamard-{HAD} ON (fp8 producers + unfused quant)\n")
                             _bcq_table_set[0] = True
                             sys.stderr.write(f"[radiance.mxfp4] BCQ block tables loaded from {BCQ}\n")

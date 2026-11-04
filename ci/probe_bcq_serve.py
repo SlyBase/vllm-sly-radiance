@@ -2,7 +2,7 @@
 output goes non-finite on a short prompt, and compare a few served linears against the checkpoint dequant.
   VLLM_ENABLE_V1_MULTIPROCESSING=0 RADIANCE_MXFP4_BCQ=/m/bcq_tables.pt python3 probe_bcq_serve.py /m
 """
-import json, sys
+import json, os, sys
 import torch
 from safetensors import safe_open
 from vllm import LLM, SamplingParams
@@ -13,6 +13,22 @@ llm = LLM(model=ck, enforce_eager=True, max_model_len=2048, gpu_memory_utilizati
 core = llm.llm_engine.engine_core.engine_core
 model = core.model_executor.driver_worker.worker.model_runner.model
 bad = []
+import radiance_mxfp4 as _RM0
+print("GET_HAD after load:", _RM0._ext.get_had() if hasattr(_RM0._ext, "get_had") else "n/a",
+      "ext file:", getattr(_RM0._ext, "__file__", "?"), flush=True)
+import sys as _s
+print("loaded fp8 modules:", [m for m in _s.modules if "mxfp4_fp8" in m], flush=True)
+if _RM0.HAD:
+    _hs = _RM0._ext.get_had_signs()
+    _want = _RM0.had_signs(128).tolist()
+    print("HAD SIGNS on device match:", max(abs(a - b) for a, b in zip(_hs, _want)) if _hs else "read failed", _hs[:4], flush=True)
+    _gu = torch.randn(4, 2 * 17408, device="cuda", dtype=torch.bfloat16)
+    _q, _sc = torch.ops.radiance.silu_mul_quant(_gu)
+    _v = (torch.nn.functional.silu(_gu[:, :17408].float()).to(torch.bfloat16).float() * _gu[:, 17408:].float()).to(torch.bfloat16)
+    _ref = (_v.float().view(4, -1, 128) @ _RM0.had_matrix(128, "cuda")).view(4, -1)
+    _got = _q.float() * _sc.view(-1, 1)
+    print("SILU OP rel vs rotated ref:", float((_got - _ref).norm() / _ref.norm()),
+          "vs unrotated:", float((_got - _v.float()).norm() / _v.float().norm()), flush=True)
 
 
 def hook(name):
@@ -30,9 +46,15 @@ for n, m in model.named_modules():
 out = llm.generate(["The capital of France is"], SamplingParams(max_tokens=8, temperature=0))
 print("GEN", repr(out[0].outputs[0].text))
 print("FIRST NONFINITE:", *bad, sep="\n  ")
+if os.environ.get("PROBE_GEN_ONLY") == "1":
+    sys.exit(0)
 
 wm = json.load(open(f"{ck}/model.safetensors.index.json"))["weight_map"]
-T = torch.load(f"{ck}/bcq_tables.pt").float().cuda()
+import os
+import radiance_mxfp4 as RM
+HAD = RM.HAD
+tf = f"{ck}/bcq_tables.pt" if os.path.exists(f"{ck}/bcq_tables.pt") else f"{ck}/mcb_tables.pt"
+T = torch.load(tf).float().cuda()
 
 
 def g(k):
@@ -44,7 +66,11 @@ def deq(b):
     c, s, r = g(b + ".weight_packed"), g(b + ".weight_scale"), g(b + ".weight_row_exp")
     nib = torch.stack([c & 15, c >> 4], -1).reshape(c.shape[0], -1).long()
     m = T[s.long().repeat_interleave(32, 1), nib & 7]
-    return torch.where(nib >= 8, -m, m) * torch.exp2(r.float() - 127)[:, None]
+    W = torch.where(nib >= 8, -m, m) * torch.exp2(r.float() - 127)[:, None]
+    if HAD:  # stored W R: un-rotate to the logical weight
+        n, k = W.shape
+        W = (W.view(n, k // HAD, HAD) @ RM.had_matrix(HAD, W.device).T).view(n, k)
+    return W
 
 
 P = "model.language_model.layers."
