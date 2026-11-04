@@ -1,4 +1,4 @@
-"""MCB (multi-codebook) block tables through EVERY PSW kernel band, checkpoint nibbles.
+"""BCQ (block-clustered (BCQ)) block tables through EVERY PSW kernel band, checkpoint nibbles.
 
 set_mag_table() replaces kMag with 256 learned 8-entry e4m3 tables; the PSW-folded Ws byte is then
 a free table id per 32-block instead of clamp(Wref - Ws, 0, 15). Per shape and M this runs the
@@ -7,7 +7,7 @@ checkpoint's nibbles and compares against an fp32 torch reference of the SAME de
   W[n, k] = sign * T[id[k/32, n]][mag] * 2^(Wref[n] - 127)
 rel <= 2e-3 (only fp32 accumulation order differs; the e4m3 table values are exact in the WMMA).
 Then it restores the OCP table and checks the plain fold digest is unchanged (OCP rows 0..15 are
-still the default kMag). env: MS, SHAPES, LAYER (12), ATTN_LAYER (3), TABLES (mcb_tables.pt path).
+still the default kMag). env: MS, SHAPES, LAYER (12), ATTN_LAYER (3), TABLES (bcq_tables.pt path).
 """
 import hashlib, json, os, sys
 os.environ.setdefault("RADIANCE_MXFP4_TN4_MIN_M", "513")
@@ -20,7 +20,7 @@ from tile_layout import tile
 dev = torch.device("cuda"); stream = torch.cuda.current_stream().cuda_stream
 E = R._ext
 assert R.WPERM and R.DECODE_MAX_M >= 128, "run with RADIANCE_MXFP4_WPERM=1 DECODE_MAX_M=128"
-assert hasattr(E, "set_mag_table"), "this .so has no MCB reader"
+assert hasattr(E, "set_mag_table"), "this .so has no BCQ reader"
 CK = "/ck"; PFX = "model.language_model."
 IDX = json.load(open(f"{CK}/model.safetensors.index.json"))["weight_map"]
 L = int(os.environ.get("LAYER", "12")); LA = int(os.environ.get("ATTN_LAYER", "3"))
@@ -36,7 +36,7 @@ R._decode_scratch[0] = torch.empty(4 * 128 * 36864, dtype=torch.float32, device=
 R._decode_scratch[1] = torch.zeros(36864 // 128 + 8, dtype=torch.int32, device=dev)
 E.set_decode_scratch(R._decode_scratch[0].data_ptr(), R._decode_scratch[0].numel() * 4, R._decode_scratch[1].data_ptr())
 
-T = torch.load(os.environ.get("TABLES", "/w/mcb_tables.pt")).float()          # [256, 8], e4m3-exact
+T = torch.load(os.environ.get("TABLES", "/w/bcq_tables.pt")).float()          # [256, 8], e4m3-exact
 assert T.shape == (256, 8)
 TB = T.to(torch.float8_e4m3fn).view(torch.uint8).contiguous()                   # 2048 B, row-major
 OCP = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
@@ -104,7 +104,7 @@ for name in SHAPES:
             rel = ((out[:rows].float() - r_).norm() / r_.norm().clamp_min(1e-9)).item()
             good = rel <= 2e-3 and d0 == d1
             ok_n += good; bad += not good
-            print(f"MCB {name} {pname} M={M} rel={rel:.6f} ocp_digest {'SAME' if d0 == d1 else 'CHANGED'} "
+            print(f"BCQ {name} {pname} M={M} rel={rel:.6f} ocp_digest {'SAME' if d0 == d1 else 'CHANGED'} "
                   f"{'OK' if good else 'WRONG'}", flush=True)
     del w, s, W2, Wd, ids, S_ocp; torch.cuda.empty_cache()
 print(f"TOTAL OK={ok_n} BAD={bad}", flush=True)

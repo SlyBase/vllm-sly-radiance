@@ -62,7 +62,7 @@ __device__ __constant__ unsigned char kLUT[16] = {
 //
 // This is only sound because the gfx12 fp8 WMMA HONOURS e4m3 subnormals rather than flushing them
 // -- verified on hardware, exact for every m*2^-9, m=1..7 (~/mxfp4_work/tier6/subnorm.hip).
-// MCB (multi-codebook): rows 16..255 are free. set_mag_table() uploads 256 learned 8-entry e4m3
+// BCQ (block clustered quantization, cf. LO-BCQ arXiv 2502.05376): rows 16..255 are free. set_mag_table() uploads 256 learned 8-entry e4m3
 // tables (one per block-scale byte value) once at load; PSW readers then index kMag by the folded
 // Ws byte, so a block picks its own table at the same 4.25 bpw and the same instruction count as
 // the OCP fold (rows 0..15 above ARE the OCP fold, so an OCP checkpoint is just the default table).
@@ -331,11 +331,18 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
     int pb1, int pb2, long astride, const unsigned char *__restrict__ WH = nullptr) {
   __shared__ unsigned char sA[BMF * ASTR];
   __shared__ unsigned char sW[WN * TN * 16 * WSTR];
+  // PSW: kMag in LDS (2 KB with BCQ). From __constant__ the 256-row table thrashed the scalar/
+  // constant cache on random per-block table ids: folded M=2048 was +5..6 % vs the 16-row table.
+  __shared__ unsigned int sMagF[PSW != 0 ? 512 : 1];
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int wm = wave / WN, wn = wave % WN;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
   constexpr int BNF_T = WN * TN * 16;
+  if constexpr (PSW != 0) {
+    for (int i = tid; i < 512; i += NTHREADS) sMagF[i] = ((const unsigned int *)kMag)[i];
+    __syncthreads();
+  }
   RAD_TILE_ORIGIN;
   // Merged-linear partition select (paroquant: one launch over the whole N, partition p's n-blocks
   // read the p-th rotated copy of A and its scales). Boundaries are multiples of every n-tile
@@ -450,7 +457,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_folded(
 #pragma unroll
         for (int q = 0; q < WSLOTS; ++q) {
           if constexpr (PSW != 0) {
-            const unsigned int *t = (const unsigned int *)((const unsigned char *)kMag + (((wsw >> (8 * q)) & 0xFF) << 3));
+            const unsigned int *t = (const unsigned int *)((const unsigned char *)sMagF + (((wsw >> (8 * q)) & 0xFF) << 3));
             *(uint2_t *)(&sW[(r + q) * WSTR + kloc]) = psw2_unpack8(wq[q], t[0], t[1]);
             continue;
           }
@@ -650,7 +657,7 @@ static __device__ __forceinline__ void radiance_lds_barrier() {
 // scale. Same logical weights, same e4m3 bytes in sW, so the output is bit-identical; the weights
 // must be repacked at load (psw_pack_w / psw_fold_ws in radiance_mxfp4.py, same bytes, no extra
 // memory). Ws holds the kMag ROW index: clamp(Wref[n] - Ws, 0, 15) for OCP, a learned table id for
-// MCB (set_mag_table); the reader shifts it to a byte offset, so the per-slot sub/clamp vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
+// BCQ (set_mag_table); the reader shifts it to a byte offset, so the per-slot sub/clamp vanish. Nibble layout of one fragment-order lane word (elements e0..e7):
 //   PSW=1: byte b = e[b] | e[b+4] << 4 (no interleave perms; 8 VALU per 8 weights).
 //   PSW=2: byte b bits 0-2 mag(e[b]), 7 sign(e[b]), 4-6 mag(e[b+4]), 3 sign(e[(b+3)%4 + 4]);
 //          rotr(w, 4) then carries e[b+4] with its sign at bit 7 (7 VALU per 8 weights).
@@ -667,7 +674,7 @@ __global__ __launch_bounds__(NTHREADS) void radiance_mxfp4_fp8_gemm_atiled(
   constexpr int NIT = BNF_T * LBK / 2 / (NTHREADS * 8);   // row-major W staging iterations per slab
   static_assert(NIT >= 1 && NIT * NTHREADS * 8 == BNF_T * LBK / 2, "W tile must be 8 B/thread multiples");
   __shared__ unsigned char sW[BNF_T * LWSTR];
-  __shared__ unsigned int sMag[512];  // kMag, 2 KB (MCB): ds_load keeps the lookup off the loadcnt chain
+  __shared__ unsigned int sMag[512];  // kMag, 2 KB (BCQ): ds_load keeps the lookup off the loadcnt chain
   __shared__ unsigned int sTab[7 * 4];
 
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
@@ -1359,7 +1366,7 @@ static void set_decode_scratch(uintptr_t ptr, size_t bytes, uintptr_t cnt) {
 // is set -- the checkpoint-order, per-block, E6 and streaming-decode kernels do not read PSW bytes.
 static int g_at_psw = 0;
 static void set_at_psw(int v) { g_at_psw = v; }
-// MCB: replace kMag (256 rows x 8 e4m3 bytes, row-major, 2048 B host buffer). Process-global like
+// BCQ: replace kMag (256 rows x 8 e4m3 bytes, row-major, 2048 B host buffer). Process-global like
 // PSW; only PSW readers index rows >= 16, so call it before the first PSW launch.
 static void set_mag_table(uintptr_t host) {
   if (hipMemcpyToSymbol(HIP_SYMBOL(kMag), (const void *)host, sizeof(kMag)) != hipSuccess)
@@ -1739,6 +1746,38 @@ static void launch6_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, uint
     }                                                                                           \
   } while (0)
 typedef unsigned int uint32_tt;
+
+// Online block-128 Hadamard on the fp8 producers' output (BCQ+H checkpoints: every MXFP4 weight is
+// stored as W R, R = blockdiag(H128 diag(s)) / sqrt(128)). set_had() turns it on process-wide, which
+// is sound because these producers only ever feed MXFP4 linears of the same checkpoint. Applied to
+// the bf16-rounded values right before amax, so the scale is the rotated row's. Thread layout: 16
+// consecutive 8-groups = one 128-block (ART % 16 == 0, K % 128 == 0, the same lanes gdn's per-head
+// sum already pairs), so the transform is 3 in-register butterfly stages + 4 xor-shuffle stages.
+__device__ __constant__ int kHadOn = 0;
+__device__ __constant__ float kHadS[128];    // s[k] / sqrt(128), k = (lane % 16) * 8 + j
+static __device__ __forceinline__ void had128(float (&v)[8], int tid) {
+#pragma unroll
+  for (int h = 1; h < 8; h <<= 1)
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      if (!(i & h)) { const float a = v[i], b = v[i + h]; v[i] = a + b; v[i + h] = a - b; }
+#pragma unroll
+  for (int o = 1; o < 16; o <<= 1)
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const float u = __shfl_xor(v[j], o, 16);
+      v[j] = (tid & o) ? u - v[j] : v[j] + u;
+    }
+  const float *sg = kHadS + (tid & 15) * 8;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) v[j] *= sg[j];
+}
+static void set_had(uintptr_t signs_host, int on) {
+  if (on && hipMemcpyToSymbol(HIP_SYMBOL(kHadS), (const void *)signs_host, sizeof(kHadS)) != hipSuccess)
+    throw std::runtime_error("radiance_mxfp4_fp8: set_had signs failed");
+  if (hipMemcpyToSymbol(HIP_SYMBOL(kHadOn), &on, sizeof(int)) != hipSuccess)
+    throw std::runtime_error("radiance_mxfp4_fp8: set_had flag failed");
+}
 union ArnqVec8 { uint4 u4; __bf16 h[8]; };
 template <int ART, bool TILED = false, bool REG = false>   // REG: see NQ_FOR
 __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
@@ -1794,10 +1833,11 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
     vw.u4 = ((const uint4 *)w)[g];
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
-      float nv = (float)(__bf16)(sv[mg][j] * inv * ((float)vw.h[j] + 1.f));
-      sv[mg][j] = nv;
-      amax = fmaxf(amax, fabsf(nv));
+      sv[mg][j] = (float)(__bf16)(sv[mg][j] * inv * ((float)vw.h[j] + 1.f));
     }
+    if (kHadOn) had128(sv[mg], tid);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) amax = fmaxf(amax, fabsf(sv[mg][j]));
   };
   NQ_FOR(KV, p2);
   for (int o = 16; o; o >>= 1) amax = fmaxf(amax, __shfl_down(amax, o));
@@ -1862,8 +1902,10 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
       float t = (float)(__bf16)(x / (1.f + expf(-x)));       // silu, rounded to bf16
       float p = (float)(__bf16)(t * (float)vu.h[j]);         // product, rounded to bf16
       pv[ng][j] = p;
-      amax = fmaxf(amax, fabsf(p));
     }
+    if (kHadOn) had128(pv[ng], tid);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) amax = fmaxf(amax, fabsf(pv[ng][j]));
   };
   NQ_FOR(NV, p1);
   __shared__ float lds[ART / 32];
@@ -1997,10 +2039,11 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
     for (int j = 0; j < 8; ++j) {
       const float zz = (float)vz.h[j];
       const float sg = zz / (1.f + expf(-zz));                       // silu, fp32
-      const float nv = (float)(__bf16)(((sv[ng][j] * inv) * (float)vw.h[j]) * sg);
-      sv[ng][j] = nv;
-      amax = fmaxf(amax, fabsf(nv));
+      sv[ng][j] = (float)(__bf16)(((sv[ng][j] * inv) * (float)vw.h[j]) * sg);
     }
+    if (kHadOn) had128(sv[ng], tid);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) amax = fmaxf(amax, fabsf(sv[ng][j]));
   };
   NQ_FOR(NV, p1);
   __shared__ float lds[ART / 32];
@@ -2261,7 +2304,8 @@ static void launch6_at_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, u
 
 PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
-  m.def("set_mag_table", &set_mag_table, "MCB: upload 256 x 8 e4m3 block tables (2048 B host ptr) into kMag");
+  m.def("set_had", &set_had, "online H128 on the fp8 producers: (128 float signs/sqrt(128) host ptr, on)");
+  m.def("set_mag_table", &set_mag_table, "BCQ: upload 256 x 8 e4m3 block tables (2048 B host ptr) into kMag");
   m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");
   m.def("set_at_tall", &set_at_tall, "bench: toggle the tall tile in-process (default from RADIANCE_MXFP4_TALL / _TALL_MIN_M)");
   // Capability probe for the loader: 2 = mode 2 is read by the decode, wide-decode and folded

@@ -1,6 +1,6 @@
-"""In-process MCB serve probe: load the MCB checkpoint with vLLM (eager, no multiproc), find the first module whose
+"""In-process BCQ serve probe: load the BCQ checkpoint with vLLM (eager, no multiproc), find the first module whose
 output goes non-finite on a short prompt, and compare a few served linears against the checkpoint dequant.
-  VLLM_ENABLE_V1_MULTIPROCESSING=0 RADIANCE_MXFP4_MCB=/m/mcb_tables.pt python3 probe_mcb_serve.py /m
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 RADIANCE_MXFP4_BCQ=/m/bcq_tables.pt python3 probe_bcq_serve.py /m
 """
 import json, sys
 import torch
@@ -32,7 +32,7 @@ print("GEN", repr(out[0].outputs[0].text))
 print("FIRST NONFINITE:", *bad, sep="\n  ")
 
 wm = json.load(open(f"{ck}/model.safetensors.index.json"))["weight_map"]
-T = torch.load(f"{ck}/mcb_tables.pt").float().cuda()
+T = torch.load(f"{ck}/bcq_tables.pt").float().cuda()
 
 
 def g(k):

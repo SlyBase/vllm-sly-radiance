@@ -67,7 +67,7 @@ def test_mode2_round_trip_recovers_every_nibble():
 
 def test_fold_ws_is_the_kmag_row():
     """The fold stores the kMag ROW (0..15 for OCP); the kernel shifts it to a byte offset, which
-    leaves rows 16..255 addressable for MCB tables (set_mag_table)."""
+    leaves rows 16..255 addressable for BCQ tables (set_mag_table)."""
     ws = torch.randint(0, 32, (4, 96), dtype=torch.uint8)
     ref = torch.randint(0, 32, (96,), dtype=torch.uint8)
     out = R.psw_fold_ws(ws, ref)
