@@ -619,6 +619,13 @@ def _debug_compare(x, weight, weight_scale, weight_ref, out, x_fp8, x_scale):
 # Only the unfused path (x arrives as bf16) can split: run with RADIANCE_FUSED_NORM_QUANT=0.
 ACT_SPLIT = os.environ.get("RADIANCE_MXFP4_ACT_SPLIT", "0") == "1"
 ACT_SPLIT_MAX_M = int(os.environ.get("RADIANCE_MXFP4_ACT_SPLIT_MAX_M", "64"))
+_act_split_set = [False]
+
+
+def act_split(M: int) -> bool:
+    """The one rule both sides use: fused producers (kernel, kSplitMaxM) write 2M rows, consumers
+    (mxfp4_linear_pq) run 2M rows and add the halves."""
+    return ACT_SPLIT and M <= ACT_SPLIT_MAX_M
 
 
 def _split_launch(x, x_fp8, x_scale, weight, weight_scale, weight_ref, folded, M, N, K):
@@ -825,7 +832,14 @@ def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Te
     # 2026-09-02 -- some caller's scale does not lead with M -- so the shape stays the contract.)
     M, N = x_fp8.shape[0], weight.shape[0]
     K = weight_scale.shape[0] * 32
-    out = torch.empty((M, N), device=x_fp8.device, dtype=torch.bfloat16)
+    split = act_split(M)
+    if split:
+        # the producer's [M, K] view sits on 2M rows (hi, then the e4m3 residual), scale on 2M
+        if (x_fp8.untyped_storage().nbytes() - x_fp8.storage_offset() < 2 * M * K
+                or x_scale.untyped_storage().nbytes() - 4 * x_scale.storage_offset() < 8 * M):
+            raise RuntimeError(f"[radiance.mxfp4] act split: pre-quantized input M={M} K={K} has no "
+                               f"residual rows -- a producer that is not split-aware fed mxfp4_linear_pq")
+    out = torch.empty((2 * M if split else M, N), device=x_fp8.device, dtype=torch.bfloat16)
     tiled = bool(A_TILED_MIN_M) and a_tiled_take(x_fp8, M, K)
     launch = _ext.launch_at if tiled else _ext.launch
     if tiled:
@@ -837,7 +851,9 @@ def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Te
             sys.stderr.flush()
     launch(x_fp8.data_ptr(), weight.data_ptr(), weight_scale.data_ptr(),
            weight_ref.data_ptr(), x_scale.data_ptr(), out.data_ptr(),
-           M, N, K, torch.cuda.current_stream().cuda_stream)
+           2 * M if split else M, N, K, torch.cuda.current_stream().cuda_stream)
+    if split:
+        return torch.add(out[:M], out[M:])
     return out
 
 
@@ -1028,6 +1044,10 @@ def _make_kernel_class():
             # thoroughly misleading "HIP runtime library (libamdhip64.so) not found ... TileLang's
             # ROCm backend". report_stats() is NOT a valid hook either -- it runs inside the custom
             # op, i.e. potentially under capture as well.
+            if ACT_SPLIT and not _act_split_set[0]:
+                _act_split_set[0] = True
+                _ext.set_act_split(ACT_SPLIT_MAX_M)   # producers: same M <= MAX rule as here
+                sys.stderr.write(f"[radiance.mxfp4] fp8 hi/lo activation split ON for M <= {ACT_SPLIT_MAX_M}\n")
             if not _decode_scratch_ready[0] and DECODE_MAX_M > 0:
                 _decode_scratch_ready[0] = True
                 try:

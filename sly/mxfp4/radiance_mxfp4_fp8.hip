@@ -1747,6 +1747,46 @@ static void launch6_p(uintptr_t a, uintptr_t w, uintptr_t wh, uintptr_t ws, uint
   } while (0)
 typedef unsigned int uint32_tt;
 
+// fp8 hi/lo activation split (set_act_split): when this launch's M (= gridDim.x) is <= kSplitMaxM,
+// the producer also writes the e4m3 residual x - deq(q_hi) as rows M..2M-1 (own per-token scale at
+// scale[M + row]); the consumer runs ONE GEMM over 2M rows and adds the halves. The rule is a
+// process-wide constant, so the Python side allocates 2M rows under exactly the same condition.
+__device__ __constant__ int kSplitMaxM = 0;
+static void set_act_split(int max_m) {
+  if (hipMemcpyToSymbol(HIP_SYMBOL(kSplitMaxM), &max_m, sizeof(int)) != hipSuccess)
+    throw std::runtime_error("radiance_mxfp4_fp8: set_act_split failed");
+}
+static __device__ __forceinline__ uint2 nq_pack8(const float (&v)[8], float rs) {
+  uint32_tt lo = 0, hi = 0;
+#pragma unroll
+  for (int j = 0; j < 4; j += 2) {
+    float a = fminf(fmaxf(v[j] * rs, -448.f), 448.f), b = fminf(fmaxf(v[j + 1] * rs, -448.f), 448.f);
+    lo |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << (j * 8);
+  }
+#pragma unroll
+  for (int j = 4; j < 8; j += 2) {
+    float a = fminf(fmaxf(v[j] * rs, -448.f), 448.f), b = fminf(fmaxf(v[j + 1] * rs, -448.f), 448.f);
+    hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
+  }
+  return make_uint2(lo, hi);
+}
+// v -= deq(p) * sc (in place), returns the residual's |max|
+static __device__ __forceinline__ float nq_resid8(float (&v)[8], uint2 p, float sc) {
+  float am = 0.f;
+  v[0] -= __builtin_amdgcn_cvt_f32_fp8((int)p.x, 0) * sc; v[1] -= __builtin_amdgcn_cvt_f32_fp8((int)p.x, 1) * sc;
+  v[2] -= __builtin_amdgcn_cvt_f32_fp8((int)p.x, 2) * sc; v[3] -= __builtin_amdgcn_cvt_f32_fp8((int)p.x, 3) * sc;
+  v[4] -= __builtin_amdgcn_cvt_f32_fp8((int)p.y, 0) * sc; v[5] -= __builtin_amdgcn_cvt_f32_fp8((int)p.y, 1) * sc;
+  v[6] -= __builtin_amdgcn_cvt_f32_fp8((int)p.y, 2) * sc; v[7] -= __builtin_amdgcn_cvt_f32_fp8((int)p.y, 3) * sc;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) am = fmaxf(am, fabsf(v[j]));
+  return am;
+}
+template <bool TILED>
+static __device__ __forceinline__ void nq_put(unsigned char *q, uint2 p, int g, int r, int kst) {
+  if (TILED) ((uint2 *)q)[((r >> 4) * kst + (g >> 1)) * 32 + (r & 15) + 16 * (g & 1)] = p;
+  else ((uint2 *)q)[g] = p;
+}
+
 // Online block-128 Hadamard on the fp8 producers' output (BCQ+H checkpoints: every MXFP4 weight is
 // stored as W R, R = blockdiag(H128 diag(s)) / sqrt(128)). set_had() turns it on process-wide, which
 // is sound because these producers only ever feed MXFP4 linears of the same checkpoint. Applied to
@@ -1864,24 +1904,32 @@ __global__ __launch_bounds__(ART) void radiance_add_rms_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
+  const bool split = (int)gridDim.x <= kSplitMaxM;
+  float am2 = 0.f;
   auto p3 = [&](int g, int mg) {
-    uint32_tt lo = 0, hi = 0;
-#pragma unroll
-    for (int j = 0; j < 4; j += 2) {
-      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
-      lo |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << (j * 8);
-    }
-#pragma unroll
-    for (int j = 4; j < 8; j += 2) {
-      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
-      hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
-    }
-    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
-    else ((uint2 *)q)[g] = make_uint2(lo, hi);
+    const uint2 pk = nq_pack8(sv[mg], rs);
+    nq_put<TILED>(q, pk, g, row, kst);
+    if (split) am2 = fmaxf(am2, nq_resid8(sv[mg], pk, sc));
   };
   NQ_FOR(KV, p3);
+  if (!split) return;
+  (void)mt; (void)lrow;
+  __syncthreads();                       // lds[0] is reused for the residual amax
+  for (int o = 16; o; o >>= 1) am2 = fmaxf(am2, __shfl_down(am2, o));
+  if ((tid & 31) == 0) lds[tid >> 5] = am2;
+  __syncthreads();
+  if (tid < ART / 32) {
+    float v = lds[tid];
+    for (int o = ART / 64; o; o >>= 1) v = fmaxf(v, __shfl_down(v, o));
+    if (tid == 0) lds[0] = v;
+  }
+  __syncthreads();
+  const float sc2 = fmaxf(lds[0] * (1.f / 448.f), 1e-30f), rs2 = 1.f / sc2;
+  const int M_ = (int)gridDim.x;
+  if (tid == 0) scale[M_ + row] = sc2;
+  unsigned char *q2 = TILED ? q : q + (long)M_ * K;   // non-tiled q is already this row's base
+  auto p4 = [&](int g, int mg) { nq_put<TILED>(q2, nq_pack8(sv[mg], rs2), g, M_ + row, kst); };
+  NQ_FOR(KV, p4);
 }
 
 // ---- fused SiLU-mul + per-token fp8 quant ----------------------------------------------------
@@ -1933,24 +1981,32 @@ __global__ __launch_bounds__(ART) void radiance_silu_mul_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
+  const bool split = (int)gridDim.x <= kSplitMaxM;
+  float am2 = 0.f;
   auto p3 = [&](int g, int mg) {
-    uint32_tt lo = 0, hi = 0;
-#pragma unroll
-    for (int j = 0; j < 4; j += 2) {
-      float a = fminf(fmaxf(pv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(pv[mg][j + 1] * rs, -448.f), 448.f);
-      lo |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << (j * 8);
-    }
-#pragma unroll
-    for (int j = 4; j < 8; j += 2) {
-      float a = fminf(fmaxf(pv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(pv[mg][j + 1] * rs, -448.f), 448.f);
-      hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
-    }
-    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
-    else ((uint2 *)q)[g] = make_uint2(lo, hi);
+    const uint2 pk = nq_pack8(pv[mg], rs);
+    nq_put<TILED>(q, pk, g, row, kst);
+    if (split) am2 = fmaxf(am2, nq_resid8(pv[mg], pk, sc));
   };
   NQ_FOR(NV, p3);
+  if (!split) return;
+  (void)mt; (void)lrow;
+  __syncthreads();                       // lds[0] is reused for the residual amax
+  for (int o = 16; o; o >>= 1) am2 = fmaxf(am2, __shfl_down(am2, o));
+  if ((tid & 31) == 0) lds[tid >> 5] = am2;
+  __syncthreads();
+  if (tid < ART / 32) {
+    float v = lds[tid];
+    for (int o = ART / 64; o; o >>= 1) v = fmaxf(v, __shfl_down(v, o));
+    if (tid == 0) lds[0] = v;
+  }
+  __syncthreads();
+  const float sc2 = fmaxf(lds[0] * (1.f / 448.f), 1e-30f), rs2 = 1.f / sc2;
+  const int M_ = (int)gridDim.x;
+  if (tid == 0) scale[M_ + row] = sc2;
+  unsigned char *q2 = TILED ? q : q + (long)M_ * N;   // non-tiled q is already this row's base
+  auto p4 = [&](int g, int mg) { nq_put<TILED>(q2, nq_pack8(pv[mg], rs2), g, M_ + row, kst); };
+  NQ_FOR(NV, p4);
 }
 
 // RADIANCE_FUSED_NQ_REG=1 (default off): register-resident row slice in the norm/act quant producers.
@@ -2071,24 +2127,32 @@ __global__ __launch_bounds__(ART) void radiance_gdn_norm_quant(
   const float sc = fmaxf(lds[0] * (1.f / 448.f), 1.f / (448.f * 512.f));
   const float rs = 1.f / sc;
   if (tid == 0) scale[row] = sc;
+  const bool split = (int)gridDim.x <= kSplitMaxM;
+  float am2 = 0.f;
   auto p3 = [&](int g, int mg) {
-    uint32_tt lo = 0, hi = 0;
-#pragma unroll
-    for (int j = 0; j < 4; j += 2) {
-      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
-      lo |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << (j * 8);
-    }
-#pragma unroll
-    for (int j = 4; j < 8; j += 2) {
-      float a = fminf(fmaxf(sv[mg][j] * rs, -448.f), 448.f);
-      float b = fminf(fmaxf(sv[mg][j + 1] * rs, -448.f), 448.f);
-      hi |= (__builtin_amdgcn_cvt_pk_fp8_f32(a, b, 0u, false) & 0xffffu) << ((j - 4) * 8);
-    }
-    if (TILED) ((uint2 *)q)[(mt * kst + (g >> 1)) * 32 + lrow + 16 * (g & 1)] = make_uint2(lo, hi);
-    else ((uint2 *)q)[g] = make_uint2(lo, hi);
+    const uint2 pk = nq_pack8(sv[mg], rs);
+    nq_put<TILED>(q, pk, g, row, kst);
+    if (split) am2 = fmaxf(am2, nq_resid8(sv[mg], pk, sc));
   };
   NQ_FOR(NV, p3);
+  if (!split) return;
+  (void)mt; (void)lrow;
+  __syncthreads();                       // lds[0] is reused for the residual amax
+  for (int o = 16; o; o >>= 1) am2 = fmaxf(am2, __shfl_down(am2, o));
+  if ((tid & 31) == 0) lds[tid >> 5] = am2;
+  __syncthreads();
+  if (tid < ART / 32) {
+    float v = lds[tid];
+    for (int o = ART / 64; o; o >>= 1) v = fmaxf(v, __shfl_down(v, o));
+    if (tid == 0) lds[0] = v;
+  }
+  __syncthreads();
+  const float sc2 = fmaxf(lds[0] * (1.f / 448.f), 1e-30f), rs2 = 1.f / sc2;
+  const int M_ = (int)gridDim.x;
+  if (tid == 0) scale[M_ + row] = sc2;
+  unsigned char *q2 = TILED ? q : q + (long)M_ * N;   // non-tiled q is already this row's base
+  auto p4 = [&](int g, int mg) { nq_put<TILED>(q2, nq_pack8(sv[mg], rs2), g, M_ + row, kst); };
+  NQ_FOR(NV, p4);
 }
 
 template <bool REG>
@@ -2318,6 +2382,7 @@ PYBIND11_MODULE(radiance_mxfp4_fp8, m) {
   m.def("launch_at", &launch_at, "MXFP4 x FP8 WMMA GEMM on a fragment-tiled activation");
   m.def("get_had_signs", &get_had_signs, "debug: kHadS as a list");
   m.def("get_had", &get_had, "debug: current kHadOn (-2 = read failed)");
+  m.def("set_act_split", &set_act_split, "fp8 hi/lo split in the producers for launches with M <= max_m (0 = off)");
   m.def("set_had", &set_had, "online H128 on the fp8 producers: (128 float signs/sqrt(128) host ptr, on)");
   m.def("set_mag_table", &set_mag_table, "BCQ: upload 256 x 8 e4m3 block tables (2048 B host ptr) into kMag");
   m.def("set_at_psw", &set_at_psw, "select the PSW weight layout (0 = off; the caller repacks W/Ws)");
