@@ -226,6 +226,51 @@ def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
         w[a:a + step].copy_(psw_pack_w(w[a:a + step], 2))
 
 
+# MCB (multi-codebook) checkpoints: RADIANCE_MXFP4_MCB=<path to a [256, 8] float tensor (.pt) of
+# e4m3-exact block tables>. The checkpoint's weight_scale then holds a TABLE ID per 32-block (not an
+# e8m0 exponent) and an extra per-row weight_row_exp (u8, 2^(e-127) row scale) replaces the
+# make_row_ref() row max. Same bytes per weight as OCP; the kernel reads it through the PSW
+# readers only (set_mag_table + the folded byte as kMag row), so it needs AT_PSW=2 and our kernel
+# on every MXFP4 layer.
+MCB = os.environ.get("RADIANCE_MXFP4_MCB", "").strip()
+if MCB and AT_PSW != 2:
+    raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_MCB needs the PSW layout (RADIANCE_MXFP4_AT_PSW=2)")
+_mcb_table_set = [False]
+
+
+def mcb_table_bytes(path: str) -> "torch.Tensor":
+    """[256, 8] e4m3-exact floats -> the 2048 kMag bytes set_mag_table() uploads (row-major)."""
+    t = torch.load(path, map_location="cpu").float()
+    if tuple(t.shape) != (256, 8) or bool((t < 0).any()):
+        raise RuntimeError(f"[radiance.mxfp4] MCB table {path}: want [256, 8] magnitudes, got {tuple(t.shape)}")
+    b = t.to(torch.float8_e4m3fn)
+    if not torch.equal(b.float(), t):
+        raise RuntimeError(f"[radiance.mxfp4] MCB table {path} is not e4m3-exact")
+    return b.view(torch.uint8).contiguous()
+
+
+def _mcb_install_create_weights() -> None:
+    """Register weight_row_exp next to weight_packed / weight_scale on every CT MXFP4 linear.
+    Runs from kernel selection, which the scheme's __init__ does BEFORE create_weights."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_mxfp4 import (
+        CompressedTensorsW4A4Mxfp4 as S)
+    from vllm.model_executor.parameter import ChannelQuantScaleParameter
+    if getattr(S, "_radiance_mcb", False):
+        return
+    orig = S.create_weights
+
+    def create_weights(self, layer, output_partition_sizes, input_size_per_partition, params_dtype,
+                       weight_loader, **kwargs):
+        orig(self, layer, output_partition_sizes, input_size_per_partition, params_dtype,
+             weight_loader, **kwargs)
+        layer.register_parameter("weight_row_exp", ChannelQuantScaleParameter(
+            data=torch.empty(sum(output_partition_sizes), dtype=torch.uint8),
+            output_dim=0, weight_loader=weight_loader))
+
+    S.create_weights = create_weights
+    S._radiance_mcb = True
+
+
 def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
     """[K/32, N] e8m0 block scales -> clamp(Wref[n] - Ws, 0, 15), the kMag ROW the PSW kernel
     looks up (it shifts the row to a byte offset itself, so MCB can use all 256 rows). Same shape
@@ -876,6 +921,8 @@ def _asm_gemm_enabled() -> bool:
 
 
 def _make_kernel_class():
+    if MCB:
+        _mcb_install_create_weights()
     """Built lazily so importing this module never drags in vllm.model_executor.kernels."""
     from vllm.model_executor.kernels.linear.mxfp4.base import (
         MxFp4LinearKernel,
@@ -971,7 +1018,21 @@ def _make_kernel_class():
             if perblock:
                 STATS["fast"] -= 1
                 STATS["perblock_forced"] = STATS.get("perblock_forced", 0) + 1
-            if ok and not perblock:
+            if MCB:
+                # weight_scale = table ids, weight_row_exp = the row exponent; only the PSW readers
+                # of our kernel understand that, so any other route would compute garbage.
+                if not ok or perblock or not WPERM:
+                    raise RuntimeError(f"[radiance.mxfp4] RADIANCE_MXFP4_MCB: layer N="
+                                       f"{tuple(layer.weight.shape)[0]} K={K} is not served by the "
+                                       f"PSW kernel (ok={ok}, perblock={perblock}, WPERM={WPERM})")
+                ref = layer.weight_row_exp.data.contiguous()
+                del layer.weight_row_exp
+                _lo, _hi = int(ref.min()), int(ref.max())
+                if _lo < 64 or _hi > 160:   # |W| row scales of a real LLM sit near 2^-6..2^-2
+                    raise RuntimeError(f"[radiance.mxfp4] MCB weight_row_exp out of range [{_lo}, {_hi}] "
+                                       f"on N={tuple(layer.weight.shape)[0]} K={K}: not loaded from the checkpoint?")
+                STATS["mcb_layers"] = STATS.get("mcb_layers", 0) + 1
+            elif ok and not perblock:
                 ref = make_row_ref(layer.weight_scale.data)          # folded
             else:
                 # 2 elements = our kernel's per-block path; 1 = aiter (kernel cannot serve it)
@@ -1003,7 +1064,17 @@ def _make_kernel_class():
                         raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW: the per-block "
                                            "path has no PSW reader")
                     psw_pack_w_(layer.weight.data)
-                    layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
+                    if MCB:
+                        if not _mcb_table_set[0]:
+                            # keep the tensor alive across the call: a bare mcb_table_bytes(MCB).data_ptr()
+                            # frees the buffer before set_mag_table copies it (NaN weights, measured)
+                            _tb = mcb_table_bytes(MCB)
+                            _ext.set_mag_table(_tb.data_ptr())
+                            del _tb
+                            _mcb_table_set[0] = True
+                            sys.stderr.write(f"[radiance.mxfp4] MCB block tables loaded from {MCB}\n")
+                    else:
+                        layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
                     if not _psw_on[0]:
                         _psw_on[0] = True
                         _ext.set_at_psw(2)
