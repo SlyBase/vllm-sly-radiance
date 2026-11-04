@@ -121,7 +121,7 @@ def main(d):
         variants = {n: v for n, v in variants.items() if any(k in n for k in keep)}
     acc = {n: [0.0, 0.0, 0.0, 0] for n in variants}
     for f in files:
-        dd = torch.load(f)
+        dd = torch.load(f, weights_only=True)
         k_all, v_all = dd["k"].float(), dd["v"].float()
         for h in range(k_all.shape[1]):
             k, v = k_all[:, h], v_all[:, h]
