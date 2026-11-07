@@ -192,9 +192,9 @@ jobs:
       - name: production health (independent of the gate result)
         if: always()
         env:
-          # production is Radiance on LXC 2413 (gpu-window GPU_WINDOW_PROD=radiance restores it);
-          # before 2026-10-06 it was vllm7 on 2408:8000 -- set the variable to that to go back
-          PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.54:8000/health' }}
+          # production is vllm7 on LXC 2408 (docker-vllm7.service) since 2026-10-24; Radiance on LXC 2413
+          # (http://192.168.178.54:8000/health) is off -- set the variable to that if it is production again
+          PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.51:8000/health' }}
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PROD_HEALTH_URL" || echo 000)
           echo "production /health = $code"

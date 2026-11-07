@@ -15,8 +15,8 @@
 # green, it may touch only CHANGELOG.md and the baselines), then release.yml tags that merge commit. Red ->
 # a commit comment on main's head with the report; the same head is not retried.
 #
-# Time window. The GPU may be taken ONLY between 04:00 and 06:00 Europe/Berlin: it stops Radiance (the
-# production LLM, LXC 2413) and must give it back before 06:00. Two crons (02:17 and 03:17 UTC, off the full hour: GitHub drops top-of-hour schedule events) cover
+# Time window. The GPU may be taken ONLY between 04:00 and 06:00 Europe/Berlin: it stops production (the
+# vllm7 unit on LXC 2408; Radiance on LXC 2413 when that is production) and must give it back before 06:00. Two crons (02:17 and 03:17 UTC, off the full hour: GitHub drops top-of-hour schedule events) cover
 # summer and winter time; the `plan` job proceeds only if the Berlin hour is 4. The budget inside the window:
 # acquire patience until ~04:10, accept.py --deadline 05:45 (no phase starts after it), TTL ends 05:50.
 # gpu-window enforces the same on its side: owner `accept-night` is refused outside 04:00-06:00 and its TTL
@@ -59,7 +59,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # production LLM health (repo variable; vLLM on LXC 2408 or Radiance on 2413); gpu-window restores
+  # production LLM health (repo variable; vllm7 on LXC 2408 by default, Radiance on 2413 when it is production); gpu-window restores
   # production on release, this is the independent check
   PROD_HEALTH_URL: ${{ vars.PROD_HEALTH_URL || 'http://192.168.178.51:8000/health' }}
 
@@ -285,7 +285,7 @@ jobs:
             ci/accept/baselines/
           retention-days: 30
 
-      - name: production (Radiance) health, independent of the gate result
+      - name: production (vllm7) health, independent of the gate result
         id: health
         if: always()
         run: |
@@ -301,7 +301,7 @@ jobs:
       - name: fail loudly when production is not back
         if: always() && steps.health.outputs.prod_ok != 'true'
         run: |
-          echo "::error::Radiance is NOT healthy after the night window -- production is down, a human must restore it (docs/MAINTENANCE.md, 'Radiance is down')"
+          echo "::error::production (vllm7) is NOT healthy after the night window -- production is down, a human must restore it (docs/MAINTENANCE.md, 'When it is red')"
           exit 1
 
   green:
@@ -547,7 +547,7 @@ jobs:
             HEAD="Night gate RED for ${SHA:0:12}. Not merged, not released; not retried for this head sha (a new push is a new candidate)."
             MARKER="<!-- accept-night:failed sha=${SHA} -->"
           fi
-          [ "$PROD_OK" = "true" ] || HEAD="$HEAD **Radiance was not healthy afterwards -- see the failed gate job.**"
+          [ "$PROD_OK" = "true" ] || HEAD="$HEAD **Production (vllm7) was not healthy afterwards -- see the failed gate job.**"
           {
             echo "$MARKER"; echo "$HEAD"; echo; echo "Run: $RUN_URL"; echo; cat "$REPORT"
           } > body.md

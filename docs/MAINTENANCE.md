@@ -12,8 +12,11 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
   `ci/resolve_stack.py`, never bumped on its own. Renovate PRs for those are disabled.
   CI-only deps (GitHub Actions, lint tools) keep their Renovate PRs and automerge on green (no image change, no release).
 - Incompatible versions are never merged. Merge and release happen automatically only if every gate is green.
-- The GPU gate runs unattended only between 04:00 and 06:00 Europe/Berlin. It stops Radiance
-  (`radiance-serve`, LXC 2413, 192.168.178.54:8000) and restores it (health 200) before 06:00.
+- The GPU gate runs unattended only between 04:00 and 06:00 Europe/Berlin. It stops production
+  (`docker-vllm7.service`, LXC 2408, 192.168.178.51:8000) and restores it (health 200) before 06:00.
+  Radiance (`radiance-serve`, LXC 2413, 192.168.178.54:8000) was production 2026-10-06..07 and 2026-10-11..24
+  and is off now; if it is production again, set `GPU_WINDOW_PROD=radiance` on the host and the repository
+  variable `PROD_HEALTH_URL` to its `/health`.
 - Hermes re-anchors broken sly patches under the rules below. Hermes never merges and never releases.
 
 ## Pipeline
@@ -68,16 +71,17 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
 ## Homelab interfaces (assumed, owned by the homelab repo)
 
 - `gpu-window`: owner `accept-night` allowed only 04:00-06:00; `acquire` returns `ttl_s` and `ttl_clamped`
-  (TTL ends 05:50). With `GPU_WINDOW_PROD=radiance` the first `start` stops `radiance-serve`; release
-  restores it to health 200 within 600 s or exits 3. `status` shows `prod`, `radiance_stopped`,
-  `radiance_pending`, `radiance_health`, `night`.
+  (TTL ends 05:50). With the default `GPU_WINDOW_PROD=vllm` the first `start` stops `docker-vllm7`; with
+  `GPU_WINDOW_PROD=radiance` it stops `radiance-serve` instead. Release restores production to health 200
+  within 600 s or exits 3. `status` shows `prod`, `radiance_stopped`, `radiance_pending`, `radiance_health`, `night`.
 - Hermes route: `POST https://hooks.timonds.de/webhooks/stack-patch-reanchor-slybase`, headers
   `X-GitHub-Event: stack_patch_broken` and `X-Hub-Signature-256: sha256=<HMAC-SHA256(body, HERMES_WEBHOOK_SECRET)>`.
   JSON: `kind`, `repository.full_name`, `pull_request.{number,html_url,head.ref,head.sha}`, `stack_change`,
   `brief` (the route renders only `{brief}`, so it carries the rules, failing hunks, patch list and verify
   commands). Hermes checks: PR open, label `stack`, branch `renovate/stack-*`, not a fork, max 3 attempts.
   Without the secret the job only warns.
-- Radiance production health: `http://192.168.178.54:8000/health` (repo variable `PROD_HEALTH_URL`).
+- Production health: `http://192.168.178.51:8000/health` (vllm7, LXC 2408; repository variable `PROD_HEALTH_URL`, workflow
+  default the same). Radiance as production: `http://192.168.178.54:8000/health` in the variable.
 
 ## Hermes re-anchoring rules
 
@@ -96,8 +100,8 @@ single description of that pipeline; `ci/build_brief.py` embeds the Hermes rules
 Actions -> accept-night -> Run workflow with `dry_run: false`, `run_now: true` (and `mode: full` for the whole
 sweep with GSM8K): the 04:00 Berlin check is skipped, gpu-window is acquired as owner `accept-manual` (only
 `accept-night` is restricted to 04:00-06:00) and the budget is ~2 h from now. Everything else is the night gate:
-calibration when the baseline is incomplete, merge + release on green, `gate-failed` on red. Production (vLLM on
-2408 or Radiance on 2413, per `GPU_WINDOW_PROD`) is down for the duration.
+calibration when the baseline is incomplete, merge + release on green, `gate-failed` on red. Production (vllm7 on
+2408 by default, Radiance on 2413 when `GPU_WINDOW_PROD=radiance`) is down for the duration.
 
     gh workflow run accept-night.yml -R SlyBase/vllm-sly-radiance -f dry_run=false -f run_now=true -f mode=full
 
@@ -119,4 +123,6 @@ gate behind it would never start). With `AUTO_MAINTAIN=off` it is back to the ol
 - Image build / smoke red: fix on the PR branch like any change.
 - `gate-failed`: read the PR comment (report). Fix, push (a new head sha is a new candidate for the next
   night), or run `accept.yml` by hand. Remove the label when retrying.
-- Radiance not back at 06:00: the workflow's last step fails; check `gpu-window status` on 2408 first.
+- Production not back at 06:00 ("Production is down"): the workflow's last step fails; check `gpu-window status` on 2408
+  first, then `systemctl status docker-vllm7`. A red step with a healthy production can be a stale `PROD_HEALTH_URL`
+  (it pointed at the disabled Radiance until 2026-11-07, which turned every night red).
