@@ -10,6 +10,17 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Added
+- `RADIANCE_LMHEAD_HOT=<rows.json>` (+ `RADIANCE_LMHEAD_HOT_FMT=fp8|bf16`, default `fp8`, opt-in; needs
+  `RADIANCE_LMHEAD_INT4=1`): the listed vocabulary rows keep their original head weights (bf16, or e4m3
+  with one fp32 scale per row). A second small GEMV computes their logits and overwrites the int4 logits;
+  all other rows are bit-identical to today. Env unset = no extra memory, no extra launch. TP = 1 only.
+  *Measured* (simulation, paired, 95 % CI excludes 0, not a GPU run): −13.8 % KLD against the bf16 head
+  with the 8k hottest rows in bf16, −14.0 % with 32k rows in fp8. Decode cost of the extra GEMV: not
+  measured yet.
+
 ## [1.10.0] - 2026-11-02
 
 The image ships about 1 GB (apparent) less: the ROCm prune now also drops the host-side tooling and
