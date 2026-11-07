@@ -226,11 +226,94 @@ def psw_pack_w_(w: "torch.Tensor", rows: int = 0) -> None:
         w[a:a + step].copy_(psw_pack_w(w[a:a + step], 2))
 
 
+# BCQ (block-clustered (BCQ)) checkpoints: RADIANCE_MXFP4_BCQ=<path to a [256, 8] float tensor (.pt) of
+# e4m3-exact block tables>. The checkpoint's weight_scale then holds a TABLE ID per 32-block (not an
+# e8m0 exponent) and an extra per-row weight_row_exp (u8, 2^(e-127) row scale) replaces the
+# make_row_ref() row max. Same bytes per weight as OCP; the kernel reads it through the PSW
+# readers only (set_mag_table + the folded byte as kMag row), so it needs AT_PSW=2 and our kernel
+# on every MXFP4 layer.
+BCQ = os.environ.get("RADIANCE_MXFP4_BCQ", "").strip()
+if BCQ and AT_PSW != 2:
+    raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_BCQ needs the PSW layout (RADIANCE_MXFP4_AT_PSW=2)")
+_bcq_table_set = [False]
+# RADIANCE_MXFP4_HAD=128: the checkpoint's MXFP4 weights are W R (R = blockdiag over K of
+# H128 diag(s) / sqrt(128), s = the fq.hadamard32(n=128) seed-0 signs). Activations get the same R
+# online: inside the fused fp8 producers (set_had) and, on the unfused path, as one bf16 GEMM here.
+HAD = int(os.environ.get("RADIANCE_MXFP4_HAD", "0") or 0)
+if HAD not in (0, 128):
+    raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD must be 0 or 128")
+if HAD and not BCQ:
+    raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD needs an BCQ checkpoint (RADIANCE_MXFP4_BCQ)")
+if HAD and os.environ.get("RADIANCE_MXFP4_HOIST_QUANT", "0") == "1":
+    raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD has no traced-quant rotation")
+_had_mat = {}
+_had_keep = []
+
+
+def had_signs(n: int = 128) -> "torch.Tensor":
+    """The fq.hadamard32(n) column signs / sqrt(n): torch.Generator seed 0, rand(n) < 0.5 -> -1."""
+    g = torch.Generator().manual_seed(0)
+    # explicit fp32 everywhere: vLLM sets the default dtype to bf16 during load, and torch.where with
+    # Python scalars follows it -- a bf16 buffer handed to set_had as 128 floats was garbage (measured)
+    s = torch.where(torch.rand(n, generator=g, dtype=torch.float32) < 0.5,
+                    torch.tensor(-1.0, dtype=torch.float32), torch.tensor(1.0, dtype=torch.float32))
+    return (s / n ** 0.5).to(torch.float32).contiguous()
+
+
+def had_matrix(n: int, device) -> "torch.Tensor":
+    key = (n, str(device))
+    if key not in _had_mat:
+        H = torch.ones(1, 1, dtype=torch.float32)
+        while H.shape[0] < n:
+            H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)])
+        _had_mat[key] = (H * had_signs(n)).to(device)
+    return _had_mat[key]
+
+
+def had_rot(x: "torch.Tensor") -> "torch.Tensor":
+    M, K = x.shape
+    return (x.float().view(M, K // HAD, HAD) @ had_matrix(HAD, x.device)).view(M, K).to(x.dtype)
+
+
+def bcq_table_bytes(path: str) -> "torch.Tensor":
+    """[256, 8] e4m3-exact floats -> the 2048 kMag bytes set_mag_table() uploads (row-major)."""
+    t = torch.load(path, map_location="cpu").float()
+    if tuple(t.shape) != (256, 8) or bool((t < 0).any()):
+        raise RuntimeError(f"[radiance.mxfp4] BCQ table {path}: want [256, 8] magnitudes, got {tuple(t.shape)}")
+    b = t.to(torch.float8_e4m3fn)
+    if not torch.equal(b.float(), t):
+        raise RuntimeError(f"[radiance.mxfp4] BCQ table {path} is not e4m3-exact")
+    return b.view(torch.uint8).contiguous()
+
+
+def _bcq_install_create_weights() -> None:
+    """Register weight_row_exp next to weight_packed / weight_scale on every CT MXFP4 linear.
+    Runs from kernel selection, which the scheme's __init__ does BEFORE create_weights."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_mxfp4 import (
+        CompressedTensorsW4A4Mxfp4 as S)
+    from vllm.model_executor.parameter import ChannelQuantScaleParameter
+    if getattr(S, "_radiance_bcq", False):
+        return
+    orig = S.create_weights
+
+    def create_weights(self, layer, output_partition_sizes, input_size_per_partition, params_dtype,
+                       weight_loader, **kwargs):
+        orig(self, layer, output_partition_sizes, input_size_per_partition, params_dtype,
+             weight_loader, **kwargs)
+        layer.register_parameter("weight_row_exp", ChannelQuantScaleParameter(
+            data=torch.empty(sum(output_partition_sizes), dtype=torch.uint8),
+            output_dim=0, weight_loader=weight_loader))
+
+    S.create_weights = create_weights
+    S._radiance_bcq = True
+
+
 def psw_fold_ws(weight_scale: "torch.Tensor", wref: "torch.Tensor") -> "torch.Tensor":
-    """[K/32, N] e8m0 block scales -> 8 * clamp(Wref[n] - Ws, 0, 15), the kMag row byte offset the
-    PSW kernel adds to its LDS table base. Same shape and dtype (uint8); Wref stays as is."""
+    """[K/32, N] e8m0 block scales -> clamp(Wref[n] - Ws, 0, 15), the kMag ROW the PSW kernel
+    looks up (it shifts the row to a byte offset itself, so BCQ can use all 256 rows). Same shape
+    and dtype (uint8); Wref stays as is."""
     d = (wref.to(torch.int32)[None, :] - weight_scale.to(torch.int32)).clamp(0, 15)
-    return (d * 8).to(torch.uint8).contiguous()
+    return d.to(torch.uint8).contiguous()
 
 
 def unpermute_w(packed: "torch.Tensor", N: int, K: int) -> "torch.Tensor":
@@ -528,6 +611,36 @@ def _debug_compare(x, weight, weight_scale, weight_ref, out, x_fp8, x_scale):
         sys.stderr.write(f"[radiance.mxfp4.debug] compare failed: {e!r}\n")
 
 
+# fp8 hi/lo activation split (RADIANCE_MXFP4_ACT_SPLIT=1, for M <= RADIANCE_MXFP4_ACT_SPLIT_MAX_M): the
+# per-token e4m3 residual x - deq(q_hi) is quantized again and stacked under q_hi, so ONE launch at 2M
+# rows reads each weight once and y = y_hi + y_lo. Removes ~3/4 of the fp8 activation KLD (fq_eval
+# --act-split, 2026-11-04: bf16 weights 0.0049 -> 0.0012; BCQ+H128 0.0174 -> 0.0155). In the
+# memory-bound decode band the doubled M is nearly free; prefill pays up to 2x WMMA, hence the cap.
+# Only the unfused path (x arrives as bf16) can split: run with RADIANCE_FUSED_NORM_QUANT=0.
+ACT_SPLIT = os.environ.get("RADIANCE_MXFP4_ACT_SPLIT", "0") == "1"
+ACT_SPLIT_MAX_M = int(os.environ.get("RADIANCE_MXFP4_ACT_SPLIT_MAX_M", "64"))
+_act_split_set = [False]
+
+
+def act_split(M: int) -> bool:
+    """The one rule both sides use: fused producers (kernel, kSplitMaxM) write 2M rows, consumers
+    (mxfp4_linear_pq) run 2M rows and add the halves."""
+    return ACT_SPLIT and M <= ACT_SPLIT_MAX_M
+
+
+def _split_launch(x, x_fp8, x_scale, weight, weight_scale, weight_ref, folded, M, N, K):
+    from vllm import _custom_ops as ops
+    r = x.float() - x_fp8.float() * x_scale[:, None]
+    r_fp8, r_scale = ops.scaled_fp8_quant(r.to(x.dtype), scale=None, use_per_token_if_dynamic=True)
+    a = torch.cat([x_fp8, r_fp8]).contiguous()
+    sc = torch.cat([x_scale, r_scale.view(-1).float()]).contiguous()
+    out = torch.empty((2 * M, N), device=x.device, dtype=torch.bfloat16)
+    _ext.launch(a.data_ptr(), weight.data_ptr(), weight_scale.data_ptr(),
+                weight_ref.data_ptr() if folded else 0, sc.data_ptr(), out.data_ptr(), 2 * M, N, K,
+                torch.cuda.current_stream().cuda_stream)
+    return (out[:M].float() + out[M:].float()).to(torch.bfloat16)
+
+
 @torch.library.custom_op("radiance::mxfp4_linear", mutates_args=())
 def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
                  weight_ref: torch.Tensor) -> torch.Tensor:
@@ -611,8 +724,12 @@ def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tens
         x_scale = sc.view(-1).contiguous()
     else:
         from vllm import _custom_ops as ops
+        if HAD:
+            x = had_rot(x)
         x_fp8, x_scale = ops.scaled_fp8_quant(x, scale=None, use_per_token_if_dynamic=True)
         x_scale = x_scale.view(-1).float().contiguous()
+    if ACT_SPLIT and M <= ACT_SPLIT_MAX_M:
+        return _split_launch(x, x_fp8, x_scale, weight, weight_scale, weight_ref, folded, M, N, K)
     if PAD_OUT:
         _slab = torch.empty(M * N + 2 * PAD_OUT, device=x.device, dtype=torch.bfloat16)
         out = _slab[PAD_OUT:PAD_OUT + M * N].view(M, N)   # view keeps the slab alive
@@ -715,7 +832,14 @@ def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Te
     # 2026-09-02 -- some caller's scale does not lead with M -- so the shape stays the contract.)
     M, N = x_fp8.shape[0], weight.shape[0]
     K = weight_scale.shape[0] * 32
-    out = torch.empty((M, N), device=x_fp8.device, dtype=torch.bfloat16)
+    split = act_split(M)
+    if split:
+        # the producer's [M, K] view sits on 2M rows (hi, then the e4m3 residual), scale on 2M
+        if (x_fp8.untyped_storage().nbytes() - x_fp8.storage_offset() < 2 * M * K
+                or x_scale.untyped_storage().nbytes() - 4 * x_scale.storage_offset() < 8 * M):
+            raise RuntimeError(f"[radiance.mxfp4] act split: pre-quantized input M={M} K={K} has no "
+                               f"residual rows -- a producer that is not split-aware fed mxfp4_linear_pq")
+    out = torch.empty((2 * M if split else M, N), device=x_fp8.device, dtype=torch.bfloat16)
     tiled = bool(A_TILED_MIN_M) and a_tiled_take(x_fp8, M, K)
     launch = _ext.launch_at if tiled else _ext.launch
     if tiled:
@@ -727,7 +851,9 @@ def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Te
             sys.stderr.flush()
     launch(x_fp8.data_ptr(), weight.data_ptr(), weight_scale.data_ptr(),
            weight_ref.data_ptr(), x_scale.data_ptr(), out.data_ptr(),
-           M, N, K, torch.cuda.current_stream().cuda_stream)
+           2 * M if split else M, N, K, torch.cuda.current_stream().cuda_stream)
+    if split:
+        return torch.add(out[:M], out[M:])
     return out
 
 
@@ -875,6 +1001,8 @@ def _asm_gemm_enabled() -> bool:
 
 
 def _make_kernel_class():
+    if BCQ:
+        _bcq_install_create_weights()
     """Built lazily so importing this module never drags in vllm.model_executor.kernels."""
     from vllm.model_executor.kernels.linear.mxfp4.base import (
         MxFp4LinearKernel,
@@ -916,6 +1044,10 @@ def _make_kernel_class():
             # thoroughly misleading "HIP runtime library (libamdhip64.so) not found ... TileLang's
             # ROCm backend". report_stats() is NOT a valid hook either -- it runs inside the custom
             # op, i.e. potentially under capture as well.
+            if ACT_SPLIT and not _act_split_set[0]:
+                _act_split_set[0] = True
+                _ext.set_act_split(ACT_SPLIT_MAX_M)   # producers: same M <= MAX rule as here
+                sys.stderr.write(f"[radiance.mxfp4] fp8 hi/lo activation split ON for M <= {ACT_SPLIT_MAX_M}\n")
             if not _decode_scratch_ready[0] and DECODE_MAX_M > 0:
                 _decode_scratch_ready[0] = True
                 try:
@@ -970,7 +1102,21 @@ def _make_kernel_class():
             if perblock:
                 STATS["fast"] -= 1
                 STATS["perblock_forced"] = STATS.get("perblock_forced", 0) + 1
-            if ok and not perblock:
+            if BCQ:
+                # weight_scale = table ids, weight_row_exp = the row exponent; only the PSW readers
+                # of our kernel understand that, so any other route would compute garbage.
+                if not ok or perblock or not WPERM:
+                    raise RuntimeError(f"[radiance.mxfp4] RADIANCE_MXFP4_BCQ: layer N="
+                                       f"{tuple(layer.weight.shape)[0]} K={K} is not served by the "
+                                       f"PSW kernel (ok={ok}, perblock={perblock}, WPERM={WPERM})")
+                ref = layer.weight_row_exp.data.contiguous()
+                del layer.weight_row_exp
+                _lo, _hi = int(ref.min()), int(ref.max())
+                if _lo < 64 or _hi > 160:   # |W| row scales of a real LLM sit near 2^-6..2^-2
+                    raise RuntimeError(f"[radiance.mxfp4] BCQ weight_row_exp out of range [{_lo}, {_hi}] "
+                                       f"on N={tuple(layer.weight.shape)[0]} K={K}: not loaded from the checkpoint?")
+                STATS["bcq_layers"] = STATS.get("bcq_layers", 0) + 1
+            elif ok and not perblock:
                 ref = make_row_ref(layer.weight_scale.data)          # folded
             else:
                 # 2 elements = our kernel's per-block path; 1 = aiter (kernel cannot serve it)
@@ -1002,7 +1148,24 @@ def _make_kernel_class():
                         raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_AT_PSW: the per-block "
                                            "path has no PSW reader")
                     psw_pack_w_(layer.weight.data)
-                    layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
+                    if BCQ:
+                        if not _bcq_table_set[0]:
+                            # keep the tensor alive across the call: a bare bcq_table_bytes(BCQ).data_ptr()
+                            # frees the buffer before set_mag_table copies it (NaN weights, measured)
+                            _tb = bcq_table_bytes(BCQ)
+                            _ext.set_mag_table(_tb.data_ptr())
+                            del _tb
+                            if HAD:
+                                _had_keep.append(had_signs(HAD))   # alive for the process lifetime
+                                assert _had_keep[-1].dtype == torch.float32 and _had_keep[-1].numel() == 128
+                                torch.cuda.synchronize()
+                                _ext.set_had(_had_keep[-1].data_ptr(), 1)
+                                torch.cuda.synchronize()
+                                sys.stderr.write(f"[radiance.mxfp4] online Hadamard-{HAD} ON (fp8 producers + unfused quant)\n")
+                            _bcq_table_set[0] = True
+                            sys.stderr.write(f"[radiance.mxfp4] BCQ block tables loaded from {BCQ}\n")
+                    else:
+                        layer.weight_scale.data.copy_(psw_fold_ws(layer.weight_scale.data, ref))
                     if not _psw_on[0]:
                         _psw_on[0] = True
                         _ext.set_at_psw(2)
@@ -1057,6 +1220,8 @@ _KERNEL_CLS = None
 def kernel_class():
     """The plugin class, built once. Returns None if anything about it is unavailable."""
     global _KERNEL_CLS
+    if BCQ:
+        _bcq_install_create_weights()   # every call: the class may be cached from before the scheme import
     if _KERNEL_CLS is None:
         try:
             _KERNEL_CLS = _make_kernel_class()
@@ -1064,3 +1229,12 @@ def kernel_class():
             sys.stderr.write(f"[radiance.mxfp4] kernel class unavailable, disabled: {e!r}\n")
             _KERNEL_CLS = False
     return _KERNEL_CLS or None
+
+
+if BCQ:
+    # Also at import: pure Python on the CT scheme class (no HIP), so it is safe in the parent too, and
+    # create_weights must carry weight_row_exp no matter which path first builds the scheme.
+    try:
+        _bcq_install_create_weights()
+    except Exception as _e:  # vLLM not importable yet (offline tools): kernel_class() retries
+        sys.stderr.write(f"[radiance.mxfp4] BCQ create_weights hook deferred: {_e!r}\n")

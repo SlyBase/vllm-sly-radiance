@@ -113,6 +113,14 @@ def _tiled(M: int, K: int) -> bool:
     return (_rmx_tiled_wanted is not None and _rmx_tiled_wanted(M) and K % 128 == 0)
 
 
+def _qs_alloc(M: int, K: int, device, tiled: bool):
+    """q [M, K] e4m3 + scale [M] f32, as views over 2M rows when the hi/lo split applies to M (the
+    kernel writes the residual rows M..2M-1 under the same rule, radiance_mxfp4.act_split)."""
+    rows = 2 * M if _rmx.act_split(M) else M
+    return (_q_alloc(rows, K, device, tiled)[:M],
+            torch.empty((rows,), device=device, dtype=torch.float32)[:M])
+
+
 def _q_alloc(M: int, K: int, device, tiled: bool) -> torch.Tensor:
     if tiled:
         return torch.empty(((M + 15) // 16 * 16, K), device=device, dtype=torch.float8_e4m3fn)[:M]
@@ -129,8 +137,7 @@ def _add_rms_quant_op(y: torch.Tensor, residual: torch.Tensor, weight: torch.Ten
     _check_bf16("add_rms_quant", y, residual, weight)
     M, K = y.shape
     tiled = _tiled(M, K)
-    q = _q_alloc(M, K, y.device, tiled)
-    s = torch.empty((M,), device=y.device, dtype=torch.float32)
+    q, s = _qs_alloc(M, K, y.device, tiled)
     r = torch.empty((M, K), device=y.device, dtype=torch.bfloat16)
     if M:
         y = y.contiguous()
@@ -160,8 +167,7 @@ def _silu_mul_quant_op(gate_up: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     M, N2 = gate_up.shape
     N = N2 // 2
     tiled = _tiled(M, N)
-    q = _q_alloc(M, N, gate_up.device, tiled)
-    s = torch.empty((M,), device=gate_up.device, dtype=torch.float32)
+    q, s = _qs_alloc(M, N, gate_up.device, tiled)
     if M:
         gate_up = gate_up.contiguous()
         _once("silu_mul_quant", f"M={M} N={N}")
@@ -188,8 +194,7 @@ def _gdn_norm_quant_op(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor,
     _check_bf16("gdn_norm_quant", x, z, weight)
     M, N = x.shape
     tiled = TILED_OPROJ and _tiled(M, N)
-    q = _q_alloc(M, N, x.device, tiled)
-    s = torch.empty((M,), device=x.device, dtype=torch.float32)
+    q, s = _qs_alloc(M, N, x.device, tiled)
     if M:
         x = x.contiguous()
         weight = weight.contiguous()
