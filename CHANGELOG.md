@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [Unreleased]
+## [1.10.1] - 2026-11-07
 
 ### Added
 - `RADIANCE_LMHEAD_HOT=<rows.json>` (+ `RADIANCE_LMHEAD_HOT_FMT=fp8|bf16`, default `fp8`, opt-in; needs
