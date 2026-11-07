@@ -10,6 +10,16 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Fixed
+- **`serve-mxfp4.sh` compiles and copies the kernel sources the image ships.** It built the repo-root
+  `radiance_mxfp4_fp8.hip` (10-argument `launch_gdn_norm_quant`) and copied the repo-root
+  `radiance_mxfp4.py`, while the image's `sly/mxfp4/radiance_fused_norm.py` calls the 11-argument
+  `sly/mxfp4/` kernel. The launcher now takes `radiance_mxfp4_fp8.hip`, `radiance_mxfp4.py` and
+  `radiance_fused_norm.py` from `sly/mxfp4/`. Gated by `sly/tests/test_launcher_sly_sources_cpu.py`
+  ([#223](https://github.com/SlyBase/vllm-sly-radiance/issues/223), launcher part only).
+
 ## [1.10.0] - 2026-11-02
 
 The image ships about 1 GB (apparent) less: the ROCm prune now also drops the host-side tooling and
