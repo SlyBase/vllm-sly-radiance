@@ -136,8 +136,8 @@ Unknown: **which of Tetra and the route is closer to the fp32 truth** — the ch
 
 ## 10. GPU host procedure (do not improvise)
 
-- Host `192.168.178.51`, ssh key `~/.ssh/ai1`, user root. Production LLM runs on `192.168.178.54` (`radiance-serve`)
-  and must be restored: after the run `systemctl start radiance-serve` on .54 if `gpu-window release` did not, wait for
+- Host `192.168.178.51`, ssh key `~/.ssh/ai1`, user root. Production LLM is `docker-vllm7` on this host (Radiance on `192.168.178.54` is off since 2026-10-24)
+  and must be restored: after the run `systemctl start docker-vllm7` if `gpu-window release` did not, wait for
   health 200.
 - Take the card only through `gpu-window acquire <name> <ttl>` WITHOUT `force`; if someone else holds it (e.g.
   `kore-v2ab`, TTL up to 4 h), wait. Check no container and VRAM < 2 GB afterwards.

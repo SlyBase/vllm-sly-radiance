@@ -2,7 +2,7 @@
 # ci/prefill_diag.sh - one-window prefill diagnosis (PREFILL-4000 Messplan, step 2).
 #
 # Runs ON the GPU host (LXC 2408) with the card FREE: the orchestrator has stopped production
-# (Radiance on LXC 2413) before; this script never stops or starts production and refuses to run
+# (docker-vllm7 on LXC 2408) before; this script never stops or starts production and refuses to run
 # unless /sys/class/drm/card*/device/mem_info_vram_used < 100 MB.
 #
 # Phases (restartable: SKIP_CELLS=1, SKIP_TRACE=1):
@@ -108,7 +108,7 @@ val() { grep -oE -- "$1 [^ ]+" launch_prod.txt | head -1 | cut -d' ' -f2; }
   echo "max-model-len: $(val --max-model-len)   kv-cache-dtype: $(val --kv-cache-dtype)   max-num-seqs: $(val --max-num-seqs)"
   echo "RADIANCE_R4D_PREFILL_MIN_Q: $(grep -oE 'RADIANCE_R4D_PREFILL_MIN_Q=[^ ]+' launch_prod.txt || echo 'unset in unit -> image default 512 (README)')"
   echo "A_TILED_MIN_M: $(grep -oE 'RADIANCE_MXFP4_A_TILED_MIN_M=[^ ]+' launch_prod.txt || echo unset)"
-  echo "note: production proper is Radiance on LXC 2413 (homelab lxc-radiance.yml radiance_serve_max_batched_tokens: 2048); this vLLM unit is only the launch-line template"
+  echo "note: production is this vLLM unit (docker-vllm7, LXC 2408) since 2026-10-24; Radiance on LXC 2413 (homelab lxc-radiance.yml radiance_serve_max_batched_tokens: 2048) is off"
 } > launch_reality.txt
 cat launch_reality.txt | tee -a run.log
 

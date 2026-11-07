@@ -174,6 +174,12 @@ python3 ci/accept/accept.py --profile ci/accept/profiles/vllm7-mxfp4.json \
   --image vllm-sly-radiance:0.2.3-rocm10.0 --mode fast --record-baseline --out out/calib
 ```
 
+**The launch (checkpoint, env, image arguments) is the live unit's, not this repo's.** `gpu-window` copies the
+`ExecStart` of `docker-vllm7.service` as it is when the candidate starts. Since 2026-11-07 that is the BCQ4 v2
+checkpoint (`/root/mcb-ckpt-v2`, `RADIANCE_MXFP4_BCQ`, `RADIANCE_LMHEAD_INT4_CODES`), so every candidate is
+measured on v2; an image older than 1.10.0 cannot load it and fails on the `BCQ block tables` marker. Comparing
+two images on the K4 checkpoint needs a window with the unit swapped back, not a gate run.
+
 **After a rollout, move the baseline forward** (commit the `--record-baseline` diff, or edit the
 file by hand): the baseline is "what production does today", not "the best we ever measured".
 
