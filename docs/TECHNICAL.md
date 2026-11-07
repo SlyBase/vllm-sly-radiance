@@ -56,6 +56,20 @@ row-wise through `torch._scaled_mm` (hipBLASLt) with per-token fp8 activations. 
 1.27 GiB returned to the KV cache. GSM8K (cot, zero-shot, greedy, 200 tasks): 0.830 ± 0.027 vs
 0.835 ± 0.026 for bf16 — no measurable loss.
 
+## lm_head hot rows (`RADIANCE_LMHEAD_HOT`)
+
+Token frequency is very skewed, so most of the int4 head's logit error sits on a few thousand rows.
+`RADIANCE_LMHEAD_HOT=<rows.json>` (a JSON list of row ids, sorted/deduplicated at load, refused when
+empty, non-integer, out of range or duplicated) keeps those rows at full precision: at load
+`attach_hot` copies them from the bf16 head (`RADIANCE_LMHEAD_HOT_FMT=bf16`, exact, 8k rows = 84 MiB, or
+`fp8` = e4m3 + fp32 per-row scale `amax/448`, the rule of the simulation's `fp8_rows`, 32k rows = 168 MiB);
+`apply_hot` runs one extra `F.linear` over them after the int4 GEMV and `index_copy_`s the result into the
+logits. fp8 rows are widened to bf16 inside the call (exact) and the row scale is applied to the fp32
+product, so the extra GEMV costs one transient bf16 copy of the hot block (84 MiB for 8k rows, 335 MiB for
+32k): prefer the 8k bf16 list unless memory is tighter than bandwidth. The row list is model specific
+(token statistics of the served model); ship it next to the checkpoint and mount it. Tensor-parallel
+heads are refused (ids are global). Tests: `sly/tests/test_lmhead_hot_cpu.py`.
+
 ## int4 lm_head (0.1.5)
 
 `sly/mxfp4/radiance_lmhead_int4.py` + `sly/patch_lmhead_int4.py`, opt-in via `RADIANCE_LMHEAD_INT4=1`
