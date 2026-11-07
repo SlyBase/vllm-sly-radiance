@@ -50,7 +50,7 @@ REVERT: unset the gate (behaviour), or drop the prelude line and reload (code).
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 KVO = SP / "vllm/v1/kv_offload"
@@ -112,27 +112,58 @@ apply(
 )
 
 # 4. fs/manager.py: record the keys at submit_load.
-apply(
+# 0.30 anchors on the fanout `tasks = self._radiance_split` line; 0.32's submit_load
+# is the closure form and sets `job_id` first. Variant 0 = 0.30, variant 1 = 0.32.
+apply_any(
     FS_MANAGER,
-    '''    def submit_load(self, job_metadata: JobMetadata) -> None:
+    [
+        (
+            '''    def submit_load(self, job_metadata: JobMetadata) -> None:
         tasks = self._radiance_split(  # radiance R3.14''',
-    '''    def submit_load(self, job_metadata: JobMetadata) -> None:
+            '''    def submit_load(self, job_metadata: JobMetadata) -> None:
         self._radiance_load_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = self._radiance_split(  # radiance R3.14''',
-    "self._radiance_load_keys[job_metadata.job_id] =",
+        ),
+        (
+            '''    def submit_load(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id''',
+            '''    def submit_load(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
+        self._radiance_load_keys[job_id] = list(job_metadata.keys)''',
+        ),
+    ],
+    "self._radiance_load_keys[",
     "4  fs/manager.py: submit_load records keys",
 )
 
 # 5. fs/manager.py: forget on a failed load, drain on every finished job.
-apply(
+# 0.30 appends JobResult(...) inline; 0.32 spreads it across multiple lines.
+# Variant 0 = 0.30, variant 1 = 0.32.
+apply_any(
     FS_MANAGER,
-    '''            results.append(JobResult(job_id=job_id, success=success))
+    [
+        (
+            '''            results.append(JobResult(job_id=job_id, success=success))
         return results''',
-    '''            load_keys = self._radiance_load_keys.pop(job_id, None)
+            '''            load_keys = self._radiance_load_keys.pop(job_id, None)
             if load_keys and not success and _RADIANCE_FAILED_LOAD_FORGET:
                 self._lookup_manager.forget(load_keys)
             results.append(JobResult(job_id=job_id, success=success))
         return results''',
-    "self._lookup_manager.forget(load_keys)",
+        ),
+        (
+            '''                self._lookup_manager.mark_miss(failed)
+                results.append(''',
+            '''                self._lookup_manager.mark_miss(failed)
+                # radiance: drop the disproved verdicts outright (re-stat) in
+                # addition to upstream's mark_miss; forget the exact failed
+                # subset (not the whole job, whose earlier blocks succeeded).
+                self._radiance_load_keys.pop(job_id, None)
+                if _RADIANCE_FAILED_LOAD_FORGET:
+                    self._lookup_manager.forget(failed)
+                results.append(''',
+        ),
+    ],
+    "self._lookup_manager.forget(",
     "5  fs/manager.py: forget on failed load",
 )

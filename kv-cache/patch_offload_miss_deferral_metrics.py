@@ -123,7 +123,6 @@ apply(
     """        _ConnectorMetricName.LOOKUP_SERVED_TOKENS: OffloadingCounterMetadata(
             documentation="Tokens returned by successful offload lookups.",
         ),
-        # radiance tier-report: everything below carries a `tier` label so one
 """,
     """        _ConnectorMetricName.LOOKUP_SERVED_TOKENS: OffloadingCounterMetadata(
             documentation="Tokens returned by successful offload lookups.",
@@ -181,7 +180,6 @@ apply(
                 )
             )
         ),
-        # radiance tier-report: everything below carries a `tier` label so one
 """,
     "LOOKUP_DEFERRAL_TOTAL: OffloadingCounterMetadata(",
     "2  offloading/metrics.py: deferral-outcome definitions",

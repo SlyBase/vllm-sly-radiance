@@ -80,7 +80,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _patchlib import apply  # noqa: E402
+from _patchlib import apply, apply_any  # noqa: E402
 
 VLLM = Path(sys.prefix) / "lib" / f"python3.{sys.version_info.minor}" / "site-packages" / "vllm"
 if not VLLM.exists():
@@ -172,11 +172,10 @@ apply(
 )
 
 # --- 3. the splitter --------------------------------------------------------------------
-apply(
-    MGR,
-    anchor='''    @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:''',
-    new='''    def _radiance_split(self, io_fn, paths, offsets, n_threads):
+# The helper body is identical for both eras; only the trailing submit_store
+# signature differs (JobMetadata in 0.30, TransferJob in 0.32). Variant 0 is the
+# 0.30 shape, variant 1 is the 0.32 shape.
+_SPLIT_BODY = '''    def _radiance_split(self, io_fn, paths, offsets, n_threads):
         """radiance R3.14: turn one job into a list of partials, one per batch.
 
         Returns a single full-range partial for jobs of 0 or 1 blocks, which is
@@ -215,16 +214,33 @@ apply(
             for a, b in _radiance_batches(total, n_batches)
         ]
 
-    @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:''',
+'''
+apply_any(
+    MGR,
+    [
+        (
+            "    @override\n    def submit_store(self, job_metadata: JobMetadata) -> None:",
+            _SPLIT_BODY + "    @override\n    def submit_store(self, job_metadata: JobMetadata) -> None:",
+        ),
+        (
+            # 0.32: submit_store lost its @override decorator (submit_load keeps it).
+            "    def submit_store(self, job_metadata: TransferJob) -> None:",
+            _SPLIT_BODY + "    def submit_store(self, job_metadata: TransferJob) -> None:",
+        ),
+    ],
     sentinel="def _radiance_split",
     label="3 fs manager: _radiance_split helper",
 )
 
 # --- 4. STORE path ----------------------------------------------------------------------
-apply(
+# 0.32 reads from the local `keys` and `chunk_ids`, and inserts a
+# `self._job_block_counts` line before enqueue; 0.30 reads `job_metadata.keys` /
+# `block_ids` and has no such line. Variant 0 = 0.30, variant 1 = 0.32.
+apply_any(
     MGR,
-    anchor='''        task = functools.partial(
+    [
+        (
+            '''        task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
             self._primary_kv_view,
@@ -233,21 +249,50 @@ apply(
             self._use_o_direct,
         )
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])''',
-    new='''        tasks = self._radiance_split(  # radiance R3.14
+            '''        tasks = self._radiance_split(  # radiance R3.14
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._radiance_n_write_threads,
         )
         self._pool.enqueue_store(job_metadata.job_id, len(tasks), tasks)''',
+        ),
+        (
+            '''        task = functools.partial(
+            batch_store_block,
+            [self.file_mapper.get_file_name(key) for key in keys],
+            self._primary_kv_view,
+            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
+            self._block_size,
+            self._use_o_direct,
+        )
+        self._job_block_counts[job_metadata.job_id] = len(keys)
+        self._pool.enqueue_store(job_metadata.job_id, 1, [task])''',
+            '''        tasks = self._radiance_split(  # radiance R3.14
+            batch_store_block,
+            [self.file_mapper.get_file_name(key) for key in keys],
+            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
+            self._radiance_n_write_threads,
+        )
+        self._job_block_counts[job_metadata.job_id] = len(keys)
+        self._pool.enqueue_store(job_metadata.job_id, len(tasks), tasks)''',
+        ),
+    ],
     sentinel="tasks = self._radiance_split(  # radiance R3.14\n            batch_store_block,",
     label="4 fs manager: fan the store path out",
 )
 
 # --- 5. LOAD path -----------------------------------------------------------------------
-apply(
+# 0.32 replaced the plain `functools.partial(batch_load_block, ...)` task with a
+# nested `load_task` closure that catches OSError, records partial progress in
+# `self._load_progress`, and surfaces errno. Fanout must preserve that handling
+# per batch, so the 0.32 variant emits a closure factory instead of a plain
+# partial. Variant 0 = 0.30 (plain partial), variant 1 = 0.32 (closure).
+apply_any(
     MGR,
-    anchor='''        task = functools.partial(
+    [
+        (
+            '''        task = functools.partial(
             batch_load_block,
             [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
             self._primary_kv_view,
@@ -257,14 +302,93 @@ apply(
         )
 
         self._pool.enqueue_load(job_metadata.job_id, 1, [task])''',
-    new='''        tasks = self._radiance_split(  # radiance R3.14
+            '''        # radiance R3.14 load-fanout
+        tasks = self._radiance_split(  # radiance R3.14
             batch_load_block,
             [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._radiance_n_read_threads,
         )
         self._pool.enqueue_load(job_metadata.job_id, len(tasks), tasks)''',
-    sentinel="tasks = self._radiance_split(  # radiance R3.14\n            batch_load_block,",
+        ),
+        (
+            '''        def load_task() -> None:
+            try:
+                batch_load_block(
+                    paths,
+                    self._primary_kv_view,
+                    offsets,
+                    self._block_size,
+                    self._use_o_direct,
+                )
+            except OSError as exc:
+                # Runs on the pool worker thread. Record how many blocks loaded
+                # before the failure so get_finished_jobs can keep them; this
+                # write precedes task_done, so the scheduler reads it safely
+                # under the GIL once the finished queue hands back this job.
+                num_succeeded = getattr(exc, "num_succeeded", 0)
+                self._load_progress[job_id] = num_succeeded
+                # Surfaces errno (e.g. EMFILE "Too many open files") for both
+                # the C and Python load paths.
+                logger.debug(
+                    "Load of %d blocks for job %s failed at block %d: %s",
+                    len(paths),
+                    job_id,
+                    num_succeeded,
+                    exc,
+                )
+                raise
+
+        self._pool.enqueue_load(job_id, 1, [load_task])''',
+            '''        # radiance R3.14 load-fanout
+        def _make_load_task(batch_paths, batch_offsets):
+            # radiance R3.14: one closure per batch; preserves the per-batch
+            # OSError handling (record partial progress, surface errno) the
+            # single-task load path had.
+            def load_task() -> None:
+                try:
+                    batch_load_block(
+                        batch_paths,
+                        self._primary_kv_view,
+                        batch_offsets,
+                        self._block_size,
+                        self._use_o_direct,
+                    )
+                except OSError as exc:
+                    num_succeeded = getattr(exc, "num_succeeded", 0)
+                    self._load_progress[job_id] = num_succeeded
+                    logger.debug(
+                        "Load of %d blocks for job %s failed at block %d: %s",
+                        len(batch_paths),
+                        job_id,
+                        num_succeeded,
+                        exc,
+                    )
+                    raise
+            return load_task
+
+        # radiance R3.14: fan the load out across the pool. 0/1-block jobs take
+        # the single-task path byte for byte (an empty task list would build a
+        # JobState that never completes and would hang drain_jobs).
+        _rad_n = _radiance_fanout_degree(
+            len(paths),
+            self._radiance_n_read_threads,
+            self._radiance_total_threads,
+            getattr(self._pool, "_inflight_jobs", 0),
+            self._block_size,
+        )
+        if len(paths) <= 1:
+            tasks = [_make_load_task(paths, offsets)]
+        else:
+            tasks = [
+                _make_load_task(paths[a:b], offsets[a:b])
+                for a, b in _radiance_batches(len(paths), _rad_n)
+            ]
+
+        self._pool.enqueue_load(job_id, len(tasks), tasks)''',
+        ),
+    ],
+    sentinel="# radiance R3.14 load-fanout",
     label="5 fs manager: fan the load path out",
 )
 
