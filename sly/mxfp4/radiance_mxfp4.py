@@ -824,7 +824,10 @@ def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tens
 # RADIANCE_RMS_QUANT_FUSION, which supplies a replacement op that works on RDNA4.
 @torch.library.custom_op("radiance::mxfp4_linear_pq", mutates_args=())
 def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Tensor,
-                    weight_scale: torch.Tensor, weight_ref: torch.Tensor) -> torch.Tensor:
+                    weight_scale: torch.Tensor, weight_ref: torch.Tensor,
+                    allow_tiled: bool = True) -> torch.Tensor:
+    # allow_tiled=False: the caller quantized row-major (HOIST_QUANT), so the data_ptr registry
+    # must not be consulted -- a stale entry at a reused address would read it as tiled (#223).
     if not _stats_reported[0]:
         report_stats()
     # A tiled activation is an [M, K] VIEW over 16-row-padded storage, so x_fp8.shape[0] is M in
@@ -840,7 +843,7 @@ def mxfp4_linear_pq(x_fp8: torch.Tensor, x_scale: torch.Tensor, weight: torch.Te
             raise RuntimeError(f"[radiance.mxfp4] act split: pre-quantized input M={M} K={K} has no "
                                f"residual rows -- a producer that is not split-aware fed mxfp4_linear_pq")
     out = torch.empty((2 * M if split else M, N), device=x_fp8.device, dtype=torch.bfloat16)
-    tiled = bool(A_TILED_MIN_M) and a_tiled_take(x_fp8, M, K)
+    tiled = allow_tiled and bool(A_TILED_MIN_M) and a_tiled_take(x_fp8, M, K)
     launch = _ext.launch_at if tiled else _ext.launch
     if tiled:
         # Which-path counter: a gated fast path must prove it ran (the verify-head lesson).
@@ -914,7 +917,7 @@ def _(a, x_scale, weight, wh, weight_scale, weight_ref, M, pb1, pb2):
 
 
 @mxfp4_linear_pq.register_fake
-def _(x_fp8, x_scale, weight, weight_scale, weight_ref):
+def _(x_fp8, x_scale, weight, weight_scale, weight_ref, allow_tiled=True):
     return torch.empty((x_fp8.shape[0], weight.shape[0]), device=x_fp8.device, dtype=torch.bfloat16)
 
 
@@ -1203,7 +1206,7 @@ def _make_kernel_class():
                                                          use_per_token_if_dynamic=True)
                 y = torch.ops.radiance.mxfp4_linear_pq(
                     x_fp8, x_scale.view(-1).float(), layer.weight, layer.weight_scale,
-                    layer.radiance_wref)
+                    layer.radiance_wref, allow_tiled=False)
             else:
                 y = torch.ops.radiance.mxfp4_linear(
                     x, layer.weight, layer.weight_scale, layer.radiance_wref)

@@ -10,6 +10,17 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Fixed
+
+- `RADIANCE_MXFP4_HOIST_QUANT=1` no longer lets a row-major activation take the A-tiled GEMM path
+  through a stale `data_ptr` registry entry (#223: NaN logits at prefill for prompts > 512 tokens whose
+  length is not a multiple of 256, sampled as token id 0, "!"). `mxfp4_linear_pq` has a new `allow_tiled`
+  argument (default `True`); the hoisted branch passes `False`. *Measured* (R9700 210 W, TP=1,
+  `HOIST_QUANT=1` + `TILED_OPROJ=1`, 24 prompts of 987-1953 tokens, none a multiple of 256, `logprobs=1`
+  which vLLM rejects with HTTP 400 on NaN): **4/24 NaN on 1.10.0 without the fix, 0/24 with it**.
+
 ## [1.10.1] - 2026-11-07
 
 ### Added
