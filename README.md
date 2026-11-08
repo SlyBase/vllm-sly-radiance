@@ -7,6 +7,7 @@
 ![GPU](https://img.shields.io/badge/GPU-R9700%20gfx1201-red)
 ![ROCm](https://img.shields.io/badge/ROCm-10.1-green)
 ![vLLM](https://img.shields.io/badge/vLLM-0.32.0-orange)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/slydlake)
 
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
 with hand-written MXFP4 kernels, DFlash2 speculative decoding and up to 262k context on a single 32 GB card.
