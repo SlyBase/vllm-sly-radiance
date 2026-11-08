@@ -56,6 +56,27 @@ row-wise through `torch._scaled_mm` (hipBLASLt) with per-token fp8 activations. 
 1.27 GiB returned to the KV cache. GSM8K (cot, zero-shot, greedy, 200 tasks): 0.830 ± 0.027 vs
 0.835 ± 0.026 for bf16 — no measurable loss.
 
+## lm_head hot rows (`RADIANCE_LMHEAD_HOT`)
+
+Token frequency is very skewed, so most of the int4 head's logit error sits on a few thousand rows.
+`RADIANCE_LMHEAD_HOT=<rows.json>` (a JSON list of row ids, sorted/deduplicated at load, refused when
+empty, non-integer, out of range or duplicated) keeps those rows at full precision: at load
+`attach_hot` copies them from the bf16 head (`RADIANCE_LMHEAD_HOT_FMT=bf16`, exact, 8k rows = 84 MiB, or
+`fp8` = e4m3 + fp32 per-row scale `amax/448`, the rule of the simulation's `fp8_rows`, 32k rows = 168 MiB);
+`apply_hot` runs one extra `F.linear` over them after the int4 GEMV and `index_copy_`s the result into the
+logits. fp8 rows are widened to bf16 inside the call (exact) and the row scale is applied to the fp32
+product, so the extra GEMV costs one transient bf16 copy of the hot block (84 MiB for 8k rows, 335 MiB for
+32k): prefer the 8k bf16 list unless memory is tighter than bandwidth. The row list is model specific
+(token statistics of the served model); ship it next to the checkpoint and mount it. Tensor-parallel
+heads are refused (ids are global). Tests: `sly/tests/test_lmhead_hot_cpu.py`.
+
+The DFlash2 drafter shares the target head (`llm_base_proposer.py`: `self.model.lm_head =
+target_language_model.lm_head`) and calls it through `LogitsProcessor.get_top_k_tokens` for its candidates,
+so by default the hot GEMV runs twice per step. *Measured* (rocprofv3, 2026-11-08, R9700 210 W, conc 1,
+8k bf16 rows): 2.1 hipBLASLt bf16 GEMMs per step, ~300 µs of a 34 ms step; served wall time per verify step
+35.67 → 35.93 ms (+0.7 %). `RADIANCE_LMHEAD_HOT_DRAFT=0` wraps `get_top_k_tokens` (only drafter models call
+it) so the drafter's call stays pure int4 and only the target's logits get the hot rows.
+
 ## int4 lm_head (0.1.5)
 
 `sly/mxfp4/radiance_lmhead_int4.py` + `sly/patch_lmhead_int4.py`, opt-in via `RADIANCE_LMHEAD_INT4=1`

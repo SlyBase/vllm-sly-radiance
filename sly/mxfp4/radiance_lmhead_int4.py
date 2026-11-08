@@ -40,18 +40,25 @@ bypass apply(), same limitation as the fp8 head).
 Hooked in by sly/patch_lmhead_int4.py (QuarkConfig.get_quant_method, before the fp8 hook).
 """
 
+import json
 import os
 
 import torch
 from torch.nn import Parameter
 
-from vllm.logger import init_logger
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    UnquantizedEmbeddingMethod,
-)
+try:
+    from vllm.logger import init_logger
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        UnquantizedEmbeddingMethod,
+    )
 
-logger = init_logger("vllm.radiance.lmhead_int4")
+    logger = init_logger("vllm.radiance.lmhead_int4")
+except Exception:  # noqa: BLE001  # offline (CPU tests): no vllm package
+    import logging
+
+    ParallelLMHead, UnquantizedEmbeddingMethod = None, object
+    logger = logging.getLogger("radiance_lmhead_int4")
 
 ENABLED = os.environ.get("RADIANCE_LMHEAD_INT4", "0") == "1"
 GROUP_SIZE = int(os.environ.get("RADIANCE_LMHEAD_INT4_GS", "128"))
@@ -69,6 +76,17 @@ TILED = os.environ.get("RADIANCE_LMHEAD_INT4_TILED", "1") == "1"
 # RADIANCE_LMHEAD_INT4_CODES=<lm_head_int4.pt>: offline (GPTQ) codes {"q": int8 [N, K] in [-8, 7],
 # "s": bf16 [N, K//G], "group": G} replace the load-time RTN; same packing, same kernel.
 CODES = os.environ.get("RADIANCE_LMHEAD_INT4_CODES", "")
+# RADIANCE_LMHEAD_HOT=<rows.json>: JSON list of vocabulary rows whose logits come from the original head
+# instead of the int4 codes (a second small GEMV, scattered over the int4 logits). Off when unset.
+# RADIANCE_LMHEAD_HOT_FMT: "fp8" (default; e4m3 + one fp32 scale per row) or "bf16" (exact).
+HOT = os.environ.get("RADIANCE_LMHEAD_HOT", "")
+HOT_FMT = os.environ.get("RADIANCE_LMHEAD_HOT_FMT", "fp8")
+# RADIANCE_LMHEAD_HOT_DRAFT: "1" (default) the DFlash2 drafter, which shares this head, gets the hot rows too;
+# "0" its head call (LogitsProcessor.get_top_k_tokens) stays pure int4 -- the hot GEMV then runs once per
+# step instead of twice (rocprofv3 2026-11-08: 2.1 calls/step, ~300 us of a 34 ms step in bf16).
+HOT_DRAFT = os.environ.get("RADIANCE_LMHEAD_HOT_DRAFT", "1") == "1"
+_in_draft = [False]
+FP8_MAX = 448.0  # e4m3fn
 
 
 def quant_method_for(layer: torch.nn.Module, prefix: str, inner=None):
@@ -148,6 +166,89 @@ def pack_codes(q: torch.Tensor, s: torch.Tensor, device):
     return pack_int4_exllama_shuffle(nib), s.to(device)
 
 
+def load_hot_rows(path: str, n: int) -> torch.Tensor:
+    """RADIANCE_LMHEAD_HOT file -> sorted int64 row ids; refuses anything but a non-empty list of unique ids in [0, n)."""
+    def refuse(why):
+        return RuntimeError(f"[radiance] RADIANCE_LMHEAD_HOT={path}: {why}")
+
+    try:
+        with open(path) as f:
+            rows = json.load(f)
+    except (OSError, ValueError) as e:
+        raise refuse(f"cannot read a JSON list ({e})") from e
+    if not isinstance(rows, list) or not rows:
+        raise refuse("must be a non-empty JSON list of row ids")
+    if not all(type(r) is int for r in rows):
+        raise refuse("row ids must be integers")
+    if min(rows) < 0 or max(rows) >= n:
+        raise refuse(f"row ids outside 0..{n - 1}")
+    if len(set(rows)) != len(rows):
+        raise refuse("duplicate row ids")
+    return torch.tensor(sorted(rows), dtype=torch.int64)
+
+
+def fp8_rows(x: torch.Tensor):
+    """[R, K] -> (e4m3 [R, K], fp32 scale [R]); per-row amax/448, same clamp rule as fq_eval.fp8_rows."""
+    x = x.float()
+    s = (x.abs().amax(1) / FP8_MAX).clamp_(min=1.0 / (FP8_MAX * 512.0))
+    return (x / s[:, None]).clamp_(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn), s
+
+
+def attach_hot(layer: torch.nn.Module, w: torch.Tensor, path: str | None = None, fmt: str | None = None) -> None:
+    """Keep the listed rows of the bf16 head `w` outside the int4 codes: layer.radiance_hot = (ids, weight, scale|None).
+
+    Does nothing (no attribute, no memory) when no rows file is set.
+    """
+    path = HOT if path is None else path
+    fmt = HOT_FMT if fmt is None else fmt
+    if not path:
+        return
+    if fmt not in ("fp8", "bf16"):
+        raise RuntimeError(f"[radiance] RADIANCE_LMHEAD_HOT_FMT={fmt!r}: must be fp8 or bf16")
+    if getattr(layer, "tp_size", 1) > 1:
+        raise RuntimeError("[radiance] RADIANCE_LMHEAD_HOT: row ids are global; tensor parallel heads are not supported")
+    ids = load_hot_rows(path, w.shape[0])
+    rows = w[ids.to(w.device)]
+    if fmt == "fp8":
+        q, s = fp8_rows(rows)
+        layer.radiance_hot = (ids.to(w.device), q, s)
+    else:
+        layer.radiance_hot = (ids.to(w.device), rows.to(torch.bfloat16).contiguous(), None)
+    logger.info("[radiance] lm_head: %d hot rows kept %s (%.0f MiB)", len(ids), fmt,
+                layer.radiance_hot[1].numel() * layer.radiance_hot[1].element_size() / 2**20)
+
+
+def apply_hot(layer: torch.nn.Module, x_2d: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """Overwrite the hot columns of the int4 logits `out` [M, N] in place; no-op without layer.radiance_hot."""
+    hot = getattr(layer, "radiance_hot", None)
+    if hot is None or (_in_draft[0] and not HOT_DRAFT):
+        return out
+    ids, w, s = hot
+    if s is None:
+        logits = torch.nn.functional.linear(x_2d, w)
+    else:  # fp8 rows: fp8 -> bf16 is exact; the row scale is applied to the fp32 product
+        logits = (torch.nn.functional.linear(x_2d, w.to(x_2d.dtype)).float() * s).to(out.dtype)
+    out.index_copy_(1, ids, logits.to(out.dtype))
+    return out
+
+
+def draft_head(fn):
+    """Wrap the drafter's head entry (LogitsProcessor.get_top_k_tokens): apply_hot sees _in_draft inside it."""
+    def wrapped(*args, **kwargs):
+        _in_draft[0] = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _in_draft[0] = False
+    return wrapped
+
+
+if HOT and not HOT_DRAFT:
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+    LogitsProcessor.get_top_k_tokens = draft_head(LogitsProcessor.get_top_k_tokens)
+
+
 class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
     """create_weights/embedding as the base class; only the loaded weight and apply() change."""
 
@@ -185,6 +286,7 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
 
             if getattr(_h, "_radiance_tiled_enabled", None) and _h._on_gfx12x() and _h._radiance_tiled_enabled(n, k):
                 w_i8 = _h.radiance_w4a16_tile(w_i8)
+        attach_hot(layer, w)  # before layer.weight loses the bf16 rows
         layer.weight = Parameter(w_i8, requires_grad=False)
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
         logger.info(
@@ -206,6 +308,7 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
         out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
             x_2d, layer.weight, layer.weight_scale, None, bias, num_compute_units(), GROUP_SIZE
         )
+        apply_hot(layer, x_2d, out)
         return out.reshape(x.shape[:-1] + (out.shape[-1],))
 
 

@@ -10,6 +10,21 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.10.1] - 2026-11-07
+
+### Added
+- `RADIANCE_LMHEAD_HOT=<rows.json>` (+ `RADIANCE_LMHEAD_HOT_FMT=fp8|bf16`, default `fp8`, opt-in; needs
+  `RADIANCE_LMHEAD_INT4=1`): the listed vocabulary rows keep their original head weights (bf16, or e4m3
+  with one fp32 scale per row). A second small GEMV computes their logits and overwrites the int4 logits;
+  all other rows are bit-identical to today. Env unset = no extra memory, no extra launch. TP = 1 only.
+  *Measured* (simulation, paired, 95 % CI excludes 0, not a GPU run): −13.8 % KLD against the bf16 head
+  with the 8k hottest rows in bf16, −14.0 % with 32k rows in fp8. *Measured* decode cost (R9700 210 W,
+  conc 1, 8k bf16 rows, DFlash2): +0.7 % wall time per verify step (35.67 → 35.93 ms), rocprofv3 ~300 µs of
+  a 34 ms step; the drafter shares the head, so the extra GEMV runs 2.1× per step.
+- `RADIANCE_LMHEAD_HOT_DRAFT=0|1` (default `1` = unchanged): `0` keeps the DFlash2 drafter's head call
+  (`LogitsProcessor.get_top_k_tokens`) on the pure int4 logits, so only the target's logits pay for the
+  hot rows. Accept-length effect not measured yet.
+
 ## [1.10.0] - 2026-11-02
 
 The image ships about 1 GB (apparent) less: the ROCm prune now also drops the host-side tooling and
