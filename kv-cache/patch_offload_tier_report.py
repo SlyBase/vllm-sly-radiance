@@ -84,7 +84,9 @@ class TierReportMetrics:
     live here.
     \"\"\"
 
-    TIER = "tier"
+    TIER = ("tier",)  # a tuple: labelnames is tuple[str, ...]; the bare string
+    # "tier" has len 4 and the connector's label-count assert rejects the 1-label
+    # emission ("expects 4 labels, got 1").
 
     # P3: size. Occupancy is a distribution over time, not a level.
     CAPACITY_BYTES = "vllm:kv_offload_tier_capacity_bytes"
@@ -113,158 +115,93 @@ class TierReportMetrics:
 #    offloading spec. OffloadPromMetrics.observe() asserts that every emitted
 #    name is registered; registering here means that assertion cannot be tripped.
 # ---------------------------------------------------------------------------
+# The eight sizing-verdict definitions, shared by both variants below (the 0.30.0 and
+# 0.32.0 definitions-dict tails differ only in the entry the block is appended after).
+_TIER_REPORT_DEFS = """        # radiance tier-report: the sizing verdict. Everything carries a `tier`
+        # label so one scrape describes every tier separately.
+        TierReportMetrics.CAPACITY_BYTES: OffloadingGaugeMetadata(
+            documentation=(
+                "Configured capacity of this tier, in bytes. For a filesystem "
+                "tier this is the size of the filesystem holding the block "
+                "store, since that is what actually bounds it."
+            ),
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.USED_BYTES: OffloadingGaugeMetadata(
+            documentation=(
+                "Bytes currently held by this tier. For a filesystem tier this "
+                "is the filesystem's used bytes, which may include data that is "
+                "not KV blocks -- it is the number that decides whether the "
+                "tier runs out of room."
+            ),
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.OCCUPANCY_RATIO: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of this tier's occupancy, sampled once per metrics "
+                "interval. The DISTRIBUTION is the sizing signal."
+            ),
+            buckets=TierReportMetrics.OCCUPANCY_BUCKETS,
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.READS_BEFORE_EVICT: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of how many times a block was read back before this "
+                "tier evicted it. Mass in the le=0.5 bucket means blocks are "
+                "being stored that nobody ever reads: the tier is oversized."
+            ),
+            buckets=TierReportMetrics.READS_BUCKETS,
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.EVICTIONS: OffloadingCounterMetadata(
+            documentation="Blocks evicted from this tier.",
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.EVICTED_BYTES: OffloadingCounterMetadata(
+            documentation="Bytes evicted from this tier.",
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.EVICTION_TO_REUSE: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of the time between this tier evicting a block and a "
+                "later lookup asking for that same block, in seconds. Mass at "
+                "the low end is cache thrashing measured rather than inferred: "
+                "the tier is undersized."
+            ),
+            buckets=TierReportMetrics.REUSE_BUCKETS,
+            labelnames=TierReportMetrics.TIER,
+        ),
+        TierReportMetrics.MISS_EVICTED: OffloadingCounterMetadata(
+            documentation=(
+                "Lookups that missed on a block this tier previously held and "
+                "evicted. Distinguishes 'never cached' from 'cached and thrown "
+                "away too early'; only the second justifies buying capacity."
+            ),
+            labelnames=TierReportMetrics.TIER,
+        ),"""
+
+_TAIL_030 = """        _ConnectorMetricName.LOOKUP_SERVED_TOKENS: OffloadingCounterMetadata(
+            documentation="Tokens returned by successful offload lookups.",
+        ),"""
+
+_TAIL_032 = """        _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
+            documentation=(
+                "Number of KV offload store allocation attempts that failed."
+            ),
+        ),"""
+
 apply_any(
     CONN_METRICS,
     [
         # 0.30.0: the definitions dict tail is LOOKUP_SERVED_TOKENS.
         (
-            """        _ConnectorMetricName.LOOKUP_SERVED_TOKENS: OffloadingCounterMetadata(
-            documentation="Tokens returned by successful offload lookups.",
-        ),
-    }""",
-            """        _ConnectorMetricName.LOOKUP_SERVED_TOKENS: OffloadingCounterMetadata(
-            documentation="Tokens returned by successful offload lookups.",
-        ),
-        # radiance tier-report: the sizing verdict. Everything carries a `tier`
-        # label so one scrape describes every tier separately.
-        TierReportMetrics.CAPACITY_BYTES: OffloadingGaugeMetadata(
-            documentation=(
-                "Configured capacity of this tier, in bytes. For a filesystem "
-                "tier this is the size of the filesystem holding the block "
-                "store, since that is what actually bounds it."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.USED_BYTES: OffloadingGaugeMetadata(
-            documentation=(
-                "Bytes currently held by this tier. For a filesystem tier this "
-                "is the filesystem's used bytes, which may include data that is "
-                "not KV blocks -- it is the number that decides whether the "
-                "tier runs out of room."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.OCCUPANCY_RATIO: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of this tier's occupancy, sampled once per metrics "
-                "interval. The DISTRIBUTION is the sizing signal."
-            ),
-            buckets=TierReportMetrics.OCCUPANCY_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.READS_BEFORE_EVICT: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of how many times a block was read back before this "
-                "tier evicted it. Mass in the le=0.5 bucket means blocks are "
-                "being stored that nobody ever reads: the tier is oversized."
-            ),
-            buckets=TierReportMetrics.READS_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTIONS: OffloadingCounterMetadata(
-            documentation="Blocks evicted from this tier.",
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTED_BYTES: OffloadingCounterMetadata(
-            documentation="Bytes evicted from this tier.",
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTION_TO_REUSE: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of the time between this tier evicting a block and a "
-                "later lookup asking for that same block, in seconds. Mass at "
-                "the low end is cache thrashing measured rather than inferred: "
-                "the tier is undersized."
-            ),
-            buckets=TierReportMetrics.REUSE_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.MISS_EVICTED: OffloadingCounterMetadata(
-            documentation=(
-                "Lookups that missed on a block this tier previously held and "
-                "evicted. Distinguishes 'never cached' from 'cached and thrown "
-                "away too early'; only the second justifies buying capacity."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-    }""",
+            _TAIL_030 + "\n    }",
+            _TAIL_030 + "\n" + _TIER_REPORT_DEFS + "\n    }",
         ),
         # 0.32.0: the definitions dict tail is ALLOCATION_FAILURE.
         (
-            """        _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
-            documentation=(
-                "Number of KV offload store allocation attempts that failed."
-            ),
-        ),
-    }""",
-            """        _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
-            documentation=(
-                "Number of KV offload store allocation attempts that failed."
-            ),
-        ),
-        # radiance tier-report: the sizing verdict. Everything carries a `tier`
-        # label so one scrape describes every tier separately.
-        TierReportMetrics.CAPACITY_BYTES: OffloadingGaugeMetadata(
-            documentation=(
-                "Configured capacity of this tier, in bytes. For a filesystem "
-                "tier this is the size of the filesystem holding the block "
-                "store, since that is what actually bounds it."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.USED_BYTES: OffloadingGaugeMetadata(
-            documentation=(
-                "Bytes currently held by this tier. For a filesystem tier this "
-                "is the filesystem's used bytes, which may include data that is "
-                "not KV blocks -- it is the number that decides whether the "
-                "tier runs out of room."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.OCCUPANCY_RATIO: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of this tier's occupancy, sampled once per metrics "
-                "interval. The DISTRIBUTION is the sizing signal."
-            ),
-            buckets=TierReportMetrics.OCCUPANCY_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.READS_BEFORE_EVICT: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of how many times a block was read back before this "
-                "tier evicted it. Mass in the le=0.5 bucket means blocks are "
-                "being stored that nobody ever reads: the tier is oversized."
-            ),
-            buckets=TierReportMetrics.READS_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTIONS: OffloadingCounterMetadata(
-            documentation="Blocks evicted from this tier.",
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTED_BYTES: OffloadingCounterMetadata(
-            documentation="Bytes evicted from this tier.",
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.EVICTION_TO_REUSE: OffloadingHistogramMetadata(
-            documentation=(
-                "Histogram of the time between this tier evicting a block and a "
-                "later lookup asking for that same block, in seconds. Mass at "
-                "the low end is cache thrashing measured rather than inferred: "
-                "the tier is undersized."
-            ),
-            buckets=TierReportMetrics.REUSE_BUCKETS,
-            labelnames=TierReportMetrics.TIER,
-        ),
-        TierReportMetrics.MISS_EVICTED: OffloadingCounterMetadata(
-            documentation=(
-                "Lookups that missed on a block this tier previously held and "
-                "evicted. Distinguishes 'never cached' from 'cached and thrown "
-                "away too early'; only the second justifies buying capacity."
-            ),
-            labelnames=TierReportMetrics.TIER,
-        ),
-    }""",
+            _TAIL_032 + "\n    }",
+            _TAIL_032 + "\n" + _TIER_REPORT_DEFS + "\n    }",
         ),
     ],
     "TierReportMetrics.CAPACITY_BYTES: OffloadingGaugeMetadata(",

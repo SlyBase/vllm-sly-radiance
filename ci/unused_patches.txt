@@ -36,3 +36,5 @@ sly/patch_mamba_align_retire.py     vllm#55450 (align-mode Mamba retirement cros
 sly/patch_rocm_load_max_split.py    0.31.0's Worker._scoped_allocator_max_split gates on is_cuda_alike() (ROCm included) and also wraps profile_run
 # --- dropped at the vLLM 0.32.0 bump (1.7.0): native upstream, files kept for the 0.31.x lineage.
 sly/patch_minicpmv4_7.py     vllm#58674 (MiniCPM-V 4.7: minicpmv4_7.py, the minicpmv4_6.py inheritability refactor and the registry entry) is in v0.32.0; the patch now SKIPs on a tree that already carries the model (RADIANCE_MINICPMV4_7=1 there keeps upstream's native files)
+# --- disk-tier (KVCACHE=disk), applied at container start from /patches, not in the Dockerfile loop.
+kv-cache/patch_offload_promotion_wallclock.py     promotion-refusal + wall-clock timing is built on the old self._stats surface; both 0.30.0 and 0.32.0 ship the native TieringMetricsTracker, so the skip_if_upstream gate exits 0 on every supported pin (a no-op). The per-job time dimension is covered by the tracker's READ_TIME/WRITE_TIME; kept for a pre-tracker tree

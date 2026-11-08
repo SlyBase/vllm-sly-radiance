@@ -1075,15 +1075,13 @@ case "$KVCACHE" in
       # One bind spec, not two words: `-v HOST CONTAINER` would make podman mount an anonymous
       # volume at HOST and then treat /kvcache as a positional argument.
       KVCACHE_MOUNT=(-v "$KVCACHE_DISK":/kvcache:z -e PYTHONHASHSEED=0)
-      KVCACHE_TIER+=(--kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kvcache/blocks","n_read_threads":8,"n_write_threads":4}]}}')
-      # the disk-tier fixes and their metrics, in the order they are validated in
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_debug_instrument.py || echo "[kv-cache] WARNING: debug-instrument did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_fs_fanout.py || echo "[kv-cache] WARNING: fs-fanout did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_tier_report.py || echo "[kv-cache] WARNING: tier-report did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_promotion_wallclock.py || echo "[kv-cache] WARNING: promotion/wallclock did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_lookup_invalidate.py || echo "[kv-cache] WARNING: lookup-invalidate did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_fs_failed_load.py || echo "[kv-cache] WARNING: failed-load-forget did not apply"'
-      _kvp 'PYTHONPATH=/patches python3 /patches/kv-cache/patch_offload_miss_deferral_metrics.py || echo "[kv-cache] WARNING: deferral/miss-reason did not apply"'
+      KVCACHE_TIER+=(--kv-transfer-config "$(cat "$PATCHES_DIR/kv-cache/disk_tier_config.json")")
+      # the disk-tier fixes and their metrics, in the order they are validated in ci/test-disk-tier.sh
+      # (the shared list drives both this prelude and the test's bring-up DISK_WARN_NAMES check).
+      while read -r _dpf _dpn; do
+        case "$_dpf" in ''|\#*) continue ;; esac
+        _kvp "PYTHONPATH=/patches python3 /patches/kv-cache/$_dpf || echo \"[kv-cache] WARNING: $_dpn did not apply\""
+      done < "$PATCHES_DIR/kv-cache/disk_patches.txt"
     fi
     ;;
   *)

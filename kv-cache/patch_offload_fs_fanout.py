@@ -149,6 +149,16 @@ def _radiance_batches(n_items: int, n_batches: int):
     label="1 fs manager: fanout knobs and helpers",
 )
 
+# --- 1b. threading import (guards the per-batch _load_progress write) --------------------
+# Both 0.30 and 0.32 ship the same import block; `import os` is unique in each.
+apply(
+    MGR,
+    "import os\nfrom collections.abc import Iterable",
+    "import os\nimport threading\nfrom collections.abc import Iterable",
+    sentinel="import threading",
+    label="1b fs manager: import threading",
+)
+
 # --- 2. remember the thread counts ------------------------------------------------------
 apply(
     MGR,
@@ -162,6 +172,10 @@ apply(
         self._radiance_n_read_threads = n_read_threads
         self._radiance_n_write_threads = n_write_threads
         self._radiance_total_threads = max(1, n_read_threads + n_write_threads)
+        # Guards the per-batch _load_progress write: each load batch runs on its own
+        # pool thread and records its failure as a GLOBAL contiguous prefix, so the
+        # read-modify-write must be atomic (see hunk 5).
+        self._radiance_load_lock = threading.Lock()
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
@@ -175,25 +189,15 @@ apply(
 # The helper body is identical for both eras; only the trailing submit_store
 # signature differs (JobMetadata in 0.30, TransferJob in 0.32). Variant 0 is the
 # 0.30 shape, variant 1 is the 0.32 shape.
-_SPLIT_BODY = '''    def _radiance_split(self, io_fn, paths, offsets, n_threads):
-        """radiance R3.14: turn one job into a list of partials, one per batch.
+_SPLIT_BODY = '''    def _radiance_batch_ranges(self, total, n_threads):
+        """radiance R3.14: one (start, end) range per batch for a job of `total` blocks.
 
-        Returns a single full-range partial for jobs of 0 or 1 blocks, which is
-        byte-for-byte the old behaviour -- an empty list would build a JobState that
-        never completes and would hang drain_jobs.
+        A 0/1-block job yields a single full range (byte-for-byte the old behaviour);
+        an empty list would build a JobState that never completes and would hang
+        drain_jobs. Shared by the store path (_radiance_split) and the load path.
         """
-        total = len(paths)
         if total <= 1:
-            return [
-                functools.partial(
-                    io_fn,
-                    paths,
-                    self._primary_kv_view,
-                    offsets,
-                    self._block_size,
-                    self._use_o_direct,
-                )
-            ]
+            return [(0, total)]
         n_batches = _radiance_fanout_degree(
             total,
             n_threads if n_threads > 0 else self._radiance_total_threads,
@@ -202,6 +206,10 @@ _SPLIT_BODY = '''    def _radiance_split(self, io_fn, paths, offsets, n_threads)
             getattr(self._pool, "_inflight_jobs", 0),
             self._block_size,
         )
+        return list(_radiance_batches(total, n_batches))
+
+    def _radiance_split(self, io_fn, paths, offsets, n_threads):
+        """radiance R3.14: turn one job into a list of store partials, one per batch."""
         return [
             functools.partial(
                 io_fn,
@@ -211,7 +219,7 @@ _SPLIT_BODY = '''    def _radiance_split(self, io_fn, paths, offsets, n_threads)
                 self._block_size,
                 self._use_o_direct,
             )
-            for a, b in _radiance_batches(total, n_batches)
+            for a, b in self._radiance_batch_ranges(len(paths), n_threads)
         ]
 
 '''
@@ -341,7 +349,7 @@ apply_any(
 
         self._pool.enqueue_load(job_id, 1, [load_task])''',
             '''        # radiance R3.14 load-fanout
-        def _make_load_task(batch_paths, batch_offsets):
+        def _make_load_task(batch_paths, batch_offsets, batch_start):
             # radiance R3.14: one closure per batch; preserves the per-batch
             # OSError handling (record partial progress, surface errno) the
             # single-task load path had.
@@ -355,8 +363,20 @@ apply_any(
                         self._use_o_direct,
                     )
                 except OSError as exc:
+                    # Within-batch count of blocks that loaded before this batch
+                    # failed. get_finished_jobs reads _load_progress[job_id] as a
+                    # GLOBAL contiguous prefix of the whole job's load_keys, so
+                    # record this batch's failure as (global start + within-batch
+                    # count) and keep the MINIMUM across all failing batches -- the
+                    # earliest contiguous prefix. min is idempotent, so thread order
+                    # does not matter; the lock makes only the read-modify-write
+                    # atomic (each batch runs on its own pool thread).
                     num_succeeded = getattr(exc, "num_succeeded", 0)
-                    self._load_progress[job_id] = num_succeeded
+                    global_prefix = batch_start + num_succeeded
+                    with self._radiance_load_lock:
+                        prev = self._load_progress.get(job_id)
+                        if prev is None or global_prefix < prev:
+                            self._load_progress[job_id] = global_prefix
                     logger.debug(
                         "Load of %d blocks for job %s failed at block %d: %s",
                         len(batch_paths),
@@ -367,24 +387,12 @@ apply_any(
                     raise
             return load_task
 
-        # radiance R3.14: fan the load out across the pool. 0/1-block jobs take
-        # the single-task path byte for byte (an empty task list would build a
-        # JobState that never completes and would hang drain_jobs).
-        _rad_n = _radiance_fanout_degree(
-            len(paths),
-            self._radiance_n_read_threads,
-            self._radiance_total_threads,
-            getattr(self._pool, "_inflight_jobs", 0),
-            self._block_size,
-        )
-        if len(paths) <= 1:
-            tasks = [_make_load_task(paths, offsets)]
-        else:
-            tasks = [
-                _make_load_task(paths[a:b], offsets[a:b])
-                for a, b in _radiance_batches(len(paths), _rad_n)
-            ]
-
+        # radiance R3.14: fan the load out across the pool. 0/1-block jobs take the
+        # single-task path byte for byte (handled by _radiance_batch_ranges).
+        tasks = [
+            _make_load_task(paths[a:b], offsets[a:b], a)
+            for a, b in self._radiance_batch_ranges(len(paths), self._radiance_n_read_threads)
+        ]
         self._pool.enqueue_load(job_id, len(tasks), tasks)''',
         ),
     ],

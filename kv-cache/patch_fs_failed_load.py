@@ -136,9 +136,27 @@ apply_any(
     "4  fs/manager.py: submit_load records keys",
 )
 
-# 5. fs/manager.py: forget on a failed load, drain on every finished job.
+# 5a. fs/manager.py: drain the load-key map for EVERY finished job.
+# The 0.32-era get_finished_jobs reads `num_succeeded = self._load_progress.pop(...)`
+# in the outer loop; that is where the leak lives (the 0.32 variant's inner pop
+# only runs on the failed branch). Draining in the outer loop reclaims the entry
+# for successful loads too, so the map does not grow without bound.
+# Guarded: the line is absent on a pre-0.30 tree (which has no _load_progress and
+# relies on hunk 5 variant 0's own inner drain), so skip rather than fail there.
+_5a_anchor = "            num_succeeded = self._load_progress.pop(job_id, 0)\n"
+if FS_MANAGER.read_text().count(_5a_anchor) == 1:
+    apply(
+        FS_MANAGER,
+        _5a_anchor,
+        _5a_anchor + "            self._radiance_load_keys.pop(job_id, None)\n",
+        "self._radiance_load_keys.pop(job_id, None)",
+        "5a fs/manager.py: drain load_keys for every finished job",
+    )
+
+# 5. fs/manager.py: forget on a failed load.
 # 0.30 appends JobResult(...) inline; 0.32 spreads it across multiple lines.
-# Variant 0 = 0.30, variant 1 = 0.32.
+# Variant 0 = 0.30, variant 1 = 0.32. The per-job drain lives in 5a (outer loop);
+# these variants only add the forget of the failed subset.
 apply_any(
     FS_MANAGER,
     [
@@ -158,7 +176,7 @@ apply_any(
                 # radiance: drop the disproved verdicts outright (re-stat) in
                 # addition to upstream's mark_miss; forget the exact failed
                 # subset (not the whole job, whose earlier blocks succeeded).
-                self._radiance_load_keys.pop(job_id, None)
+                # The per-job map entry is drained in the outer loop (hunk 5a).
                 if _RADIANCE_FAILED_LOAD_FORGET:
                     self._lookup_manager.forget(failed)
                 results.append(''',

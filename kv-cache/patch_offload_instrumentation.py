@@ -113,8 +113,6 @@ apply_any(
                     0.1,
                     0.5,
                     1,
-                    5,
-                    10,
 """
             + _WIDE,
         ),
@@ -154,8 +152,6 @@ apply_any(
                     0.1,
                     0.5,
                     1,
-                    5,
-                    10,
 """
             + _WIDE,
         ),
@@ -268,14 +264,14 @@ apply(
         # radiance: prepare_store() admits a batch iff
         #   len(keys_to_store) <= free + evictable
         # and neither term was observable. See cache-preemption-patch-plan.md R3.2.
-        if self._num_blocks > 0:
+        if self._num_chunks > 0:
             stats.set_gauge(
                 CPUOffloadingMetrics.CPU_CACHE_EVICTABLE_PERC,
-                self._num_evictable_cache_blocks / self._num_blocks,
+                self._num_evictable_cache_chunks / self._num_chunks,
             )
             stats.set_gauge(
                 CPUOffloadingMetrics.CPU_CACHE_FREE_PERC,
-                self._get_num_free_blocks() / self._num_blocks,
+                self._get_num_free_chunks() / self._num_chunks,
             )""",
     "CPU_CACHE_EVICTABLE_PERC",
     "cpu tier gauge emission",

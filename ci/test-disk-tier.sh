@@ -31,6 +31,9 @@ SHM_SRC=${SHM_SRC:-/dev/shm/sly-swift}
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-1800}   # seconds; a cold compile can take ~30 min
 
 die() { echo "FATAL: $*" >&2; exit 1; }
+# the script's own exit status, printed into the log: the harness is usually run through
+# `| tee`, so a caller reading the pipeline's status can still compare it against this.
+trap 'echo ">> harness exit: $?"' EXIT
 
 # ---- verdict tracking --------------------------------------------------------
 # Correctness checks below record a soft FAIL rather than aborting mid-run, so the whole
@@ -88,10 +91,18 @@ ttft() {  # $1=max_tokens ; prints total seconds (1 token ~= pure prefill time)
   curl -s -o /dev/null -w '%{time_total}' -H 'Content-Type: application/json' \
     --data @"$PAYLOAD_FILE" "http://localhost:$PORT/v1/chat/completions"
 }
+ok_resp() {  # $1=json outfile ; a dead engine answers {"error":...} — never continue on that
+  grep -q '"choices"' "$1" || {
+    echo ">> engine log tail (the engine's own root cause):"
+    tail -120 "$CURLOG" 2>/dev/null || true
+    die "engine returned an error response in $1 (see the log tail above)"
+  }
+}
 resp() {  # $1=outfile ; grabs a 64-token greedy completion
   payload 64 > "$PAYLOAD_FILE"
   curl -s -H 'Content-Type: application/json' --data @"$PAYLOAD_FILE" \
-    "http://localhost:$PORT/v1/chat/completions" > "$1"
+    "http://localhost:$PORT/v1/chat/completions" > "$1" || true
+  ok_resp "$1"
 }
 
 # ---- accuracy-gate prompt set (varying length) -------------------------------
@@ -125,7 +136,8 @@ mt=int(sys.argv[1]); content=open(sys.argv[2]).read()
 print(json.dumps({"model":sys.argv[3],"messages":[{"role":"user","content":content}],"max_tokens":mt,"temperature":0}))
 ' "$2" "$PROMPT_DIR/$1.txt" "$SERVED" > "$PAYLOAD_FILE"
   curl -s -H 'Content-Type: application/json' --data @"$PAYLOAD_FILE" \
-    "http://localhost:$PORT/v1/chat/completions" > "$3"
+    "http://localhost:$PORT/v1/chat/completions" > "$3" || true
+  ok_resp "$3"
 }
 
 # ---- decode throughput (tok/s) -----------------------------------------------
@@ -175,18 +187,19 @@ run patch_swa_align_touch.py                || echo "[kv-cache] WARNING: swa-ali
 run patch_sched_align_last_block.py         || echo "[kv-cache] WARNING: align-last-block did not apply"
 run patch_swa_eagle_replay_tail.py          || echo "[kv-cache] WARNING: eagle-replay-tail did not apply"
 run patch_offload_boundary_trace.py         || echo "[kv-cache] WARNING: boundary-trace did not apply"
-run patch_offload_debug_instrument.py       || echo "[kv-cache] WARNING: debug-instrument did not apply"
-run patch_offload_fs_fanout.py              || echo "[kv-cache] WARNING: fs-fanout did not apply"
-run patch_offload_tier_report.py            || echo "[kv-cache] WARNING: tier-report did not apply"
-run patch_offload_promotion_wallclock.py    || echo "[kv-cache] WARNING: promotion/wallclock did not apply"
-run patch_lookup_invalidate.py              || echo "[kv-cache] WARNING: lookup-invalidate did not apply"
-run patch_fs_failed_load.py                 || echo "[kv-cache] WARNING: failed-load-forget did not apply"
-run patch_offload_miss_deferral_metrics.py  || echo "[kv-cache] WARNING: deferral/miss-reason did not apply"
+# disk set: shared with serve-mxfp4.sh (kv-cache/disk_patches.txt). Short names feed the
+# bring-up DISK_WARN_NAMES check; all warn-and-continue (mixed_hit/instrumentation are the FATAL pair).
+while read -r _dpf _dpn; do
+  [ -z "$_dpf" ] && continue
+  case "$_dpf" in \#*) continue ;; esac
+  run "$_dpf" || echo "[kv-cache] WARNING: $_dpn did not apply"
+done < /patches/kv-cache/disk_patches.txt
 exec /opt/radiance_entrypoint.sh "$@"'
 
 start() {  # $1=log-label
   CLEAN_SHM
   docker rm -f "$CONTAINER" 2>/dev/null || true
+  CURLOG="$LOGDIR/$1.log"
   echo ">> starting $CONTAINER (label=$1)"
   docker run -d --name "$CONTAINER" \
     --device=/dev/kfd --device=/dev/dri --group-add video \
@@ -218,7 +231,7 @@ start() {  # $1=log-label
     --max-model-len 262144 --gpu-memory-utilization 0.98 \
     --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
     --kv-offloading-size 16 --kv-offloading-backend native \
-    --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kvcache/blocks","n_read_threads":8,"n_write_threads":4}]}}' \
+    --kv-transfer-config "$(cat "$PATCHES_DIR/kv-cache/disk_tier_config.json")" \
     --speculative-config.method dflash \
     --speculative-config.model "$DRAFTER" \
     --speculative-config.num_speculative_tokens 7 \
@@ -234,12 +247,15 @@ start() {  # $1=log-label
     --chat-template /chat-template.jinja \
     --default-chat-template-kwargs '{"reasoning_effort": "medium"}' \
     --override-generation-config '{"temperature":0.7,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.1}'
+  # The follower keeps the log live: `docker logs` is empty once the container is
+  # gone, and a silent engine death must still be readable by ok_resp.
+  docker logs -f "$CONTAINER" > "$CURLOG" 2>&1 &
 }
 
 alive() { docker ps -q -f "name=^${CONTAINER}$" 2>/dev/null | grep -q .; }
 
-dump_log() {  # $1=label ; the vLLM + prelude output lives in `docker logs`, not run-stdout
-  docker logs "$CONTAINER" > "$LOGDIR/$1.log" 2>&1 || true
+dump_log() {  # $1=label ; the `docker logs -f` follower in start() owns $CURLOG already
+  :
 }
 
 wait_healthy() {
@@ -248,14 +264,12 @@ wait_healthy() {
   while :; do
     if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then echo ">> healthy."; return 0; fi
     if ! alive; then
-      dump_log early
       echo "FATAL: container exited before becoming healthy; last log lines:" >&2
-      tail -40 "$LOGDIR/early.log" >&2
+      tail -40 "$CURLOG" >&2 || true
       return 1
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      dump_log timeout
-      echo "FATAL: not healthy within ${HEALTH_TIMEOUT}s; see $LOGDIR/timeout.log" >&2
+      echo "FATAL: not healthy within ${HEALTH_TIMEOUT}s; see $CURLOG" >&2
       return 1
     fi
     sleep 30
@@ -265,14 +279,14 @@ wait_healthy() {
 # ---- the test ----------------------------------------------------------------
 echo "=== PHASE 1: bring up ==="
 start first
-wait_healthy
+wait_healthy || die "container never became healthy"
 dump_log first
 
 # Verify the disk patches applied. instrumentation/mixed_hit are FATAL (caught by
 # health); the rest warn-and-continue, so check their short WARNING names are absent.
 echo ">> patch-application warnings in the log (expect NONE for the disk set):"
 grep -E 'WARNING: .* did not apply' "$LOGDIR/first.log" || echo "   (no warnings)"
-DISK_WARN_NAMES="fs-fanout lookup-invalidate failed-load-forget tier-report promotion/wallclock deferral/miss-reason"
+DISK_WARN_NAMES="fs-fanout lookup-invalidate failed-load-forget tier-report deferral/miss-reason"
 FAIL=0
 for n in $DISK_WARN_NAMES; do
   if grep -q "WARNING: $n did not apply" "$LOGDIR/first.log"; then
@@ -311,7 +325,7 @@ echo "=== PHASE 3: restart (stop + start, same /kvcache mount) ==="
 docker stop "$CONTAINER"
 sleep 5
 start second
-wait_healthy
+wait_healthy || die "container never became healthy"
 dump_log second
 
 echo "=== PHASE 4: survival ==="
@@ -325,6 +339,19 @@ if responses_identical "$LOGDIR/resp_before.json" "$LOGDIR/resp_after.json"; the
   pass "response identical after restart (disk serves correct tokens)"
 else
   fail "response DIFFERS after restart"
+fi
+# Survival signals ARE gated (greedy byte-equality alone is indifferent to cache hits:
+# a recompute produces identical output whether the KV came from disk, RAM, or a fresh
+# prefill). The disk tier is proven only if the re-prefill is faster AND the disk grew.
+if [ "$BLOCKS_AFTER" -gt "$BLOCKS_BEFORE" ]; then
+  pass "disk populated: block count grew ($BLOCKS_BEFORE -> $BLOCKS_AFTER)"
+else
+  fail "disk NOT populated: block count did not grow ($BLOCKS_BEFORE -> $BLOCKS_AFTER)"
+fi
+if python3 -c "import sys; sys.exit(0 if float('$AFTER_TTFT') < float('$BEFORE_TTFT') else 1)"; then
+  pass "restart beat fresh prefill: TTFT ${BEFORE_TTFT}s -> ${AFTER_TTFT}s"
+else
+  fail "restart did NOT beat fresh prefill: TTFT ${BEFORE_TTFT}s -> ${AFTER_TTFT}s"
 fi
 
 echo "=== PHASE 5: accuracy gate (cached vs fresh, byte-identical) ==="
@@ -371,7 +398,7 @@ echo "=== PHASE 8: durability (second restart) ==="
 docker stop "$CONTAINER"
 sleep 5
 start third
-wait_healthy
+wait_healthy || die "container never became healthy"
 dump_log third
 # baseline (long) blocks must survive a second restart and serve byte-identical output.
 resp "$LOGDIR/resp_third.json"
@@ -382,6 +409,9 @@ else
 fi
 BLOCKS_THIRD=$(find "$KVCACHE_DIR/blocks" -type f | wc -l)
 echo ">> block files after third restart: $BLOCKS_THIRD"
+# the run would otherwise leave a vLLM process parked on the GPU, and the next
+# run's preflight would die on the running-container check.
+docker stop "$CONTAINER"
 
 # ---- verdict ----------------------------------------------------------------
 SPEEDUP=$(python3 -c "print(round(float('$BEFORE_TTFT')/float('$AFTER_TTFT'),2) if float('$AFTER_TTFT')>0 else 99)")
