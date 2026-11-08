@@ -70,6 +70,13 @@ product, so the extra GEMV costs one transient bf16 copy of the hot block (84 Mi
 (token statistics of the served model); ship it next to the checkpoint and mount it. Tensor-parallel
 heads are refused (ids are global). Tests: `sly/tests/test_lmhead_hot_cpu.py`.
 
+The DFlash2 drafter shares the target head (`llm_base_proposer.py`: `self.model.lm_head =
+target_language_model.lm_head`) and calls it through `LogitsProcessor.get_top_k_tokens` for its candidates,
+so by default the hot GEMV runs twice per step. *Measured* (rocprofv3, 2026-11-08, R9700 210 W, conc 1,
+8k bf16 rows): 2.1 hipBLASLt bf16 GEMMs per step, ~300 µs of a 34 ms step; served wall time per verify step
+35.67 → 35.93 ms (+0.7 %). `RADIANCE_LMHEAD_HOT_DRAFT=0` wraps `get_top_k_tokens` (only drafter models call
+it) so the drafter's call stays pure int4 and only the target's logits get the hot rows.
+
 ## int4 lm_head (0.1.5)
 
 `sly/mxfp4/radiance_lmhead_int4.py` + `sly/patch_lmhead_int4.py`, opt-in via `RADIANCE_LMHEAD_INT4=1`

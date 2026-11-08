@@ -81,6 +81,11 @@ CODES = os.environ.get("RADIANCE_LMHEAD_INT4_CODES", "")
 # RADIANCE_LMHEAD_HOT_FMT: "fp8" (default; e4m3 + one fp32 scale per row) or "bf16" (exact).
 HOT = os.environ.get("RADIANCE_LMHEAD_HOT", "")
 HOT_FMT = os.environ.get("RADIANCE_LMHEAD_HOT_FMT", "fp8")
+# RADIANCE_LMHEAD_HOT_DRAFT: "1" (default) the DFlash2 drafter, which shares this head, gets the hot rows too;
+# "0" its head call (LogitsProcessor.get_top_k_tokens) stays pure int4 -- the hot GEMV then runs once per
+# step instead of twice (rocprofv3 2026-11-08: 2.1 calls/step, ~300 us of a 34 ms step in bf16).
+HOT_DRAFT = os.environ.get("RADIANCE_LMHEAD_HOT_DRAFT", "1") == "1"
+_in_draft = [False]
 FP8_MAX = 448.0  # e4m3fn
 
 
@@ -216,7 +221,7 @@ def attach_hot(layer: torch.nn.Module, w: torch.Tensor, path: str | None = None,
 def apply_hot(layer: torch.nn.Module, x_2d: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     """Overwrite the hot columns of the int4 logits `out` [M, N] in place; no-op without layer.radiance_hot."""
     hot = getattr(layer, "radiance_hot", None)
-    if hot is None:
+    if hot is None or (_in_draft[0] and not HOT_DRAFT):
         return out
     ids, w, s = hot
     if s is None:
@@ -225,6 +230,23 @@ def apply_hot(layer: torch.nn.Module, x_2d: torch.Tensor, out: torch.Tensor) -> 
         logits = (torch.nn.functional.linear(x_2d, w.to(x_2d.dtype)).float() * s).to(out.dtype)
     out.index_copy_(1, ids, logits.to(out.dtype))
     return out
+
+
+def draft_head(fn):
+    """Wrap the drafter's head entry (LogitsProcessor.get_top_k_tokens): apply_hot sees _in_draft inside it."""
+    def wrapped(*args, **kwargs):
+        _in_draft[0] = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _in_draft[0] = False
+    return wrapped
+
+
+if HOT and not HOT_DRAFT:
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+    LogitsProcessor.get_top_k_tokens = draft_head(LogitsProcessor.get_top_k_tokens)
 
 
 class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):

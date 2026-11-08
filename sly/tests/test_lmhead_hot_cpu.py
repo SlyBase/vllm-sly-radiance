@@ -84,6 +84,37 @@ def test_listed_rows_match_reference_others_untouched(tmp_path, head, x, fmt):
     assert torch.equal(out[:, other], int4_logits[:, other])  # bit-identical
 
 
+@pytest.mark.parametrize("draft_on", [False, True])
+def test_drafter_head_call_skips_hot_rows_unless_enabled(tmp_path, head, x, monkeypatch, draft_on):
+    """The DFlash2 drafter shares the target head and calls it via LogitsProcessor.get_top_k_tokens."""
+    monkeypatch.setattr(L, "HOT_DRAFT", draft_on)
+    layer = FakeLayer()
+    L.attach_hot(layer, head, rows_file(tmp_path, [5, 17]), "bf16")
+    int4_logits = (torch.randn(3, N) * 3).to(torch.bfloat16)
+
+    def head_call(out):  # stand-in for get_top_k_tokens -> _apply_head -> quant_method.apply
+        return L.apply_hot(layer, x, out)
+
+    drafted = L.draft_head(head_call)(int4_logits.clone())
+    assert torch.equal(drafted, int4_logits) is (not draft_on)
+    target = head_call(int4_logits.clone())  # the target path keeps the hot rows either way
+    assert not torch.equal(target, int4_logits)
+
+
+def test_drafter_flag_reset_after_error(tmp_path, head, x, monkeypatch):
+    monkeypatch.setattr(L, "HOT_DRAFT", False)
+    layer = FakeLayer()
+    L.attach_hot(layer, head, rows_file(tmp_path, [5]), "bf16")
+
+    def boom():
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        L.draft_head(boom)()
+    out = (torch.randn(3, N) * 3).to(torch.bfloat16)
+    assert not torch.equal(L.apply_hot(layer, x, out.clone()), out)
+
+
 def test_fp8_rows_storage_is_fp8_plus_row_scale(tmp_path, head):
     layer = FakeLayer()
     L.attach_hot(layer, head, rows_file(tmp_path, [1, 2, 3]), "fp8")
