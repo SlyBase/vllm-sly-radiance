@@ -607,7 +607,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_r4d_attn.py radiance_r4d_hybrid_attn.py radiance_gdn.py radiance_gdn_lazy.py radiance_w4.py sly/mxfp4/radiance_mxfp4.py \
      sly/mxfp4/radiance_lmhead_fp8.py sly/mxfp4/radiance_lmhead_int4.py \
      sly/mxfp4/radiance_lmhead_int2.py \
-     sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
+     sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_fwht.py sly/mxfp4/radiance_embed_int8.py sly/radiance_attn_decode.py \
      sly/radiance_embed_host.py \
      sly/mxfp4/tile_layout.py \
      sly/radiance_attn_drafter.py sly/radiance_lookup_draft.py sly/gdn/radiance_gdn_decode.py \

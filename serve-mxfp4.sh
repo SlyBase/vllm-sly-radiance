@@ -1290,7 +1290,7 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
        radiance_arnq.py radiance_tp3pad.py "$SP"/
     # radiance_mxfp4.py + radiance_fused_norm.py + the kernel source come from sly/mxfp4/ (what the image ships);
     # the repo-root radiance_mxfp4{.py,_fp8.hip} are older twins that do not match launch_gdn_norm_quant (#223).
-    cp sly/mxfp4/radiance_mxfp4.py sly/mxfp4/radiance_fused_norm.py "$SP"/
+    cp sly/mxfp4/radiance_mxfp4.py sly/mxfp4/radiance_fused_norm.py sly/mxfp4/radiance_fwht.py "$SP"/
     # MXFP4_CUMODE=1 builds the GEMM TU in CU mode (waves of a workgroup confined to one CU of the
     # WGP, LDS partitioned per CU) -- bit-identical output, an occupancy/LDS-placement A/B knob.
     if [ -n "${LAUNCH_IMG_KEY:-}" ] && [ -f /startup-cache/hip-so-cache.sh ]; then

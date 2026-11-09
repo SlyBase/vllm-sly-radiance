@@ -10,6 +10,17 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Changed
+- `RADIANCE_MXFP4_HAD=128`, unfused linears (no fused fp8 producer): the online rotation `had_rot` is now a
+  fast Walsh-Hadamard transform (`sly/mxfp4/radiance_fwht.py`, Triton, 7 butterfly stages, fp32 math, one
+  rounding to the input dtype) instead of the dense fp32 GEMM `x.float() @ had_matrix`. Same convention
+  (`H128 diag(s) / sqrt(128)` per 128-block), results equal to the GEMM within fp32 rounding (1e-5). HAD
+  off: unchanged. *Measured* (CPU only: Triton interpreter + torch reference, 25 tests); **GPU time not
+  measured yet** — the dense GEMM was 18 calls / 835 µs per verify step (+3.3 % GPU per forward with
+  HAD=128, rocprofv3 H1P), the estimate for the kernel is < 1 % (estimate, to be measured in a GPU window).
+
 ## [1.11.0] - 2026-11-09
 
 ### Added
