@@ -238,7 +238,7 @@ if BCQ and AT_PSW != 2:
 _bcq_table_set = [False]
 # RADIANCE_MXFP4_HAD=128: the checkpoint's MXFP4 weights are W R (R = blockdiag over K of
 # H128 diag(s) / sqrt(128), s = the fq.hadamard32(n=128) seed-0 signs). Activations get the same R
-# online: inside the fused fp8 producers (set_had) and, on the unfused path, as one bf16 GEMM here.
+# online: inside the fused fp8 producers (set_had) and, on the unfused path, as an FWHT here (fwht128).
 HAD = int(os.environ.get("RADIANCE_MXFP4_HAD", "0") or 0)
 if HAD not in (0, 128):
     raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD must be 0 or 128")
@@ -247,6 +247,7 @@ if HAD and not BCQ:
 if HAD and os.environ.get("RADIANCE_MXFP4_HOIST_QUANT", "0") == "1":
     raise RuntimeError("[radiance.mxfp4] RADIANCE_MXFP4_HAD has no traced-quant rotation")
 _had_mat = {}
+_had_sgn = {}
 _had_keep = []
 
 
@@ -270,9 +271,17 @@ def had_matrix(n: int, device) -> "torch.Tensor":
     return _had_mat[key]
 
 
+def fwht128(x: "torch.Tensor") -> "torch.Tensor":
+    """x @ blockdiag(had_matrix(128)) over K, as a fast Walsh-Hadamard transform (no GEMM)."""
+    import radiance_fwht
+    key = str(x.device)
+    if key not in _had_sgn:
+        _had_sgn[key] = had_signs(128).to(x.device)
+    return radiance_fwht.fwht128(x, _had_sgn[key])
+
+
 def had_rot(x: "torch.Tensor") -> "torch.Tensor":
-    M, K = x.shape
-    return (x.float().view(M, K // HAD, HAD) @ had_matrix(HAD, x.device)).view(M, K).to(x.dtype)
+    return fwht128(x)
 
 
 def bcq_table_bytes(path: str) -> "torch.Tensor":
