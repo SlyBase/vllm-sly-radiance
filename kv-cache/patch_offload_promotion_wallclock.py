@@ -67,10 +67,11 @@ connector level so they exist for every offloading spec; OffloadPromMetrics.
 observe() asserts that every emitted name is registered.
 """
 
+import sys
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, skip_if_upstream
 
 SP = Path(sysconfig.get_paths()["purelib"])
 KVO_BASE = SP / "vllm/v1/kv_offload" / "base.py"
@@ -82,6 +83,23 @@ CONN_METRICS = (
 )
 
 print("radiance: KV offload promotion-refusal instrumentation")
+
+# 0.30.0 and 0.32.0 both ship the native TieringMetricsTracker, which restructures
+# the tiering manager: self._metrics replaces the self._stats buffer this bundle
+# emits into, prepare_store()'s two refusal paths are rewritten around ARC, and the
+# deferred-lookup mechanism the wall-clock span hung off is gone. promotion-refusal
+# and the wall-clock timing are built on the old self._stats surface and are not
+# portable to that tree; the native tracker already covers the per-job time
+# dimension (READ_TIME/WRITE_TIME). Skip rather than fail on it.
+if skip_if_upstream(
+    TIERING_MANAGER,
+    "TieringMetricsTracker",
+    "promotion-refusal + wall-clock timing",
+    "vLLM ships the native TieringMetricsTracker, which restructures the tiering "
+    "manager (self._metrics replaces self._stats); the promotion-refusal and "
+    "wall-clock hooks are not portable to it",
+):
+    sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # 1. base.py: the PrepareStoreRefusal sentinel, next to PrepareStoreOutput.

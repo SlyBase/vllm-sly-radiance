@@ -1,0 +1,10 @@
+# The disk-tier (KVCACHE=disk) patch set, in application order. Shared by serve-mxfp4.sh (the disk
+# branch) and ci/test-disk-tier.sh (the prelude). Columns: <filename> <short-warning-name>.
+# All are warn-and-continue; a failure is surfaced as "[kv-cache] WARNING: <short> did not apply"
+# (the test's DISK_WARN_NAMES check greps the short names) and checked in the test's bring-up phase.
+patch_offload_debug_instrument.py debug-instrument
+patch_offload_fs_fanout.py fs-fanout
+patch_offload_tier_report.py tier-report
+patch_lookup_invalidate.py lookup-invalidate
+patch_fs_failed_load.py failed-load-forget
+patch_offload_miss_deferral_metrics.py deferral/miss-reason

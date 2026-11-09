@@ -49,7 +49,7 @@ in the metrics path.
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 
@@ -75,9 +75,14 @@ _WIDE = """                    5,
                 ),"""
 
 # --- hunk 1: tiering LOOKUP_ASYNC_DELAY buckets --------------------------------------
-apply(
+# The docstring of this histogram was rewritten between vLLM 0.30 and 0.32 (and a
+# `labelnames=("tier",)` line was added in 0.32); the bucket ladder is identical.
+# Variant 0 is the 0.30 shape (kept for a 0.30 tree), variant 1 is the 0.32 shape.
+apply_any(
     TIERING_SPEC,
-    """                    "secondary-tier lookup until the request is allocated or "
+    [
+        (
+            """                    "secondary-tier lookup until the request is allocated or "
                     "finishes, in seconds."
                 ),
                 buckets=(
@@ -93,7 +98,7 @@ apply(
                     5,
                     10,
                 ),""",
-    """                    "secondary-tier lookup until the request is allocated or "
+            """                    "secondary-tier lookup until the request is allocated or "
                     "finishes, in seconds."
                 ),
                 # radiance: extended past 10 s -- a measured 60.6 s stall was
@@ -109,7 +114,48 @@ apply(
                     0.5,
                     1,
 """
-    + _WIDE,
+            + _WIDE,
+        ),
+        (
+            """                    "Histogram of wall-clock time from a per-chunk tier lookup "
+                    "first returning retry until that same tier lookup resolves "
+                    "as a hit or miss, labeled by tier, in seconds."
+                ),
+                labelnames=("tier",),
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+                    5,
+                    10,
+                ),""",
+            """                    "Histogram of wall-clock time from a per-chunk tier lookup "
+                    "first returning retry until that same tier lookup resolves "
+                    "as a hit or miss, labeled by tier, in seconds."
+                ),
+                labelnames=("tier",),
+                # radiance: extended past 10 s -- a measured 60.6 s stall was
+                # invisible in +Inf. See cache-preemption-patch-plan.md R3.5.
+                buckets=(
+                    0.0001,
+                    0.0005,
+                    0.001,
+                    0.005,
+                    0.01,
+                    0.05,
+                    0.1,
+                    0.5,
+                    1,
+"""
+            + _WIDE,
+        ),
+    ],
     "radiance: extended past 10 s",
     "tiering lookup_async_delay buckets",
 )
@@ -218,14 +264,14 @@ apply(
         # radiance: prepare_store() admits a batch iff
         #   len(keys_to_store) <= free + evictable
         # and neither term was observable. See cache-preemption-patch-plan.md R3.2.
-        if self._num_blocks > 0:
+        if self._num_chunks > 0:
             stats.set_gauge(
                 CPUOffloadingMetrics.CPU_CACHE_EVICTABLE_PERC,
-                self._num_evictable_cache_blocks / self._num_blocks,
+                self._num_evictable_cache_chunks / self._num_chunks,
             )
             stats.set_gauge(
                 CPUOffloadingMetrics.CPU_CACHE_FREE_PERC,
-                self._get_num_free_blocks() / self._num_blocks,
+                self._get_num_free_chunks() / self._num_chunks,
             )""",
     "CPU_CACHE_EVICTABLE_PERC",
     "cpu tier gauge emission",

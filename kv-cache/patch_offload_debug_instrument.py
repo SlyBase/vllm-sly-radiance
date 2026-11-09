@@ -160,7 +160,7 @@ except Exception:
         "                        continue\n"
     )
     sentinel = "_kvinstr_store_drop(req_id, offload_key)"
-    v2_sentinel = '"swa" if (group_config.is_mamba_group'
+    v2_sentinel = '"swa" if (getattr(group_config, "is_mamba_group"'
     # Match the v1 call OR the v2 (group_type-bearing) call, so a re-run after the
     # v2 surgery does not try to re-apply the v1 anchor (which no longer matches).
     if (sentinel in SCHED.read_text()) or (v2_sentinel in SCHED.read_text()):
@@ -201,10 +201,10 @@ def v2_surgery() -> None:
         SCHED,
         "                        _kvinstr_store_drop(req_id, offload_key)\n",
         "                        _kvinstr_store_drop(req_id, offload_key,\n"
-        "                            \"swa\" if (group_config.is_mamba_group\n"
+        "                            \"swa\" if (getattr(group_config, \"is_mamba_group\", False)\n"
         "                            or (group_config.sliding_window_size_in_chunks is not None))\n"
         "                            else \"full\")\n",
-        '"swa" if (group_config.is_mamba_group',
+        '"swa" if (getattr(group_config, "is_mamba_group"',
         "v2: drop-site group_type",
     )
     # 5d. record num_prompt_tokens on lookup_terminal (gap size per miss).

@@ -114,7 +114,7 @@ restoring the pre-patch files and reloading the model.
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 KVO = SP / "vllm/v1/kv_offload"
@@ -141,20 +141,11 @@ if "_RADIANCE_FANOUT_MAX = int(" not in FS_MANAGER.read_text():
 # 1. async_lookup.py: add AsyncLookupManager.invalidate() (before cleanup) and
 #    guard cleanup() against a key dropped by invalidate().
 # ---------------------------------------------------------------------------
-apply(
-    ASYNC_LOOKUP,
-    '''    def cleanup(self, req_id: str) -> None:
-        """Remove entries no longer needed by any active request.
-
-        Called from the tier's on_request_finished(). Uses the reverse
-        index to visit only keys associated with this request.
-        """
-        for key in self._req_keys.pop(req_id, ()):
-            state = self._lookup_state[key]
-            state.request_ids.discard(req_id)
-            if not state.request_ids:
-                del self._lookup_state[key]''',
-    '''    def invalidate(self, keys: "Iterable[OffloadKey]") -> None:
+# The invalidate() method body is identical for both eras (it reads
+# `state.result is False`, which both have). Only cleanup()'s docstring and the
+# deletion guard differ: 0.32 retains in-flight lookups
+# (`and state.phase is not LookupPhase.IN_FLIGHT`). Variant 0 = 0.30, variant 1 = 0.32.
+_INVALIDATE_METHOD = '''    def invalidate(self, keys: "Iterable[OffloadKey]") -> None:
         """Drop the cached verdict for ``keys`` so the next lookup re-states it.
 
         Called by a tier when a STORE for these keys completes successfully: the
@@ -171,7 +162,23 @@ apply(
             if state is not None and state.result is False:
                 del self._lookup_state[key]
 
-    def cleanup(self, req_id: str) -> None:
+'''
+apply_any(
+    ASYNC_LOOKUP,
+    [
+        (
+            '''    def cleanup(self, req_id: str) -> None:
+        """Remove entries no longer needed by any active request.
+
+        Called from the tier's on_request_finished(). Uses the reverse
+        index to visit only keys associated with this request.
+        """
+        for key in self._req_keys.pop(req_id, ()):
+            state = self._lookup_state[key]
+            state.request_ids.discard(req_id)
+            if not state.request_ids:
+                del self._lookup_state[key]''',
+            _INVALIDATE_METHOD + '''    def cleanup(self, req_id: str) -> None:
         """Remove entries no longer needed by any active request.
 
         Called from the tier's on_request_finished(). Uses the reverse
@@ -187,6 +194,37 @@ apply(
             state.request_ids.discard(req_id)
             if not state.request_ids:
                 del self._lookup_state[key]''',
+        ),
+        (
+            '''    def cleanup(self, req_id: str) -> None:
+        """Release request references, retaining in-flight lookups.
+
+        Called from the tier's on_request_finished(). Uses the reverse
+        index to visit only keys associated with this request.
+        """
+        for key in self._req_keys.pop(req_id, ()):
+            state = self._lookup_state[key]
+            state.request_ids.discard(req_id)
+            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+                del self._lookup_state[key]''',
+            _INVALIDATE_METHOD + '''    def cleanup(self, req_id: str) -> None:
+        """Release request references, retaining in-flight lookups.
+
+        Called from the tier's on_request_finished(). Uses the reverse
+        index to visit only keys associated with this request.
+        """
+        for key in self._req_keys.pop(req_id, ()):
+            # A key may have been dropped by invalidate() (a store landed) and
+            # not yet re-looked-up, so its entry can be absent here. This guard
+            # is a no-op when nothing was dropped (e.g. the fix gate is unset).
+            state = self._lookup_state.get(key)
+            if state is None:
+                continue
+            state.request_ids.discard(req_id)
+            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
+                del self._lookup_state[key]''',
+        ),
+    ],
     "def invalidate(self, keys",
     "1  async_lookup.py: invalidate() + guarded cleanup()",
 )
@@ -253,18 +291,35 @@ apply(
 # ---------------------------------------------------------------------------
 # 4. fs/manager.py submit_store(): record the store's keys unconditionally.
 # ---------------------------------------------------------------------------
-apply(
+# 0.30 stores `list(job_metadata.keys)`; 0.32 stores the local `keys`. Variant 0
+# = 0.30, variant 1 = 0.32.
+apply_any(
     FS_MANAGER,
-    '''        if self.events is not None:
+    [
+        (
+            '''        if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = self._radiance_split(  # radiance R3.14''',
-    '''        if self.events is not None:
+            '''        if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         # radiance: always-on (independent of events) so get_finished_jobs() can
         # invalidate the async-lookup cache when this store lands.
         self._store_lookup_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = self._radiance_split(  # radiance R3.14''',
-    "self._store_lookup_keys[job_metadata.job_id] = list(job_metadata.keys)",
+        ),
+        (
+            '''        if self.events is not None:
+            self._store_job_keys[job_metadata.job_id] = keys
+        tasks = self._radiance_split(  # radiance R3.14''',
+            '''        if self.events is not None:
+            self._store_job_keys[job_metadata.job_id] = keys
+        # radiance: always-on (independent of events) so get_finished_jobs() can
+        # invalidate the async-lookup cache when this store lands.
+        self._store_lookup_keys[job_metadata.job_id] = keys
+        tasks = self._radiance_split(  # radiance R3.14''',
+        ),
+    ],
+    "self._store_lookup_keys[job_metadata.job_id]",
     "4  fs/manager.py submit_store: track store keys unconditionally",
 )
 
@@ -272,32 +327,10 @@ apply(
 # 5. fs/manager.py get_finished_jobs(): on a SUCCESSFUL store, invalidate the
 #    cached verdict for those keys (and always drain the tracking map).
 # ---------------------------------------------------------------------------
-apply(
-    FS_MANAGER,
-    '''            if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
-                    self.events.append(
-                        OffloadingEvent(
-                            keys=keys,
-                            medium=self.medium,
-                            removed=False,
-                            locality=self.locality,
-                        )
-                    )
-            results.append(JobResult(job_id=job_id, success=success))''',
-    '''            if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
-                    self.events.append(
-                        OffloadingEvent(
-                            keys=keys,
-                            medium=self.medium,
-                            removed=False,
-                            locality=self.locality,
-                        )
-                    )
-            # radiance: a successful store put these blocks on disk, so any
+# 0.30 appends `JobResult(job_id, success)` directly after the events block;
+# 0.32 inserts a `load_keys`/`mark_miss` block first (partial-load handling).
+# Variant 0 = 0.30, variant 1 = 0.32.
+_INV_STORE_BLOCK = '''            # radiance: a successful store put these blocks on disk, so any
             # previously-cached `absent` verdict for them is stale. Drop it (the
             # next lookup re-states the file, reflecting its real current state,
             # robust to external eviction). A FAILED store leaves the verdict
@@ -306,7 +339,67 @@ apply(
             store_keys = self._store_lookup_keys.pop(job_id, None)
             if store_keys and success and _RADIANCE_LOOKUP_INVALIDATE:
                 self._lookup_manager.invalidate(store_keys)
+'''
+apply_any(
+    FS_MANAGER,
+    [
+        (
+            '''            if self.events is not None:
+                keys = self._store_job_keys.pop(job_id, None)
+                if success and keys:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
+                    )
             results.append(JobResult(job_id=job_id, success=success))''',
+            '''            if self.events is not None:
+                keys = self._store_job_keys.pop(job_id, None)
+                if success and keys:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
+                    )
+'''
+            + _INV_STORE_BLOCK
+            + '''            results.append(JobResult(job_id=job_id, success=success))''',
+        ),
+        (
+            '''            if self.events is not None:
+                keys = self._store_job_keys.pop(job_id, None)
+                if success and keys:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
+                    )
+            load_keys = self._load_job_keys.pop(job_id, None)''',
+            '''            if self.events is not None:
+                keys = self._store_job_keys.pop(job_id, None)
+                if success and keys:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
+                    )
+'''
+            + _INV_STORE_BLOCK
+            + '''            load_keys = self._load_job_keys.pop(job_id, None)''',
+        ),
+    ],
     "store_keys = self._store_lookup_keys.pop(job_id, None)",
     "5  fs/manager.py get_finished_jobs: invalidate on successful store",
 )
