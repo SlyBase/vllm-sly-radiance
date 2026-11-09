@@ -1285,18 +1285,21 @@ exec ${DRY_RUN:+echo} "$RUNTIME" run "${RT_FLAGS[@]}" --name "$NAME" --privilege
     # radiance_drafthead.py is copied too so RADIANCE_DRAFT_RERANK can be swept without an
     # image rebuild. The repo copy was byte-identical to the 0.9.3 one before that knob existed.
     cp radiance_preamble.py /opt/radiance_preamble.py      # banner/preamble from the repo, not the baked copy
-    cp radiance_nvfp4.py radiance_mxfp4.py radiance_gdn.py radiance_gdn_lazy.py radiance_rmsquant.py radiance_drafthead.py \
+    cp radiance_nvfp4.py radiance_gdn.py radiance_gdn_lazy.py radiance_rmsquant.py radiance_drafthead.py \
        radiance_verifyhead.py radiance_gdnmerge.py radiance_aroverlap.py radiance_topk.py \
        radiance_arnq.py radiance_tp3pad.py "$SP"/
+    # radiance_mxfp4.py + radiance_fused_norm.py + the kernel source come from sly/mxfp4/ (what the image ships);
+    # the repo-root radiance_mxfp4{.py,_fp8.hip} are older twins that do not match launch_gdn_norm_quant (#223).
+    cp sly/mxfp4/radiance_mxfp4.py sly/mxfp4/radiance_fused_norm.py "$SP"/
     # MXFP4_CUMODE=1 builds the GEMM TU in CU mode (waves of a workgroup confined to one CU of the
     # WGP, LDS partitioned per CU) -- bit-identical output, an occupancy/LDS-placement A/B knob.
     if [ -n "${LAUNCH_IMG_KEY:-}" ] && [ -f /startup-cache/hip-so-cache.sh ]; then
       # STARTUP_CACHE=1: compiled once per (source, flags, arch, image); --offload-arch is appended there
-      bash /startup-cache/hip-so-cache.sh radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
+      bash /startup-cache/hip-so-cache.sh sly/mxfp4/radiance_mxfp4_fp8.hip "$SP"/radiance_mxfp4_fp8.so \
         -O3 -w -std=c++17 -fPIC -shared $([ "${MXFP4_CUMODE:-0}" = 1 ] && echo -mcumode) $(python3 -m pybind11 --includes)
     else
       hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 $([ "${MXFP4_CUMODE:-0}" = 1 ] && echo -mcumode) \
-        $(python3 -m pybind11 --includes) radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+        $(python3 -m pybind11 --includes) sly/mxfp4/radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
     fi
     # Optional patched libr4d. R4D_SO is the DIRECTORY of a libr4d checkout built from main --
     # it is bind-mounted at /r4d and its r4d.so replaces the one in the image. For an image
