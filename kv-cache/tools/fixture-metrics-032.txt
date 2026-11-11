@@ -1,0 +1,44 @@
+# Synthetic /metrics fixture: the 0.32.0 surface (our patch + native tracker).
+# Built to exercise kvvalidate.py's core invariants WITHOUT a live engine.
+# Values are chosen so the lookup partition partitions exactly and the
+# promotion check passes (0 refusals).
+vllm:num_requests_running 1
+vllm:num_requests_waiting 0
+vllm:kv_cache_usage_perc 0.71
+# --- lookup partition (six terminals + authority) ---
+vllm:kv_offload_lookup_calls_total 1000
+vllm:kv_offload_lookup_served_total 400
+vllm:kv_offload_lookup_skip_zero_hit_total 50
+vllm:kv_offload_lookup_skip_short_window_total 300
+vllm:kv_offload_lookup_skip_short_result_total 0
+vllm:kv_offload_lookup_deferred_backend_total 250
+vllm:kv_offload_lookup_deferred_loading_total 0
+# --- reason sub-partition (zero_hit / short_result unresolved) ---
+vllm:kv_offload_lookup_zero_hit_unresolved_total 50
+vllm:kv_offload_lookup_short_result_unresolved_total 0
+# --- promotion (fs tier; 0 refusals) ---
+vllm:kv_offload_promotion_initiated_total{tier="fs"} 120
+vllm:kv_offload_promotion_refused_total{tier="fs"} 0
+vllm:kv_offload_promotion_refused_no_evictable_total{tier="fs"} 0
+vllm:kv_offload_promotion_refused_protected_total{tier="fs"} 0
+# --- tier size (fs) ---
+vllm:kv_offload_tier_capacity_bytes{tier="fs"} 1.0e11
+vllm:kv_offload_tier_used_bytes{tier="fs"} 3.2e9
+# --- tier load (fs; wall + thread + latency + ops) ---
+vllm:kv_offload_tier_load_bytes_total{tier="fs"} 1.8e9
+vllm:kv_offload_tier_load_seconds_total{tier="fs"} 2.4
+vllm:kv_offload_tier_load_thread_seconds_total{tier="fs"} 16.8
+vllm:kv_offload_tier_load_latency_seconds_sum{tier="fs"} 16.8
+vllm:kv_offload_tier_load_ops_total{tier="fs"} 60
+# --- cpu tier occupancy (regime) ---
+vllm:kv_offload_cpu_cache_free_perc 0.0
+# --- native prompt-token sources (NO _total suffix) ---
+vllm:prompt_tokens 1000000
+vllm:prompt_tokens_by_source{model_name="m",engine_idx="0",source="local_compute"} 400000
+vllm:prompt_tokens_by_source{model_name="m",engine_idx="0",source="local_cache_hit"} 500000
+vllm:prompt_tokens_by_source{model_name="m",engine_idx="0",source="external_kv_transfer"} 100000
+# --- native external prefix hits (NO _total suffix) ---
+vllm:external_prefix_cache_hits 100000
+# --- prefill (native) ---
+vllm:request_prefill_time_seconds_sum 200
+vllm:request_prefill_kv_computed_tokens_sum 400000

@@ -407,6 +407,7 @@ mounted, patched or passed to the engine.
 | `KVCACHE` | `off` | `off` (default) = stock behaviour; `ram` = GPU → RAM tier in `/dev/shm` + the 6 behavioural patches; `disk` = GPU → RAM → disk + the full 15-patch instrumented set |
 | `KVCACHE_RAM_GIB` | `16` | size of the RAM tier (GiB); needs `/dev/shm` big enough |
 | `KVCACHE_DISK` | — | host path of a dedicated filesystem for the disk tier (`KVCACHE=disk` only); the disk tier also wants `kvcache-reap.sh` (see `kv-cache/README.md`) to keep the fs below 70 % |
+| `KVCACHE_EVICT_POLICY` | `lru` | **Recommended: `lru`** (stock; `arc` is a measured opt-in). RAM-tier eviction policy for `KVCACHE=ram`/`disk`; `arc` promotes a twice-hit prefix to the frequent set so it survives a sweep of one-off blocks. Matters where the RAM tier is the retention boundary (**RAM-only**, or fs too small to hold the hot set) — there a measured A/B showed `arc` serving the recurrent main across flush bursts where `lru` recomputes it (flush-resume TTFT 4.67 s → 0.51 s). Injected into `--kv-transfer-config` by `kv-cache/tools/tier-config.py`; the disk reaper is unaffected (FIFO-by-mtime). Deep dive in `docs/TECHNICAL.md` |
 | `STARTUP_CACHE` | `1` | **Recommended: on.** `serve-mxfp4.sh` keys its cache dir on image ID + GPU arch, persists the comgr / tvm-ffi / tilelang JIT caches across `--rm` boots, compiles `radiance_mxfp4_fp8.so` once per key and prunes stale cache trees when the disk passes 65 %. A miss is always safe (the slow path rebuilds); saves ~68 s per boot. See `startup-cache/README.md` |
 | `KVCACHE_EXACT` | `0` | `1` (needs `KVCACHE=ram`/`disk`) = bit-exact cached resumes via canonical prefill chunks + checkpoint retention; six extra patches, see `kv-cache/README.md` → "Exact resumes". **Recommended with `KVCACHE=ram`/`disk` for multi-turn / long-context agents** (retention raises follow-up turns served from cache 56→77 % / 69→85 %; a cached turn becomes bit-identical to a cold one for greedy eval/A-B). **Keep `0` for short prompts** (< one 3520-token grid chunk): they are then never prefix-cached |
 
@@ -573,6 +574,12 @@ This image stands on other people's work:
 - **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** — the paged prefill attention kernel behind `R4D_HYBRID`.
 - **[ggz14](https://codeberg.org/ggz14)** — radiance-vllm-mxfp4: MXFP4 on RDNA4 and the W4A8 kernel, the
   libr4d extras, TP=3 padding, and the NVFP4, ParoQuant and AutoRound paths.
+- **[zzpanic](https://github.com/zzpanic/qwen3.6-vllm-gfx1201-launchers)** — the KV-cache offload consumers
+  (`kv-cache/tools/kvvalidate.py`, `kv-cache/tools/tierreport.py`, ported and adapted to the 0.32.0 metric
+   surface). The port is the 0.27.1 tools re-pointed at the 0.32.0 surface (the native
+   `TieringMetricsTracker` names and the token→chunk hit-granularity degradation). The RAM-tier
+   `eviction_policy` knob (default `lru`, `arc` opt-in) is vLLM-native; we only expose the knob, we do not
+   implement the policy.
 - **[vLLM](https://github.com/vllm-project/vllm)**, **[AITER](https://github.com/ROCm/aiter)**, the
   **[DFlash](https://github.com/vllm-project/vllm/pull/52816)** authors; `sly/gdn/radiance_gdn_decode.hip`
   ports vLLM's fused GDN decode kernel (Apache-2.0).

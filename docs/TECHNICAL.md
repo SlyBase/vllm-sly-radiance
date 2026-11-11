@@ -823,3 +823,48 @@ Limitations:
 - The container's cgroup numbers include page cache; they show the limit being reached, not
   the actual need.
 - No 16 GiB host was tested. The 16 GiB figure is a container cap on a 29 GiB host.
+
+## KV-cache RAM-tier eviction policy: `KVCACHE_EVICT_POLICY` (unreleased)
+
+`serve-mxfp4.sh` injects `KVCACHE_EVICT_POLICY` (default `lru`, the stock behavior) into the
+`--kv-transfer-config` at launch for **both** `KVCACHE=ram` and `KVCACHE=disk` (baseline
+`kv-cache/tier_config.json`, assembled by `kv-cache/tools/tier-config.py`, which adds the fs
+secondary tier `kv-cache/fs_tier.json` for `disk` only), so the policy reaches the mode where it
+matters most (RAM-only) and every knob is an env var; `arc` is the opt-in. ARC (vLLM-native) keeps
+a twice-seen prefix in its frequent set (T2); it matters where the RAM tier is the retention
+boundary (RAM-only / small-fs) and is a reload-speed delta in large-fs disk mode.
+
+**Why the A/B was hard to make conclusive.** The eviction policy only matters where the RAM tier
+*hands blocks back* — the recurrent main must be evicted from the tier and then reloaded. The first
+runs were all null (both arms byte-identical) and looked like "arc ≈ lru," but they were a
+**test-sizing bug**, not a policy null: the eviction burst was smaller than the tier it was meant to
+evict, so the main was never pushed out and reloaded. GPU KV pool at `GPU_UTIL=0.60 MAXLEN=24576`
+is **28,572 tokens**; `--kv-offloading-size` GiB sizes the primary tier (~1 GiB ≈ 74 chunks,
+~2 GiB ≈ 148, ~4 GiB ≈ 296, ~800 tok/chunk). Three windows:
+
+| RAM tier | burst | result |
+|---|---|---|
+| 1 GiB (74 chunks) | small | bursts evict the main from the tier before any re-send → reload never fires → arms tie |
+| 2 GiB (148 chunks) | `NSUB=6` | demotion fires; arms split on retention (`arc` +112 vs `lru` +34 `chunk_hits`) but **no served work** (`external_kv_transfer`=0 both arms, TTFT flat 4.6–4.7 s) — burst below tier capacity |
+| 4 GiB (296 chunks) | `NSUB=24` | **decisive**: burst overflows the tier, `arc` serves the recurrent main |
+
+**Sizing rule.** The lever is burst-vs-tier capacity, not retention. Size the eviction burst to
+**overflow** the tier (≥ 1.2× tier capacity, as many small requests as one huge one — cf.
+`upstream/ggz14` `kv-cache/tierbench.py` `EVICT_MARGIN=1.20`, `EVICT_CHUNK_TOKENS=30000`).
+`--prefix-cache-retention-interval` (default 0) is the **wrong** lever: raising it to 880
+*sparsifies* checkpoints (`chunk_hits` 112→0); it does not make the reload serve. The served-tokens
+signal is `external_kv_transfer` (**not** `kv_offload_cpu_cache_read_usage_perc`, which stays 0.0 in
+every run, and **not** `chunk_hits` alone, which counts queries matched, not tokens served). A phase
+is inconclusive unless `external_kv_transfer` > 0.
+
+**Measured** (R9700, `ci/tier_ab.sh`, one GPU window, RAM tier 4 GiB ≈ 296 chunks, reused
+20k-token main + `NSUB=24` flush bursts sized to overflow the tier): `arc` serves the recurrent main
+across flush bursts where `lru` recomputes it — `external_kv_transfer` **+59,840** vs `lru` **+14,960**,
+primary `chunk_hits` +184 vs +46, and flush-resume TTFT collapses **4.67 s → 0.51 s** (~9×). Ran at
+the box's standing **260 W** cap (the harness reads power, not sets it; AGENTS.md mandates 300 W for
+A/Bs) — the delta is a 9× TTFT / ~4× token gap, not a thin margin, so the cap does not affect the
+conclusion. The
+disk-mode win (5.14× TTFT) is post-restart survival, independent of policy.
+
+**Decision.** `arc` shows a measurable benefit in the RAM-only pattern, so the prerequisite is
+satisfied; it is kept **opt-in** (default stays `lru`) until the production launch is re-decided.

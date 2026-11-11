@@ -1028,6 +1028,12 @@ case "$KVCACHE" in
       -e RADIANCE_SWA_EAGLE_REPLAY_TAIL=1 \
       -e RADIANCE_OFFLOAD_BOUNDARY_TRACE="${RADIANCE_OFFLOAD_BOUNDARY_TRACE:-0}")
     KVCACHE_TIER=(--kv-offloading-size "$KVCACHE_RAM_GIB" --kv-offloading-backend native)
+    # KVCACHE_EVICT_POLICY (default lru) sets the RAM-tier eviction policy. The config itself is
+    # kv-cache/tier_config.json (mode-neutral, CPU primary tier only) plus, for disk only, the fs
+    # secondary tier in kv-cache/fs_tier.json, assembled by kv-cache/tools/tier-config.py -- the
+    # same helper ci/test-disk-tier.sh and ci/tier_ab.sh call, so they cannot drift. Both modes
+    # carry the --kv-offloading-backend native + --kv-transfer-config pair disk mode always used.
+    KVCACHE_TIER+=(--kv-transfer-config "$(python3 "$PATCHES_DIR/kv-cache/tools/tier-config.py" "$KVCACHE" "${KVCACHE_EVICT_POLICY:-}")")
     # vLLM leaves its RAM tier behind in /dev/shm when the container stops, and the next boot
     # then cannot fit its own. Remove regions no live process holds (fuser/lsof decide; with
     # neither available nothing is touched, so a second running server keeps its buffer).
@@ -1075,7 +1081,6 @@ case "$KVCACHE" in
       # One bind spec, not two words: `-v HOST CONTAINER` would make podman mount an anonymous
       # volume at HOST and then treat /kvcache as a positional argument.
       KVCACHE_MOUNT=(-v "$KVCACHE_DISK":/kvcache:z -e PYTHONHASHSEED=0)
-      KVCACHE_TIER+=(--kv-transfer-config "$(cat "$PATCHES_DIR/kv-cache/disk_tier_config.json")")
       # the disk-tier fixes and their metrics, in the order they are validated in ci/test-disk-tier.sh
       # (the shared list drives both this prelude and the test's bring-up DISK_WARN_NAMES check).
       while read -r _dpf _dpn; do
