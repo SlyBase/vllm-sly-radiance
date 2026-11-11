@@ -63,7 +63,7 @@ _stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argma
 _stub("vllm.v1.worker.gpu.sample.watermark", philox_gumbel_block_argmax=None)
 
 KNOBS = ("RADIANCE_CACTUS_DELTA", "RADIANCE_CACTUS_FADE_START", "RADIANCE_CACTUS_FADE_END",
-         "RADIANCE_CACTUS_CAP_R", "RADIANCE_NSD")
+         "RADIANCE_CACTUS_CAP_R", "RADIANCE_CACTUS_ESCAPE", "RADIANCE_NSD")
 K, VOCAB, POS0 = 3, 9000, 100
 Q = 0.6
 # slot -> output length at the first verified position (prompt length = POS0 - out)

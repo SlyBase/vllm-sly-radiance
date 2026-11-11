@@ -10,6 +10,29 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Added
+- `RADIANCE_CACTUS_ESCAPE` (default `0` = off, opt-in, range `[0,1]`, outside = startup error): escape
+  mixture against Cactus repetition lock-in (#164). With probability `eps` the exact stock
+  acceptance test runs instead of the Cactus test (same uniform), so per-step acceptance is
+  `(1-eps)*min(1,h/p) + eps*min(1,q/p)` and the per-step output is exactly
+  `(1-eps)*out_cactus + eps*q` and every token keeps at least `eps` of the stock rejection chance —
+  including the absorbing corner `q >= 1/(1+2*delta)`, `p <= h`, where the plain rule accepts with
+  probability 1 and neither the length fade (loops starting before 4096 output tokens, e.g. agent
+  turns on long contexts) nor the cap (probabilistic drafter at `p <= h`) provides an escape.
+  `eps=1` or `delta=0` is bit-exact stock; `eps=0` leaves the current fade+cap behaviour untouched.
+  The threshold hunk upgrades the stock, 1.5.1-1.8.1 and 1.9.0+ shapes in one pass (launcher re-run
+  on an older image). *CPU-verified*: fresh/idempotent/upgrade apply on the pinned vLLM 0.32.0,
+  output-distribution and escape-floor identities (max error 2e-16 over 4000 random pairs), kernel
+  acceptance vs a float64 reference in the Triton interpreter (`sly/tests/test_cactus_escape_cpu.py`,
+  `sly/tests/cactus_escape_kernel_check.py`), fade/cap regression at `eps=0`, closed-form simulation
+  (`sly/tests/cactus_escape_sim.py`: in the loop-attractor chain at q=0.99, p=1.0 the plain rule
+  locks in 100 % of runs, the eps=0.25 mixture 7.5 % with mean escape at step ~123, stock 2 %).
+  GPU A/B on the #164 repro and the accept/quality gates are pending,
+  hence default off. Analysis, attempt history and GPU test plan:
+  [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md).
+
 ## [1.11.0] - 2026-11-09
 
 ### Added
