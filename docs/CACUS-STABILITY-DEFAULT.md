@@ -56,7 +56,8 @@ without bound (raw Cactus). This bounds the long-output drift by construction.
    by default.
 3. **Document the stability ladder** (README): default fade+cap (balance) → +ESCAPE=0.25 (lock-in
    guarantee, ~2–4 % cost) → DELTA=0 (max exactness, zero drift, −12 % speed).
-4. **Version 1.11.1** carries the escape knob + guidance (1.11.0 was already released without it).
+4. **Version 1.12.0** carries the escape knob + guidance (1.11.0 was already released without it;
+   the section was numbered 1.11.1 before the owner renamed it).
 
 ## What this does NOT claim
 

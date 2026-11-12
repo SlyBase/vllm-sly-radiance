@@ -12,7 +12,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
-## [1.11.1] - 2026-11-12
+## [1.12.0] - 2026-11-12
 
 ### Added
 - `RADIANCE_CACTUS_ESCAPE` (default `0` = off, opt-in, range `[0,1]`, outside = startup error): escape
@@ -39,6 +39,31 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   Analysis, attempt history and GPU test plan:
   [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md); decision record:
   [docs/CACUS-STABILITY-DEFAULT.md](docs/CACUS-STABILITY-DEFAULT.md).
+
+### Changed
+- Draft-head quantisation (`RADIANCE_FAST_DRAFT=1`, opt-in, default off) uses less startup memory:
+  `_head_is_empty` scans the weight in 8192-row chunks instead of materialising a full-table
+  `abs().max()` temporary (the fp8 byte check and float signed-zero semantics are preserved, and a
+  zero-row head no longer raises), and `_quantize_head_now` releases loader temporaries with
+  `torch.cuda.empty_cache()` before the pack allocations (skipped while a CUDA stream is capturing)
+  and packs in 1024-row instead of 8192-row chunks, bounding the peak temporaries inside startup
+  memory profiling. Ported from ggz14 `2ec647c` (mirror PR #231). *Not measured on GPU here:*
+  CPU/syntax verification only (`sly/tests/test_drafthead_head_is_empty_cpu.py`, 10 cases: bf16
+  zero/nonzero/signed-zero/NaN, fp8 byte check incl. the 0x80 signed-zero byte, non-zeros past the
+  first chunk, zero rows); no GPU window was spent on this opt-in path. The default start is
+  untouched.
+
+### Fixed
+- `DRY_RUN=1` on `serve-mxfp4.sh` no longer removes a running container of the same name: the
+  leftover-container cleanup (`"$RUNTIME" rm -f "$NAME"`, docker only) ran before the flag was
+  consulted, so a dry run tore down the live server whose command it was meant to be compared
+  against. The cleanup is now skipped whenever `DRY_RUN` is non-empty, matching the script's
+  existing dry-run convention; podman is unaffected (`--replace` on the real run only). Ported from
+  ggz14 `08fc42d` (mirror PR #231; upstream reproduced/verified on docker 29.8.2). *CPU-verified*:
+  `sly/tests/test_launcher_dry_run_cpu.py` executes the launcher's actual cleanup line with
+  recording stub runtimes (docker removes without DRY_RUN, keeps the container under DRY_RUN=1/0;
+  podman never removes) and scans all `serve*.sh` for unguarded `rm -f "$NAME"`. Host-side launcher
+  only — not copied into the image.
 
 ## [1.11.0] - 2026-11-09
 
