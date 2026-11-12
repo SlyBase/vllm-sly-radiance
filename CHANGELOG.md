@@ -12,6 +12,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-12
+
 ### Added
 - `RADIANCE_CACTUS_ESCAPE` (default `0` = off, opt-in, range `[0,1]`, outside = startup error): escape
   mixture against Cactus repetition lock-in (#164). With probability `eps` the exact stock
@@ -29,9 +31,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `sly/tests/cactus_escape_kernel_check.py`), fade/cap regression at `eps=0`, closed-form simulation
   (`sly/tests/cactus_escape_sim.py`: in the loop-attractor chain at q=0.99, p=1.0 the plain rule
   locks in 100 % of runs, the eps=0.25 mixture 7.5 % with mean escape at step ~123, stock 2 %).
-  GPU A/B on the #164 repro and the accept/quality gates are pending,
-  hence default off. Analysis, attempt history and GPU test plan:
-  [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md).
+  GPU-validated (#164 repro + AMD Quark stock-model control, R9700 210 W): on raw Cactus (fade/cap off)
+  eps=0.5 cuts loops 12/16 -> 4/16 (75 % -> 25 %, Fisher p=0.012) at ~36 % decode cost, eps=0.25 gives 9/16
+  (directional); on the fade+cap default no measurable extra loop reduction (already at the stock loop rate)
+  at ~2-4 % cost; the eps=0 path is bit-exact with no measurable overhead. Default off (opt-in). README
+  stability ladder added (default fade+cap; +ESCAPE for a lock-in guarantee; DELTA=0 for max exactness).
+  Analysis, attempt history and GPU test plan:
+  [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md); decision record:
+  [docs/CACUS-STABILITY-DEFAULT.md](docs/CACUS-STABILITY-DEFAULT.md).
 
 ## [1.11.0] - 2026-11-09
 

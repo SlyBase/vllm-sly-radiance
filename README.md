@@ -464,7 +464,7 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py` and
 | `RADIANCE_CACTUS_FADE_START` | `4096` | 1.9.0 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
 | `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
 | `RADIANCE_CACTUS_CAP_R` | `0.5` | 1.9.0 acceptance cap, independent of length: h is also limited to `1 - r*(1-q)`. Never stricter than the stock rule (h >= q for every r <= 1), and it keeps `r` of the stock rejection chance at the drafter's p ~ 1, where Cactus has none above q = 1/(1+2*delta). `0` = off, `1` = exactly the stock rule; outside `[0,1]` the engine refuses to start |
-| `RADIANCE_CACTUS_ESCAPE` | `0` (off, opt-in) | Escape mixture against repetition lock-in ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): with probability `eps` the exact stock acceptance test runs instead of the Cactus test (same uniform), so per-step acceptance becomes `(1-eps)*min(1,h/p) + eps*min(1,q/p)`. The per-step output is exactly `(1-eps)*out_cactus + eps*q`, and every token keeps at least `eps` of the stock rejection chance — including the corner `q >= 1/(1+2*delta)`, `p <= h`, where the plain rule accepts with probability 1 and neither fade nor cap provides an escape. `1` = exactly the stock rule, `0` or `delta=0` = bit-exact current behaviour; outside `[0,1]` the engine refuses to start. GPU A/B pending, hence default off. Analysis: [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md) |
+| `RADIANCE_CACTUS_ESCAPE` | `0` (off, opt-in) | Escape mixture against repetition lock-in ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): with probability `eps` the exact stock acceptance test runs instead of the Cactus test (same uniform), so per-step acceptance becomes `(1-eps)*min(1,h/p) + eps*min(1,q/p)`. The per-step output is exactly `(1-eps)*out_cactus + eps*q`, and every token keeps at least `eps` of the stock rejection chance — including the corner `q >= 1/(1+2*delta)`, `p <= h`, where the plain rule accepts with probability 1 and neither fade nor cap provides an escape. `1` = exactly the stock rule, `0` or `delta=0` = bit-exact current behaviour; outside `[0,1]` the engine refuses to start. GPU-validated; default off (opt-in) — see the stability ladder below. Analysis: [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md) |
 
 Measured (one R9700, 300 W, production arguments, BetterBench 0.4.0 default config, 2026-10-17): against the
 1.0.0 column of the 1.5.1 reference run (see Performance), delta 0.5 gives **+3 to +20 % tokens per update** (prose +20, reasoning +14,
@@ -478,9 +478,7 @@ What this does not show yet: the 300 W comparison above crosses image versions (
 delta 0 control at 300 W and a sampled accuracy check (GSM8K runs greedy, which Cactus does not touch) are still open. **Recommendation:**
 keep 0.5 for chat, coding and agent workloads, where more accepted tokens is the goal. Set
 `RADIANCE_CACTUS_DELTA=0` when you need output that is statistically identical to the target model (evals,
-distribution-sensitive sampling, reproducing published numbers). Long agent / long-reasoning runs have repeatedly
-locked into repetition loops at delta > 0 (#164, reported through 1.10.0 even with fade+cap); until the escape
-mixture below is GPU-validated, `RADIANCE_CACTUS_DELTA=0` remains the safe setting for those workloads. Do not
+distribution-sensitive sampling, reproducing published numbers). Long agent / long-reasoning runs can lock into repetition loops at delta > 0 (#164). The fade+cap default keeps the loop rate at the stock level (measured below) while retaining most of the speed gain; for output that must be statistically identical to the target, or for maximum stability, use `RADIANCE_CACTUS_DELTA=0` (see the stability ladder below). Do not
 raise it above 0.5 without measuring quality on your own prompts.
 
 **Length fade (1.9.0).** Long sampled generations entered verbatim repetition loops about three times as often
@@ -518,9 +516,31 @@ fade at all. The escape mixture runs the exact stock acceptance test instead of 
 `eps` (same uniform `u`), i.e. acceptance becomes `(1-eps)*min(1,h/p) + eps*min(1,q/p)`: the per-step output becomes exactly `(1-eps)*out_cactus + eps*q`, every token keeps
 at least `eps` of the stock rejection chance, `eps=1` (or delta 0) is bit-exact stock, and the default `eps=0`
 leaves today's behaviour untouched. CPU-verified (patch wiring, math identities, Triton-interpreter kernel check,
-closed-form simulation); the GPU A/B on the #164 repro and the accept/quality gates are pending, hence default
-off. Full analysis, the attempt history (streak guard, fade, cap, ctx-fade PR #207) and the GPU test plan:
+closed-form simulation) and **GPU-validated** (2026-11-12, #164 repro + an AMD Quark stock-model control, R9700 210 W):
+
+- On the fade+cap default, escape adds no measurable loop reduction (the default is already at the stock loop
+  rate, 1/16 vs 2/16, p≈1.0) at ~2–4 % decode cost — so it stays opt-in, default off.
+- On raw Cactus (fade/cap off), which loops heavily, escape is effective: eps=0.5 cuts loops 12/16 → 4/16
+  (75 % → 25 %, Fisher p=0.012) at ~36 % decode cost; eps=0.25 gives 9/16 (directional, p=0.46).
+- The PR code at eps=0 is bit-exact and adds no measurable overhead (release vs PR image A/B: 140.1 vs 141.3 t/s).
+
+Full analysis, the attempt history (streak guard, fade, cap, ctx-fade PR #207) and the GPU test plan:
 [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md).
+
+**Stability/quality balance — default and opt-ins.** The default is the measured sweet spot between stability
+(loop-safety, bounded drift) and quality (speed):
+
+| Goal | Config | Stability | Speed vs stock |
+|---|---|---|---|
+| **Balance (default)** | `DELTA=0.5 FADE_START=4096 FADE_END=16384 CAP_R=0.5` | stock-level loops (1/16); drift bounded — the fade makes outputs >16384 tokens bit-exact stock | +12 % |
+| **+ lock-in guarantee** | default + `ESCAPE=0.25` | guaranteed escape floor on every token (absorbing corner covered) | +8–10 % (~2–4 % below default) |
+| **Max exactness/stability** | `DELTA=0` | bit-exact stock, zero drift | baseline (−12 % vs default) |
+
+No acceptance rule eliminates loops entirely — the stock rule itself loops on adversarial prompts (2/16). For a
+hard termination guarantee (no run ends in a loop), use a server-side repetition detector that aborts/restarts
+the request, independent of the acceptance rule. Raw Cactus without fade/cap is not recommended as a default
+(34–75 % loops, unbounded drift); if you run it, add `ESCAPE=0.5` to mitigate. Decision record:
+[docs/CACUS-STABILITY-DEFAULT.md](docs/CACUS-STABILITY-DEFAULT.md).
 
 ### Nucleus Speculative Decoding (opt-in, off by default)
 
