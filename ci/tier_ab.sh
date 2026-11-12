@@ -40,6 +40,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+: "${HOME:=/root}"   # systemd-run and some wrappers start the script without HOME; the HF cache mount below needs it
 
 IMAGE=${IMAGE:-ghcr.io/slybase/vllm-sly-radiance:$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null)-rocm10.1}
 MODEL=${MODEL:-slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ}
