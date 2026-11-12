@@ -16,6 +16,59 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 - **KV-cache: the RAM-tier eviction policy is now an env knob (`KVCACHE_EVICT_POLICY`), with ARC available as an opt-in.** `serve-mxfp4.sh` injects `KVCACHE_EVICT_POLICY` (default `lru`, the stock behavior) into the `--kv-transfer-config` at launch for **both** `KVCACHE=ram` and `KVCACHE=disk`; `arc` (vLLM-native) keeps a twice-seen prefix in its frequent set and matters where the RAM tier is the retention boundary. *Measured* (R9700, RAM-only A/B, `ci/tier_ab.sh`, production checkpoint + warm compile cache, RAM tier 4 GiB ≈ 296 chunks, reused main + one flush round of 24 concurrent bursts sized to overflow the tier): `arc` serves the recurrent main across the flush burst where `lru` recomputes it — `external_kv_transfer` **+28,160** vs `lru` **+14,080**, flush-resume TTFT **6.14 s → 0.98 s** (~6×). Ran at the box's standing **210 W** cap (the harness reads power, not sets it; AGENTS.md mandates 300 W for A/Bs) — the delta is a 6× TTFT / 2× token gap, not a thin margin, so the cap does not affect the conclusion. Kept **opt-in** (default stays `lru`) until the production launch is re-decided. Earlier all-null runs were a test-sizing bug (burst below tier capacity), not a policy null; the sizing rule and the 1/2/4 GiB sweep are in [docs/TECHNICAL.md](docs/TECHNICAL.md#kv-cache-ram-tier-eviction-policy-kvcache_evict_policy-unreleased).
 - **KV-cache effectiveness consumers: `kv-cache/tools/kvvalidate.py` and `kv-cache/tools/tierreport.py`** (ported from zzpanic's `qwen3.6-vllm-gfx1201-launchers`, adapted to the 0.32.0 metric surface). `kvvalidate.py` answers "is the cache working" (names the regime so a cold engine is not misread as dead, runs the five invariants, shows where prompt tokens came from); `tierreport.py` answers "is my tier the right size" (sizing verdict + layered-cache value). Both are read-only, stdlib-only, and run against a live `/metrics` or a saved snapshot. The 0.32.0 surface dropped the token-granularity hit counter, so token-based hit figures degrade to `UNKNOWN`/`n/a` rather than reporting a false value; the load-bytes, lookup, promotion, capacity and regime figures are unaffected. *Measured* (inference host, disk-tier container live `/metrics`): `kvvalidate.py` reports `lookup_partition` PASS (served 2 + short_result 7 + deferred_backend 138 = 147 = `lookup_calls`), `promotion_refused` PASS, and correctly `UNKNOWN` for the token-granularity `cpu_equals_external` and the two on-disk checks against a saved snapshot; the synthetic 0.32.0 fixture (`kv-cache/tools/fixture-metrics-032.txt`) verifies the same parsing offline. The prompt-source attribution reads both spellings of the counters (`…_by_source` and `…_by_source_total`), so the breakdown (local_compute / local_cache_hit / external_kv_transfer) populates on the native suffix-less surface and on the `_total` names the patched image still exports. Re-verified live on the RAM tier: `kvvalidate.py` exits 0 with `UNKNOWN` (never `FAIL`) for the lookup counters that only the disk patches emit, and `tierreport.py` fills the attribution table from the same scrape.
 
+## [1.12.0] - 2026-11-12
+
+### Added
+- `RADIANCE_CACTUS_ESCAPE` (default `0` = off, opt-in, range `[0,1]`, outside = startup error): escape
+  mixture against Cactus repetition lock-in (#164). With probability `eps` the exact stock
+  acceptance test runs instead of the Cactus test (same uniform), so per-step acceptance is
+  `(1-eps)*min(1,h/p) + eps*min(1,q/p)` and the per-step output is exactly
+  `(1-eps)*out_cactus + eps*q` and every token keeps at least `eps` of the stock rejection chance —
+  including the absorbing corner `q >= 1/(1+2*delta)`, `p <= h`, where the plain rule accepts with
+  probability 1 and neither the length fade (loops starting before 4096 output tokens, e.g. agent
+  turns on long contexts) nor the cap (probabilistic drafter at `p <= h`) provides an escape.
+  `eps=1` or `delta=0` is bit-exact stock; `eps=0` leaves the current fade+cap behaviour untouched.
+  The threshold hunk upgrades the stock, 1.5.1-1.8.1 and 1.9.0+ shapes in one pass (launcher re-run
+  on an older image). *CPU-verified*: fresh/idempotent/upgrade apply on the pinned vLLM 0.32.0,
+  output-distribution and escape-floor identities (max error 2e-16 over 4000 random pairs), kernel
+  acceptance vs a float64 reference in the Triton interpreter (`sly/tests/test_cactus_escape_cpu.py`,
+  `sly/tests/cactus_escape_kernel_check.py`), fade/cap regression at `eps=0`, closed-form simulation
+  (`sly/tests/cactus_escape_sim.py`: in the loop-attractor chain at q=0.99, p=1.0 the plain rule
+  locks in 100 % of runs, the eps=0.25 mixture 7.5 % with mean escape at step ~123, stock 2 %).
+  GPU-validated (#164 repro + AMD Quark stock-model control, R9700 210 W): on raw Cactus (fade/cap off)
+  eps=0.5 cuts loops 12/16 -> 4/16 (75 % -> 25 %, Fisher p=0.012) at ~36 % decode cost, eps=0.25 gives 9/16
+  (directional); on the fade+cap default no measurable extra loop reduction (already at the stock loop rate)
+  at ~2-4 % cost; the eps=0 path is bit-exact with no measurable overhead. Default off (opt-in). README
+  stability ladder added (default fade+cap; +ESCAPE for a lock-in guarantee; DELTA=0 for max exactness).
+  Analysis, attempt history and GPU test plan:
+  [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md); decision record:
+  [docs/CACUS-STABILITY-DEFAULT.md](docs/CACUS-STABILITY-DEFAULT.md).
+
+### Changed
+- Draft-head quantisation (`RADIANCE_FAST_DRAFT=1`, opt-in, default off) uses less startup memory:
+  `_head_is_empty` scans the weight in 8192-row chunks instead of materialising a full-table
+  `abs().max()` temporary (the fp8 byte check and float signed-zero semantics are preserved, and a
+  zero-row head no longer raises), and `_quantize_head_now` releases loader temporaries with
+  `torch.cuda.empty_cache()` before the pack allocations (skipped while a CUDA stream is capturing)
+  and packs in 1024-row instead of 8192-row chunks, bounding the peak temporaries inside startup
+  memory profiling. Ported from ggz14 `2ec647c` (mirror PR #231). *Not measured on GPU here:*
+  CPU/syntax verification only (`sly/tests/test_drafthead_head_is_empty_cpu.py`, 10 cases: bf16
+  zero/nonzero/signed-zero/NaN, fp8 byte check incl. the 0x80 signed-zero byte, non-zeros past the
+  first chunk, zero rows); no GPU window was spent on this opt-in path. The default start is
+  untouched.
+
+### Fixed
+- `DRY_RUN=1` on `serve-mxfp4.sh` no longer removes a running container of the same name: the
+  leftover-container cleanup (`"$RUNTIME" rm -f "$NAME"`, docker only) ran before the flag was
+  consulted, so a dry run tore down the live server whose command it was meant to be compared
+  against. The cleanup is now skipped whenever `DRY_RUN` is non-empty, matching the script's
+  existing dry-run convention; podman is unaffected (`--replace` on the real run only). Ported from
+  ggz14 `08fc42d` (mirror PR #231; upstream reproduced/verified on docker 29.8.2). *CPU-verified*:
+  `sly/tests/test_launcher_dry_run_cpu.py` executes the launcher's actual cleanup line with
+  recording stub runtimes (docker removes without DRY_RUN, keeps the container under DRY_RUN=1/0;
+  podman never removes) and scans all `serve*.sh` for unguarded `rm -f "$NAME"`. Host-side launcher
+  only — not copied into the image.
+
 ## [1.11.0] - 2026-11-09
 
 ### Added
