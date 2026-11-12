@@ -1,0 +1,45 @@
+=== A. exact identities (enumeration, V=5) ===
+stock out == q:                max TV = 1.67e-16
+mixture out == (1-e)C + e*q:   max TV = 1.80e-16
+escape floor esc_m >= e*esc_s: max violation = 9.02e-17
+
+=== B. per-step KL of the repo rule vs q (delta=0.5) ===
+Gamma(0.5) binary worst case (arXiv v1 App A.3) = 0.3466 nats
+current cap=None: mean KL=0.3794  p99=0.8798  max=1.2717  mean TV=0.3073  frac KL>Gamma_v1: 0.530
+current cap=0.5: mean KL=0.3754  p99=0.8705  max=1.2717  mean TV=0.3055  frac KL>Gamma_v1: 0.521
+paper-faithful:    mean KL=0.3776  p99=0.8775  max=1.2717  frac KL>Gamma: 0.524
+delta=0.1: zero escape for q >= 0.833 (gamma*, verified in v1.5.1 and main)
+delta=0.25: zero escape for q >= 0.667 (gamma*, verified in v1.5.1 and main)
+delta=0.5: zero escape for q >= 0.500 (gamma*, verified in v1.5.1 and main)
+
+=== C. loop-attractor Markov chain (3-cycle, T=400, 400 runs) ===
+   q_c     p_c |          stock    cactus d=.5      +cap r=.5      mix e=.10      mix e=.25
+   0.9     1.0 |    0.0%/  10.3  100.0%/   inf    0.0%/  18.3    0.0%/  17.1    0.0%/  15.3
+  0.99     1.0 |    2.0%/  91.5  100.0%/   inf   11.2%/ 141.4    9.0%/ 136.9    7.5%/ 123.3
+   0.9    0.99 |    0.0%/  10.2    1.8%/  94.0    0.0%/  19.5    0.0%/  17.2    0.0%/  15.0
+  0.99   0.999 |    2.5%/  88.7   68.5%/ 199.2   12.2%/ 142.5    8.0%/ 139.7    6.8%/ 129.4
+ 0.999  0.9999 |   69.0%/ 198.7   96.5%/ 198.3   83.8%/ 193.4   82.2%/ 190.8   79.0%/ 198.2
+   0.8    0.99 |    0.0%/   5.2    1.8%/  94.0    0.0%/  10.2    0.0%/   9.2    0.0%/   8.1
+(cells: lock-in % at T=400 / mean escape step when escaped)
+
+=== acceptance cost of mixture (benign states, q==p) ===
+eps=0.1: mean acceptance loss = 0.0062 (max 0.0147); bound eps*(a_c-a_s) <= eps
+eps=0.25: mean acceptance loss = 0.0155 (max 0.0349); bound eps*(a_c-a_s) <= eps
+
+=== D. absorbing corner: tiny KL, zero escape ===
+q=0.999 p=1.00 (greedy drafter), no cap:
+   KL(out_cactus,q) = 0.00100 nats (budget Gamma(0.5) = 0.3466)
+   escape/step: cactus=0.00e+00  stock=1.00e-03  mix(e=0.25)=2.50e-04
+   expected steps to escape: cactus=     inf  stock=    1000  mix=    4000
+q=0.999 p=1.00, cap r=0.5:
+   KL(out_cactus,q) = 0.00015 nats (budget Gamma(0.5) = 0.3466)
+   escape/step: cactus=5.00e-04  stock=1.00e-03  mix(e=0.25)=6.25e-04
+   expected steps to escape: cactus=    2000  stock=    1000  mix=    1600
+q=0.90  p=0.92, cap r=0.5 (probabilistic drafter):
+   KL(out_cactus,q) = 0.00237 nats (budget Gamma(0.5) = 0.3466)
+   escape/step: cactus=0.00e+00  stock=2.17e-02  mix(e=0.25)=5.43e-03
+   expected steps to escape: cactus=     inf  stock=      46  mix=     184
+q=0.98  p=0.99, cap r=0.5:
+   KL(out_cactus,q) = 0.00312 nats (budget Gamma(0.5) = 0.3466)
+   escape/step: cactus=0.00e+00  stock=1.01e-02  mix(e=0.25)=2.53e-03
+   expected steps to escape: cactus=     inf  stock=      99  mix=     396
