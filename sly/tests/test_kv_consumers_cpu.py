@@ -69,6 +69,33 @@ def test_tierreport_runs_clean_on_fixture():
     assert isinstance(d, dict)
 
 
+def test_kvvalidate_reads_the_total_suffix_surface():
+    """The patched 0.32.0 image exports the `_total` spelling of the prompt-token
+    counters. kvvalidate must populate the breakdown there too: the one-way
+    NAME_MAP rename used to look only for the suffix-less name and silently read 0.
+    """
+    import tempfile
+
+    text = Path(FIXTURE).read_text()
+    total_surface = (text
+                     .replace("vllm:prompt_tokens ", "vllm:prompt_tokens_total ")
+                     .replace("vllm:prompt_tokens_by_source{", "vllm:prompt_tokens_by_source_total{")
+                     .replace("vllm:external_prefix_cache_hits ", "vllm:external_prefix_cache_hits_total "))
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+        fh.write(total_surface)
+        path = fh.name
+    try:
+        proc = run("kvvalidate.py", "--metrics-file", path, "--json")
+        assert proc.returncode == 0, f"kvvalidate exit {proc.returncode}\n{proc.stderr}"
+        d = json.loads(proc.stdout)
+        pt = d["prompt_tokens"]
+        assert pt["prompt_tokens_total"] == 1000000, pt
+        assert pt["local_compute"] == 400000, pt
+        assert pt["external_kv_transfer"] is not None, pt
+    finally:
+        Path(path).unlink()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

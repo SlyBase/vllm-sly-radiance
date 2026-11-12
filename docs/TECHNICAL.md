@@ -857,12 +857,13 @@ signal is `external_kv_transfer` (**not** `kv_offload_cpu_cache_read_usage_perc`
 every run, and **not** `chunk_hits` alone, which counts queries matched, not tokens served). A phase
 is inconclusive unless `external_kv_transfer` > 0.
 
-**Measured** (R9700, `ci/tier_ab.sh`, one GPU window, RAM tier 4 GiB ≈ 296 chunks, reused
-20k-token main + `NSUB=24` flush bursts sized to overflow the tier): `arc` serves the recurrent main
-across flush bursts where `lru` recomputes it — `external_kv_transfer` **+59,840** vs `lru` **+14,960**,
-primary `chunk_hits` +184 vs +46, and flush-resume TTFT collapses **4.67 s → 0.51 s** (~9×). Ran at
-the box's standing **260 W** cap (the harness reads power, not sets it; AGENTS.md mandates 300 W for
-A/Bs) — the delta is a 9× TTFT / ~4× token gap, not a thin margin, so the cap does not affect the
+**Measured** (R9700, `ci/tier_ab.sh`, one GPU window, production checkpoint + warm compile cache,
+RAM tier 4 GiB ≈ 296 chunks, reused 20k-token main + one `NSUB=24` flush round sized to overflow
+the tier, `--prefix-cache-retention-interval 1760`): `arc` serves the recurrent main across the
+flush burst where `lru` recomputes it — `external_kv_transfer` **+28,160** vs `lru` **+14,080**,
+primary `chunk_hits` +88 vs +44, and flush-resume TTFT collapses **6.14 s → 0.98 s** (~6×). Ran at
+the box's standing **210 W** cap (the harness reads power, not sets it; AGENTS.md mandates 300 W for
+A/Bs) — the delta is a 6× TTFT / 2× token gap, not a thin margin, so the cap does not affect the
 conclusion. The
 disk-mode win (5.14× TTFT) is post-restart survival, independent of policy.
 

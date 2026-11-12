@@ -163,12 +163,14 @@ def get(m, name, **labels):
 
     A prometheus_client Counter that has never been touched for a label combo
     emits no sample, so an absent line genuinely means 0. Names are translated
-    through NAME_MAP first (0.27.1 -> 0.32.0 surface).
+    through NAME_MAP first (0.27.1 -> 0.32.0 surface), with the literal name as
+    fallback: the patched 0.32.0 image still exports the `_total` spelling, so
+    both surfaces must resolve (a one-way rename silently reads 0 there).
     """
-    name = NAME_MAP.get(name, name)
-    for lab, val in m.get(name, ()):
-        if all(lab.get(k) == v for k, v in labels.items()):
-            return val
+    for cand in dict.fromkeys((NAME_MAP.get(name, name), name)):
+        for lab, val in m.get(cand, ()):
+            if all(lab.get(k) == v for k, v in labels.items()):
+                return val
     return None
 
 
