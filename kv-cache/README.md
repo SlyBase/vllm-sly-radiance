@@ -231,5 +231,19 @@ to hold.
 - `turnbench.py` (+ its deps `tierbench.py`, `equivbench.py`) — the correctness gate.
 - `kvwatch.py` — live hit rates and tier traffic.
 - `kvcache-reap.sh` + `.service`/`.timer` — eviction for the disk tier.
+- `tools/tier-config.py` + `tier_config.json` + `fs_tier.json` — the `--kv-transfer-config` the
+  launcher emits: `tier_config.json` is the mode-neutral baseline (CPU primary tier only),
+  `fs_tier.json` is the fs secondary tier `disk` appends, and the helper assembles both and
+  rejects any `eviction_policy` outside `lru`/`arc` (vLLM reads any other string as an
+  out-of-tree `CachePolicy` class name, so a typo has to die at launch, not in the log).
+   `serve-mxfp4.sh`, `ci/test-disk-tier.sh` and `ci/tier_ab.sh` all call it, so they cannot drift.
+- `tools/kvvalidate.py` — "is the cache working": names the regime (so a cold engine is not
+  misread as dead) and runs the five invariants (lookup partition, reason sub-partition,
+  CPU-vs-external reconciliation, promotion refusals, plus the two on-disk checks).
+- `tools/tierreport.py` — "is my tier the right size": the sizing verdict (occupancy,
+  reads-before-evict, eviction-to-reuse) and the layered-cache value, from one `/metrics` scrape.
+- `tools/fixture-metrics-032.txt` — a synthetic 0.32.0 `/metrics` surface (no `_total` on the
+  native prompt-token counters, no token-granularity hit counter) to verify both consumers'
+  parsing offline, without a live engine.
 
 Evidence for these claims comes from radiance 0.9.3 / vLLM 0.27.1 on one R9700.

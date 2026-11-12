@@ -231,7 +231,7 @@ start() {  # $1=log-label
     --max-model-len 262144 --gpu-memory-utilization 0.98 \
     --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
     --kv-offloading-size 16 --kv-offloading-backend native \
-    --kv-transfer-config "$(cat "$PATCHES_DIR/kv-cache/disk_tier_config.json")" \
+    --kv-transfer-config "$(python3 "$PATCHES_DIR/kv-cache/tools/tier-config.py" disk "${KVCACHE_EVICT_POLICY:-}")" \
     --speculative-config.method dflash \
     --speculative-config.model "$DRAFTER" \
     --speculative-config.num_speculative_tokens 7 \

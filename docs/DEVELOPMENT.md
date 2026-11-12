@@ -153,6 +153,20 @@ git push -u origin feat/my-change && gh pr create
 # merge when `ci` is green
 ```
 
+## Testing on the inference host
+
+There is no GPU in CI; anything that touches the engine is verified on the one R9700
+(host `pve.local`) by building the image and running a **throwaway** container there. The two
+harnesses:
+
+- `ci/test-disk-tier.sh` — the `KVCACHE=disk` disk-tier E2E (survival, accuracy gate, throughput,
+  partial eviction, durability); full interpretation in [`docs/DISK-TIER-TEST.md`](DISK-TIER-TEST.md).
+- `ci/tier_ab.sh` — the RAM-only eviction-policy A/B (arms `C L A C2`; L=`lru`, A=`arc`), the agent
+  pattern of a reused main + subagent bursts, verdict read from native `/metrics` counters. A null
+  (both arms identical, the reload never fires) is a test-sizing bug, not a finding: the eviction
+  burst must overflow the tier it is meant to evict (≥ 1.2× tier capacity), and the served signal
+  is `external_kv_transfer` > 0 — see the sizing rule in the `sly-radiance-inference-test` skill.
+
 Releasing (when you want an image): `python3 ci/cut_release.py X.Y.Z` on a branch turns
 `[Unreleased]` into `[X.Y.Z] - <date>` and sets `VERSION`; open that as the release PR (it builds once
 when it leaves draft). Its merge — the VERSION change on main — triggers `build`, then the gate and the tag.
