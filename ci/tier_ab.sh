@@ -44,6 +44,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 IMAGE=${IMAGE:-ghcr.io/slybase/vllm-sly-radiance:$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null)-rocm10.1}
 MODEL=${MODEL:-slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ}
+# Host-side layout knobs. Defaults reproduce the original HF-repo-id run; the production host
+# serves a local checkpoint with the radiance tables plus a warm compile cache, which is both
+# faster and the closer comparison:
+#   MODEL_DIR=/root/mcb-ckpt-v2 HF_CACHE=/root/hf-cache CACHE_DIR=/root/vllm7-cache
+MODEL_DIR=${MODEL_DIR:-}              # host checkpoint dir, mounted ro at /models/model; MODEL becomes that path
+HF_CACHE=${HF_CACHE:-$HOME/.cache/huggingface}   # host HF cache mounted at /root/.cache/huggingface (drafter lives there)
+CACHE_DIR=${CACHE_DIR:-}              # host dir with triton/, torch_compile/, aiter/ (prod: /root/vllm7-cache)
+HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}   # 1 = trust the mounted cache (prod runs offline: no hub round-trip per start)
 DRAFTER=${DRAFTER:-syvai/Qwen3.8-27B-DFlash2-W4A16}
 SERVED=${SERVED:-tier-ab}
 CONTAINER=${CONTAINER:-tier-ab}
@@ -142,7 +150,8 @@ PRELUDE_OFF='
 exec /opt/radiance_entrypoint.sh "$@"'
 
 start_arm() {  # $1=arm -> container healthy; builds the launch line into $OUT/<arm>.cmd
-  local arm=$1 tier=() env_off=() prelude maxlen gpuutil policy cfg
+  local arm=$1 tier=() env_off=() prelude maxlen gpuutil policy cfg model=$MODEL \
+        model_mount=() model_env=() cache_mount=()
   case $arm in
     C|C2) maxlen=262144; gpuutil=0.98; prelude=$PRELUDE_OFF ;;   # production, no tier
     L|A)  maxlen=$MAXLEN; gpuutil=$GPU_UTIL
@@ -158,6 +167,17 @@ start_arm() {  # $1=arm -> container healthy; builds the launch line into $OUT/<
                    -e RADIANCE_SWA_EAGLE_REPLAY_TAIL=1 -e RADIANCE_OFFLOAD_BOUNDARY_TRACE=0) ;;
     *) die "unknown arm $arm" ;;
   esac
+  if [ -n "$MODEL_DIR" ]; then
+    model_mount=(-v "$MODEL_DIR:/models/model:ro")
+    model=/models/model
+    [ -f "$MODEL_DIR/bcq_tables.pt" ] && model_env=(-e RADIANCE_MXFP4_BCQ=/models/model/bcq_tables.pt)
+    [ -f "$MODEL_DIR/lm_head_int4.pt" ] && model_env+=(-e RADIANCE_LMHEAD_INT4_CODES=/models/model/lm_head_int4.pt)
+  fi
+  if [ -n "$CACHE_DIR" ]; then
+    cache_mount=(-v "$CACHE_DIR/triton:/root/.triton"
+                 -v "$CACHE_DIR/torch_compile:/root/.cache/vllm/torch_compile_cache"
+                 -v "$CACHE_DIR/aiter:/root/.aiter")
+  fi
   CLEAN_SHM
   docker rm -f "$CONTAINER" 2>/dev/null || true
   docker run -d --name "$CONTAINER" \
@@ -165,10 +185,13 @@ start_arm() {  # $1=arm -> container healthy; builds the launch line into $OUT/<
     --security-opt seccomp=unconfined --ipc=host \
     --mount type=bind,source="$SHM_SRC",target=/dev/shm \
     -p "$PORT":8000 \
-    -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    -v "$HF_CACHE:/root/.cache/huggingface" \
+    ${model_mount[@]+"${model_mount[@]}"} \
+    ${cache_mount[@]+"${cache_mount[@]}"} \
     -v "$CHAT_TEMPLATE:/chat-template.jinja:ro,z" \
     -v "$PATCHES_DIR:/patches:z" \
     -e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=2 -e HF_HUB_DISABLE_SHARED_BLOBS=1 \
+    -e HF_HUB_OFFLINE="$HF_HUB_OFFLINE" \
     -e RADIANCE_MXFP4=1 -e RADIANCE_MXFP4_W4A8=1 -e RADIANCE_MXFP4_W4A8_MIN_M=0 \
     -e RADIANCE_MXFP4_DECODE_MAX_M=128 -e RADIANCE_MXFP4_A_TILED_MIN_M=513 -e RADIANCE_MXFP4_WPERM=1 \
     -e RADIANCE_MXFP4_TN4_MIN_M=513 -e RADIANCE_MXFP4_AT_SKIP_PAD=1 \
@@ -178,8 +201,9 @@ start_arm() {  # $1=arm -> container healthy; builds the launch line into $OUT/<
     -e RADIANCE_MXFP4_WIDE_MAX_M=192 -e RADIANCE_ADAPTIVE_WIDTH=perseq \
     -e RADIANCE_CACTUS_DELTA=0.5 \
     ${env_off[@]+"${env_off[@]}"} \
+    ${model_env[@]+"${model_env[@]}"} \
     --entrypoint bash "$IMAGE" -lc "$prelude" _ \
-    --model "$MODEL" \
+    --model "$model" \
     --served-model-name "$SERVED" \
     --max-model-len "$maxlen" --gpu-memory-utilization "$gpuutil" \
     --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
