@@ -829,7 +829,10 @@ def detect_engine_pid(arg):
 def main():
     ap = argparse.ArgumentParser(description="validate the KV-offload fs tier")
     ap.add_argument("--metrics-url",
-                   default="http://127.0.0.1:1234/upstream/qwen3.8-27b-kvcache/metrics")
+                   default="http://127.0.0.1:8000/metrics",
+                   help="Prometheus /metrics URL of the engine (default: %(default)s; "
+                        "under the router, append its upstream prefix, e.g. "
+                        "http://127.0.0.1:1234/upstream/<model>/metrics)")
     ap.add_argument("--fs-path", default="/kvcache/blocks")
     ap.add_argument("--history", default=None,
                    help="metrics-history.csv for regime trend (auto-searched if omitted)")
