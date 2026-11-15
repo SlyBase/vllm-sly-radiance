@@ -379,3 +379,20 @@ tokens) and decodes 6.6 % slower (143.5 against 153.7 weighted), so only its pre
 
 Revisit when: (a) a rotated-int4 trunk with a measured dKLD <= 0.010 nats against our W4A8 exists; (b) gfx1201
 gains an FP4 matrix instruction (NVFP4 W4A4 checkpoints exist on HF, but the ISA has no such GEMM today).
+
+**MACaQ ([huawei-csl/MACaQ](https://github.com/huawei-csl/MACaQ), arXiv 2611.10649, read at 3810efc; lab 2026-11-15):**
+
+A W4A4 MXFP4 quantiser: an online per-channel scale and a block Hadamard on the activations, plus "flip refinement"
+of the codes. The two ideas our BCQ quantiser (`SlyBase/bcq-quant`) did not have were measured as lab arms on 8
+layers (5, 14, 23, 30, 37, 46, 55, 62), simulated KLD against bf16 on items3 (700,952 positions), control = the v4
+quantiser (`--search 8 --cd 2`). Rule set before the run: paired 95 % interval clear of 0 and mean gain >= 1.5 %.
+
+| Item | Why not |
+|---|---|
+| W4A4 kernel (their 2.33x prefill / 2.58x decode against bf16) | Uses a native FP4 GEMM (`tl.dot_scaled`); gfx1201 has no FP4 matrix instruction. Their weight-only mode unpacks to bf16 and is slower by their own README. |
+| Table reselection after coordinate descent (block move with the exact gain 2 d.P + d A d^T, `tsel=1`) | Measured: −1.6 % KLD, interval [−0.00017, +0.00004] touches 0. Held-out weight error −0.9 %, of which −0.4 % is the extra CD sweep it needs. |
+| Per-input-channel scale t = std(W)^a / rms(x)^(1−a), folded offline (`cs=a`) | Measured a = 0.75: +3.5 % KLD (worse), with reselection +3.1 %. Held-out weight error: a = 0.5 +5.8 %, 0.75 +0.2 %, 1.0 −1.0 %. A served model would also need t folded into the producer of each input. |
+| Ridge on the Hessian, gates `in_proj_a/b` left unquantised, 32-wide online Hadamard | Their own appendix shows a flat ridge curve; the gates measured −1.0 % with 0 in the interval; H128 measured −2.7 % KLD for +1.8 % step time after v4. |
+
+Noise floor of this lab: the same control arm built with image 1.9.1 and 1.12.0 differs by 3.1 % KLD on the 8-layer
+test (interval touches 0), so effects below ~3 % are not resolvable there. Revisit when gfx1201 gains an FP4 GEMM.
