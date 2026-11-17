@@ -122,17 +122,21 @@ apply(F,
       "try:  # --- radiance (sly/patch_fused_norm_quant.py): RADIANCE_FUSED_NORM_QUANT ---\n",
       "_RADIANCE_W4_QKVZ_BA = _radiance_w4a16 is not None",
       "gdn: W4A16 fusion import")
+# Re-anchored for vLLM 0.34.0: forward_cuda now takes qkvz_input and runs the in-projections
+# under an `if self._ba_stream is None:` branch (the aux-stream path is separate). The qkvz
+# projection uses `qkvz_in` (== hidden_states when qkvz_input is None). The merge lands in the
+# no-stream branch; the aux-stream branch is left untouched.
 apply(F,
-      "        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
-      "        ba, _ = self.in_proj_ba(hidden_states)\n"
-      "        if _rfn_q:",
-      "        if getattr(self.in_proj_qkvz, \"_radiance_ba\", 0):\n"
-      "            # radiance (sly/patch_w4a16_fuse.py): qkvz + ba in one int4 GEMM, two contiguous outputs\n"
-      "            mixed_qkvz, ba = _radiance_w4a16.radiance_qkvz_ba(self.in_proj_qkvz, hidden_states)\n"
-      "        else:\n"
-      "            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
-      "            ba, _ = self.in_proj_ba(hidden_states)\n"
-      "        if _rfn_q:",
+      "        if self._ba_stream is None:\n"
+      "            mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)\n"
+      "            ba, _ = self.in_proj_ba(hidden_states)\n",
+      "        if self._ba_stream is None:\n"
+      "            if getattr(self.in_proj_qkvz, \"_radiance_ba\", 0):\n"
+      "                # radiance (sly/patch_w4a16_fuse.py): qkvz + ba in one int4 GEMM, two contiguous outputs\n"
+      "                mixed_qkvz, ba = _radiance_w4a16.radiance_qkvz_ba(self.in_proj_qkvz, hidden_states)\n"
+      "            else:\n"
+      "                mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)\n"
+      "                ba, _ = self.in_proj_ba(hidden_states)\n",
       "mixed_qkvz, ba = _radiance_w4a16.radiance_qkvz_ba(",
       "gdn: forward_cuda merged qkvz + ba")
 apply(F,

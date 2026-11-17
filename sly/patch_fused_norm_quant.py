@@ -74,13 +74,16 @@ apply(NEXT, A,
 A = "logger = init_logger(__name__)\n"
 apply(MOE, A, A + "\n" + IMPORT, IMPORT_SENTINEL, "qwen2_moe: import radiance_fused_norm")
 
-A = "        out = self.act_fn(gate_up)\n"
+# Re-anchored for vLLM 0.34.0: the MLP forward now calls maybe_fused_act_quant
+# (upstream fused act+quant) instead of a plain self.act_fn(gate_up); the radiance path
+# is unchanged and the fallback defers to the new upstream line.
+A = "        out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)\n"
 apply(MOE, A,
       "        if _rfn is not None and _rfn.SILU and _rfn.mlp_ok(self):\n"
       "            # radiance: silu(gate) * up + per-token fp8 quant -> (q, scale) into down_proj\n"
       "            out = _rfn.silu_mul_quant(gate_up)\n"
       "        else:\n"
-      "            out = self.act_fn(gate_up)\n",
+      "            out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)\n",
       "_rfn.mlp_ok(self)", "qwen2_moe: Qwen2MoeMLP act_fn -> radiance::silu_mul_quant")
 
 # ---- qwen_gdn_linear_attn.py --------------------------------------------------------------------
@@ -90,12 +93,13 @@ A = ("try:\n"
      "    _radiance_gdn = None\n")
 apply(GDN, A, A + IMPORT, IMPORT_SENTINEL, "gdn: import radiance_fused_norm")
 
-A = ("        if GDN_AITER_TRITON_AVAILABLE:\n"
+# Re-anchored for vLLM 0.34.0: forward_hip's guard gained `and not self.enable_fused_gdn_spec_decode`.
+A = ("        if GDN_AITER_TRITON_AVAILABLE and not self.enable_fused_gdn_spec_decode:\n"
      "            num_tokens = hidden_states.size(0)\n"
      "            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
      "            projected_states_ba, _ = self.in_proj_ba(hidden_states)\n")
 apply(GDN, A,
-      "        if GDN_AITER_TRITON_AVAILABLE:\n"
+      "        if GDN_AITER_TRITON_AVAILABLE and not self.enable_fused_gdn_spec_decode:\n"
       "            # radiance fused-norm carrier (forward_hip): hidden_states may be (q, scale)\n"
       "            _rfn_q = isinstance(hidden_states, tuple)\n"
       "            num_tokens = (hidden_states[0] if _rfn_q else hidden_states).size(0)\n"
@@ -105,24 +109,29 @@ apply(GDN, A,
       "                hidden_states = projected_states_qkvz\n",
       "radiance fused-norm carrier (forward_hip)", "gdn: forward_hip takes the (q, scale) pair")
 
+# Re-anchored for vLLM 0.34.0: forward_cuda now takes a qkvz_input argument and runs the
+# in-projections through a _ba_stream if/else, so the carrier is split into two hunks:
+# the tuple detection at the top, and the bf16 carry right before use_fused_gdn_spec_decode
+# (where hidden_states.dtype is read).
 A = ("        num_tokens = hidden_states.size(0)\n"
      "        # ============================================================\n"
      "        # Part 1: Input Projection\n"
      "        # ============================================================\n"
-     "        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
-     "        ba, _ = self.in_proj_ba(hidden_states)\n")
+     "        qkvz_in = hidden_states if qkvz_input is None else qkvz_input\n")
 apply(GDN, A,
-      "        # radiance fused-norm carrier (forward_cuda): hidden_states may be (q, scale)\n"
-      "        _rfn_q = isinstance(hidden_states, tuple)\n"
+      "        _rfn_q = isinstance(hidden_states, tuple)  # radiance fused-norm carrier (forward_cuda)\n"
       "        num_tokens = (hidden_states[0] if _rfn_q else hidden_states).size(0)\n"
       "        # ============================================================\n"
       "        # Part 1: Input Projection\n"
       "        # ============================================================\n"
-      "        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
-      "        ba, _ = self.in_proj_ba(hidden_states)\n"
-      "        if _rfn_q:  # only .dtype/.device are read below: carry the bf16 projection\n"
-      "            hidden_states = mixed_qkvz\n",
+      "        qkvz_in = hidden_states if qkvz_input is None else qkvz_input\n",
       "radiance fused-norm carrier (forward_cuda)", "gdn: forward_cuda takes the (q, scale) pair")
+A = ("        use_fused_gdn_spec_decode = (\n")
+apply(GDN, A,
+      "        if _rfn_q:  # only .dtype/.device are read below: carry the bf16 projection\n"
+      "            hidden_states = mixed_qkvz\n"
+      "        use_fused_gdn_spec_decode = (\n",
+      "hidden_states = mixed_qkvz", "gdn: forward_cuda carries the bf16 projection")
 
 _HOOK = ("        if _rfn is not None and _rfn.GDN and _rfn.gdn_ok(self):\n"
          "            # radiance: per-head gated rms_norm + fp8 quant in one launch -> out_proj\n"

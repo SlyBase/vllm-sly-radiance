@@ -743,7 +743,7 @@ COPY sly/ /opt/patches/sly/
 RUN set -eu; cd /opt/patches; \
     for p in patch_gfx1201 patch_radiance_dispatch patch_skinny_gemm patch_unified_attention_lds \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
-             patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
+             patch_unpad patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_gdn_lazy \
              sly/patch_quark_mxfp4 \

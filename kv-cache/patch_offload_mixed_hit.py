@@ -114,7 +114,7 @@ reproduction still has to be built before this can be filed; see kv-cache-known-
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply, skip_if_upstream
+from _patchlib import apply, apply_any, skip_if_upstream
 
 SP = Path(sysconfig.get_paths()["purelib"])
 TARGET = SP / "vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py"
@@ -140,12 +140,28 @@ if "\nimport os\n" not in _src:
     print("  OK    offload: added missing 'import os'")
 
 # --- hunk 2: kill switch -- decline external hits for requests with a local prefix hit
-apply(
+# vLLM 0.34.0 renames the skip condition to `skip_reading_external_kv or load_failed`.
+apply_any(
     TARGET,
-    """        num_hit_tokens: int | None
+    [
+        (
+            """        num_hit_tokens: int | None
+        if request.skip_reading_external_kv or req_status.load_failed:
+            num_hit_tokens = 0""",
+            """        num_hit_tokens: int | None
+        if request.skip_reading_external_kv or req_status.load_failed or (
+            num_computed_tokens > 0 and not _RADIANCE_ALLOW_MIXED_HIT
+        ):
+            # radiance kill switch (RADIANCE_OFFLOAD_MIXED_HIT=0): decline every
+            # mixed local+external hit. Costs a prefill, cannot corrupt KV.
+            # Off by default -- hunk 3 makes the mixed hit safe to serve.
+            num_hit_tokens = 0""",
+        ),
+        (
+            """        num_hit_tokens: int | None
         if request.skip_reading_prefix_cache:
             num_hit_tokens = 0""",
-    """        num_hit_tokens: int | None
+            """        num_hit_tokens: int | None
         if request.skip_reading_prefix_cache or (
             num_computed_tokens > 0 and not _RADIANCE_ALLOW_MIXED_HIT
         ):
@@ -153,6 +169,8 @@ apply(
             # mixed local+external hit. Costs a prefill, cannot corrupt KV.
             # Off by default -- hunk 3 makes the mixed hit safe to serve.
             num_hit_tokens = 0""",
+        ),
+    ],
     "radiance kill switch (RADIANCE_OFFLOAD_MIXED_HIT=0)",
     "offload decline mixed hit (kill switch)",
 )

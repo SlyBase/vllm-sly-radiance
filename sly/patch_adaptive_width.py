@@ -244,14 +244,15 @@ def main():
         "scheduler.py observe hook",
     )
     # sync scheduling: trim after the real drafts arrived
+    # vLLM 0.34.0: validate_tokens -> trim_spec_tokens (the same single call).
     apply(
         SCHED,
-        "            request.spec_token_ids = self.structured_output_manager.validate_tokens(\n"
+        "            request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(\n"
         "                request, spec_token_ids\n"
         "            )\n"
         "\n"
         "    def update_draft_token_ids_in_output(",
-        "            request.spec_token_ids = self.structured_output_manager.validate_tokens(\n"
+        "            request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(\n"
         "                request, spec_token_ids\n"
         "            )\n"
         "        self._radiance_aw_sync(draft_token_ids)\n"
@@ -275,9 +276,11 @@ def main():
         "                    self.current_step + self.decode_stagger\n"
         "                )\n"
     )
+    # vLLM 0.34.0: the assignment collapsed back to a single line (decode_stagger), 12-space indent.
+    _A034 = "            request.next_decode_eligible_step = self.current_step + self.decode_stagger\n"
     apply_any(
         V1 / "core/sched/async_scheduler.py",
-        [(_A030, _A030 + _HOOK), (_A031, _A031 + _HOOK)],
+        [(_A030, _A030 + _HOOK), (_A031, _A031 + _HOOK), (_A034, _A034 + _HOOK)],
         "_radiance_aw_after_schedule(scheduler_output)",
         "async_scheduler.py hook",
     )

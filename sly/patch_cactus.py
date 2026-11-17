@@ -104,6 +104,7 @@ apply(TARGET,
       "    HAS_DRAFT_LOGITS: tl.constexpr,\n"
       "    SYNTHETIC_MODE: tl.constexpr,\n"
       "    USE_BLOCK_VERIFICATION: tl.constexpr,\n"
+      "    FLY_WINDOW_SIZE: tl.constexpr,\n"
       "):\n",
       "    vocab_num_blocks,\n"
       "    cactus_delta,  # radiance cactus: kernel arg (sly/patch_cactus.py)\n"
@@ -111,6 +112,7 @@ apply(TARGET,
       "    HAS_DRAFT_LOGITS: tl.constexpr,\n"
       "    SYNTHETIC_MODE: tl.constexpr,\n"
       "    USE_BLOCK_VERIFICATION: tl.constexpr,\n"
+      "    FLY_WINDOW_SIZE: tl.constexpr,\n"
       "):\n",
       "# radiance cactus: kernel arg",
       "cactus: kernel signature")
@@ -194,8 +196,29 @@ apply_any(TARGET,
 # vLLM 0.32.0 inserts watermarking_skip_mask between watermarking and watermark_key, so the
 # cactus_delta wrapper arg anchors on the skip-mask + watermark_key tail (unique in the file).
 # The old shape stays for the launchers patching older images.
+# vLLM 0.34.0 adds fly_window_size / fly_entropy_threshold / fly_entropy_top_k /
+# skip_masked_vocab_blocks after watermark_key, before the return type.
 apply_any(TARGET,
       [
+      (
+      "    watermarking: torch.Tensor | None = None,\n"
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      "    fly_window_size: int = 0,\n"
+      "    fly_entropy_threshold: float = 0.3,\n"
+      "    fly_entropy_top_k: int = 3,\n"
+      "    skip_masked_vocab_blocks: bool = False,\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n",
+      "    watermarking: torch.Tensor | None = None,\n"
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      "    fly_window_size: int = 0,\n"
+      "    fly_entropy_threshold: float = 0.3,\n"
+      "    fly_entropy_top_k: int = 3,\n"
+      "    skip_masked_vocab_blocks: bool = False,\n"
+      "    cactus_delta: float = CACTUS_DELTA,  # radiance cactus: wrapper arg (sly/patch_cactus.py)\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n"
+      ),
       (
       "    watermarking_skip_mask: torch.Tensor | None = None,\n"
       "    watermark_key: int | None = None,\n"

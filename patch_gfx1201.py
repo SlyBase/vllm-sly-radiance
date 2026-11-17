@@ -49,25 +49,12 @@ def main():
         "            return torch.version.hip is not None",
         "Triton HIPDriver.is_active: gate on torch.version.hip",
     )
-    # C. AITER sampler gate: VLLM_ROCM_USE_AITER=1 also selects AITER's top-k/top-p sampler, whose
-    #    C++/HIP kernel fails to build on RDNA4. Gate to MI3xx; gfx12x uses the native sampler.
-    apply(
-        SP / "vllm/v1/sample/ops/topk_topp_sampler.py",
-        "            logprobs_mode not in PROCESSED_LOGPROBS_MODES\n"
-        "            and rocm_aiter_ops.is_enabled()\n"
-        "            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable\n"
-        "        ):",
-        "            logprobs_mode not in PROCESSED_LOGPROBS_MODES\n"
-        "            and rocm_aiter_ops.is_enabled()\n"
-        "            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable\n"
-        "            # gfx1201: AITER's sampler C++/HIP kernel fails to build on RDNA4.\n"
-        "            # Gate to MI3xx; gfx12x uses the native sampler.\n"
-        '            and __import__("vllm.platforms.rocm", fromlist=["on_mi3xx"]).on_mi3xx()\n'
-        "        ):",
-        "AITER's sampler C++/HIP kernel fails to build on RDNA4",
-        "topk_topp_sampler: gate AITER sampler to MI3xx",
-    )
-
+    # C (dropped at the vLLM 0.34.0 bump): the AITER top-k/top-p sampler gate.
+    #    v0.32.0 selected AITER's sampler in topk_topp_sampler.py via
+    #    rocm_aiter_ops.is_enabled(); its C++/HIP kernel fails to build on RDNA4, so this hunk
+    #    gated it to MI3xx. v0.34.0 removed the AITER sampler from the v1 sampling path entirely
+    #    (no aiter.ops.sampling / aiter_sample reference in the vLLM tree; apply_top_k_top_p
+    #    routes Triton/pytorch only), so the gate's behaviour is native now.
 
 if __name__ == "__main__":
     main()

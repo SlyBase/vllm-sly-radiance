@@ -17,17 +17,22 @@ from pathlib import Path
 from _patchlib import apply
 
 LIB = Path(sysconfig.get_paths()["purelib"])
-F = LIB / "vllm/v1/spec_decode/llm_base_proposer.py"
+F = LIB / "vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py"
 
+# Re-anchored for vLLM 0.34.0: the loop moved from vllm/v1/spec_decode/llm_base_proposer.py
+# to vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py, and the loop variable changed
+# from `token_index` / `self.num_speculative_tokens - 1` to `step` / `num_speculative_steps`.
+# The standard multi-step decode loop (the one MTP uses) is distinguished from the fused one
+# by the `if not skip_attn and ...` guard (the fused one says `if attn_metadata is not None`).
 ANCHOR = (
-    "        for token_index in range(self.num_speculative_tokens - 1):\n"
-    "            # Update the inputs.\n"
+    "        for step in range(1, num_speculative_steps):\n"
+    "            if not skip_attn and (self.advance_draft_positions or step == 1):\n"
 )
 NEW = (
-    "        for token_index in range(self.num_speculative_tokens - 1):\n"
+    "        for step in range(1, num_speculative_steps):\n"
     "            if getattr(self, \"_radiance_stop\", False):\n"
     "                break  # radiance: controller stopped; skip the remaining draft forwards\n"
-    "            # Update the inputs.\n"
+    "            if not skip_attn and (self.advance_draft_positions or step == 1):\n"
 )
 SENTINEL = "radiance: controller stopped; skip the remaining draft forwards"
 
