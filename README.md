@@ -505,7 +505,7 @@ requests in parallel, 16-32 sampled runs per arm):
 
 The fade is the fix (1/16 vs 11/32, p = 0.03); the cap alone does not change the loop rate (p = 0.55) and is
 kept as the length-independent insurance. Sequences (prompt + output) below 4096 tokens are untouched, so their
-Cactus behaviour is unchanged; since the fade counts the whole sequence (Unreleased), contexts beyond 16384 tokens run
+Cactus behaviour is unchanged; since the fade counts the whole sequence (1.13.0), contexts beyond 16384 tokens run
 bit-exact stock. The stock rule itself still loops on this prompt (2/16). The stock rule itself
 still loops on adversarial prompts (2/16 in the same test); the fade does not change that.
 

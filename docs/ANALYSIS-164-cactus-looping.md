@@ -166,7 +166,7 @@ Fade lowers δ linearly from 4096 to 16384 output tokens. Two gaps:
    after 7.7k tokens" is corpus-specific: PR #207 documents a production agent turn (~170k context)
    that locked after ~3k output tokens with acceptance 1.0 for the last ~300 tokens, cap active.
    Agent turns are new requests with short outputs on long contexts — the output-length fade never
-   starts there. *Fixed (Unreleased):* the fade now counts the total sequence length (prompt +
+   starts there. *Fixed (1.13.0):* the fade now counts the total sequence length (prompt +
    output), so a 130k-170k agent context is past `FADE_END` and runs bit-exact stock.
 2. **Late rescue**: after 16384 tokens the rule is stock, but a locked-in loop has q ≈ 0.999+, so
    stock escape is ≈ 1e-3/step — ~1000 steps (minutes) to break, while q keeps rising. Users stop
