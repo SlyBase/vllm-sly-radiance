@@ -12,6 +12,20 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-11-19
+
+### Fixed
+- **DFlash prefill-skip hook on vLLM 0.34 (`sly/patch_dflash_prefill_skip.py`):** the 0.32 anchor
+  (`num_reqs` / `num_target_tokens` back to back) migrated into `_prepare_graph_replay` in 0.34, so
+  the hook landed in the wrong function and referenced its absent `is_profile` local -> `NameError`
+  in the first dummy run, engine crash loop (local prod test of 1.13.2; prod reverted to 1.12.0).
+  The hook now anchors on 0.34's `propose` opening (with the dp_sync clamp), where `is_profile` is a
+  parameter; the <= 0.32 shape is kept. A static scope audit of every patch-injected line against
+  the 0.34 tree (function locals + module globals + builtins) finds no further unbound names; the
+  cactus prompt-length plumbing and the skip helper's InputBatch attributes verified present in 0.34.
+  Dryrun 183 hunks pass 2 NOOP; `test_dflash_prefill_skip_cpu.py` 11 passed.
+
+
 ## [1.13.2] - 2026-11-19
 
 ### Fixed

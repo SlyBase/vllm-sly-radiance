@@ -13,21 +13,37 @@ import os
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 TARGET = (
     Path(os.environ.get("RADIANCE_PATCH_TARGET_DIR") or sysconfig.get_paths()["purelib"])
     / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "dflash" / "speculator.py"
 )
 
-apply(TARGET,
-      "        num_reqs = input_batch.num_reqs\n        num_target_tokens = input_batch.num_tokens\n",
-      "        num_reqs = input_batch.num_reqs\n"
-      "        # radiance (sly/patch_dflash_prefill_skip.py): old prefill chunks need no drafter work.\n"
-      "        from radiance_dflash_skip import skip_context\n"
-      "\n"
-      "        if skip_context(self, input_batch, dummy_run, is_profile):\n"
-      "            return self.draft_tokens[:num_reqs]\n"
-      "        num_target_tokens = input_batch.num_tokens\n",
-      "from radiance_dflash_skip import skip_context",
-      "dflash: skip drafter work on old prefill chunks")
+_HOOK = (
+    "        # radiance (sly/patch_dflash_prefill_skip.py): old prefill chunks need no drafter work.\n"
+    "        from radiance_dflash_skip import skip_context\n"
+    "\n"
+    "        if skip_context(self, input_batch, dummy_run, is_profile):\n"
+    "            return self.draft_tokens[:num_reqs]\n"
+)
+# <= 0.32: propose opens with num_reqs / num_target_tokens back to back.
+_A032 = (
+    "        num_reqs = input_batch.num_reqs\n"
+    "        num_target_tokens = input_batch.num_tokens\n"
+)
+# 0.34: propose gained the dp_sync num_reqs clamp between them, and the bare 0.32 pair now
+# appears in _prepare_graph_replay (no is_profile there) -- anchor on the 0.34 propose opening.
+_A034 = (
+    "        num_reqs = input_batch.num_reqs\n"
+    "        if dummy_run and dp_sync_state is not None:\n"
+    "            num_reqs = min(num_reqs, dp_sync_state.num_reqs)\n"
+    "        num_target_tokens = input_batch.num_tokens\n"
+)
+apply_any(TARGET,
+          [(_A034, _A034 + _HOOK),
+           (_A032, _A032.replace(
+               "        num_target_tokens = input_batch.num_tokens\n",
+               "") + _HOOK + "        num_target_tokens = input_batch.num_tokens\n")],
+          "from radiance_dflash_skip import skip_context",
+          "dflash: skip drafter work on old prefill chunks")
