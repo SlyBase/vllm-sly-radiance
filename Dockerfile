@@ -419,9 +419,9 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
       /wheels/triton-*.whl /wheels/torchvision-*.whl $(ls /wheels/amd_torchvision_device_*.whl 2>/dev/null) \
       /wheels/*aiter-*.whl \
  # vLLM >= 0.34 declares torch[device-gfx1201] unpinned; without a constraint pip swaps the ROCm
- # wheel for the newest PyPI (CUDA) torch. Pin exactly what --no-deps just installed.
- && pip freeze > /tmp/trio-freeze.txt \
- && grep -iE '^(torch|torchvision|triton|amd.torch|amd.torchvision)==' /tmp/trio-freeze.txt > /tmp/trio-pins.txt \
+ # wheel for the newest PyPI (CUDA) torch. Pin exactly what --no-deps just installed (pip freeze
+ # prints local wheels as name @ file://, so read the installed metadata instead).
+ && python -c "import importlib.metadata as m; want={'torch','torchvision','triton','amd-torch-device-${GFX_ARCH}','amd-torchvision-device-${GFX_ARCH}'}; pins=[f'{d.name}=={d.version}' for d in m.distributions() if d.name.lower().replace('_','-') in want]; assert len(pins)==len(want), pins; print('\n'.join(pins))" > /tmp/trio-pins.txt \
  && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
  && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt pillow pybind11 \
@@ -434,7 +434,7 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
     else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
  && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
  && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
- && rm -rf /wheels /root/.cache /tmp/constraints.txt /tmp/trio-pins.txt /tmp/trio-freeze.txt
+ && rm -rf /wheels /root/.cache /tmp/constraints.txt /tmp/trio-pins.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
 # asic_info reports it empty on this card). It used to be called VLLM_ROCM_GCN_ARCH, which vLLM
