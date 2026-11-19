@@ -12,6 +12,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-11-19
+
 ### Fixed
 - **vLLM 0.34 import rename in `sly/patch_quark_mxfp4.py`:** the injected RDNA gate now imports
   `is_aiter_found_and_supported_on_rdna` (0.34 renamed `..._on_rdna4`, covering gfx11 + gfx12).
