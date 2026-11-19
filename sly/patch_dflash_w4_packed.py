@@ -60,11 +60,13 @@ apply(F,
 apply(F,
       '        self._kv_source_attn = layers_attn\n'
       '        self._kv_lazy = layers_attn[0].qkv_proj.weight.dtype in _DFLASH_FP8\n'
+      '        kv_weight = kv_bias = None\n'
       '        if self._kv_lazy:\n',
       '        self._kv_source_attn = layers_attn\n'
       '        # --- SLY W4-PACKED: no raw .weight (W4A16 packed) is deferred as well.\n'
       '        qkv_weight = getattr(layers_attn[0].qkv_proj, "weight", None)\n'
       '        self._kv_lazy = qkv_weight is None or qkv_weight.dtype in _DFLASH_FP8\n'
+      '        kv_weight = kv_bias = None\n'
       '        if self._kv_lazy:\n',
       '        # --- SLY W4-PACKED: no raw .weight (W4A16 packed) is deferred as well.',
       'dflash W4-packed: load_weights defers packed qkv_proj')

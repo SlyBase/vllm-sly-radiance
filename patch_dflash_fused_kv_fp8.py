@@ -52,27 +52,41 @@ def _dflash_kv_weight_rows(qkv_proj, q_size: int) -> torch.Tensor:
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):'''
 
-SLICE_OLD = """        if all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in self._context_qkv_projs
-        ):"""
+# Re-anchored for vLLM 0.34.0: the build moved to _build_context_kv_buffers and now uses a
+# local kv_weight/kv_bias + refill_derived(self, "_fused_kv_weight", ...) instead of direct
+# self._fused_kv_weight assignment; the raw-weight check is now _reads_raw_weights(...) rather
+# than an inline all(isinstance(...)). The deferred branch sets kv_weight to None (refill
+# keeps it None) and the lazy materialization in _project_context_kv_token_major is unchanged.
+SLICE_OLD = """        kv_weight = kv_bias = None
+        if _reads_raw_weights(self._context_qkv_projs):
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                kv_bias = torch.cat(kv_biases, dim=0)
+        refill_derived(self, "_fused_kv_weight", kv_weight)
+        refill_derived(self, "_fused_kv_bias", kv_bias)"""
 SLICE_NEW = """        self._kv_source_attn = layers_attn
         self._kv_lazy = layers_attn[0].qkv_proj.weight.dtype in _DFLASH_FP8
+        kv_weight = kv_bias = None
         if self._kv_lazy:
             # Deferred: a quantized qkv_proj cannot be read until its quant method has processed
             # the weights, which happens after load_weights returns (_project_context_kv builds
             # the fused buffer on first use). Upstream's own answer for a quantized drafter is one
             # quant-method GEMM per layer; this keeps the single fused GEMM.
-            self._fused_kv_weight = None
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias = torch.cat(kv_biases, dim=0)
-            else:
-                self._fused_kv_bias = None
-        elif all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in self._context_qkv_projs
-        ):"""
+                kv_bias = torch.cat(kv_biases, dim=0)
+        elif _reads_raw_weights(self._context_qkv_projs):
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                kv_bias = torch.cat(kv_biases, dim=0)
+        refill_derived(self, "_fused_kv_weight", kv_weight)
+        refill_derived(self, "_fused_kv_bias", kv_bias)"""
 
 LAZY_OLD = """        if self._fused_kv_weight is not None:
             all_kv_flat = F.linear("""

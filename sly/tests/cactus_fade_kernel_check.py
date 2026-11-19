@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Runs the PATCHED V2 rejection kernel (sly/patch_cactus.py) in the Triton interpreter on the CPU and
-checks the length fade (issue #164): delta_eff = delta * clamp((END - out) / (END - START), 0, 1), with
-out = position - prompt length of the request.
+checks the length fade (issue #164): delta_eff = delta * clamp((END - pos) / (END - START), 0, 1), with
+pos = the total sequence length (prompt + output) at the verified token. Every slot starts with output 0, so
+a fade over the output length alone would keep the full delta everywhere and fail the reference.
 
 Not collected by pytest (no test_ prefix); sly/tests/test_cactus_cpu.py starts it as a subprocess with
 TRITON_INTERPRET=1 when `triton` and a pinned vLLM source file are available.
@@ -10,8 +11,9 @@ TRITON_INTERPRET=1 when `triton` and a pinned vLLM source file are available.
 
 Setup: every drafted token is the target's top token with q = 0.6 (point-mass draft). Cactus 0.5 lifts that
 to h = 1 and accepts every draft; the stock rule accepts with chance 0.6. One slot per output range:
-  1. fade 8..16: out < 8 -> every draft accepted; out >= 16 -> equals stock; in between -> equals a
-     float64 reference of the fade formula.
+  1. fade 8..16: pos < 8 -> every draft accepted; pos >= 16 -> equals stock; in between -> equals a
+     float64 reference of the fade formula. Default fade (4096..16384): prompt 130000 + output 10 ->
+     equals stock; prompt 100 + output 100 -> full delta (every draft accepted).
   2. FADE_END=0 -> every draft accepted (1.8.1 behaviour); no prompt lengths passed -> the same.
   3. RADIANCE_CACTUS_DELTA=0 -> equals stock.
 """
@@ -50,25 +52,36 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 @triton.jit
 def gumbel_block_argmax(logits, block, mask, resample_token_idx, expanded_idx_mapping_ptr, temp_ptr, seed_ptr,
                         pos_ptr, logits_cache_ptr, logits_cache_stride_0, logits_cache_stride_1,
-                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride, vocab_size,
+                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride,
+                        logits_cache_row_mapping_ptr, vocab_size,
                         IS_DRAFTING: tl.constexpr, APPLY_TEMPERATURE: tl.constexpr, USE_FP64: tl.constexpr,
                         PER_TOKEN_COL: tl.constexpr = False):
-    # signature of vLLM 0.32.0 sample/gumbel.py
+    # signature of vLLM 0.34.0 sample/gumbel.py
     # Stand-in: plain argmax; only the accepted counts are compared.
     return tl.max(tl.where(mask, logits, float("-inf")), axis=0, return_indices=True)
 
 
 _stub("vllm.triton_utils", tl=tl, tldevice=tl.math, triton=triton)
-_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32)
+@triton.jit
+def spec_step_seed(seed, step):
+    # vLLM 0.34 sample/gumbel.py: mix the spec step into the seed's high bits
+    return seed ^ (tl.cast(step, tl.int64) << 32)
+
+
+_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32,
+      spec_step_seed=spec_step_seed)
 _stub("vllm.v1.worker.gpu.sample.watermark", philox_gumbel_block_argmax=None)
+_stub("vllm.v1.worker.gpu.spec_decode.draft_logits", DraftLogitsCache=object, draft_logits_row=None)
+_stub("vllm.v1.worker.gpu.spec_decode.fly", compute_fly_entropy=None)
 
 KNOBS = ("RADIANCE_CACTUS_DELTA", "RADIANCE_CACTUS_FADE_START", "RADIANCE_CACTUS_FADE_END",
          "RADIANCE_CACTUS_CAP_R", "RADIANCE_CACTUS_ESCAPE", "RADIANCE_NSD")
-K, VOCAB, POS0 = 3, 9000, 100
+K, VOCAB = 3, 9000
 Q = 0.6
-# slot -> output length at the first verified position (prompt length = POS0 - out)
-OUT0 = [0, 4, 9, 11, 13, 20, 30, 40]
-SLOTS = len(OUT0)
+# slot -> total sequence length at the first verified position; prompt length PL0 (output = SEQ0 - PL0)
+SEQ0 = [0, 4, 9, 11, 13, 20, 30, 40, 130010, 200]
+PL0 = SEQ0[:8] + [130000, 100]
+SLOTS = len(SEQ0)
 
 
 @triton.jit
@@ -100,10 +113,10 @@ def batch():
     logits[:, 17] = math.log(Q * (VOCAB - 1) / (1 - Q))      # q(top) = 0.6
     tokens = torch.full((n, kp1), 17, dtype=torch.int64)
     cu = torch.arange(n + 1, dtype=torch.int32) * kp1
-    pos = (torch.arange(kp1, dtype=torch.int64) + POS0).repeat(n)
+    pos = (torch.arange(kp1, dtype=torch.int64) + torch.tensor(SEQ0).unsqueeze(1)).reshape(-1)
     idx = torch.arange(n, dtype=torch.int32)
     seed = torch.arange(SLOTS, dtype=torch.int64) * 7919 + 13
-    prompt_len = torch.tensor([POS0 - o for o in OUT0], dtype=torch.int32)
+    prompt_len = torch.tensor(PL0, dtype=torch.int32)
     return (logits, tokens.reshape(-1), cu, pos, idx, idx.repeat_interleave(kp1),
             torch.arange(kp1, dtype=torch.int32).repeat(n), seed, prompt_len)
 
@@ -122,7 +135,7 @@ def reference(start, end, delta=0.5, cap_r=0.0):
     _u_kernel[(SLOTS * (K + 1),)](u, seed.repeat_interleave(K + 1), pos)
     u = u.view(SLOTS, K + 1).double()
     out = []
-    for s, o0 in enumerate(OUT0):
+    for s, o0 in enumerate(SEQ0):
         acc = 0
         for i in range(K):
             # end == 0 is the "no fade" switch in the kernel, not a fade to zero
@@ -144,14 +157,22 @@ def main(stock_path, patched_path):
     # cap off: the fade alone must stay bit-comparable with the reference that has no cap
     fade = run(load(patched_path, "rsu_fade", RADIANCE_CACTUS_DELTA=0.5, RADIANCE_CACTUS_FADE_START=8,
                     RADIANCE_CACTUS_FADE_END=16, RADIANCE_CACTUS_CAP_R=0))
-    for s, o in enumerate(OUT0):
+    for s, o in enumerate(SEQ0):
         if o + K - 1 < 8:
-            assert fade[s] == K, f"slot {s} (out {o}) before the fade must accept all: {fade}"
+            assert fade[s] == K, f"slot {s} (pos {o}) before the fade must accept all: {fade}"
         if o >= 16:
-            assert fade[s] == stock[s], f"slot {s} (out {o}) after the fade must equal stock: {fade} vs {stock}"
+            assert fade[s] == stock[s], f"slot {s} (pos {o}) after the fade must equal stock: {fade} vs {stock}"
     want = reference(8, 16)
     assert fade == want, f"fade differs from the float64 reference: {fade} vs {want}"
     print(f"fade 8..16, cap off: {fade} (stock {stock}) == reference - OK")
+
+    # default fade 4096..16384 (agent regime, #164): a 130k prompt is past FADE_END after 10 output
+    # tokens -> bit-exact stock; prompt 100 + output 100 is far below FADE_START -> full delta.
+    dflt = run(load(patched_path, "rsu_dflt", RADIANCE_CACTUS_DELTA=0.5, RADIANCE_CACTUS_CAP_R=0))
+    assert stock[8] < K, f"stock accepted everything in the 130k slot: cannot separate {stock}"
+    assert dflt[8] == stock[8], f"prompt 130000 + out 10 must equal stock: {dflt} vs {stock}"
+    assert dflt[:8] == [K] * 8 and dflt[9] == K, f"short sequences must keep the full delta: {dflt}"
+    print(f"default fade: 130k prompt == stock, short sequences full delta {dflt} - OK")
 
     # cap on: q = 0.6, so h is limited to 1 - r*0.4 (0.8 at the default r = 0.5), i.e. only 80 % of the
     # drafts are accepted; the value must equal the float64 reference of the combined rule.

@@ -197,7 +197,9 @@ CALL_ANCHOR = (
     "                                new_computed_blocks,\n"
     "                                num_new_local_computed_tokens,\n"
     "                                request.shared_prefix_boundary,\n"
-    "                            ) = self.kv_cache_manager.get_computed_blocks(request)\n"
+    "                            ) = self.kv_cache_manager.get_computed_blocks(\n"
+    "                                request, max_cache_hit_length\n"
+    "                            )\n"
 )
 CALL_NEW = CALL_ANCHOR + (
     "                            # radiance reconcile re-ask: the fallback above can drop the\n"

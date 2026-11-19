@@ -54,13 +54,20 @@ HOOK_NEW = (
     + "            if _radiance_gdn.EMPTY_OUT:   # the Triton body writes only real rows\n"
     + "                core_attn_out.zero_()\n"
 )
+# vLLM 0.34.0 forward_cuda already uses torch.empty unconditionally (the old zeros
+# anchor no longer exists), so the knob hunk now anchors on empty and the NEW
+# text still restores zeros by default (knob off) / empty when the knob is on.
 ZEROS_OLD = (
-    "        core_attn_out = torch.zeros(\n"
+    "        core_attn_out = torch.empty(\n"
     "            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),\n"
     "            dtype=hidden_states.dtype,\n"
     "            device=hidden_states.device,\n"
     "        )\n"
     "\n"
+    "        # b/a may stay strided chunk views of ba: the packed decode, prefill\n"
+    "        # (fused_post_conv_prep) and ROCm fallback kernels consume row strides\n"
+    "        # directly, and fused_sigmoid_gating_delta_rule_update contiguous()\n"
+    "        # internally where needed.\n"
     "        torch.ops.vllm.qwen_gdn_attention_core(\n"
 )
 ZEROS_NEW = (
@@ -73,6 +80,10 @@ ZEROS_NEW = (
     "            device=hidden_states.device,\n"
     "        )\n"
     "\n"
+    "        # b/a may stay strided chunk views of ba: the packed decode, prefill\n"
+    "        # (fused_post_conv_prep) and ROCm fallback kernels consume row strides\n"
+    "        # directly, and fused_sigmoid_gating_delta_rule_update contiguous()\n"
+    "        # internally where needed.\n"
     "        torch.ops.vllm.qwen_gdn_attention_core(\n"
 )
 

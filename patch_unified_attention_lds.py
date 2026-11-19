@@ -198,6 +198,7 @@ A_3D_TAIL = (
     "        NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,\n"
     "        TILE_SIZE=TILE_SIZE,\n"
     "        **config,\n"
+    "        enable_fp_fusion=True,\n"  # aiter >= 0.1.28 (vLLM 0.34's AITER_BRANCH)
     "    )\n"
     "\n"
     "\n"
@@ -209,6 +210,7 @@ INSERT_3D_RETURN = (
     "        NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,\n"
     "        TILE_SIZE=TILE_SIZE,\n"
     "        **config,\n"
+    "        enable_fp_fusion=True,\n"
     "    )\n"
     "    # RADIANCE: hand the final TILE_SIZE back so unified_attention() can forward\n"
     "    # the exact value this launch used into the paired reduce_segments call.\n"
@@ -257,8 +259,12 @@ INSERT_CALL_SITE = (
 A_REDUCE_PRE = (
     "    head_size_padded = triton.next_power_of_2(params.head_size)\n"
     '    config = get_unified_attention_config("reduce", params, backend="triton")\n'
+    "    v_head_size_padded = triton.next_power_of_2(params.head_size_v)\n"
+    "    num_d_blocks = triton.cdiv(\n"
+    '        v_head_size_padded, config.get("BLOCK_D") or v_head_size_padded\n'
+    "    )\n"
     "\n"
-    "    reduce_segments[(params.num_tokens, params.num_query_heads)](\n"
+    "    reduce_segments[(params.num_tokens, params.num_query_heads, num_d_blocks)](\n"
 )
 INSERT_REDUCE_TUNE = (
     "    head_size_padded = triton.next_power_of_2(params.head_size)\n"
@@ -272,7 +278,12 @@ INSERT_REDUCE_TUNE = (
     "    ):\n"
     '        config["num_warps"] = 4\n'
     "\n"
-    "    reduce_segments[(params.num_tokens, params.num_query_heads)](\n"
+    "    v_head_size_padded = triton.next_power_of_2(params.head_size_v)\n"
+    "    num_d_blocks = triton.cdiv(\n"
+    '        v_head_size_padded, config.get("BLOCK_D") or v_head_size_padded\n'
+    "    )\n"
+    "\n"
+    "    reduce_segments[(params.num_tokens, params.num_query_heads, num_d_blocks)](\n"
 )
 
 

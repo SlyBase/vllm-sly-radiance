@@ -74,9 +74,9 @@ ARG TORCHVISION_VERSION=0.28.0
 # (aiter/ops/triton/__init__.py: "unified_attention": "attention.unified_attention", checked in
 # the v0.1.24.post1 tree). rocm_aiter_unified_attn stays usable, so nothing holds the pin here.
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.24.post1
+ARG AITER_VERSION=0.1.28.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-ARG VLLM_VERSION=0.32.0
+ARG VLLM_VERSION=0.34.0
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
@@ -100,8 +100,10 @@ ARG VLLM_VERSION=0.32.0
 # left in place, but this is inference from source shape, not a passing load test. Re-check this the
 # first time a Gemma-4 checkpoint is actually served on this image. Same-inference caveat for
 # 5.19.0 (see the 0.32.0 note above): still no live Gemma-4 load test.
+# vLLM 0.34.0 widens the range to >= 5.16.1, < 5.23.0, so this update takes 5.22.2, the newest
+# release the range allows (same inference-only Gemma-4 caveat as 5.19.0).
 # renovate: datasource=pypi depName=transformers versioning=pep440
-ARG TRANSFORMERS_VERSION=5.19.0
+ARG TRANSFORMERS_VERSION=5.22.2
 # rocm-bandwidth-test for the startup topology/bandwidth sweep. Pinned to the NEWEST tag that still
 # has a plain CMakeLists: the rocm-7.x tags moved to a cmake framework that demands clang>=19 on PATH
 # plus vendored boost/fmt/curl submodules, none of which this tool needs.
@@ -416,9 +418,13 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
       /wheels/torch-*.whl $(ls /wheels/amd_torch_device_*.whl 2>/dev/null) \
       /wheels/triton-*.whl /wheels/torchvision-*.whl $(ls /wheels/amd_torchvision_device_*.whl 2>/dev/null) \
       /wheels/*aiter-*.whl \
- && pip install --no-cache-dir -c /tmp/constraints.txt \
+ # vLLM >= 0.34 declares torch[device-gfx1201] unpinned; without a constraint pip swaps the ROCm
+ # wheel for the newest PyPI (CUDA) torch. Pin exactly what --no-deps just installed (pip freeze
+ # prints local wheels as name @ file://, so read the installed metadata instead).
+ && python -c "import importlib.metadata as m; want={'torch','torchvision','triton','amd-torch-device-${GFX_ARCH}','amd-torchvision-device-${GFX_ARCH}'}; pins=[f'{d.name}=={d.version}' for d in m.distributions() if d.name.lower().replace('_','-') in want]; assert len(pins)==len(want), pins; print('\n'.join(pins))" > /tmp/trio-pins.txt \
+ && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
- && pip install --no-cache-dir -c /tmp/constraints.txt pillow pybind11 \
+ && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt pillow pybind11 \
  # aiter 0.1.23 imports flydsl at `import aiter` (aiter/ops/topk_select.py -> aiter.ops.flydsl); aiter is
  # installed --no-deps above, so its pinned runtime dep comes here. Without it every aiter import fails and
  # the backward-compat finder for aiter.ops.triton.unified_attention swallows the error
@@ -428,7 +434,7 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
     else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
  && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
  && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
- && rm -rf /wheels /root/.cache /tmp/constraints.txt
+ && rm -rf /wheels /root/.cache /tmp/constraints.txt /tmp/trio-pins.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
 # asic_info reports it empty on this card). It used to be called VLLM_ROCM_GCN_ARCH, which vLLM
@@ -743,7 +749,7 @@ COPY sly/ /opt/patches/sly/
 RUN set -eu; cd /opt/patches; \
     for p in patch_gfx1201 patch_radiance_dispatch patch_skinny_gemm patch_unified_attention_lds \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
-             patch_unpad patch_mtp_mm_mask patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
+             patch_unpad patch_mtp_loopbreak patch_qwen3_toolparse patch_from_json_filter \
              patch_dynamo_metrics patch_conv1d_blockn patch_r4d \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_gdn_lazy \
              sly/patch_quark_mxfp4 \

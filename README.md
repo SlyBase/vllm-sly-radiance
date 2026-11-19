@@ -462,8 +462,8 @@ Patch: `sly/patch_cactus.py`, CPU-tested in `sly/tests/test_cactus_cpu.py` and
 | Variable | Recommended | What it does |
 |---|---|---|
 | `RADIANCE_CACTUS_DELTA` | `0.5` (image default) | Divergence budget. `0` = bit-exact stock acceptance test (the exp/log round-trip is guarded, so the comparison is identical to upstream). Larger = more accepted tokens, more drift from the target distribution. Read once at start; it is a per-process kernel constant, so changing it needs a restart |
-| `RADIANCE_CACTUS_FADE_START` | `4096` | 1.9.0 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): output tokens of a request after which its delta starts to fall |
-| `RADIANCE_CACTUS_FADE_END` | `16384` | output tokens at which the delta reaches 0 (stock rule). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
+| `RADIANCE_CACTUS_FADE_START` | `4096` | 1.9.0 length fade ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): sequence tokens (prompt + output; output only up to 1.12.0) after which a request's delta starts to fall. Counted over the whole sequence because agent turns are new requests with short outputs on long prompts: an output-length fade never engaged there |
+| `RADIANCE_CACTUS_FADE_END` | `16384` | sequence tokens (prompt + output) at which the delta reaches 0: longer sequences (e.g. a 100k-token agent context) run bit-exact stock. Swift-1.5 agent turns at 105k context looped 15/32 with the output-length fade vs 6/32 stock, 8/32 with this rule (bench164); it costs those turns the Cactus speed-up (79.5 -> 67.7 tok/s). `FADE_END <= FADE_START` = hard cut at START, `0` = no fade (1.8.1 behaviour) |
 | `RADIANCE_CACTUS_CAP_R` | `0.5` | 1.9.0 acceptance cap, independent of length: h is also limited to `1 - r*(1-q)`. Never stricter than the stock rule (h >= q for every r <= 1), and it keeps `r` of the stock rejection chance at the drafter's p ~ 1, where Cactus has none above q = 1/(1+2*delta). `0` = off, `1` = exactly the stock rule; outside `[0,1]` the engine refuses to start |
 | `RADIANCE_CACTUS_ESCAPE` | `0` (off, opt-in) | Escape mixture against repetition lock-in ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164)): with probability `eps` the exact stock acceptance test runs instead of the Cactus test (same uniform), so per-step acceptance becomes `(1-eps)*min(1,h/p) + eps*min(1,q/p)`. The per-step output is exactly `(1-eps)*out_cactus + eps*q`, and every token keeps at least `eps` of the stock rejection chance — including the corner `q >= 1/(1+2*delta)`, `p <= h`, where the plain rule accepts with probability 1 and neither fade nor cap provides an escape. `1` = exactly the stock rule, `0` or `delta=0` = bit-exact current behaviour; outside `[0,1]` the engine refuses to start. GPU-validated; default off (opt-in) — see the stability ladder below. Analysis: [docs/ANALYSIS-164-cactus-looping.md](docs/ANALYSIS-164-cactus-looping.md) |
 
@@ -486,8 +486,8 @@ raise it above 0.5 without measuring quality on your own prompts.
 with delta 0.5 as with the stock rule ([#164](https://github.com/SlyBase/vllm-sly-radiance/issues/164): 11/32 vs
 2/16 runs, all loops after 7.7k output tokens, most after 16k). Cactus only in the first 4096 output tokens of a
 request removed them (0/16). The fade lowers a request's delta linearly from `RADIANCE_CACTUS_DELTA` at
-`RADIANCE_CACTUS_FADE_START` output tokens to 0 at `RADIANCE_CACTUS_FADE_END`. Outputs below 4096 tokens (chat,
-the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. On top, the length-independent
+`RADIANCE_CACTUS_FADE_START` sequence tokens (prompt + output; output only up to 1.12.0) to 0 at
+`RADIANCE_CACTUS_FADE_END`. Short-prompt requests below 4096 tokens in total (chat, the BetterBench corpus) keep the full gain; a 32k-token output keeps about 78 % of it. On top, the length-independent
 **acceptance cap** (`RADIANCE_CACTUS_CAP_R`) keeps a share `r` of the stock rejection chance at every output length
 *where the drafter's p exceeds the cap* (p ~ 1, a greedy drafter). A probabilistic drafter inside a loop can sit
 below the cap (p <= h) and still be accepted with probability 1 — the escape mixture below covers that corner.
@@ -504,16 +504,17 @@ requests in parallel, 16-32 sampled runs per arm):
 | stock (delta 0) | 2/16 (12.5 %) | 0.532 | 354.8 | - | - |
 
 The fade is the fix (1/16 vs 11/32, p = 0.03); the cap alone does not change the loop rate (p = 0.55) and is
-kept as the length-independent insurance. Outputs below 4096 tokens are untouched, so their Cactus behaviour is
-unchanged. The stock rule itself still loops on this prompt (2/16). The stock rule itself
+kept as the length-independent insurance. Sequences (prompt + output) below 4096 tokens are untouched, so their
+Cactus behaviour is unchanged; since the fade counts the whole sequence (1.13.0), contexts beyond 16384 tokens run
+bit-exact stock. The stock rule itself still loops on this prompt (2/16). The stock rule itself
 still loops on adversarial prompts (2/16 in the same test); the fade does not change that.
 
 **Escape mixture (opt-in, `RADIANCE_CACTUS_ESCAPE`).** Fade and cap reduce the loop rate but leave a corner with
 *zero* escape probability: at delta 0.5 the plain rule accepts unconditionally whenever q >= 0.5 and p <= h, and
 the cap only bites when p > 1 - r*(1-q) (a greedy drafter, p ~ 1). A probabilistic drafter (the production
 `draft_sample_method probabilistic`) inside a repetition sits at p <= h, so neither mitigation can break the loop
-once it forms — and loops that start before 4096 output tokens (agent turns on long contexts) never reach the
-fade at all. The escape mixture runs the exact stock acceptance test instead of the Cactus test with probability
+once it forms — and up to 1.12.0 loops that start before 4096 output tokens (agent turns on long contexts) never
+reached the fade at all (the fade now counts prompt + output, so such turns run stock). The escape mixture runs the exact stock acceptance test instead of the Cactus test with probability
 `eps` (same uniform `u`), i.e. acceptance becomes `(1-eps)*min(1,h/p) + eps*min(1,q/p)`: the per-step output becomes exactly `(1-eps)*out_cactus + eps*q`, every token keeps
 at least `eps` of the stock rejection chance, `eps=1` (or delta 0) is bit-exact stock, and the default `eps=0`
 leaves today's behaviour untouched. CPU-verified (patch wiring, math identities, Triton-interpreter kernel check,

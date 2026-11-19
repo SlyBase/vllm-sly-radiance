@@ -14,7 +14,9 @@ from _patchlib import apply
 
 GDN = Path(sysconfig.get_paths()["purelib"]) / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
 
-A = "MAX_FUSED_GDN_MTP_TOKENS = 8\n"
+# Re-anchored for vLLM 0.34.0: MAX_FUSED_GDN_MTP_TOKENS is now 9 (was 8); the register import
+# lands right after it, unchanged.
+A = "MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu\n"
 apply(GDN, A,
       "try:  # radiance (sly/patch_gdn_fused_decode.py): HIP port of fused_gdn_decode_post_conv_mtp\n"
       "    import radiance_gdn_decode as _radiance_gdn_decode\n"

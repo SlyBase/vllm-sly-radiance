@@ -166,7 +166,8 @@ Fade lowers δ linearly from 4096 to 16384 output tokens. Two gaps:
    after 7.7k tokens" is corpus-specific: PR #207 documents a production agent turn (~170k context)
    that locked after ~3k output tokens with acceptance 1.0 for the last ~300 tokens, cap active.
    Agent turns are new requests with short outputs on long contexts — the output-length fade never
-   starts there.
+   starts there. *Fixed (1.13.0):* the fade now counts the total sequence length (prompt +
+   output), so a 130k-170k agent context is past `FADE_END` and runs bit-exact stock.
 2. **Late rescue**: after 16384 tokens the rule is stock, but a locked-in loop has q ≈ 0.999+, so
    stock escape is ≈ 1e-3/step — ~1000 steps (minutes) to break, while q keeps rising. Users stop
    the run first. And the stock rule itself loops 2/16 on this prompt: fade can at best reach the
@@ -276,7 +277,8 @@ for agent workloads: keep fade+cap defaults, add `ε = 0.25`; the GPU plan (§8)
 ### 5.5 Upgrade path
 
 The acceptance hunk matches three shapes (stock, 1.5.1–1.8.1, 1.9.0–1.11.0 fade), so a launcher
-re-run on an older image upgrades to the escape mixture in one pass. Verified: old-patch → new-patch
+re-run on an older image upgrades to the escape mixture in one pass; a separate step then rewrites
+the 1.9.0–1.12.0 output-length fade lines to the total-sequence-length fade. Verified: old-patch → new-patch
 produces a kernel byte-identical to a fresh apply, second run is all-NOOP.
 
 ## 6. Verification done (CPU only, GPU was busy until ~20:00)

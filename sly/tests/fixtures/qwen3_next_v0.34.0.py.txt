@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Test fixture: excerpts of vllm/model_executor/models/qwen3_next.py of vLLM v0.32.0 as the image
+# Test fixture: excerpts of vllm/model_executor/models/qwen3_next.py of vLLM v0.34.0 as the image
 # builds it (after sly/patch_fused_norm_quant.py), verbatim: Qwen3NextAttention._project_qkv_gate
 # and forward, Qwen3NextDecoderLayer.forward, Qwen3NextModel.use_sequence_parallel and forward.
 # sly/tests/test_inductor_waste_cpu.py applies sly/patch_attn_gate_view.py and
@@ -10,7 +10,7 @@
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 
 
-class Qwen3NextAttention:
+class Qwen3NextAttention(nn.Module):
     def _project_qkv_gate(
         self,
         qkv: torch.Tensor,
@@ -76,18 +76,31 @@ class Qwen3NextAttention:
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            if not self.use_fused_output_gate:
+                attn_output = attn_output * torch.sigmoid(gate)
+            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+                # Sigmoid gate, fused with o_proj's static FP8 input quant.
+                scale = self.o_proj.input_scale
+                attn_output = QuantizedActivation(
+                    data=fused_sigmoid_gate_mul(attn_output, gate, scale),
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8StaticTensorSym,
+                )
+            else:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
         output, _ = self.o_proj(attn_output)
         return output
 
 
-class Qwen3NextDecoderLayer:
+class Qwen3NextDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,

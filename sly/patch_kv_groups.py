@@ -22,7 +22,10 @@ from pathlib import Path
 
 from _patchlib import apply
 
-F = Path(sysconfig.get_paths()["purelib"]) / "vllm/v1/core/kv_cache_utils.py"
+# Re-anchored for vLLM 0.34.0: the group-sizing logic moved from vllm/v1/core/kv_cache_utils.py
+# to vllm/v1/core/kv_cache_planning.py (the _get_kv_cache_groups_uniform_page_size function); the
+# anchor text is unchanged.
+F = Path(sysconfig.get_paths()["purelib"]) / "vllm/v1/core/kv_cache_planning.py"
 
 A = ("        group_size = max_num_layers\n"
      "    grouped_layers = []\n")
@@ -32,7 +35,7 @@ apply(F, A,
       "    # --- radiance (sly/patch_kv_groups.py): RADIANCE_KV_GROUP_SIZE overrides group_size ---\n"
       "    # The min-bucket heuristic pads 16 attn + 48 GDN layers to groups of 5 when a 5-layer\n"
       "    # drafter is present (15.6 % of the pool); see the patch's docstring for the numbers.\n"
-      "    _radiance_gs = os.environ.get(\"RADIANCE_KV_GROUP_SIZE\", \"\")\n"
+      "    _radiance_gs = __import__(\"os\").environ.get(\"RADIANCE_KV_GROUP_SIZE\", \"\")\n"
       "    if _radiance_gs:\n"
       "        logger.info(\n"
       "            \"[radiance] KV cache group size %s (stock heuristic: %d; layer buckets %s)\",\n"

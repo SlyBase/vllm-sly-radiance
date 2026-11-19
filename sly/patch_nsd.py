@@ -145,12 +145,21 @@ apply(TARGET,
       "nsd: nucleus-mass kernel")
 
 # 3. _rejection_kernel signature: runtime args + constexpr (all passed positionally at the launch)
+# Re-anchored for vLLM 0.34.0: the signature gained fly_entropy_ptr / fly_entropy_threshold
+# between local_residual_mass_stride and vocab_num_blocks; the nsd args are inserted right before
+# vocab_num_blocks, same as before.
 apply(TARGET,
       "    local_residual_mass_ptr,\n"
       "    local_residual_mass_stride,\n"
+      "    # [num_logits]\n"
+      "    fly_entropy_ptr,\n"
+      "    fly_entropy_threshold,\n"
       "    vocab_num_blocks,\n",
       "    local_residual_mass_ptr,\n"
       "    local_residual_mass_stride,\n"
+      "    # [num_logits]\n"
+      "    fly_entropy_ptr,\n"
+      "    fly_entropy_threshold,\n"
       "    # radiance nsd: kernel args (sly/patch_nsd.py)\n"
       "    # [num_logits, num_blocks]\n"
       "    nsd_partial_ptr,\n"
@@ -162,29 +171,38 @@ apply(TARGET,
       "nsd: kernel signature")
 
 # 4. Leviathan branch: OR the nucleus test into `accepted`
+# Re-anchored for vLLM 0.34.0: the Leviathan acceptance is now inside an `if not
+# USE_BLOCK_VERIFICATION or is_greedy:` block with a FLY_WINDOW_SIZE if/else; the non-FLY
+# (else) branch is the standard Leviathan path, and the tl.store is multi-line with a
+# `target_argmax if is_greedy and not accepted else draft_sampled` fallback. The NSD nucleus
+# test is ORed into `accepted` in that branch, same as before.
 apply(TARGET,
-      "                verifying = accepted\n"
-      "                accepted_length += accepted\n"
-      "                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)\n"
-      "\n"
-      "    tl.store(rejected_steps_ptr + req_idx, accepted_length)\n",
-      "                if USE_NSD:\n"
-      "                    # radiance nsd: accept a draft token inside the target nucleus (sly/patch_nsd.py)\n"
-      "                    nsd_blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)\n"
-      "                    nsd_mass = tl.sum(\n"
-      "                        tl.load(\n"
-      "                            nsd_partial_ptr + logit_idx * nsd_partial_stride + nsd_blocks,\n"
-      "                            mask=nsd_blocks < vocab_num_blocks,\n"
-      "                            other=0.0,\n"
-      "                        ),\n"
-      "                        axis=0,\n"
-      "                    )\n"
-      "                    accepted = accepted | (nsd_mass <= nsd_theta)\n"
-      "                verifying = accepted\n"
-      "                accepted_length += accepted\n"
-      "                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)\n"
-      "\n"
-      "    tl.store(rejected_steps_ptr + req_idx, accepted_length)\n",
+      "                else:\n"
+      "                    verifying = accepted\n"
+      "                    accepted_length += accepted\n"
+      "                    tl.store(\n"
+      "                        sampled_ptr + req_idx * sampled_stride + i,\n"
+      "                        target_argmax if is_greedy and not accepted else draft_sampled,\n"
+      "                    )\n",
+      "                else:\n"
+      "                    if USE_NSD:\n"
+      "                        # radiance nsd: accept a draft token inside the target nucleus (sly/patch_nsd.py)\n"
+      "                        nsd_blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)\n"
+      "                        nsd_mass = tl.sum(\n"
+      "                            tl.load(\n"
+      "                                nsd_partial_ptr + logit_idx * nsd_partial_stride + nsd_blocks,\n"
+      "                                mask=nsd_blocks < vocab_num_blocks,\n"
+      "                                other=0.0,\n"
+      "                            ),\n"
+      "                            axis=0,\n"
+      "                        )\n"
+      "                        accepted = accepted | (nsd_mass <= nsd_theta)\n"
+      "                    verifying = accepted\n"
+      "                    accepted_length += accepted\n"
+      "                    tl.store(\n"
+      "                        sampled_ptr + req_idx * sampled_stride + i,\n"
+      "                        target_argmax if is_greedy and not accepted else draft_sampled,\n"
+      "                    )\n",
       "# radiance nsd: accept a draft token",
       "nsd: Leviathan acceptance")
 
@@ -227,10 +245,17 @@ apply(TARGET,
       "nsd: kernel launch (mass)")
 
 # 6. rejection kernel launch args (before vocab_num_blocks, so independent of the Cactus launch arg)
+# Re-anchored for vLLM 0.34.0: the launch now passes fly_entropy / fly_entropy_threshold between
+# local_residual_mass.stride and vocab_num_blocks; the nsd args are inserted right before
+# vocab_num_blocks, same as before.
 apply(TARGET,
       "        local_residual_mass.stride(0) if local_residual_mass is not None else 0,\n"
+      "        fly_entropy,\n"
+      "        fly_entropy_threshold,\n"
       "        vocab_num_blocks,\n",
       "        local_residual_mass.stride(0) if local_residual_mass is not None else 0,\n"
+      "        fly_entropy,\n"
+      "        fly_entropy_threshold,\n"
       "        nsd_partial,  # radiance nsd: launch args (sly/patch_nsd.py)\n"
       "        nsd_partial.stride(0) if nsd_partial is not None else 0,\n"
       "        NSD_THETA,\n"

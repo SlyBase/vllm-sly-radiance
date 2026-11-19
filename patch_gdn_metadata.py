@@ -271,6 +271,18 @@ LENS_OLD_031 = LENS_OLD_029.replace(_CUT, _UNIFORM_031 + _CUT, 1)
 LENS_NEW_031 = LENS_NEW_029.replace(_CUT, _UNIFORM_031 + _CUT, 1)
 assert LENS_OLD_031 != LENS_OLD_029 and LENS_NEW_031 != LENS_NEW_029
 
+# --- vLLM 0.34 shape --------------------------------------------------------------------------
+# 0.34 keeps the 0.31 counts block but the uniform-spec-length probe now also gates on
+# `not self._adaptive_verification`. The counts are unchanged, so the 0.31 pair is reused with
+# only the probe's `if` line spliced in.
+_UNIFORM_034 = _UNIFORM_031.replace(
+    "if spec_query_lens_cpu.numel() > 0:",
+    "if spec_query_lens_cpu.numel() > 0 and not self._adaptive_verification:",
+)
+LENS_OLD_034 = LENS_OLD_029.replace(_CUT, _UNIFORM_034 + _CUT, 1)
+LENS_NEW_034 = LENS_NEW_029.replace(_CUT, _UNIFORM_034 + _CUT, 1)
+assert LENS_OLD_034 != LENS_OLD_031 and LENS_NEW_034 != LENS_NEW_031
+
 
 # --- vLLM 0.32 shape --------------------------------------------------------------------------
 # 0.32 REMOVES the 0.29/0.31 "or the draft tokens all sum to zero" branch from the spec-mask
@@ -378,7 +390,8 @@ IDX_NEW_032 = """                if _RADIANCE_GDN_META:
 apply(F, PREAMBLE_OLD, PREAMBLE_NEW, "_RADIANCE_GDN_META", "gdn metadata: helpers")
 apply_any(F, [(MASK_OLD_032, MASK_NEW_032), (MASK_OLD, MASK_NEW), (MASK_OLD_029, MASK_NEW_029)],
           "one numpy pass over the same buffer", "gdn metadata: spec mask")
-apply_any(F, [(LENS_OLD, LENS_NEW), (LENS_OLD_029, LENS_NEW_029), (LENS_OLD_031, LENS_NEW_031)],
+apply_any(F, [(LENS_OLD, LENS_NEW), (LENS_OLD_029, LENS_NEW_029), (LENS_OLD_031, LENS_NEW_031),
+               (LENS_OLD_034, LENS_NEW_034)],
           "same integers, one numpy pass", "gdn metadata: request counts")
 apply_any(F, [(IDX_OLD_032, IDX_NEW_032), (IDX_OLD, IDX_NEW)],
           "read once, by the copy_", "gdn metadata: index tensors")

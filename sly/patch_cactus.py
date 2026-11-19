@@ -18,8 +18,9 @@ RADIANCE_CACTUS_DELTA   divergence budget (default 0.5; set 0 for the bit-exact 
                         compile constant of the Triton kernel, so it cannot change
                         mid-serve.
 RADIANCE_CACTUS_FADE_START  length fade (issue #164): the request's delta falls linearly from
-RADIANCE_CACTUS_FADE_END    `delta` at START output tokens to 0 at END (defaults 4096 / 16384);
-                            END <= START = hard cut at START, END = 0 = no fade (1.8.1 behaviour).
+RADIANCE_CACTUS_FADE_END    `delta` at START sequence tokens (prompt + output) to 0 at END (defaults
+                            4096 / 16384); END <= START = hard cut at START, END = 0 = no fade (1.8.1
+                            behaviour). Sequences past END are bit-exact stock (long-context agent turns).
 RADIANCE_CACTUS_CAP_R       acceptance cap, default 0.5 (0 = off): h_n is additionally limited to
                             1 - r*(1 - q_n). h >= q always (never stricter than stock) and, at the
                             drafter's p ~ 1, it keeps r of the stock rejection chance at every q < 1 --
@@ -104,6 +105,7 @@ apply(TARGET,
       "    HAS_DRAFT_LOGITS: tl.constexpr,\n"
       "    SYNTHETIC_MODE: tl.constexpr,\n"
       "    USE_BLOCK_VERIFICATION: tl.constexpr,\n"
+      "    FLY_WINDOW_SIZE: tl.constexpr,\n"
       "):\n",
       "    vocab_num_blocks,\n"
       "    cactus_delta,  # radiance cactus: kernel arg (sly/patch_cactus.py)\n"
@@ -111,6 +113,7 @@ apply(TARGET,
       "    HAS_DRAFT_LOGITS: tl.constexpr,\n"
       "    SYNTHETIC_MODE: tl.constexpr,\n"
       "    USE_BLOCK_VERIFICATION: tl.constexpr,\n"
+      "    FLY_WINDOW_SIZE: tl.constexpr,\n"
       "):\n",
       "# radiance cactus: kernel arg",
       "cactus: kernel signature")
@@ -133,7 +136,7 @@ apply(TARGET,
       "cactus escape mixture: kernel signature")
 
 # Threshold. Shape 2 is the 1.5.1-1.8.1 hunk, shape 3 the 1.9.0-1.11.0 fade hunk, so a launcher
-# re-run on an older image upgrades it to the escape mixture in one pass.
+# re-run on an older image upgrades it to the escape mixture in one pass (the fade lines next).
 _STOCK_TEST = (
     "                    # Probability ratio test: p(x) > u * q(x)\n"
     "                    # Equivalent log form: log_p(x) > log(u) + log_q(x)\n"
@@ -155,13 +158,19 @@ _ACCEPT_TAIL = (
     "                                        tl.where((cactus_escape > 0.0) & (req_delta > 0.0),\n"
     "                                                 acc_mix, acc_cactus))\n"
 )
+# Fade over the total sequence length (#164, agent regime): `pos` is the absolute position (prompt +
+# output so far), so a 130k-170k prompt is past FADE_END from its first token and runs bit-exact stock.
+_SEQ_FADE = (
+    "                    # radiance cactus fade: delta falls to 0 over the total sequence length (#164)\n"
+    "                    # (prompt + output; cactus_prompt_len_ptr is unused, its launch arg is the fade switch)\n"
+    "                    seq_len = pos.to(tl.float32)\n"
+    "                    fade = tl.minimum(tl.maximum((cactus_fade_end - seq_len)\n"
+)
 _THRESHOLD = (
     _STOCK_TEST +
     "                    # radiance cactus: threshold (sly/patch_cactus.py): q_n -> h_n,\n"
     "                    # delta=0 stays the stock comparison, bit-exact.\n"
-    "                    # radiance cactus fade: delta falls to 0 over the output length (#164)\n"
-    "                    out_len = (pos - tl.load(cactus_prompt_len_ptr + req_state_idx)).to(tl.float32)\n"
-    "                    fade = tl.minimum(tl.maximum((cactus_fade_end - out_len)\n"
+    + _SEQ_FADE +
     "                                      / tl.maximum((cactus_fade_end - cactus_fade_start) * 1.0, 1.0), 0.0), 1.0)\n"
     "                    req_delta = tl.where(cactus_fade_end > 0, cactus_delta * fade, cactus_delta)\n"
     "                    q_n = tl.exp(target_logprob)\n"
@@ -191,11 +200,42 @@ apply_any(TARGET,
       "# radiance cactus escape mixture: acceptance",
       "cactus: Leviathan acceptance")
 
+# 1.9.0-1.12.0 faded over the output length (pos - prompt_len), which never engages for agent turns
+# (< 4096 output tokens on a 130k+ prompt). Shapes 2/3 above already write or keep the fade lines.
+apply(TARGET,
+      "                    # radiance cactus fade: delta falls to 0 over the output length (#164)\n"
+      "                    out_len = (pos - tl.load(cactus_prompt_len_ptr + req_state_idx)).to(tl.float32)\n"
+      "                    fade = tl.minimum(tl.maximum((cactus_fade_end - out_len)\n",
+      _SEQ_FADE,
+      "# radiance cactus fade: delta falls to 0 over the total sequence length",
+      "cactus fade: total sequence length")
+
 # vLLM 0.32.0 inserts watermarking_skip_mask between watermarking and watermark_key, so the
 # cactus_delta wrapper arg anchors on the skip-mask + watermark_key tail (unique in the file).
 # The old shape stays for the launchers patching older images.
+# vLLM 0.34.0 adds fly_window_size / fly_entropy_threshold / fly_entropy_top_k /
+# skip_masked_vocab_blocks after watermark_key, before the return type.
 apply_any(TARGET,
       [
+      (
+      "    watermarking: torch.Tensor | None = None,\n"
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      "    fly_window_size: int = 0,\n"
+      "    fly_entropy_threshold: float = 0.3,\n"
+      "    fly_entropy_top_k: int = 3,\n"
+      "    skip_masked_vocab_blocks: bool = False,\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n",
+      "    watermarking: torch.Tensor | None = None,\n"
+      "    watermarking_skip_mask: torch.Tensor | None = None,\n"
+      "    watermark_key: int | None = None,\n"
+      "    fly_window_size: int = 0,\n"
+      "    fly_entropy_threshold: float = 0.3,\n"
+      "    fly_entropy_top_k: int = 3,\n"
+      "    skip_masked_vocab_blocks: bool = False,\n"
+      "    cactus_delta: float = CACTUS_DELTA,  # radiance cactus: wrapper arg (sly/patch_cactus.py)\n"
+      ") -> tuple[torch.Tensor, torch.Tensor]:\n"
+      ),
       (
       "    watermarking_skip_mask: torch.Tensor | None = None,\n"
       "    watermark_key: int | None = None,\n"

@@ -108,6 +108,11 @@ apply(M,
 '''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # FlashInfer ReplaySSM migrates temporal state through its ring materializer.
+    # Skip the generic temporal copy in that case so it cannot overwrite the
+    # ReplaySSM-owned transition; canonical convolution state still needs the
+    # generic snapshot at the same block boundary.
+    SKIP_TEMPORAL_STATE_COPY: tl.constexpr = False,
     # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
     # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
     # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
@@ -118,6 +123,11 @@ apply(M,
 '''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # FlashInfer ReplaySSM migrates temporal state through its ring materializer.
+    # Skip the generic temporal copy in that case so it cannot overwrite the
+    # ReplaySSM-owned transition; canonical convolution state still needs the
+    # generic snapshot at the same block boundary.
+    SKIP_TEMPORAL_STATE_COPY: tl.constexpr = False,
     # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
     # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
     # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
@@ -166,6 +176,7 @@ apply_any(M,
 apply(M,
 '''    CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
+    ZERO_TEMPORAL_TOKEN_BIAS: tl.constexpr = False,
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
@@ -174,6 +185,7 @@ apply(M,
 ''',
 '''    CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
+    ZERO_TEMPORAL_TOKEN_BIAS: tl.constexpr = False,
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
@@ -185,6 +197,33 @@ apply(M,
 # note); old shape kept for the launchers.
 apply_any(M,
 [
+(
+'''    token_bias = tl.load(token_bias_ptr + req_idx)
+    if ZERO_TEMPORAL_TOKEN_BIAS:
+        conv_width = tl.load(state_conv_widths_ptr + state_idx)
+        token_bias = tl.where(conv_width > 0, token_bias, 0)
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_col,
+        dst_col,
+        token_bias,
+''',
+'''    if LAZY_TEMPORAL:  # radiance lazy gdn pre-skip
+        if tl.load(state_conv_widths_ptr + state_idx) == 0:
+            return
+    token_bias = tl.load(token_bias_ptr + req_idx)
+    if ZERO_TEMPORAL_TOKEN_BIAS:
+        conv_width = tl.load(state_conv_widths_ptr + state_idx)
+        token_bias = tl.where(conv_width > 0, token_bias, 0)
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        src_col,
+        dst_col,
+        token_bias,
+'''
+),
 (
 '''    token_bias = tl.load(token_bias_ptr + req_idx)
     _copy_mamba_state_block(
@@ -250,15 +289,14 @@ apply(M,
 apply(M,
 '''        if num_reqs == 0 or not self.is_initialized:
             return
-
-        # Initialize output to current values (unchanged unless src==dst)
+        total_states = self.num_states
 ''',
 '''        if num_reqs == 0 or not self.is_initialized:
             return
         if _radiance_lazy():  # radiance lazy gdn v1
             raise RuntimeError("RADIANCE_GDN_LAZY needs the V2 model runner (align postprocess)")
 
-        # Initialize output to current values (unchanged unless src==dst)
+        total_states = self.num_states
 ''', SENT + " v1", "mamba_utils: V1 postprocess refuses lazy")
 # precopy: Triton (conv only) then materialize
 apply(M,
@@ -267,6 +305,7 @@ apply(M,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
+            ZERO_TEMPORAL_TOKEN_BIAS=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 ''',
@@ -275,6 +314,7 @@ apply(M,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
+            ZERO_TEMPORAL_TOKEN_BIAS=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
             LAZY_TEMPORAL=self._radiance_lazy_temporal,
         )
@@ -302,11 +342,13 @@ apply(M,
 apply(M,
 '''            HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
+            SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 ''',
 '''            HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
+            SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
             LAZY_TEMPORAL=self._radiance_lazy_temporal,  # radiance lazy gdn postalign-flag
         )

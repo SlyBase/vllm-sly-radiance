@@ -53,23 +53,33 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 @triton.jit
 def gumbel_block_argmax(logits, block, mask, resample_token_idx, expanded_idx_mapping_ptr, temp_ptr, seed_ptr,
                         pos_ptr, logits_cache_ptr, logits_cache_stride_0, logits_cache_stride_1,
-                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride, vocab_size,
+                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride,
+                        logits_cache_row_mapping_ptr, vocab_size,
                         IS_DRAFTING: tl.constexpr, APPLY_TEMPERATURE: tl.constexpr, USE_FP64: tl.constexpr,
                         PER_TOKEN_COL: tl.constexpr = False):
-    # signature of vLLM 0.32.0 sample/gumbel.py
+    # signature of vLLM 0.34.0 sample/gumbel.py
     # Stand-in: plain argmax; only the accepted counts are compared.
     return tl.max(tl.where(mask, logits, float("-inf")), axis=0, return_indices=True)
 
 
 _stub("vllm.triton_utils", tl=tl, tldevice=tl.math, triton=triton)
-_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32)
+@triton.jit
+def spec_step_seed(seed, step):
+    # vLLM 0.34 sample/gumbel.py: mix the spec step into the seed's high bits
+    return seed ^ (tl.cast(step, tl.int64) << 32)
+
+
+_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32,
+      spec_step_seed=spec_step_seed)
 _stub("vllm.v1.worker.gpu.sample.watermark", philox_gumbel_block_argmax=None)
+_stub("vllm.v1.worker.gpu.spec_decode.draft_logits", DraftLogitsCache=object, draft_logits_row=None)
+_stub("vllm.v1.worker.gpu.spec_decode.fly", compute_fly_entropy=None)
 
 KNOBS = ("RADIANCE_CACTUS_DELTA", "RADIANCE_CACTUS_FADE_START", "RADIANCE_CACTUS_FADE_END",
          "RADIANCE_CACTUS_CAP_R", "RADIANCE_CACTUS_ESCAPE", "RADIANCE_NSD")
-K, VOCAB, POS0 = 3, 9000, 100
+K, VOCAB = 3, 9000
 Q = 0.6
-# slot -> output length at the first verified position (prompt length = POS0 - out)
+# slot -> sequence length at the first verified position (prompt length 0: the fade runs over pos)
 OUT0 = [0, 4, 9, 11, 13, 20, 30, 40]
 SLOTS = len(OUT0)
 
@@ -103,10 +113,10 @@ def batch():
     logits[:, 17] = math.log(Q * (VOCAB - 1) / (1 - Q))      # q(top) = 0.6
     tokens = torch.full((n, kp1), 17, dtype=torch.int64)
     cu = torch.arange(n + 1, dtype=torch.int32) * kp1
-    pos = (torch.arange(kp1, dtype=torch.int64) + POS0).repeat(n)
+    pos = (torch.arange(kp1, dtype=torch.int64) + torch.tensor(OUT0).unsqueeze(1)).reshape(-1)
     idx = torch.arange(n, dtype=torch.int32)
     seed = torch.arange(SLOTS, dtype=torch.int64) * 7919 + 13
-    prompt_len = torch.tensor([POS0 - o for o in OUT0], dtype=torch.int32)
+    prompt_len = torch.zeros(SLOTS, dtype=torch.int32)
     return (logits, tokens.reshape(-1), cu, pos, idx, idx.repeat_interleave(kp1),
             torch.arange(kp1, dtype=torch.int32).repeat(n), seed, prompt_len)
 

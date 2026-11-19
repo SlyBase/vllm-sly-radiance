@@ -63,17 +63,20 @@ apply(NEXT,
       "        q, k, v, gate = self._project_qkv_gate(qkv, positions)\n"
       "        attn_output = self.attn(q, k, v)\n"
       "        if gate is not None:\n"
-      "            attn_output = attn_output * torch.sigmoid(gate)\n",
+      "            if not self.use_fused_output_gate:\n"
+      "                attn_output = attn_output * torch.sigmoid(gate)\n",
       "        q, k, v, gate = self._project_qkv_gate(\n"
       "            qkv, positions, gate_view=_RADIANCE_ATTN_GATE_VIEW\n"
       "        )\n"
       "        attn_output = self.attn(q, k, v)\n"
-      "        if gate is not None and gate.dim() == attn_output.dim() + 1:\n"
-      "            # radiance gate view (sly/patch_attn_gate_view.py): the same multiply, per head\n"
-      "            attn_output = (attn_output.view(gate.shape) * torch.sigmoid(gate)).view(\n"
-      "                attn_output.shape\n"
-      "            )\n"
-      "        elif gate is not None:\n"
-      "            attn_output = attn_output * torch.sigmoid(gate)\n",
+      "        if gate is not None:\n"
+      "            if not self.use_fused_output_gate:\n"
+      "                if gate.dim() == attn_output.dim() + 1:\n"
+      "                    # radiance gate view (sly/patch_attn_gate_view.py): the same multiply, per head\n"
+      "                    attn_output = (attn_output.view(gate.shape) * torch.sigmoid(gate)).view(\n"
+      "                        attn_output.shape\n"
+      "                    )\n"
+      "                else:\n"
+      "                    attn_output = attn_output * torch.sigmoid(gate)\n",
       "gate_view=_RADIANCE_ATTN_GATE_VIEW",
       "qwen3_next: per-head gate multiply")

@@ -7,8 +7,9 @@ choices -- they are *derived* from those two, and this script is the one place t
 
 Inputs
   * Dockerfile ARGs VLLM_VERSION and ROCM_BASE (the two things Renovate bumps),
-  * vLLM's own tag: docker/Dockerfile.rocm_base (PYTORCH_BRANCH release/X.Y, TRITON_BRANCH commit,
-    PYTORCH_VISION_BRANCH, AITER_BRANCH), requirements/common.txt (transformers range) and
+  * vLLM's own tag: docker/Dockerfile.rocm_base (<= 0.32: PYTORCH_BRANCH release/X.Y,
+    PYTORCH_VISION_BRANCH; >= 0.34: TORCH_VERSION / TORCHVISION_VERSION pins; both: TRITON_BRANCH
+    commit, AITER_BRANCH), requirements/common.txt (transformers range) and
     requirements/rocm.txt,
   * AMD's wheel index https://stable.repo.amd.com/rocm/whl-next (redirects to /rocm/pytorch/whl-next):
     cp312 linux wheels torch X.Y.*+rocm<ROCM>, amd-torch-device-<arch> of the same version,
@@ -16,9 +17,10 @@ Inputs
   * PyPI: the newest transformers release inside vLLM's range.
 
 Rules (what "derived" means; each is one function below)
-  torch         newest X.Y.* on the AMD index for rocm<ROCM> (X.Y from PYTORCH_BRANCH `release/X.Y`)
+  torch         newest X.Y.* on the AMD index for rocm<ROCM> (X.Y from PYTORCH_BRANCH `release/X.Y`,
+                or from the TORCH_VERSION pin on vLLM >= 0.34)
   triton        the AMD wheel built from the commit vLLM's TRITON_BRANCH names (prefix match)
-  torchvision   newest 0.Y.* on the AMD index (0.Y from PYTORCH_VISION_BRANCH)
+  torchvision   newest 0.Y.* on the AMD index (0.Y from PYTORCH_VISION_BRANCH or TORCHVISION_VERSION)
   aiter         vLLM's AITER_BRANCH, exactly
   transformers  newest PyPI release inside the range of requirements/common.txt
   TORCH_AMD_ROCM  the ROCm version of ROCM_BASE (the wheel's rocm_sdk check_version must match)
@@ -215,16 +217,29 @@ def parse_rocm_base(text: str) -> dict:
         return a[name]
 
     out: dict = {}
-    val, com = need("PYTORCH_BRANCH")
-    m = re.search(r"release/(\d+)\.(\d+)", f"{val} {com}") or re.fullmatch(r"v?(\d+)\.(\d+)\.\d+", val)
-    if not m:
-        raise Incompatible(f"PYTORCH_BRANCH='{val}' ({com or 'no comment'}): no release/X.Y to derive torch from")
+    if "PYTORCH_BRANCH" in a:
+        val, com = a["PYTORCH_BRANCH"]
+        m = re.search(r"release/(\d+)\.(\d+)", f"{val} {com}") or re.fullmatch(r"v?(\d+)\.(\d+)\.\d+", val)
+        if not m:
+            raise Incompatible(f"PYTORCH_BRANCH='{val}' ({com or 'no comment'}): no release/X.Y to derive torch from")
+    else:
+        # vLLM >= 0.34 dropped PYTORCH_BRANCH and pins TORCH_VERSION=<x.y.z>+rocm<a.b.c> directly.
+        val, _ = need("TORCH_VERSION")
+        m = re.match(r"v?(\d+)\.(\d+)\.\d+", val)
+        if not m:
+            raise Incompatible(f"TORCH_VERSION='{val}': no x.y.z to derive the torch series from")
     out["torch_series"] = f"{m.group(1)}.{m.group(2)}"
 
-    val, _ = need("PYTORCH_VISION_BRANCH")
-    m = re.fullmatch(r"v?(\d+)\.(\d+)\.\d+(?:[a-z]+\d*)?", val)
-    if not m:
-        raise Incompatible(f"PYTORCH_VISION_BRANCH='{val}' is not a release tag")
+    if "PYTORCH_VISION_BRANCH" in a:
+        val, _ = a["PYTORCH_VISION_BRANCH"]
+        m = re.fullmatch(r"v?(\d+)\.(\d+)\.\d+(?:[a-z]+\d*)?", val)
+        if not m:
+            raise Incompatible(f"PYTORCH_VISION_BRANCH='{val}' is not a release tag")
+    else:
+        val, _ = need("TORCHVISION_VERSION")
+        m = re.match(r"v?(\d+)\.(\d+)\.\d+", val)
+        if not m:
+            raise Incompatible(f"TORCHVISION_VERSION='{val}': no x.y.z to derive the torchvision series from")
     out["vision_series"] = f"{m.group(1)}.{m.group(2)}"
 
     val, com = need("TRITON_BRANCH")

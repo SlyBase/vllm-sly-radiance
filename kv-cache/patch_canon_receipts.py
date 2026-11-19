@@ -67,9 +67,13 @@ apply(POOL,
       "canon receipts: gate constant")
 
 apply(POOL,
-      "        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()\n"
+      "        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap(\n"
+      "            self.blocks\n"
+      "        )\n"
       "        self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}\n",
-      "        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()\n"
+      "        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap(\n"
+      "            self.blocks\n"
+      "        )\n"
       "        self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}\n"
       "        # radiance (patch_canon_receipts.py): ids of cached receipt-only blocks.\n"
       "        self._radiance_receipts: set[int] = set()\n",
@@ -137,9 +141,9 @@ apply(POOL,
       "canon receipts: flag follows move_block_hashes")
 
 apply(POOL,
-      "        self.cached_block_hash_to_block = BlockHashToBlockMap()\n"
+      "        self.cached_block_hash_to_block.clear()\n"
       "        self.cached_block_hashes_by_block.clear()\n",
-      "        self.cached_block_hash_to_block = BlockHashToBlockMap()\n"
+      "        self.cached_block_hash_to_block.clear()\n"
       "        self.cached_block_hashes_by_block.clear()\n"
       "        self._radiance_receipts.clear()  # radiance (patch_canon_receipts.py)\n",
       "self._radiance_receipts.clear()",

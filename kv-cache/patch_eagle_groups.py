@@ -101,6 +101,17 @@ KVU = VLLM / "v1" / "core" / "kv_cache_utils.py"
 
 print("[radiance] R3.13a eagle-group annotation")
 
+# vLLM 0.34: the eagle annotation moved to kv_cache_planning.py and uses
+# spec.is_draft natively (attn_module.is_draft_layer tags every draft spec),
+# so the positional fallback this patch re-enables is no longer needed.
+if skip_if_upstream(
+    KVU,
+    "eagle_proof_margin",
+    "A kv_cache_utils: eagle annotation moved to kv_cache_planning.py",
+    "vLLM 0.34 tags draft groups via spec.is_draft natively (attn_module.is_draft_layer)",
+):
+    raise SystemExit(0)
+
 # --- A. remove the DeepSeek-only gate -------------------------------------------------
 # Three shapes of the same rule. vLLM 0.27.1: one annotator, `_annotate_eagle_groups_deepseek_v4`,
 # gated on the spec's model_version. vLLM >= 0.30: `_annotate_eagle_groups` runs on every

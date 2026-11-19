@@ -62,7 +62,14 @@ REG_HYB_NEW = REG_HYB_OLD + '    R4D_HYBRID = "radiance_r4d_hybrid_attn.R4DHybri
 
 
 # ---- 2. the gated-delta-net layer ------------------------------------------------------------
-LAYER_IMPORT_OLD = "from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata\n"
+# Re-anchored for vLLM 0.34.0: the GDNAttentionMetadata import became multi-line (gained
+# FLASHINFER_GDN_CHECKPOINT_ALIGNMENT); anchor on the full 4-line block.
+LAYER_IMPORT_OLD = (
+    "from vllm.v1.attention.backends.gdn_attn import (\n"
+    "    FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,\n"
+    "    GDNAttentionMetadata,\n"
+    ")\n"
+)
 LAYER_IMPORT_NEW = (
     LAYER_IMPORT_OLD
     + "\n"

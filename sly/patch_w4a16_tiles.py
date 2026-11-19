@@ -1127,8 +1127,25 @@ apply_any(F,
 # vLLM 0.32.0: the skinny limit is now MEDIUM_SKINNY_LIMIT_ELEMENTS (1.2x the LDS elements,
 # see _pad_activation_rows); was LDS_CAPACITY_ELEMENTS. `w_q.dim() == 2` keeps the HIP
 # skinny path off the tiled layout regardless of the constant.
+# vLLM 0.34.0: the skinny condition is now parenthesized and OR'd with _on_gfx115x().
 apply_any(F,
       [
+      (
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0]\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and (\n'
+      '        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()\n'
+      '    ):\n',
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
+      '\n'
+      '    if M <= MAX_SKINNY_BATCH_SIZE and (\n'
+      '        (K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()) and w_q.dim() == 2\n'
+      '    ):\n'
+      ),
       (
       '    M = x_2d.shape[0]\n'
       '    K = x_2d.shape[1]\n'
@@ -1153,7 +1170,7 @@ apply_any(F,
       '\n'
       '    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS and w_q.dim() == 2:\n'
       )],
-      'K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS and w_q.dim() == 2:',
+      'N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled',
       'rdna_hybrid_w4a16: apply op handles tiled weights')
 apply(F,
       '    M = x_2d.size(0)\n'
@@ -1202,10 +1219,12 @@ apply(F,
 apply(F,
       '            cu_count,\n'
       '            c.group_size,\n'
+      '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
       '        )\n'
       '        return output.reshape(out_shape)\n',
       '            cu_count,\n'
       '            c.group_size,\n'
+      '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
       '        )\n'
       '        if getattr(layer, "_radiance_silu", False):\n'
       '            # radiance: rows interleaved for the fused MLP; a plain caller gets [gate | up] back\n'
