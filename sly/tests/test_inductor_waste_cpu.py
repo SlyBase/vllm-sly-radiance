@@ -2,8 +2,8 @@
 """CPU tests for the gate view (sly/patch_attn_gate_view.py) and the aux-from-residual capture
 (sly/patch_dflash_aux_residual.py), plus the compile-key and loop wiring of both and of patch_gdn_glue.py.
 
-Both patches claim the same bits as the stock path, so the tests run the patched vLLM 0.32.0 code
-(fixtures/qwen3_next_v0.32.0.py.txt, verbatim) with small CPU modules, knob on against knob off,
+Both patches claim the same bits as the stock path, so the tests run the patched vLLM 0.34.0 code
+(fixtures/qwen3_next_v0.34.0.py.txt, verbatim) with small CPU modules, knob on against knob off,
 eager and under torch.compile, and compare with torch.equal:
 
   * gate view: the attention output is bit-identical, and with a graph break where vLLM splits at
@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci"))
 from patch_list import patch_names  # noqa: E402
 
-FIXTURE = ROOT / "sly" / "tests" / "fixtures" / "qwen3_next_v0.32.0.py.txt"
+FIXTURE = ROOT / "sly" / "tests" / "fixtures" / "qwen3_next_v0.34.0.py.txt"
 REL = Path("vllm/model_executor/models/qwen3_next.py")
 GATE = ROOT / "sly" / "patch_attn_gate_view.py"
 AUX = ROOT / "sly" / "patch_dflash_aux_residual.py"
@@ -66,7 +66,7 @@ def _patched_source():
 _PP = NS(is_first_rank=True, is_last_rank=True)
 
 
-class _EagleMixin:  # vllm/model_executor/models/interfaces.py, v0.32.0
+class _EagleMixin:  # vllm/model_executor/models/interfaces.py, v0.34.0
     def _maybe_add_hidden_state(self, aux_hidden_states, layer_idx, hidden_states, residual):
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -141,6 +141,7 @@ def _attention(ns, graph_break=False):
             self.num_heads, self.num_kv_heads, self.head_dim = H, KVH, D
             self.q_size, self.kv_size = H * D, KVH * D
             self.attn_output_gate, self.use_fused_qk_norm_rope_gate = True, False
+            self.use_fused_output_gate = False  # vLLM 0.34: fused output gate stays off on ROCm
             self.q_norm, self.k_norm = _RMS(D, 1), _RMS(D, 2)
             self.wqkv = torch.nn.Parameter(torch.randn(HID, 2 * H * D + 2 * KVH * D, generator=g).to(BF) / 8,
                                            requires_grad=False)

@@ -20,7 +20,7 @@ filter (json.loads on a string, NOOP otherwise). It is a superset-safe addition:
 no existing template references `from_json`, so nothing
 else changes.
 
-Injection point (transformers 5.12.x): right where the other filters/globals are
+Injection point (transformers 5.22.x): right where the other filters/globals are
 attached, just before `return jinja_env.from_string(chat_template)`.
 
 Idempotent; anchor-count-guarded; ast.parse guard before writing. NOOP once applied."""
@@ -37,6 +37,8 @@ ANCHOR = (
     '    jinja_env.filters["tojson"] = tojson\n'
     '    jinja_env.globals["raise_exception"] = raise_exception\n'
     '    jinja_env.globals["strftime_now"] = strftime_now\n'
+    '    jinja_env.globals["dict"] = TemplateDict()\n'
+    '    jinja_env.globals["namespace"] = TemplateNamespace\n'
     "    return jinja_env.from_string(chat_template)\n"
 )
 NEW = (
@@ -52,6 +54,8 @@ NEW = (
     '    jinja_env.filters["from_json"] = from_json\n'
     '    jinja_env.globals["raise_exception"] = raise_exception\n'
     '    jinja_env.globals["strftime_now"] = strftime_now\n'
+    '    jinja_env.globals["dict"] = TemplateDict()\n'
+    '    jinja_env.globals["namespace"] = TemplateNamespace\n'
     "    return jinja_env.from_string(chat_template)\n"
 )
 SENTINEL = 'jinja_env.filters["from_json"] = from_json'
