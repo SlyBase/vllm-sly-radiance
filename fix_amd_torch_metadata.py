@@ -5,7 +5,11 @@ AMD's whl-next torch (and its amd-torch-device-<arch> wheel) declare `rocm[libra
 `rocm-bootstrap`, `rocm-sdk-device-<arch>` and an exact `triton==3.8.0+git...`. This image takes
 ROCm from /opt/rocm (rocm_sdk/ preloads from there) and pins triton itself, so none of those are
 installed -- and pip then treats the installed torch as unsatisfied and replaces it with the newest
-PyPI torch (a CUDA build) the first time anything that depends on torch is resolved. Only METADATA
+PyPI torch (a CUDA build) the first time anything that depends on torch is resolved. The device
+extras are dropped too: the stack stage installs exactly the one amd-torch-device-<arch> /
+amd-torchvision-device-<arch> wheel it needs with --no-deps, and AMD's gfx12xx metadata pairs every
+device extra with a bogus second requirement `amd-torch-device-gfx12-0` (a package that does not
+exist), which breaks `torch[device-gfx1201]` resolution from vLLM 0.34 on. Only METADATA
 and RECORD change; every binary in the wheel stays byte-identical.
 
     fix_amd_torch_metadata.py <triton-version> <in.whl> <out-dir>
@@ -17,7 +21,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-DROP = re.compile(r"^Requires-Dist:\s*(rocm(\[|\s|=|$)|rocm-bootstrap|rocm-sdk-|triton(\s|=|$))", re.I)
+DROP = re.compile(r"^Requires-Dist:\s*(rocm(\[|\s|=|$)|rocm-bootstrap|rocm-sdk-|triton(\s|=|$)"
+                  r"|amd-torch-device-|amd-torchvision-device-)", re.I)
 
 
 def record_line(name, data):
