@@ -12,6 +12,16 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+### Fixed
+- **vLLM 0.34 import rename in `sly/patch_quark_mxfp4.py`:** the injected RDNA gate now imports
+  `is_aiter_found_and_supported_on_rdna` (0.34 renamed `..._on_rdna4`, covering gfx11 + gfx12).
+  With the old name the `quark_online_quant` plugin, the radiance load hook and the model-registry
+  inspection subprocess all died at startup on the 1.13.0 image (engine crash loop). Verified in the
+  image (CPU + GPU enumeration): `load_general_plugins()` and the registry import succeed, all radiance
+  hooks install. Known open port: `radiance_draft` (dynamic draft) still imports the removed
+  `vllm.v1.spec_decode.llm_base_proposer` and fails soft (dynamic draft disabled, stock k); the 0.34
+  speculator architecture (`v1/worker/gpu/spec_decode/dflash2/`) needs a real port, not a rename.
+
 ## [1.13.0] - 2026-11-19
 
 ### Added

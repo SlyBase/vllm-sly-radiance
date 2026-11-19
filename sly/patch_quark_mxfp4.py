@@ -43,7 +43,7 @@ Anchor-by-anchor findings (vLLM 0.29.0 source, tag v0.29.0):
          return False, "AITER not found or not supported on the current platform"
      at the end of is_supported() -- again gated on the CDNA-only check, independent of
      supports_mx(). Same fix as hunk 4: OR in vLLM 0.29.0's own native
-     `is_aiter_found_and_supported_on_rdna4()` (added upstream between 0.27 and 0.29 for a
+     `is_aiter_found_and_supported_on_rdna()` (added upstream between 0.27 and 0.29 for a
      different call site in _aiter_ops.py; reused here).
 
 Not touched here: patch_gfx1201.py's four hunks (gcn-arch env override, AITER CDNA-gate relax,
@@ -183,11 +183,12 @@ MODULE_GATE_NEW = (
     "# where HIP initialization is expected.\n"
     "# --- radiance (patch_quark_mxfp4.py): also define+register this op on gfx1201/RDNA4. gfx12\n"
     "# has no aiter CK build (is_aiter_found_and_supported() stays CDNA-only for that reason) but\n"
-    "# does have the Triton fp4 GEMM this op wraps -- is_aiter_found_and_supported_on_rdna4() is\n"
-    "# vLLM 0.29.0's own native predicate for exactly that distinction.\n"
-    "from vllm._aiter_ops import is_aiter_found_and_supported_on_rdna4\n"
+    "# does have the Triton fp4 GEMM this op wraps -- is_aiter_found_and_supported_on_rdna() is\n"
+    "# vLLM's own native predicate for exactly that distinction (0.29-0.32: ..._on_rdna4;\n"
+    "# 0.34 renamed it to ..._on_rdna, covering gfx11 + gfx12).\n"
+    "from vllm._aiter_ops import is_aiter_found_and_supported_on_rdna\n"
     "\n"
-    "if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4():\n"
+    "if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna():\n"
     "    from vllm.utils.torch_utils import direct_register_custom_op\n"
 )
 
@@ -200,9 +201,9 @@ FINAL_GATE_ANCHOR = (
 FINAL_GATE_NEW = (
     "        # --- radiance (patch_quark_mxfp4.py): OR in the RDNA4 analog, same reasoning as\n"
     "        # the module-scope gate above this class.\n"
-    "        from vllm._aiter_ops import is_aiter_found_and_supported_on_rdna4\n"
+    "        from vllm._aiter_ops import is_aiter_found_and_supported_on_rdna\n"
     "\n"
-    "        if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4():\n"
+    "        if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna():\n"
     "            return True, None\n"
     '        return False, "AITER not found or not supported on the current platform"\n'
 )
@@ -219,7 +220,7 @@ def main():
           "aiter.ops.triton.gemm.basic.gemm_afp4wfp4",
           "mxfp4: aiter moved-module + fp4 arch allowlist")
     apply(KA, MODULE_GATE_ANCHOR, MODULE_GATE_NEW,
-          "is_aiter_found_and_supported_on_rdna4",
+          "is_aiter_found_and_supported_on_rdna\n",
           "mxfp4: register gemm_with_dynamic_quant op on RDNA4")
     apply(KA, FINAL_GATE_ANCHOR, FINAL_GATE_NEW,
           "OR in the RDNA4 analog, same reasoning as",
