@@ -12,6 +12,28 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.13.4] - 2026-11-19
+
+### Fixed
+- **Two vLLM 0.34 request-time drifts that the accept gate flags (found by the marker audit of the
+  1.13.3 prod startup, after the owner-ordered release-readiness check):**
+  - **Lookup draft self-disabled** (`sly/radiance_lookup_draft.py`): 0.34's `speculator.draft_logits`
+    is a `DraftLogitsCache` object (`.values` in head_dtype bf16, `.row_mapping` None for replicated
+    TP=1), not the float32 tensor 0.32 exposed -> `dl.dtype` raised `AttributeError` and the lever
+    logged `off after an error` (a forbidden gate pattern). The override now resolves `.values`,
+    accepts bf16, and declines sharded caches (row != slot indexing). A plain tensor still works
+    (0.32); `Tensor.values` is a method, so the resolver keys on `isinstance(torch.Tensor)`.
+  - **Drafter attention tune declined** (`sly/radiance_attn_drafter.py`): 0.34 hands the DFlash
+    drafter's TRITON_ATTN an fp8 query (q/k/v all e4m3); the gate only accepted bf16 q, so the tune
+    never engaged and the required `drafter attn plan:` log never appeared. The gate now accepts fp8 q
+    (with `q_descale`), and the launch wires `Q_IS_FP8=True` + `q_scale=<q_descale>` into vLLM's own
+    `kernel_unified_attention` (only the launch shape is ours; `USE_FP8_Q_DESCALE` auto-derives from
+    `KV_QUANT_MODE==1`, TILE=32 already satisfies the fp8 P@V dot, stages=2 mirrors the stock fp8
+    head-128 launch). bf16 q is unchanged.
+  - TDD: `sly/tests/test_vllm034_request_drifts_cpu.py` (8 tests) RED against 1.13.3, GREEN here;
+    full suite 303 passed, 27 skipped; patch dryrun 183 hunks pass 2 NOOP.
+
+
 ## [1.13.3] - 2026-11-19
 
 ### Fixed

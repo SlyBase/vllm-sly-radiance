@@ -119,7 +119,7 @@ _REDUCE_ARGS = (
 
 # features vLLM's wrapper supports and this launch does not: any of them present -> vLLM's own launch
 _MUST_BE_NONE = ("alibi_slopes", "sinks", "mm_prefix_range", "rswa_prefix_lens", "rswa_window", "output_scale",
-                 "qq_bias", "k_scale_cache", "v_scale_cache", "q_descale")
+                 "qq_bias", "k_scale_cache", "v_scale_cache")
 
 
 def _gate(kw):
@@ -129,8 +129,10 @@ def _gate(kw):
         q, k, v = kw["q"], kw["k"], kw["v"]
         if kw.get("kv_quant_mode") != _state["fp8_per_tensor"]:
             return None, f"kv_quant_mode={kw.get('kv_quant_mode')}"
-        if q.dtype != _state["bf16"] or k.dtype != _state["fp8"] or v.dtype != _state["fp8"]:
+        if q.dtype not in (_state["bf16"], _state["fp8"]) or k.dtype != _state["fp8"] or v.dtype != _state["fp8"]:
             return None, f"dtypes q={q.dtype} k={k.dtype} v={v.dtype}"
+        if q.dtype == _state["fp8"] and kw.get("q_descale") is None:
+            return None, "fp8 query without q_descale"
         if q.dim() != 3 or q.shape[2] != HEAD or k.shape[3] != HEAD or q.stride(2) != 1:
             return None, f"shapes q={tuple(q.shape)} k={tuple(k.shape)} q_stride={tuple(q.stride(i) for i in range(q.dim()))}"
         kvh = k.shape[2]
@@ -164,6 +166,7 @@ def _params(kw):
 def _run(kw, window, max_q, nseq, causal):
     torch, TU = _state["torch"], _state["TU"]
     q, k, v, out = kw["q"], kw["k"], kw["v"], kw["out"]
+    q_is_fp8 = q.dtype == _state["fp8"]   # 0.34 hands the drafter an e4m3 query; vLLM's kernel reads it via Q_IS_FP8
     cu, seq, bt = kw["cu_seqlens_q"], kw["seqused_k"], kw["block_table"]
     block = v.shape[1]
     nq = q.shape[1]
@@ -183,7 +186,7 @@ def _run(kw, window, max_q, nseq, causal):
         output_ptr=out, segm_output_ptr=so, segm_max_ptr=sm, segm_expsum_ptr=se, query_ptr=q, key_cache_ptr=k,
         value_cache_ptr=v, sink_ptr=None, block_tables_ptr=bt2, seq_lens_ptr=seq2, alibi_slopes_ptr=None,
         qq_bias_ptr=None, k_scale_cache_ptr=None, v_scale_cache_ptr=None, scale=kw["softmax_scale"],
-        q_scale=None, k_scale=kw["k_descale"], v_scale=kw["v_descale"], out_scale=1.0, softcap=0,
+        q_scale=(kw.get("q_descale") if q_is_fp8 else None), k_scale=kw["k_descale"], v_scale=kw["v_descale"], out_scale=1.0, softcap=0,
         num_query_heads=nq, num_queries_per_kv=NQPKV, block_table_stride=bt2.stride(0),
         query_stride_0=q.stride(0), query_stride_1=q.stride(1), output_stride_0=out.stride(0),
         output_stride_1=out.stride(1), qq_bias_stride_0=0, BLOCK_SIZE=block, TILE_SIZE=TILE, HEAD_SIZE=HEAD,
@@ -196,8 +199,8 @@ def _run(kw, window, max_q, nseq, causal):
         stride_v_cache_3=v.stride(3), stride_ks_blk=None, stride_ks_slot=None, stride_ks_head=None,
         stride_vs_blk=None, stride_vs_slot=None, stride_vs_head=None, query_start_len_ptr=cu, BLOCK_Q=bq,
         num_seqs=nseq, BLOCK_M=BLOCK_M, NUM_SEGMENTS_PER_SEQ=segs, USE_FP8=False, IS_3D=True,
-        KV_QUANT_MODE=_state["fp8_per_tensor"], Q_IS_FP8=False, CHUNK_LOOKBACK=-1, CHUNK_SIZE=-1, USE_TD=False,
-        USE_TD_QO=False, MM_PREFIX_CLAMP_SW=False, num_warps=WARPS, num_stages=STAGES)
+        KV_QUANT_MODE=_state["fp8_per_tensor"], Q_IS_FP8=q_is_fp8, CHUNK_LOOKBACK=-1, CHUNK_SIZE=-1, USE_TD=False,
+        USE_TD_QO=False, MM_PREFIX_CLAMP_SW=False, num_warps=WARPS, num_stages=(2 if q_is_fp8 else STAGES))
     TU.reduce_segments[(q.shape[0], nq)](
         output_ptr=out, segm_output_ptr=so, segm_max_ptr=sm, segm_expsum_ptr=se, seq_lens_ptr=seq2,
         num_seqs=nseq, num_query_heads=nq, out_scale_inv=1.0, output_stride_0=out.stride(0),
