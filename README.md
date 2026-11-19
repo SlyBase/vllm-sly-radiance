@@ -1,12 +1,12 @@
 # vllm-sly-radiance
 
 [![Release](https://img.shields.io/github/v/release/SlyBase/vllm-sly-radiance?label=release)](https://github.com/SlyBase/vllm-sly-radiance/releases/latest)
-[![Image](https://img.shields.io/badge/ghcr.io-1.8.1--rocm10.1-blue?logo=docker)](https://github.com/SlyBase/vllm-sly-radiance/pkgs/container/vllm-sly-radiance)
+[![Image](https://img.shields.io/badge/ghcr.io-1.13.4--rocm10.1-blue?logo=docker)](https://github.com/SlyBase/vllm-sly-radiance/pkgs/container/vllm-sly-radiance)
 [![CI](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/ci.yml)
 [![Build](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/SlyBase/vllm-sly-radiance/actions/workflows/build.yml)
 ![GPU](https://img.shields.io/badge/GPU-R9700%20gfx1201-red)
 ![ROCm](https://img.shields.io/badge/ROCm-10.1-green)
-![vLLM](https://img.shields.io/badge/vLLM-0.32.0-orange)
+![vLLM](https://img.shields.io/badge/vLLM-0.34.0-orange)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/slydlake)
 
 **The fastest way to run Qwen3.8-27B on one AMD Radeon AI PRO R9700.** A vLLM image for gfx1201 (RDNA4)
@@ -16,7 +16,7 @@ with hand-written MXFP4 kernels, DFlash2 speculative decoding and up to 262k con
 8 concurrent requests. Every number is measured and reproducible (see [Performance](#performance)).
 
 ```bash
-docker pull ghcr.io/slybase/vllm-sly-radiance:1.8.1-rocm10.1
+docker pull ghcr.io/slybase/vllm-sly-radiance:1.13.4-rocm10.1
 ```
 
 ## Contents
