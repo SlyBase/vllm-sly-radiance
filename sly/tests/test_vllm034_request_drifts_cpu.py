@@ -28,6 +28,11 @@ sys.path.insert(0, str(ROOT / "sly"))
 import radiance_attn_drafter as D
 import radiance_lookup_draft as L
 
+# CI's cpu-tests env has torch but no triton; _prepare only needs next_power_of_2 (pure math, not the
+# behavior under test). Stub it so the cache-resolution logic runs there too. Only this file imports L.
+if L.triton is None:
+    L.triton = types.SimpleNamespace(next_power_of_2=lambda x: 1 << (int(x) - 1).bit_length())
+
 
 class _Launch:
     """A triton-kernel stand-in: kernel[grid](*a, **kw) captures the launch kwargs."""
