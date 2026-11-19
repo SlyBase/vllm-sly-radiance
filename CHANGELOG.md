@@ -12,6 +12,19 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-11-19
+
+### Fixed
+- **Adaptive verify width on vLLM 0.34 (`sly/patch_adaptive_width.py`):** the injected
+  `_radiance_aw_extra_descs` call referenced the `capture_sizes` / `max_cg_capture_size` locals that
+  0.34's restructured `_init_candidates` removed -> `NameError` at KV-cache init, engine crash loop
+  (found in the owner-ordered local prod test of 1.13.1; prod reverted to 1.12.0). The 0.34 shape now
+  derives the decode token counts from the built descriptors and the cap from
+  `decode_cudagraph_capture_max_tokens(compilation_config)`; the <= 0.32 shape is kept. Audited the
+  patch's other 0.34 call sites (scheduler hooks, dispatch guard, mamba_hybrid capture): names in
+  scope. Patch dryrun 183 hunks, pass 2 all NOOP; patched cudagraph_utils parses.
+
+
 ## [1.13.1] - 2026-11-19
 
 ### Fixed

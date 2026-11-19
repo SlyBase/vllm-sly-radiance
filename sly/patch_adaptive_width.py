@@ -285,15 +285,36 @@ def main():
         "async_scheduler.py hook",
     )
 
-    # cudagraph descriptors
-    apply(
-        CG,
-        "        for mode, descs in descs_by_mode.items():\n",
+    # cudagraph descriptors. vLLM 0.34 restructured _init_candidates: the capture_sizes and
+    # max_cg_capture_size locals are gone. Derive the decode token counts from the descriptors
+    # already built and the cap from decode_cudagraph_capture_max_tokens(compilation_config)
+    # (both in scope there). The 0.34 shape anchors on the descs_by_mode build loop, unique to
+    # 0.34; the bare-loop shape stays for <= 0.32. An already-patched older file NOOPs on the
+    # sentinel before either anchor is tried.
+    _CG_LOOP = "        for mode, descs in descs_by_mode.items():\n"
+    _CG_PRE_034 = (
+        "        for desc in decode_descs + token_keyed_descs:\n"
+        "            descs_by_mode[desc.cg_mode].append(desc)\n"
+    )
+    _CG_CALL_034 = (
+        "        _radiance_aw_extra_descs(\n"
+        "            self, descs_by_mode, decode_mode,\n"
+        "            sorted({d.num_tokens for d in descs_by_mode.get(decode_mode, [])}),\n"
+        "            max_decode_tokens,\n"
+        "            decode_cudagraph_capture_max_tokens(compilation_config),\n"
+        "            separate_decode_routine,\n"
+        "        )\n"
+    )
+    _CG_CALL_032 = (
         "        _radiance_aw_extra_descs(\n"
         "            self, descs_by_mode, decode_mode, capture_sizes, max_decode_tokens,\n"
         "            max_cg_capture_size, separate_decode_routine,\n"
         "        )\n"
-        "        for mode, descs in descs_by_mode.items():\n",
+    )
+    apply_any(
+        CG,
+        [(_CG_PRE_034 + _CG_LOOP, _CG_PRE_034 + _CG_CALL_034 + _CG_LOOP),
+         (_CG_LOOP, _CG_CALL_032 + _CG_LOOP)],
         "_radiance_aw_extra_descs(\n",
         "cudagraph_utils.py descriptors",
     )
