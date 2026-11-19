@@ -16,6 +16,25 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 - **KV-cache: the RAM-tier eviction policy is now an env knob (`KVCACHE_EVICT_POLICY`), with ARC available as an opt-in.** `serve-mxfp4.sh` injects `KVCACHE_EVICT_POLICY` (default `lru`, the stock behavior) into the `--kv-transfer-config` at launch for **both** `KVCACHE=ram` and `KVCACHE=disk`; `arc` (vLLM-native) keeps a twice-seen prefix in its frequent set and matters where the RAM tier is the retention boundary. *Measured* (R9700, RAM-only A/B, `ci/tier_ab.sh`, production checkpoint + warm compile cache, RAM tier 4 GiB ≈ 296 chunks, reused main + one flush round of 24 concurrent bursts sized to overflow the tier): `arc` serves the recurrent main across the flush burst where `lru` recomputes it — `external_kv_transfer` **+28,160** vs `lru` **+14,080**, flush-resume TTFT **6.14 s → 0.98 s** (~6×). Ran at the box's standing **210 W** cap (the harness reads power, not sets it; AGENTS.md mandates 300 W for A/Bs) — the delta is a 6× TTFT / 2× token gap, not a thin margin, so the cap does not affect the conclusion. Kept **opt-in** (default stays `lru`) until the production launch is re-decided. Earlier all-null runs were a test-sizing bug (burst below tier capacity), not a policy null; the sizing rule and the 1/2/4 GiB sweep are in [docs/TECHNICAL.md](docs/TECHNICAL.md#kv-cache-ram-tier-eviction-policy-kvcache_evict_policy-unreleased).
 - **KV-cache effectiveness consumers: `kv-cache/tools/kvvalidate.py` and `kv-cache/tools/tierreport.py`** (ported from zzpanic's `qwen3.6-vllm-gfx1201-launchers`, adapted to the 0.32.0 metric surface). `kvvalidate.py` answers "is the cache working" (names the regime so a cold engine is not misread as dead, runs the five invariants, shows where prompt tokens came from); `tierreport.py` answers "is my tier the right size" (sizing verdict + layered-cache value). Both are read-only, stdlib-only, and run against a live `/metrics` or a saved snapshot. The 0.32.0 surface dropped the token-granularity hit counter, so token-based hit figures degrade to `UNKNOWN`/`n/a` rather than reporting a false value; the load-bytes, lookup, promotion, capacity and regime figures are unaffected. *Measured* (inference host, disk-tier container live `/metrics`): `kvvalidate.py` reports `lookup_partition` PASS (served 2 + short_result 7 + deferred_backend 138 = 147 = `lookup_calls`), `promotion_refused` PASS, and correctly `UNKNOWN` for the token-granularity `cpu_equals_external` and the two on-disk checks against a saved snapshot; the synthetic 0.32.0 fixture (`kv-cache/tools/fixture-metrics-032.txt`) verifies the same parsing offline. The prompt-source attribution reads both spellings of the counters (`…_by_source` and `…_by_source_total`), so the breakdown (local_compute / local_cache_hit / external_kv_transfer) populates on the native suffix-less surface and on the `_total` names the patched image still exports. Re-verified live on the RAM tier: `kvvalidate.py` exits 0 with `UNKNOWN` (never `FAIL`) for the lookup counters that only the disk patches emit, and `tierreport.py` fills the attribution table from the same scrape.
 
+### Fixed
+- **Cactus length fade now counts the total sequence length (prompt + output), not the output length** (#164,
+  `sly/patch_cactus.py`). In the long-context agent regime (130k-170k-token prompts, every turn a new request with
+  < 4096 output tokens) the output-length fade never engaged, so the full delta 0.5 applied and Cactus lock-in still
+  happened under the fade+cap default. The kernel now fades over the absolute position `pos`; knobs and defaults are
+  unchanged (`RADIANCE_CACTUS_FADE_START=4096`, `RADIANCE_CACTUS_FADE_END=16384`, `END=0` = no fade) but count sequence
+  tokens. Sequences beyond `FADE_END` run bit-exact stock (`req_delta == 0` keeps the stock comparison); short-prompt
+  requests (BetterBench, chat) are unchanged while prompt + output < `FADE_START`. A launcher re-run upgrades
+  1.9.0-1.12.0 images in one pass; the prompt-length plumbing stays as the fade switch. *CPU-verified*: Triton-interpreter
+  kernel check (prompt 130000 + output 10 == stock, prompt 100 + output 100 full delta, fade vs float64 reference),
+  upgrade from the 1.12.0 / 1.9.0-1.11.0 forms byte-identical to a fresh apply, idempotent.
+  *Measured* (bench164, R9700, 210 W, image 1.12.0 + patched kernel, one Hermes agent turn on a 105k-token context,
+  xhigh, T 1.0, max 4096 tokens, 32 seeds; bad = loop or stuck at ~100 % acceptance): **Swift-1.5** (production)
+  stock 6/32, fade+cap default 15/32 (Fisher p = 0.032 vs stock), **this fix 8/32** (p = 0.76 vs stock); agent-turn
+  decode 65.5 / 79.5 / 67.7 tok/s (the turn now runs at stock speed); BetterBench 0.6.1 decode-only 140.4 / 146.9 /
+  **146.9** tok/s (short requests keep the full gain); issue brief at xhigh 0/16 loops for stock and default.
+  AMD Quark: the default did not loop more than stock there (4/16 = 4/16), so the change costs that model its
+  +17 % agent-turn gain without a loop benefit.
+
 ## [1.12.0] - 2026-11-12
 
 ### Added

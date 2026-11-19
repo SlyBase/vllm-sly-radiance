@@ -41,7 +41,8 @@ PR #239 impact A/B (Swift, release image vs PR image, 16 seeds): eps=0 is bit-ex
 overhead (BB decode 140.1 vs 141.3 t/s); eps=0.25 on the fade+cap default gives no measurable loop
 reduction (1/16 vs 2/16, p≈1.0) at ~2–4 % cost. GSM8K-200 sampled (temp 0.7) 0.95–0.97 across all arms.
 
-**Key structural fact:** the fade makes `req_delta = 0` for outputs beyond `FADE_END` (16384 tokens), i.e.
+**Key structural fact:** the fade makes `req_delta = 0` for sequences (prompt + output; output only up to
+1.12.0) beyond `FADE_END` (16384 tokens), i.e.
 **long outputs are generated bit-exact stock** — drift saturates at 16384 tokens instead of growing
 without bound (raw Cactus). This bounds the long-output drift by construction.
 

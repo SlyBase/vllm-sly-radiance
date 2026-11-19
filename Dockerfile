@@ -420,7 +420,8 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
       /wheels/*aiter-*.whl \
  # vLLM >= 0.34 declares torch[device-gfx1201] unpinned; without a constraint pip swaps the ROCm
  # wheel for the newest PyPI (CUDA) torch. Pin exactly what --no-deps just installed.
- && pip freeze | grep -iE '^(torch|torchvision|triton|amd.torch|amd.torchvision)==' > /tmp/trio-pins.txt \
+ && pip freeze > /tmp/trio-freeze.txt \
+ && grep -iE '^(torch|torchvision|triton|amd.torch|amd.torchvision)==' /tmp/trio-freeze.txt > /tmp/trio-pins.txt \
  && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt \
       /wheels/vllm-*.whl "transformers==${TRANSFORMERS_VERSION}" \
  && pip install --no-cache-dir -c /tmp/constraints.txt -c /tmp/trio-pins.txt pillow pybind11 \
@@ -433,7 +434,7 @@ RUN pip install --no-cache-dir -U pip wheel setuptools -c /tmp/constraints.txt \
     else echo /opt/rocm/share/amd_smi > ${SP}/amdsmi_rocm.pth; fi \
  && python -c "import amdsmi.amdsmi_wrapper as w; assert w._loaded_lib_path, 'amdsmi: libamd_smi not loadable'; print('amdsmi', w._loaded_lib_path)" \
  && python -c "import sys, torch; sys.exit(None if torch.version.hip else f'stack: torch {torch.__version__} is not a ROCm build -- pip replaced the compiled wheel')" \
- && rm -rf /wheels /root/.cache /tmp/constraints.txt /tmp/trio-pins.txt
+ && rm -rf /wheels /root/.cache /tmp/constraints.txt /tmp/trio-pins.txt /tmp/trio-freeze.txt
 
 # RADIANCE_GFX_ARCH is what the gfx1201 patch and the banner read for the target arch (amdsmi's
 # asic_info reports it empty on this card). It used to be called VLLM_ROCM_GCN_ARCH, which vLLM

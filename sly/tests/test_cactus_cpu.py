@@ -144,8 +144,11 @@ def test_fade_defaults():
 
 def _pinned_source():
     # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
-    if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_file() and sys.argv[1].endswith("rejection_sampler_utils.py"):
         return Path(sys.argv[1])
+    if os.environ.get("RADIANCE_TEST_VLLM_SRC"):  # same knob as test_cactus_escape_cpu.py
+        cand = Path(os.environ["RADIANCE_TEST_VLLM_SRC"]) / "vllm" / "v1" / "worker" / "gpu" / "spec_decode"
+        return cand / "rejection_sampler_utils.py" if (cand / "rejection_sampler_utils.py").exists() else None
     cand = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "rejection_sampler_utils.py"
     return cand if cand.exists() else None
 
@@ -185,19 +188,10 @@ def test_fade_kernel_in_triton_interpreter():
 
 
 def test_patch_structure():
-    # pytest passes its own argv (e.g. "sly/tests"); only a real file counts as the pinned source.
-    src = sys.argv[1] if len(sys.argv) > 1 and Path(sys.argv[1]).is_file() else None
+    src = _pinned_source()
     if src is None:
-        cand = ROOT / ".dryrun" / "src" / "vllm" / "vllm" / "v1" / "worker" / "gpu" / "spec_decode" / "rejection_sampler_utils.py"
-        if not cand.exists():
-            # The CI cpu-tests job has no pinned tree; ci/patch_dryrun.sh covers apply + idempotence.
-            try:
-                import pytest
-                pytest.skip("pinned vLLM source not available (ci/patch_dryrun.sh covers it)")
-            except ImportError:
-                print("SKIP cactus patch structure: no pinned source (pass the file as argv[1])")
-            return
-        src = cand
+        # The CI cpu-tests job has no pinned tree; ci/patch_dryrun.sh covers apply + idempotence.
+        return _skip("pinned vLLM source not available (ci/patch_dryrun.sh covers it)")
     s = _run_patch_on(Path(src))
     ast.parse(s)  # the patched file must parse
     assert "RADIANCE_CACTUS_DELTA" in s, "env knob missing"
@@ -208,6 +202,80 @@ def test_patch_structure():
     assert '"RADIANCE_CACTUS_DELTA", "0.5"' in s, "patched file must default to 0.5"
     assert "cactus_prompt_len_ptr" in s and "req_delta" in s, "length fade missing"
     assert "cactus_cap_r" in s and "1.0 - cactus_cap_r * (1.0 - q_n)" in s, "acceptance cap missing"
+    # the fade runs over the total sequence length (prompt + output), not the output length (#164)
+    assert _NEW_FADE in s and "out_len" not in s, "fade must use the total sequence length pos"
+
+
+# The 1.9.0-1.12.0 fade lines (output length) and their replacement (total sequence length, #164).
+_OLD_FADE = (
+    "                    # radiance cactus fade: delta falls to 0 over the output length (#164)\n"
+    "                    out_len = (pos - tl.load(cactus_prompt_len_ptr + req_state_idx)).to(tl.float32)\n"
+    "                    fade = tl.minimum(tl.maximum((cactus_fade_end - out_len)\n"
+)
+_NEW_FADE = (
+    "                    seq_len = pos.to(tl.float32)\n"
+    "                    fade = tl.minimum(tl.maximum((cactus_fade_end - seq_len)\n"
+)
+
+
+def _patch_scratch(src):
+    """Scratch site with the pinned file pair; returns (tempdir, env, target)."""
+    td = tempfile.TemporaryDirectory()
+    site = Path(td.name) / "site-packages"
+    pkg = site / "vllm" / "v1" / "worker" / "gpu" / "spec_decode"
+    pkg.mkdir(parents=True)
+    target = pkg / "rejection_sampler_utils.py"
+    shutil.copy(src, target)
+    shutil.copy(Path(src).with_name("rejection_sampler.py"), target.with_name("rejection_sampler.py"))
+    return td, dict(os.environ, PYTHONPATH=str(ROOT), RADIANCE_PATCH_TARGET_DIR=str(site)), target
+
+
+def _patch(env):
+    r = subprocess.run([sys.executable, str(PATCH)], check=False, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout
+
+
+def test_upgrade_from_output_length_fade():
+    """A 1.9.0-1.12.0 file (fade over pos - prompt_len) upgrades to the total-length fade in one pass,
+    byte-identical to a fresh apply; a second pass changes nothing."""
+    src = _pinned_source()
+    if src is None:
+        return _skip("pinned vLLM source not available")
+    td, env, target = _patch_scratch(src)
+    with td:
+        _patch(env)
+        fresh = target.read_text()
+        start = fresh.rindex("                    # radiance cactus fade:", 0, fresh.index(_NEW_FADE))
+        old = fresh[:start] + _OLD_FADE + fresh[fresh.index(_NEW_FADE) + len(_NEW_FADE):]
+        assert "out_len" in old and _NEW_FADE not in old
+        for tail_era in (False, True):  # 1.12.0 (escape tail) and 1.9.0-1.11.0 (fade tail, no mixture)
+            text = old
+            if tail_era:
+                a = text.index("                    log_h_n = tl.where(req_delta == 0.0")
+                b = text.index("\n", text.index("acc_mix, acc_cactus))", a)) + 1
+                text = (text[:a] + "                    log_h_n = tl.where(req_delta == 0.0, target_logprob, tl.log(h_n))\n"
+                        "                    accepted = log_h_n > tl.log(u) + draft_logprob\n" + text[b:])
+            target.write_text(text)
+            out = _patch(env)
+            assert "OK    cactus fade: total sequence length" in out, out
+            assert target.read_text() == fresh, f"upgrade (tail_era={tail_era}) differs from a fresh apply"
+            out2 = _patch(env)
+            assert "OK" not in out2 and target.read_text() == fresh, f"second pass not idempotent: {out2}"
+
+
+def test_idempotent_on_stock():
+    src = _pinned_source()
+    if src is None:
+        return _skip("pinned vLLM source not available")
+    td, env, target = _patch_scratch(src)
+    with td:
+        out1 = _patch(env)
+        once = target.read_text()
+        assert _NEW_FADE in once and "out_len" not in once
+        out2 = _patch(env)
+        assert "OK" not in out2 and out2.count("NOOP") == out1.count("OK") + out1.count("NOOP"), out2
+        assert target.read_text() == once
 
 
 if __name__ == "__main__":
@@ -219,5 +287,7 @@ if __name__ == "__main__":
     test_cap_default_is_half()
     test_fade_defaults()
     test_patch_structure()
+    test_upgrade_from_output_length_fade()
+    test_idempotent_on_stock()
     test_fade_kernel_in_triton_interpreter()
     print("cactus CPU tests OK")
