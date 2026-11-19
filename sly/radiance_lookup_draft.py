@@ -205,6 +205,25 @@ def _top_k(sp):
     return int(k if k is not None else sp.top_k)
 
 
+def _draft_logits_tensor(sp):
+    """The draft-logits tensor the override rewrites. 0.32: sp.draft_logits IS a float32 tensor.
+    0.34: a DraftLogitsCache (.values [rows, steps, vocab] in head_dtype bf16, .row_mapping None for
+    a replicated cache). Return .values, or the tensor itself, or None. A SHARDED cache (TP>1) declines:
+    the override indexes logits by slot (= req_state_idx), which equals the cache row only when replicated."""
+    dl = sp.draft_logits
+    if dl is None:
+        return None
+    import torch
+    if isinstance(dl, torch.Tensor):            # 0.32: the tensor itself (Tensor.values is a method, not a cache)
+        return dl
+    values = getattr(dl, "values", None)
+    if values is not None:                      # DraftLogitsCache (vLLM >= 0.34)
+        if getattr(dl, "row_mapping", None) is not None:
+            raise RuntimeError("draft_logits cache is sharded (TP>1); lookup indexes by slot, declining")
+        return values
+    return dl
+
+
 def _prepare(sp, rs):
     """Per-process buffers and the shape guards; raises when this speculator / vLLM is not the one it was written for."""
     import torch
@@ -215,10 +234,10 @@ def _prepare(sp, rs):
         raise RuntimeError(f"max_model_len {ids.shape[1]} does not fit {POS_BITS} bits")
     top_k = _top_k(sp)
     steps = int(sp.num_speculative_steps)
-    dl = sp.draft_logits
+    dl = _draft_logits_tensor(sp)
     if dl is not None:
         vocab = int(sp.vllm_config.model_config.get_vocab_size())
-        if dl.dtype != torch.float32 or dl.dim() != 3 or dl.stride(-1) != 1 or dl.shape[-1] < vocab:
+        if dl.dtype not in (torch.float32, torch.bfloat16) or dl.dim() != 3 or dl.stride(-1) != 1 or dl.shape[-1] < vocab:
             raise RuntimeError(f"draft_logits {dl.dtype} {tuple(dl.shape)} vs vocab {vocab}")
         if tuple(_cand_ids(sp).shape) != (dl.shape[0], steps, top_k):
             raise RuntimeError(f"cached candidates {tuple(_cand_ids(sp).shape)}")
@@ -242,7 +261,7 @@ def _override(sp, rs, input_batch, num_sampled):
     grid = (n, (min(bound, S["max_len"]) + BLOCK - 1) // BLOCK)
     _scan_kernel[grid](ids, ids.stride(0), lens, input_batch.idx_mapping, S["best"], S["min_dist"],
                        MINL=min(ENTER, STAY), MAXL=MAXL, POS_BITS=POS_BITS, BLOCK=BLOCK, num_warps=4)
-    dl = sp.draft_logits
+    dl = _draft_logits_tensor(sp)
     tokens = sp.draft_tokens
     _apply_kernel[(n,)](ids, ids.stride(0), lens, input_batch.idx_mapping, S["best"], num_sampled, S["st_len"],
                         S["st_used"], S["stats"], tokens, tokens.stride(0),
