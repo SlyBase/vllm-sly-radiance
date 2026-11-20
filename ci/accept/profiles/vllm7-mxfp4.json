@@ -48,10 +48,6 @@
       "Resolved architecture: DFlash2DraftModel"
     ],
     [
-      "dynamic draft controller",
-      "RADIANCE_DYNAMIC_DRAFT"
-    ],
-    [
       "decode attention tune",
       "\\[radiance\\] decode attn tune installed"
     ],

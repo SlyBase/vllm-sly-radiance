@@ -28,7 +28,6 @@ EARLY = [
     "[radiance.mxfp4] W4A8 fp8-WMMA GEMM ENABLED for M>0 (NOTE: W4A8, not the checkpoint's W4A4)",
     "[radiance.fused_norm] armed: add_rms_quant=1 silu_mul_quant=1 gdn_norm_quant=1 a_tiled_min_m=513",
     "(APIServer pid=1) INFO 11-20 03:26:18 [model.py:772] Resolved architecture: DFlash2DraftModel",
-    "RADIANCE_DYNAMIC_DRAFT=ON  controller=policy  tau=0.5  schedule=off",
     "[radiance.mxfp4] decode kernel ON (M<=128), 72 MiB split-K scratch",
     "[radiance.mxfp4] BCQ block tables loaded from /models/swift-mxfp4/bcq_tables.pt",
 ]
@@ -77,6 +76,16 @@ class FullStartupLog(unittest.TestCase):
         assert n >= 100_000, seen["args"]
         # trust boundary: gpu-window-ssh's grammar is_num = ^[0-9]{1,6}$
         assert n <= 999_999, seen["args"]
+
+
+    def test_no_marker_for_the_closed_dynamic_draft_feature(self):
+        # The dynamic MTP draft controller is closed by owner decision (dynab-20261119:
+        # A/B tie, structurally inert on the DFlash2 probabilistic block-draft path).
+        # Since vLLM 0.34 its install soft-fails; the startup log carries NO controller
+        # line at all (EARLY/LATE are the real 1.13.4 lines). The gate must pass without one.
+        text = "\n".join(EARLY + [FILLER] * 100 + LATE)
+        r = check_logs(text, PROFILE)
+        assert r["ok"], r["missing"]
 
 
 if __name__ == "__main__":
