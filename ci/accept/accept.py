@@ -116,12 +116,14 @@ class GpuWindow:
     def start(self, image: str, service: str) -> dict:
         return self._json("start", image, service, self.load_format, timeout=2400)
 
-    def logs(self, lines: int = 1_000_000_000) -> str:
+    def logs(self, lines: int = 999_999) -> str:
         # Full startup log, not a tail window: start_once() recreates the candidate,
         # so everything it has logged IS the startup. vLLM 0.34 emits ~8000 lines
         # before the first request (HIPCachingAllocator capture warnings); the old
         # --tail 4000 cut the install banners (lines ~100-200) and failed every gate
         # since the 0.34 bump while all functional checks were green (1.13.0-1.13.4).
+        # 999999 = the max the gpu-window-ssh trust boundary accepts (is_num is
+        # ^[0-9]{1,6}$); ~100x the startup volume, effectively the full log.
         return self._ssh("logs", str(lines), timeout=300)
 
     def release(self) -> dict:

@@ -72,9 +72,11 @@ class FullStartupLog(unittest.TestCase):
 
         RecordingWindow("gpuwin@host", None, "test", 60).logs()
         assert seen["args"][0] == "logs"
-        # a tail window is only safe if it cannot be smaller than the startup
-        # log; 1e9 lines (~100 GB) is effectively the full log of a fresh container
-        assert int(seen["args"][1]) >= 1_000_000, seen["args"]
+        n = int(seen["args"][1])
+        # full-scan intent: far above any startup volume (~8-11k lines on 0.34)
+        assert n >= 100_000, seen["args"]
+        # trust boundary: gpu-window-ssh's grammar is_num = ^[0-9]{1,6}$
+        assert n <= 999_999, seen["args"]
 
 
 if __name__ == "__main__":
