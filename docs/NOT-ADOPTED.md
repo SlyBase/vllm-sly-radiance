@@ -379,3 +379,22 @@ tokens) and decodes 6.6 % slower (143.5 against 153.7 weighted), so only its pre
 
 Revisit when: (a) a rotated-int4 trunk with a measured dKLD <= 0.010 nats against our W4A8 exists; (b) gfx1201
 gains an FP4 matrix instruction (NVFP4 W4A4 checkpoints exist on HF, but the ISA has no such GEMM today).
+
+## Adaptive verify width for DFlash2 (native vLLM 0.34 `enable_adaptive_verification`) (2026-11-20)
+
+Spec `docs/SPEC-adaptive-verify-width.md` (owner-approved). The Phase-0 audit found the mechanism already
+native and already in the image (the 0.27.1 backport was dropped at the 0.29 bump; the native DFlash2
+speculator feeds the online acceptance estimator, the manager trims verify width under a total-logits
+budget). So the experiment was config-only: window `avab-20261120`, ABBA interleaved (V0a V1a V1b V0b),
+one image 1.13.4-rocm10.1, standard decode BetterBench 0.6.1 (65536 ctx, prefix off, no async, k=7
+probabilistic, seed 42, 20 runs/category), 300 W firmware fan curve, one window. Dataset:
+radiance-benchmarks `avab-V0a/V1a/V1b/V0b` (metrics attached).
+
+| Item | Why not |
+|---|---|
+| `enable_adaptive_verification=true` as a default | Weighted decode **−3.8 %** (148.98 → 143.29 t/s; pair deltas −2.9 % / −4.8 %, control drift −0.45 %, variant same-arm spread 2.4 % — the gap survives both pairs). Five of six categories lose: code −4.3 %, reasoning −6.8 %, json −4.1 %, file_edit −4.2 %, prose −1.5 %; summarization +1.0 %. Mechanism: at concurrency 1 the draft budget never binds — drafted width stays **7.00** and per-position acceptance is unchanged (0.87/0.71/0.58/0.47/0.39/0.33/0.28 in both states), so nothing is trimmed while the estimator + budget kernels add +1.5–2.1 % step time (34.16 → 34.69/34.88 ms). Quality is a tie (GSM8K-200 greedy: 0.960 off vs 0.955 on), KV unchanged (340,530 in the standard config). Junction ran 37 → 100 °C across the window; the closing control held (148.6 vs 149.3), so the cost is not thermal. |
+| The concurrency upside (left unmeasured) | Trimming only fires when the total-logits budget binds, i.e. at higher concurrency. Production (Prometheus, 7 d) runs ≥2 concurrent **12.9 %** of the time and ≥4 **11.0 %** — time-weighted break-even against the −3.8 % single-stream cost would need ≈ +30 % at concurrency, implausible for verify trimming; and the gate's per-category ratios (≥0.95x) would block a default-on release anyway. No second window spent (YAGNI; dynab-20261119 precedent). |
+
+Revisit when: (a) the production load profile shifts to sustained concurrency ≥4 so the budget binds most
+of the time; (b) upstream makes the non-trimming path free at low concurrency; (c) a concurrency-heavy
+deployment wants it opt-in — then measure a conc 2/4/8 A/B (the gate's full-sweep shape) first.

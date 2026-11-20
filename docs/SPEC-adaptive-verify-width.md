@@ -1,6 +1,8 @@
 # Spec: Adaptive verify width for DFlash2 (native vLLM 0.34 mechanism)
 
-Status: APPROVED by owner 2026-11-20 ("Freigeben"). Phase 0 audit DONE — see below.
+Status: CLOSED 2026-11-20 — the A/B failed the win bar (weighted −3.8 %, no trimming at
+concurrency 1). Results and the revisit conditions: docs/NOT-ADOPTED.md, entry avab-20261120.
+Phase 0 audit + Phase 1/2 executed as specified; no code shipped. Original spec below.
 Supersedes the "block-drafter redesign" hypothesis of dynab-20261119 (the MTP
 controller port stays CLOSED; this is a different mechanism).
 
