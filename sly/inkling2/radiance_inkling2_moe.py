@@ -72,9 +72,9 @@ def _expert_gemm(
 
 
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
-                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16):
+                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
-    `row_end` are left unwritten).  `dot_dtype`: bf16 is exact for these products; the Triton CPU
+    `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
     n, k = weight.shape[1], weight.shape[2] * 2
     bm = block_m or min(32, triton.next_power_of_2(plan.tile))  # arange needs a power of 2;
@@ -83,5 +83,5 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
     _expert_gemm[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
         act, act_scale, row_scale, weight, weight_scale, expert_scale, out, tiles,
-        MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype)
+        MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype, **launch)
     return out
