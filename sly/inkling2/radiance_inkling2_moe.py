@@ -1,18 +1,124 @@
-"""Inkling 2 NVFP4 expert GEMM for gfx12 (RDNA4), which has no FP4 MMA.
-
-vLLM's sm120 path computes `tl.dot_scaled(a, a_scale, "e2m1", w, w_scale, "e2m1")` -- a Blackwell
-instruction.  Here both operands are dequantized per K chunk (e2m1 x e4m3 block scale, 16 columns per
-scale) and fed to a bf16 `tl.dot` with fp32 accumulation.  The dequantized product has at most 6
-significant bits, so bf16 holds it exactly: the result equals the native MMA up to accumulation
-order.  Weights stay packed in memory (the ~20 GB checkpoint fits a 32 GB card).
+"""Inkling 2 expert GEMMs for gfx12 (RDNA4): a hand-written HIP kernel for the decode / spec-verify
+tile (plan.tile == 8) and vLLM's Triton kernels (with an NVFP4 dequant GEMM, gfx12 has no FP4 MMA)
+for everything else.
 
 Layouts are vLLM's (models/inkling2/nvidia/ops/moe_sm120.py): packed uint8 with the even column in
-the low nibble, e4m3 weight scales row-major [E, N, K/16], activation scales in the tile-padded
-R8c4/R128c4 layout (`_scale_offsets`), `tiles` = [expert per CTA | row end per CTA | CTA count].
+the low nibble, e4m3 weight scales row-major [E, N, K/16] (NVFP4), e8m0 scales per 32 columns
+[E, N, K/32] (MXFP8), activation scales in the tile-padded R8c4 layout (`_scale_offsets`),
+`tiles` = [expert per CTA | row end per CTA | CTA count | padded rows].  Output bf16
+[plan.rows, N]; rows past a tile's `row_end` are left unwritten; tiles >= the CTA count do nothing.
+
+HIP path (radiance_inkling2_moe.hip): env RADIANCE_INKLING2_HIP_MOE default on, '0' = Triton.
+RADIANCE_INKLING2_HIP_DEBUG=1 also reads the tile table back (host sync, never while a graph is
+captured) and rejects ids the kernel would index out of the weight pool.
 """
+import functools
+import os
+
 import torch
 from vllm.models.inkling2.nvidia.ops.block_scales import _scale_offsets
 from vllm.triton_utils import tl, triton
+
+try:
+    import radiance_inkling2_moe_hip as _hip
+except ImportError:
+    _hip = None
+if os.environ.get("RADIANCE_INKLING2_HIP_MOE") == "0":
+    _hip = None
+
+_HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens); bigger prefill tiles stay on Triton
+_TOPK = 8      # experts per token: an expert (= one CTA) gets at most one row per token
+# Geometry of radiance_inkling2_moe.hip (test_moe_hip.py asserts it equals hip.geometry()):
+# BN weight rows per block, LPR lanes per row, a lane streams `quantum` k-values per step and at
+# most NJ_MAX steps (K <= K_MAX), a CTA holds at most MAX_ROWS rows.
+GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304)
+
+
+def _stream():
+    return torch.cuda.current_stream().cuda_stream
+
+
+def _lds_rows(max_ctas):
+    """Act rows the kernel keeps in LDS at once (a CTA with more rows takes extra passes)."""
+    return max(1, min(GEOMETRY["max_rows"], -(-max_ctas // _TOPK)))
+
+
+def _hip_fits(plan, k, nvfp4):
+    return (_hip is not None and plan.tile == _HIP_TILE and k <= GEOMETRY["k_max"]
+            and k % (64 if nvfp4 else 128) == 0)
+
+
+@functools.lru_cache(maxsize=None)
+def launch_extents(nvfp4, rows, max_ctas, experts, n, k):
+    """Bytes of each buffer the HIP kernel can touch, by emulating its index math over the whole
+    launch (every block / wave / lane / step; every CTA with the worst case of 8 rows and the last
+    expert).  Mirrors radiance_inkling2_moe.hip: change both together."""
+    import numpy as np
+
+    g = GEOMETRY
+    assert rows == _HIP_TILE * max_ctas and k % g["quantum"] == 0
+    nq = k // g["quantum"]
+    qb, sb = (16, 2) if nvfp4 else (32, 1)         # weight / act bytes and scale bytes per quantum
+    cols = nq * sb                                  # act scale columns per row
+    nj = -(-nq // g["lpr"])
+    assert nj <= g["nj_max"]
+    rows_per_wave = 32 // g["lpr"]
+    nb, waves = -(-n // g["bn"]), g["bn"] // rows_per_wave
+    blk = np.arange(nb)[:, None, None, None]
+    wave = np.arange(waves)[None, :, None, None]
+    lane = np.arange(32)[None, None, :, None]
+    j = np.arange(nj)[None, None, None, :]
+    nn = blk * g["bn"] + wave * rows_per_wave + lane // g["lpr"]
+    q = j * g["lpr"] + (lane & (g["lpr"] - 1))
+    live = (nn < n) & (q < nq)
+    wrow = (experts - 1) * n + nn
+    ext = {
+        "weight": int(((wrow * nq * qb + q * qb + qb)[live]).max()),
+        "weight_scale": int(((wrow * nq * sb + q * sb + sb)[live]).max()),
+    }
+    row = np.arange(rows)[:, None]
+    qa = np.arange(nq)[None, :]
+    first = qa * sb                                 # first scale group of the quantum
+    off = ((row >> 3) * (cols // 4) + first // 4) * 32 + (row & 7) * 4 + first % 4
+    ext["act"] = int((row * nq * qb + qa * qb + qb).max())
+    ext["act_scale"] = int((off + sb).max())
+    ext["out"] = int(((rows - 1) * n + int(np.broadcast_to(nn, live.shape)[live].max()) + 1) * 2)
+    ext["row_scale"] = rows * 4 if nvfp4 else 0
+    ext["expert_scale"] = experts * 4
+    ext["tiles"] = (2 * max_ctas + 1) * 4
+    return ext
+
+
+_ITEMSIZE = dict(act=1, act_scale=1, weight=1, weight_scale=1, row_scale=4, expert_scale=4, tiles=4)
+_DTYPE = dict(row_scale=torch.float32, expert_scale=torch.float32, tiles=torch.int32)
+
+
+def _check_launch(nvfp4, plan, experts, n, k, **tensors):
+    """Refuse a launch whose index math leaves a buffer (a GPU fault can reset the host)."""
+    ext = launch_extents(nvfp4, plan.rows, plan.max_ctas, experts, n, k)
+    for name, t in tensors.items():
+        if not t.is_contiguous():
+            raise ValueError(f"{name}: not contiguous")
+        if t.element_size() != _ITEMSIZE[name]:
+            raise ValueError(f"{name}: dtype {t.dtype} (the kernel reads {_ITEMSIZE[name]}-byte items)")
+        if name in _DTYPE and t.dtype != _DTYPE[name]:
+            raise ValueError(f"{name}: dtype {t.dtype}, the kernel reads {_DTYPE[name]}")
+    for name, t in tensors.items():
+        if ext[name] and t.numel() * t.element_size() < ext[name]:
+            raise ValueError(f"{name}: {t.numel() * t.element_size()} bytes, kernel reads/writes "
+                             f"{ext[name]} (N={n} K={k} CTAs={plan.max_ctas} experts={experts})")
+    for name in ("act", "weight"):
+        if tensors[name].data_ptr() % 16:
+            raise ValueError(f"{name}: pointer not 16-byte aligned")
+    if os.environ.get("RADIANCE_INKLING2_HIP_DEBUG") == "1" and not (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
+        t = tensors["tiles"].cpu().tolist()
+        count = t[2 * plan.max_ctas]
+        if not 0 <= count <= plan.max_ctas:
+            raise ValueError(f"tiles: CTA count {count} outside [0, {plan.max_ctas}]")
+        for cta in range(count):
+            if not 0 <= t[cta] < experts:
+                raise ValueError(f"tiles: expert {t[cta]} of CTA {cta} outside [0, {experts})")
 
 
 @triton.jit
@@ -77,6 +183,17 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
     n, k = weight.shape[1], weight.shape[2] * 2
+    if _hip_fits(plan, k, True):
+        _check_launch(True, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
+                      row_scale=row_scale, weight=weight, weight_scale=weight_scale,
+                      expert_scale=expert_scale, tiles=tiles)
+        out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+        _hip.nvfp4_gemm(
+            act.data_ptr(), act_scale.data_ptr(), row_scale.data_ptr(),
+            weight.data_ptr(), weight_scale.data_ptr(), expert_scale.data_ptr(),
+            out.data_ptr(), tiles.data_ptr(),
+            plan.max_ctas, weight.shape[0], n, k, plan.tile, _lds_rows(plan.max_ctas), _stream())
+        return out
     bm = block_m or min(32, triton.next_power_of_2(plan.tile))  # arange needs a power of 2;
     bn = block_n or min(64, triton.next_power_of_2(n))          # the masks cover the overhang
     bk = block_k or min(128, triton.next_power_of_2(k))
@@ -84,4 +201,40 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     _expert_gemm[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
         act, act_scale, row_scale, weight, weight_scale, expert_scale, out, tiles,
         MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype, **launch)
+    return out
+
+
+def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles, plan):
+    """bf16 `[plan.rows, N]` = MXFP8 expert rows x weights * expert_scale (no row scale). HIP kernel
+    for decode / spec tiles (plan.tile == 8) unless RADIANCE_INKLING2_HIP_MOE=0; otherwise vLLM's
+    Triton `_mxfp8_gemm` with the ROCm tile shrink, identical to what ops/moe_sm120.py's `bmm()`
+    launches."""
+    n, k = weight.shape[1], weight.shape[2]
+    if _hip_fits(plan, k, False):
+        _check_launch(False, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
+                      weight=weight, weight_scale=weight_scale, expert_scale=expert_scale,
+                      tiles=tiles)
+        out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+        _hip.mxfp8_gemm(
+            act.data_ptr(), act_scale.data_ptr(), weight.data_ptr(), weight_scale.data_ptr(),
+            expert_scale.data_ptr(), out.data_ptr(), tiles.data_ptr(),
+            plan.max_ctas, weight.shape[0], n, k, plan.tile, _lds_rows(plan.max_ctas), _stream())
+        return out
+    from vllm.models.inkling2.nvidia.ops.moe_sm120 import _mxfp8_gemm
+    if plan.tile <= 16:
+        block_n, block_t, num_warps = 128, 16, 4
+    elif plan.tile <= 64:
+        block_n, block_t, num_warps = 128, 64, 4
+    else:
+        block_n, block_t, num_warps = 256, 128, 8
+    if torch.version.hip:  # 64 KB LDS on gfx1201
+        block_n, block_t, num_warps = min(block_n, 64), min(block_t, 16), 4
+    out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+    _mxfp8_gemm[
+        (triton.cdiv(n, block_n), plan.max_ctas * triton.cdiv(plan.tile, block_t))
+    ](
+        act, act_scale, weight, weight_scale, expert_scale, out, tiles,
+        MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BN=block_n, BT=block_t, BK=128,
+        num_warps=num_warps, num_stages=3,
+    )
     return out

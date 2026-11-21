@@ -26,6 +26,8 @@ ROCm path, with four kinds of edits:
   4f. linear(): `not use_sm100_kernels()` before `is_flashinfer_autotuning()` (imports flashinfer).
   4g. DSpark draft `_RMSNorm`: torch implementation of flashinfer's rmsnorm contract.
   4h. DSpark draft KV write -> radiance_inkling2_kv.kv_scatter (Triton; reshape_and_cache_flash is CUDA-only).
+  4i. MXFP8 experts (layers 20-23) -> radiance_inkling2_moe.mxfp8_expert_gemm on ROCm: the hand-written HIP
+      GEMV for decode / spec-verify tiles (tile 8), vLLM's `_mxfp8_gemm` (ROCm tiles) for the rest.
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -233,6 +235,21 @@ def main():
         "        kv_scatter(self.attn.kv_cache, k, v, slot_mapping)\n",
         "from radiance_inkling2_kv import kv_scatter",
         "inkling2 dspark draft: Triton KV scatter instead of the CUDA cache op",
+    )
+
+
+    apply(
+        ROOT / "nvidia/ops/moe_sm120.py",
+        "        assert k % 128 == 0\n"
+        "        if plan.tile <= 16:\n",
+        "        assert k % 128 == 0\n"
+        "        if torch.version.hip:  # gfx12: radiance_inkling2_moe (HIP decode kernel, Triton else)\n"
+        "            from radiance_inkling2_moe import mxfp8_expert_gemm\n"
+        "            return mxfp8_expert_gemm(act, act_scale, weight, weight_scale, ones,\n"
+        "                                     tiles, plan)\n"
+        "        if plan.tile <= 16:\n",
+        "from radiance_inkling2_moe import mxfp8_expert_gemm",
+        "inkling2 moe_sm120: MXFP8 experts -> radiance_inkling2_moe (HIP GEMV for decode tiles) on ROCm",
     )
 
 

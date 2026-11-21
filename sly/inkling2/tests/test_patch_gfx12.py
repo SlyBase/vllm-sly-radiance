@@ -101,6 +101,14 @@ def test_nvfp4_experts_use_the_dequant_kernel_on_rocm(tree):
     assert "torch.version.hip" in s
 
 
+def test_mxfp8_branch_routes_to_hip_on_rocm(tree):
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/moe_sm120.py").read_text()
+    assert "from radiance_inkling2_moe import mxfp8_expert_gemm" in s
+    assert "torch.version.hip" in s
+    assert "mxfp8_expert_gemm(act, act_scale, weight, weight_scale, ones," in s
+
+
 def test_result_still_parses_and_second_run_changes_nothing(tree):
     run(tree)
     for p in py_files(tree):
