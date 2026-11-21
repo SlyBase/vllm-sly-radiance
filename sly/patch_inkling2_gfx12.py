@@ -25,6 +25,7 @@ ROCm path, with four kinds of edits:
   4e. rel_attention num_stages 2 -> 1 on ROCm.
   4f. linear(): `not use_sm100_kernels()` before `is_flashinfer_autotuning()` (imports flashinfer).
   4g. DSpark draft `_RMSNorm`: torch implementation of flashinfer's rmsnorm contract.
+  4h. DSpark draft KV write in torch (reshape_and_cache_flash is CUDA-only).
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -221,6 +222,22 @@ def main():
         "        x.copy_(y)\n        return x\n",
         "fp32 norm, bf16 out; with a residual",
         "inkling2 dspark draft: torch RMSNorm instead of flashinfer",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "        impl = cast(FlashAttentionImpl, self.attn.impl)\n"
+        "        impl.do_kv_cache_update(self.attn, k, v, self.attn.kv_cache, slot_mapping)\n",
+        "        # The cache op of the CUDA flash backend is not importable on ROCm. Same scatter in torch:\n"
+        "        # cache is (blocks, heads, page, 2 * head_dim) = K | V; slot < 0 is padding (not written).\n"
+        "        # ponytail: boolean indexing is not CUDA-graph safe -> eager only, Triton scatter later.\n"
+        "        cache = self.attn.kv_cache\n"
+        "        page = cache.shape[2]\n"
+        "        ok = slot_mapping >= 0\n"
+        "        b, o = slot_mapping[ok] // page, slot_mapping[ok] % page\n"
+        "        cache[b, :, o, : self.head_dim] = k[ok].to(cache.dtype)\n"
+        "        cache[b, :, o, self.head_dim :] = v[ok].to(cache.dtype)\n",
+        "# cache is (blocks, heads, page, 2 * head_dim)",
+        "inkling2 dspark draft: torch KV scatter instead of the CUDA cache op",
     )
 
 

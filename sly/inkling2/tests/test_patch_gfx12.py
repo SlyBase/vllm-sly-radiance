@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import types
 import sys
 from pathlib import Path
 
@@ -251,3 +252,39 @@ def test_draft_rmsnorm_matches_the_flashinfer_contract(tree, with_residual):
     torch.testing.assert_close(rs, total.bfloat16())      # residual rounded once
     torch.testing.assert_close(out, ref(total))           # norm from the UNROUNDED sum
     assert out.data_ptr() == xs.data_ptr()                # in place, as flashinfer does
+
+
+def _patched_write_kv(tree):
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    cls = next(n for n in ast.parse(src).body
+               if isinstance(n, ast.ClassDef) and n.name == "Inkling2DraftSelfAttention")
+    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_write_kv")
+    ns = {"torch": torch, "cast": lambda t, x: x, "FlashAttentionImpl": object}
+    exec(ast.get_source_segment(src, fn).replace("    def", "def", 1).replace("\n    ", "\n"), ns)
+    return ns["_write_kv"]
+
+
+def test_draft_kv_write_does_not_need_the_cuda_cache_op(tree):
+    """Fourth GPU-window finding (DSpark): FlashAttentionImpl.do_kv_cache_update calls
+    reshape_and_cache_flash, which is not imported on ROCm (NameError)."""
+    run(tree)
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    assert "do_kv_cache_update" not in src
+
+
+def test_draft_kv_write_scatters_into_the_bhn2d_cache(tree):
+    run(tree)
+    write = _patched_write_kv(tree)
+    B, H, N, D = 4, 2, 8, 16
+    cache = torch.zeros(B, H, N, 2 * D)
+    k, v = torch.randn(5, H, D), torch.randn(5, H, D)
+    slots = torch.tensor([3, 9, -1, 17, 31])  # -1 = padding: must not be written
+    attn = types.SimpleNamespace(kv_cache=cache, head_dim=D)
+    me = types.SimpleNamespace(attn=attn, head_dim=D)
+    write(me, k, v, slots)
+    exp = torch.zeros_like(cache)
+    for t, s in enumerate(slots.tolist()):
+        if s >= 0:
+            exp[s // N, :, s % N, :D] = k[t]
+            exp[s // N, :, s % N, D:] = v[t]
+    torch.testing.assert_close(cache, exp)
