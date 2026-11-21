@@ -339,8 +339,17 @@ RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
 # ARG at the point of use, not at the top of the stage: an ARG line is a cache-key instruction, so
 # declaring it up there would make a vLLM bump rebuild torch, triton, torchvision and aiter too.
 ARG VLLM_VERSION
+# Spike hook: VLLM_REF (a commit SHA) builds that commit of VLLM_REPO instead of the v${VLLM_VERSION}
+# tag -- for model support that is on main or in an open PR but in no release yet. Empty = the tag.
+ARG VLLM_REF=""
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
-    git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
+    if [ -n "${VLLM_REF}" ]; then \
+      git init -q /src/vllm && git -C /src/vllm fetch -q --depth 1 "${VLLM_REPO}" "${VLLM_REF}" \
+      && git -C /src/vllm checkout -q FETCH_HEAD; \
+    else \
+      git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi \
     && cd /src/vllm && python $([ -f tools/use_existing_torch.py ] && echo tools/use_existing_torch.py || echo use_existing_torch.py) \
     && pip install "setuptools-rust>=1.9.0" \
     && VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
@@ -746,6 +755,9 @@ COPY sly/ /opt/patches/sly/
 # (/opt/patches/sly), not cwd, at sys.path[0] -- without this, the sly/ entries' `from _patchlib
 # import apply` would not find /opt/patches/_patchlib.py. The top-level entries already have
 # /opt/patches as their own script directory, so this is a no-op for them.
+# Spike hook: PATCH_SKIP = space-separated loop names to leave out (patches anchored to a vLLM that
+# is not the one built). Empty for every release build.
+ARG PATCH_SKIP=""
 RUN set -eu; cd /opt/patches; \
     for p in patch_gfx1201 patch_radiance_dispatch patch_skinny_gemm patch_unified_attention_lds \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
@@ -762,6 +774,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_prefill_skip \
              sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
+      case " ${PATCH_SKIP} " in *" $p "*) echo "== SKIP $p =="; continue;; esac; \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \
