@@ -23,6 +23,7 @@ ROCm path, with four kinds of edits:
   4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
   4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   4e. rel_attention num_stages 2 -> 1 on ROCm.
+  4f. linear(): `not use_sm100_kernels()` before `is_flashinfer_autotuning()` (imports flashinfer).
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -195,6 +196,13 @@ def main():
         "        num_warps=8 if block_m >= 128 else 4,\n        num_stages=1 if torch.version.hip else 2,\n",
         "num_stages=1 if torch.version.hip else 2,",
         "inkling2 rel_attention: 1 stage on ROCm (LDS)",
+    )
+    apply(
+        ROOT / "nvidia/ops/linear.py",
+        "        x.shape[0] > LOW_M_MAX_TOKENS\n        or is_flashinfer_autotuning()\n        or not use_sm100_kernels()\n",
+        "        x.shape[0] > LOW_M_MAX_TOKENS\n        or not use_sm100_kernels()\n        or is_flashinfer_autotuning()\n",
+        "        or not use_sm100_kernels()\n        or is_flashinfer_autotuning()",
+        "inkling2 linear: short-circuit before the flashinfer probe",
     )
 
 

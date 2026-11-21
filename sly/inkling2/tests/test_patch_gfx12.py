@@ -196,3 +196,12 @@ def test_rel_attention_uses_one_stage_on_rocm(tree):
     run(tree)
     s = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
     assert "num_stages=1 if torch.version.hip else 2," in s
+
+
+def test_flashinfer_is_never_touched_on_rocm(tree):
+    """Seventh finding: `is_flashinfer_autotuning()` imports flashinfer (absent on ROCm) before the
+    `not use_sm100_kernels()` short-circuit gets a chance."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/linear.py").read_text()
+    cond = s.split("# Autotuning would profile")[1].split("):")[0]
+    assert cond.index("use_sm100_kernels") < cond.index("is_flashinfer_autotuning")
