@@ -189,3 +189,10 @@ def test_mxfp8_gemm_tiles_fit_the_64k_lds_of_gfx12(tree):
     run(tree)
     s = (tree / "vllm/models/inkling2/nvidia/ops/moe_sm120.py").read_text()
     assert "if torch.version.hip:  # 64 KB LDS" in s
+
+
+def test_rel_attention_uses_one_stage_on_rocm(tree):
+    """Sixth finding: rel_attention with 2 stages needs 69 KB LDS (limit 64 KB)."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
+    assert "num_stages=1 if torch.version.hip else 2," in s
