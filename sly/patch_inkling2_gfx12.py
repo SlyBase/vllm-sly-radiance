@@ -19,6 +19,11 @@ ROCm path, with four kinds of edits:
   4. experts    ops/moe_sm120.py: NVFP4 expert GEMM -> radiance_inkling2_moe.nvfp4_expert_gemm
                 (dequantize tiles + bf16 dot; gfx12 has no FP4 MMA / `tl.dot_scaled`).
 
+  4b. libdevice `tldevice.rcp_rn(x)` -> `tl.div_rn(1.0, x)`, `tldevice.div_rn` -> `tl.div_rn` (hip libdevice lacks both).
+  4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
+  5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
+                Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
+
 A vLLM without models/inkling2 (every release up to 0.34) is a NOOP.
 """
 import ast
@@ -106,6 +111,26 @@ def replace_ptx(src):
     return "".join(lines), len(edits)
 
 
+def drop_hw_e2m1(src):
+    """In every function whose body is `if not _HW_E2M1: <software path> return ...` followed by the
+    PTX path, keep only the software path (Triton compiles the dead tail too)."""
+    tree = ast.parse(src)
+    lines = src.splitlines(keepends=True)
+    edits = []
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for i, st in enumerate(fn.body):
+            if (isinstance(st, ast.If) and isinstance(st.test, ast.UnaryOp)
+                    and isinstance(st.test.operand, ast.Name) and st.test.operand.id == "_HW_E2M1"
+                    and i + 1 < len(fn.body)):
+                body = "".join(lines[st.body[0].lineno - 1:st.body[-1].end_lineno])
+                dedented = "".join(l[4:] if l.startswith("    ") else l
+                                   for l in body.splitlines(keepends=True))
+                edits.append((st.lineno, fn.body[-1].end_lineno, dedented))
+    for a, b, new in sorted(edits, reverse=True):
+        lines[a - 1:b] = [new]
+    return "".join(lines)
+
+
 def patch_file(p):
     s = o = p.read_text()
     if p.name != "nvfp4.py":  # there the gate means "native e2m1 conversions": keep it false
@@ -114,7 +139,13 @@ def patch_file(p):
                flags=re.M)
     s = re.sub(r"^[ \t]*launch_pdl=True,[ \t]*\n", "", s, flags=re.M)
     s = s.replace(", launch_pdl=True", "")
+    # hip's libdevice lacks rcp_rn / div_rn; tl.div_rn (core) is the same correctly rounded division
+    s = re.sub(r"tldevice\.rcp_rn\(((?:[^()]|\([^()]*\))*)\)", r"tl.div_rn(1.0, \1)", s)
+    s = s.replace("tldevice.div_rn(", "tl.div_rn(")
+    s = re.sub(r"^[ \t]*maxnreg=maxnreg,[ \t]*\n", "", s, flags=re.M)
     s, _ = replace_ptx(s)
+    if p.name == "nvfp4.py":
+        s = drop_hw_e2m1(s)
     if s == o:
         return False
     ast.parse(s)  # never write a file that would not parse
@@ -139,6 +170,13 @@ def main():
         "                                 tiles, plan)\n",
         "from radiance_inkling2_moe import nvfp4_expert_gemm",
         "inkling2 moe_sm120: NVFP4 experts -> dequant GEMM on ROCm",
+    )
+    apply(
+        SP / "vllm/platforms/rocm.py",
+        '    supported_quantization: list[str] = [\n        "awq",\n',
+        '    supported_quantization: list[str] = [\n        "inkling2",\n        "awq",\n',
+        '"inkling2",\n        "awq"',
+        "rocm platform: inkling2 in supported_quantization",
     )
 
 

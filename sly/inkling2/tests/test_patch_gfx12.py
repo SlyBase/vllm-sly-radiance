@@ -147,3 +147,37 @@ def test_math_templates_compute_the_ptx_function():
                 torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-6)
                 seen.add(key)
     assert seen == set(want), set(want) - seen
+
+
+def test_rocm_platform_lists_inkling2_quantization(tree):
+    """Found in the first GPU window: ModelConfig raised 'inkling2 quantization is currently not
+    supported in rocm' (platforms/rocm.py supported_quantization)."""
+    run(tree)
+    s = (tree / "vllm/platforms/rocm.py").read_text()
+    block = s.split("supported_quantization: list[str] = [")[1].split("\n    ]")[0]
+    assert '"inkling2"' in block
+
+
+def test_libdevice_functions_missing_on_hip_are_replaced(tree):
+    """Second GPU-window finding: hip libdevice has no rcp_rn / div_rn (AttributeError at compile).
+    tl.div_rn is core and exact on both."""
+    run(tree)
+    text = "\n".join(p.read_text() for p in py_files(tree))
+    assert "tldevice.rcp_rn" not in text and "tldevice.div_rn" not in text
+    assert "tl.div_rn(1.0, 1536.0 * tl.load(WDenominator))" in text
+
+
+def test_launch_kwarg_maxnreg_is_dropped(tree):
+    """Third finding: AMD's Triton rejects the NVIDIA-only launch kwarg `maxnreg`."""
+    run(tree)
+    assert "maxnreg=maxnreg" not in "\n".join(p.read_text() for p in py_files(tree))
+
+
+def test_hardware_e2m1_branch_is_removed_not_just_gated(tree):
+    """Fourth finding: Triton compiles the statements after `if not _HW_E2M1: return ...` anyway, so
+    the PTX there reached LLVM ('could not allocate output register for constraint f')."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/nvfp4.py").read_text()
+    assert "inline_asm_elementwise" not in s
+    ast.parse(s)
+    assert "_e2m1(a)" in s and "_e2m1(b)" in s  # the software path survives
