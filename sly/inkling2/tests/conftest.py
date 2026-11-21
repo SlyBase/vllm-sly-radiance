@@ -21,29 +21,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the module un
 @pytest.fixture(scope="session", autouse=True)
 def vllm_shim():
     src = os.environ.get("INKLING_VLLM_SRC")
-    triton = pytest.importorskip("triton")
-    if not src or not Path(src, "models/inkling2/nvidia/ops/block_scales.py").exists():
-        pytest.skip("INKLING_VLLM_SRC (vllm/ source dir with models/inkling2) not set")
-    import triton.language as tl
+    if src and Path(src, "models/inkling2/nvidia/ops/block_scales.py").exists():
+        triton = pytest.importorskip("triton")
+        import triton.language as tl
 
-    made = []
+        made = []
 
-    def pkg(name, path):
-        m = types.ModuleType(name)
-        m.__path__ = [str(path)]
-        sys.modules[name] = m
-        made.append(name)
+        def pkg(name, path):
+            m = types.ModuleType(name)
+            m.__path__ = [str(path)]
+            sys.modules[name] = m
+            made.append(name)
 
-    root = Path(src)
-    pkg("vllm", root)
-    pkg("vllm.models", root / "models")
-    pkg("vllm.models.inkling2", root / "models/inkling2")
-    pkg("vllm.models.inkling2.nvidia", root / "models/inkling2/nvidia")
-    pkg("vllm.models.inkling2.nvidia.ops", root / "models/inkling2/nvidia/ops")
-    shim = types.ModuleType("vllm.triton_utils")
-    shim.tl, shim.triton = tl, triton
-    sys.modules["vllm.triton_utils"] = shim
-    made.append("vllm.triton_utils")
+        root = Path(src)
+        pkg("vllm", root)
+        pkg("vllm.models", root / "models")
+        pkg("vllm.models.inkling2", root / "models/inkling2")
+        pkg("vllm.models.inkling2.nvidia", root / "models/inkling2/nvidia")
+        pkg("vllm.models.inkling2.nvidia.ops", root / "models/inkling2/nvidia/ops")
+        shim = types.ModuleType("vllm.triton_utils")
+        shim.tl, shim.triton = tl, triton
+        sys.modules["vllm.triton_utils"] = shim
+        made.append("vllm.triton_utils")
+    else:
+        made = []
     yield
     for n in made:
         sys.modules.pop(n, None)
