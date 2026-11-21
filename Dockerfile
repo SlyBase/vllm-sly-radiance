@@ -629,7 +629,8 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
-     sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
+     sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
+     sly/inkling2/radiance_inkling2_moe.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -773,7 +774,7 @@ RUN set -eu; cd /opt/patches; \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
              sly/patch_dflash_prefill_skip \
              sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
-             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
+             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm sly/patch_inkling2_gfx12; do \
       case " ${PATCH_SKIP} " in *" $p "*) echo "== SKIP $p =="; continue;; esac; \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
