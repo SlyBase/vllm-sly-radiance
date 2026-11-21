@@ -600,6 +600,17 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/kernels/radiance_gdn_decode.hip -o /out/radiance_gdn_decode_ext.so \
  && PYTHONPATH=/out python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
 
+# sly/inkling2/radiance_inkling2_gemv.hip: hand-written low-M int8 (Q8_0) weight GEMV for
+# Inkling-2-Mini on gfx1201. Same single-file pybind11 build as mxfp4/gdn above; imported as
+# radiance_inkling2_gemv by radiance_inkling2_gemv_hip.py, which only routes to it under
+# RADIANCE_INKLING2_W8=1 (default off). Built here because it links against the same ROCm
+# toolchain the venv loads.
+COPY sly/inkling2/radiance_inkling2_gemv.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_inkling2_gemv.hip -o /out/radiance_inkling2_gemv.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_inkling2_gemv as m; print('radiance_inkling2_gemv built:', m.__file__)"
+
 # ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
 # above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
 # paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
@@ -647,6 +658,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
      sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py ${SP}/
+COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
