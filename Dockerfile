@@ -630,7 +630,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
-     sly/inkling2/radiance_inkling2_moe.py ${SP}/
+     sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
