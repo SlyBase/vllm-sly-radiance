@@ -12,6 +12,20 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+### Added
+- **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
+  the model's sm120 (Triton) path on ROCm: capability gates, PDL removed, hot-path PTX rewritten to
+  Triton math, hip libdevice gaps, 64 KB LDS tiles, flashinfer-free DSpark drafter (torch RMSNorm,
+  Triton KV scatter). NOOP on a vLLM without `models/inkling2`.
+- **HIP expert GEMV for decode / spec-verify tiles** (`sly/inkling2/radiance_inkling2_moe.hip`, tile 8 =
+  up to 8 tokens): one pass over each routed expert's weights for all its rows, NVFP4 codes as e4m3
+  through `v_dot4_f32_fp8_fp8` (exact), MXFP8 unchanged. Micro-bench (rotated >300 MB pool):
+  529-648 GB/s, NVFP4 3.1-3.4x and MXFP8 6.0-6.8x faster than the Triton dequant kernels; NVFP4 output
+  bit-identical. `RADIANCE_INKLING2_HIP_MOE=0` = Triton.
+- **Opt-in int8 (Q8_0) weight GEMV for the dense projections** (`RADIANCE_INKLING2_W8=1`,
+  `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
+  drafter projections, bf16 activations, M <= 4; 1.6-1.9x faster than the bf16 Triton GEMV at M=1.
+
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
   `KVCacheLayerConfig` / `MambaManager.layer_config` (`v1/kv_cache_interface.py`), which Inkling 2 Mini
