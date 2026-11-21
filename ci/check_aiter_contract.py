@@ -44,7 +44,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from read_pins import read_pins  # noqa: E402
+from read_pins import read_pins, vllm_source_ref  # noqa: E402
 
 # attribute reads that are dict methods, not _UAParams fields (the wrapper keeps small dicts
 # under the same variable names)
@@ -190,28 +190,30 @@ def check_drift(repo_root):
     if not (aiter_pin and vllm_pin):
         warn("drift check skipped: AITER_VERSION/VLLM_VERSION pins missing")
         return
+    # the sanctioned stand is read from the tree the image builds (ARG VLLM_REF, else the tag)
+    vllm_ref = vllm_source_ref(pins)
     try:
         req = urllib.request.Request(
-            f"https://raw.githubusercontent.com/vllm-project/vllm/v{vllm_pin}/docker/Dockerfile.rocm_base",
+            f"https://raw.githubusercontent.com/vllm-project/vllm/{vllm_ref}/docker/Dockerfile.rocm_base",
             headers={"User-Agent": "hermes-ci"})
         base = urllib.request.urlopen(req, timeout=30).read().decode()
     except Exception as e:
-        warn(f"drift check degraded (could not fetch vLLM v{vllm_pin} rocm_base: {type(e).__name__})")
+        warn(f"drift check degraded (could not fetch vLLM {vllm_ref} rocm_base: {type(e).__name__})")
         return
     m = re.search(r'ARG\s+AITER_BRANCH="([^"]+)"', base)
     if not m:
-        warn(f"drift check degraded: no AITER_BRANCH in vLLM v{vllm_pin} rocm_base")
+        warn(f"drift check degraded: no AITER_BRANCH in vLLM {vllm_ref} rocm_base")
         return
     sanctioned = m.group(1).lstrip("v")
     if aiter_pin == sanctioned:
-        print(f"aiter drift OK: {aiter_pin} == vLLM v{vllm_pin}'s sanctioned AITER_BRANCH")
+        print(f"aiter drift OK: {aiter_pin} == vLLM {vllm_ref}'s sanctioned AITER_BRANCH")
         return
     dist = _release_distance(aiter_pin, sanctioned)
     if dist is None or dist <= 0:
-        warn(f"aiter {aiter_pin} differs from vLLM v{vllm_pin}'s sanctioned v{sanctioned} (not gradeable; check manually)")
+        warn(f"aiter {aiter_pin} differs from vLLM {vllm_ref}'s sanctioned v{sanctioned} (not gradeable; check manually)")
         return
     if dist == 1:
-        print(f"aiter drift OK: {aiter_pin} is 1 release above vLLM v{vllm_pin}'s sanctioned v{sanctioned} "
+        print(f"aiter drift OK: {aiter_pin} is 1 release above vLLM {vllm_ref}'s sanctioned v{sanctioned} "
               f"(within tolerance -- RDNA4 runs latest aiter for kernel coverage)")
         return
     # 2+ releases above the sanctioned stand: require a justification -- in the PR body OR a
@@ -219,9 +221,9 @@ def check_drift(repo_root):
     just_text = os.environ.get("GH_PR_BODY", "") + "\n" + os.environ.get("GH_PR_COMMENTS", "")
     justified = bool(re.search(r"gfx1201|sanctioned|above (the )?sanctioned|kernel coverage|why.{0,40}(above|newer|bump)", just_text, re.I))
     if justified:
-        print(f"aiter drift noted: {aiter_pin} is {dist} releases above vLLM v{vllm_pin}'s sanctioned v{sanctioned}; justified in PR body/comment")
+        print(f"aiter drift noted: {aiter_pin} is {dist} releases above vLLM {vllm_ref}'s sanctioned v{sanctioned}; justified in PR body/comment")
     else:
-        warn(f"aiter {aiter_pin} is {dist} releases above vLLM v{vllm_pin}'s sanctioned AITER_BRANCH v{sanctioned} "
+        warn(f"aiter {aiter_pin} is {dist} releases above vLLM {vllm_ref}'s sanctioned AITER_BRANCH v{sanctioned} "
              f"-- add a one-line justification to the PR body (gfx1201 kernel coverage / why this release)")
 
 

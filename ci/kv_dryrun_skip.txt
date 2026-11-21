@@ -1,0 +1,28 @@
+# kv-cache (KVCACHE=ram/disk) patches the CI dry run must skip on the pinned vLLM base, one per
+# line: `<path>  <reason>`. Same convention as ci/patch_dryrun_skip.txt, for the launcher's patch
+# set (serve-mxfp4.sh `_kvp` lines) instead of the Dockerfile loop. Every skip is logged as
+# `SKIP <patch>: <reason>`; an entry that no longer matches a launcher entry fails the run.
+#
+# WHY (vLLM main@1bdc437, the Inkling 2 Mini base): the KV-cache manager / offloading-connector
+# layer these patches anchor on was REWRITTEN upstream -- offloading/scheduler.py lost
+# SchedulerOffloadConfig / GroupOffloadConfig / RequestGroupState / RequestOffloadState
+# (2671 -> 1748 lines), kv_cache_utils.py lost the eagle-group annotation entirely, and
+# find_longest_cache_hit / the SWA replay-boundary loop changed shape. That is a PORT, not a
+# re-anchor (skill vllm-sly-radiance: drift / missing-dependency / whole-module restructure).
+#
+# PAYOFF FOR PRODUCTION: none. KVCACHE defaults to `off` and the docker-vllm7 launch does not set
+# it, so no production fast path is lost. KVCACHE=ram/disk is UNSUPPORTED on this base until the
+# port lands: serve-mxfp4.sh applies these patches fatally at container start, so a tiering launch
+# fails loudly there instead of running half-patched. See kv-cache/README.md.
+#
+# Revisit at the next base move: drop an entry as soon as its patch applies again (the dry run
+# reports it), and delete this file when the set is ported.
+kv-cache/patch_offload_mixed_hit.py        offloading/scheduler.py rewritten at main@1bdc437: SchedulerOffloadConfig gone (port, not re-anchor)
+kv-cache/patch_swa_align_touch.py          offloading/scheduler.py rewritten at main@1bdc437: per-group offload config classes gone (port)
+kv-cache/patch_tier_retention.py           offloading/scheduler.py rewritten at main@1bdc437: per-group offload config classes gone (port)
+kv-cache/patch_sched_canonical_chunks.py   caps the offload store in the rewritten offloading/scheduler.py (port); its kv_cache_manager hunk is re-anchored
+kv-cache/patch_eagle_groups.py             kv_cache_utils.py has no eagle-group annotation at main@1bdc437 (removed by the KV-cache refactor; port)
+kv-cache/patch_canon_receipts.py           depends on the canonical-chunk grid + the rewritten find_longest_cache_hit re-ask path (port)
+kv-cache/patch_canon_mixed.py              anchors on the canonical-chunk grid hook that patch_sched_canonical_chunks cannot install (cascade)
+kv-cache/patch_vram_retention.py           anchors on the canon-mixed stats hook (cascade)
+kv-cache/patch_swa_eagle_replay_tail.py    single_type_kv_cache_manager.py replay-boundary loop reshaped by the KV-cache refactor (port)

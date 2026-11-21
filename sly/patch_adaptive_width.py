@@ -235,11 +235,23 @@ def _radiance_aw_stats(batch_desc, batch_req_state):
 
 def main():
     # observation hook: after the scheduler computed num_accepted / num_rejected
-    apply(
+    # vLLM main@1bdc437 inlined num_draft_tokens into the num_rejected expression; both names
+    # the hook reads are still in scope here (num_draft_tokens now comes from the runner's
+    # per-request counts when it reports them, else len(scheduled_spec_token_ids)).
+    apply_any(
         SCHED,
-        "                num_rejected = num_draft_tokens - num_accepted\n",
-        "                num_rejected = num_draft_tokens - num_accepted\n"
-        "                self._radiance_aw_observe(request, num_accepted, num_draft_tokens)\n",
+        [
+            (
+                "                num_rejected = len(scheduled_spec_token_ids) - num_accepted\n",
+                "                num_rejected = len(scheduled_spec_token_ids) - num_accepted\n"
+                "                self._radiance_aw_observe(request, num_accepted, num_draft_tokens)\n",
+            ),
+            (
+                "                num_rejected = num_draft_tokens - num_accepted\n",
+                "                num_rejected = num_draft_tokens - num_accepted\n"
+                "                self._radiance_aw_observe(request, num_accepted, num_draft_tokens)\n",
+            ),
+        ],
         "_radiance_aw_observe",
         "scheduler.py observe hook",
     )

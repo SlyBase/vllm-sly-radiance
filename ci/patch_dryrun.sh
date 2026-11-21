@@ -29,12 +29,22 @@ sparse() { # <name> <url> <ref> <sparse path>...
   fi
   rm -rf "$dir"
   echo "== $name @ $ref"
-  git clone --quiet --filter=blob:none --no-checkout --depth 1 --branch "$ref" "$url" "$dir"
-  git -C "$dir" sparse-checkout set --no-cone "$@"
-  git -C "$dir" checkout --quiet
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    # a commit SHA is no branch/tag: fetch it by SHA, exactly like the Dockerfile's VLLM_REF path
+    git init --quiet "$dir"
+    git -C "$dir" remote add origin "$url"
+    git -C "$dir" fetch --quiet --depth 1 --filter=blob:none origin "$ref"
+    git -C "$dir" sparse-checkout set --no-cone "$@"
+    git -C "$dir" checkout --quiet FETCH_HEAD
+  else
+    git clone --quiet --filter=blob:none --no-checkout --depth 1 --branch "$ref" "$url" "$dir"
+    git -C "$dir" sparse-checkout set --no-cone "$@"
+    git -C "$dir" checkout --quiet
+  fi
   echo "$ref" > "$dir/.ok"
 }
-sparse vllm         https://github.com/vllm-project/vllm.git      "v$VLLM_VERSION"         '/vllm/'
+# the vLLM tree the image builds: the pinned commit (ARG VLLM_REF) or the release tag
+sparse vllm         https://github.com/vllm-project/vllm.git      "$("$PY" "$ROOT/ci/read_pins.py" --vllm-ref)" '/vllm/'
 sparse aiter        https://github.com/ROCm/aiter.git             "v$AITER_VERSION"        '/aiter/'
 sparse transformers https://github.com/huggingface/transformers.git "v$TRANSFORMERS_VERSION" '/src/transformers/'
 sparse pytorch      https://github.com/pytorch/pytorch.git        "v$TORCH_VERSION"        '/torch/_dynamo/'
@@ -104,11 +114,24 @@ mapfile -t KV_PATCHES < <(sed -n '/^KVCACHE=.{KVCACHE:-off}/,/^esac/p' "$ROOT/se
   | awk '/KVCACHE" = disk/{d=1} d&&/^    fi/{d=0;next} !d' \
   | grep -o 'kv-cache/patch_[a-z_]*\.py' | awk '!seen[$0]++')
 [ "${#KV_PATCHES[@]}" -gt 0 ] || { echo "FAIL: no kv-cache patches found in serve-mxfp4.sh"; exit 1; }
+# skip allowlist for the tiering set: patches whose target module upstream REWROTE (a port, not a
+# re-anchor). Opt-in only (KVCACHE=ram/disk, off in production); see the file's header.
+declare -A KVSKIP
+while read -r name reason; do
+  [[ -z "$name" || "$name" == \#* ]] && continue
+  KVSKIP["$name"]="$reason"
+done < "$ROOT/ci/kv_dryrun_skip.txt"
+for k in "${!KVSKIP[@]}"; do
+  printf '%s\n' "${KV_PATCHES[@]}" | grep -qx "$k" || { echo "FAIL: kv skip entry '$k' is not in serve-mxfp4.sh"; exit 1; }
+done
 export RADIANCE_OFFLOAD_MIXED_HIT=1 RADIANCE_OFFLOAD_EAGLE_GROUPS=1 RADIANCE_MAMBA_STORE_STRIDE=4
 run_kv_pass() { # <pass no>
   local pass=$1 log="$WORK/kv-pass$1.log"
   : > "$log"
   for p in "${KV_PATCHES[@]}"; do
+    if [[ -n "${KVSKIP[$p]:-}" ]]; then
+      echo "SKIP $p: ${KVSKIP[$p]}" | tee -a "$log"; continue
+    fi
     echo "== kv pass $pass: $p ==" | tee -a "$log"
     (cd "$ROOT" && PYTHONPATH="$ROOT" "$VPY" "$p") 2>&1 | tee -a "$log"
     [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "FAIL: $p exited non-zero in kv pass $pass"; exit 1; }
@@ -122,7 +145,7 @@ run_kv_pass 2
 if grep -q '^  OK ' "$WORK/kv-pass2.log"; then
   echo "FAIL: kv pass 2 applied hunks again (patch not idempotent):"; grep '^  OK ' "$WORK/kv-pass2.log"; exit 1
 fi
-echo "kv-cache dry run OK: ${#KV_PATCHES[@]} patches, $(grep -c '^  OK ' "$WORK/kv-pass1.log") hunks applied, $(grep -c '^  SKIP ' "$WORK/kv-pass1.log" || true) upstream, pass 2 all NOOP"
+echo "kv-cache dry run OK: ${#KV_PATCHES[@]} patches, $(grep -c '^  OK ' "$WORK/kv-pass1.log") hunks applied, $(grep -c '^  SKIP ' "$WORK/kv-pass1.log" || true) upstream, $(grep -c '^SKIP ' "$WORK/kv-pass1.log" || true) unported on this base, pass 2 all NOOP"
 
 # same final check as the Dockerfile loop: every radiance module still parses
 "$VPY" -c "import ast,glob,sys; fs=glob.glob('$SP/radiance_*.py'); [ast.parse(open(f).read()) for f in fs]; print(f'radiance modules parse OK ({len(fs)})')"

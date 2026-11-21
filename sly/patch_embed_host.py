@@ -16,7 +16,7 @@ must fail at load, not silently keep the table in VRAM.
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 LOADER = SP / "vllm/model_executor/model_loader/base_loader.py"
@@ -46,10 +46,40 @@ NEW = (
     "        return model.eval()\n"
 )
 
+# Re-anchored for vLLM main@1bdc437: the weight-processing tail is now wrapped in a try/except
+# that logs the layer backends on a failed load. Same insertion point -- after the weights are
+# processed, before gc.collect()/empty_cache() and model.eval(), outside the try so a flag the
+# user asked for still fails the load loudly instead of being reported as a backend selection.
+ANCHOR_MAIN = (
+    "                log_layer_backends(model, model_config, load_failed=True)\n"
+    "                raise\n"
+    "\n"
+    "            gc.collect()\n"
+    "            torch.accelerator.empty_cache()\n"
+    "\n"
+    "        return model.eval()\n"
+)
+NEW_MAIN = (
+    "                log_layer_backends(model, model_config, load_failed=True)\n"
+    "                raise\n"
+    "\n"
+    "            # --- RADIANCE embed-host (patch_embed_host.py) ---\n"
+    "            if __import__(\"os\").environ.get(\"RADIANCE_EMBED_HOST\", \"0\") == \"1\":\n"
+    "                import radiance_embed_host as _radiance_embed_host\n"
+    "\n"
+    "                _radiance_embed_host.maybe_offload(model, vllm_config, model_config)\n"
+    "\n"
+    "            gc.collect()\n"
+    "            torch.accelerator.empty_cache()\n"
+    "\n"
+    "        return model.eval()\n"
+)
+
 
 def main():
-    apply(LOADER, ANCHOR, NEW, "RADIANCE embed-host (patch_embed_host.py)",
-          "embed_tokens -> pinned host memory behind a UVA view (RADIANCE_EMBED_HOST=1)")
+    apply_any(LOADER, [(ANCHOR_MAIN, NEW_MAIN), (ANCHOR, NEW)],
+              "RADIANCE embed-host (patch_embed_host.py)",
+              "embed_tokens -> pinned host memory behind a UVA view (RADIANCE_EMBED_HOST=1)")
 
 
 if __name__ == "__main__":

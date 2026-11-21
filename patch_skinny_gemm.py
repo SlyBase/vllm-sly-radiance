@@ -23,6 +23,8 @@ UTIL = SP / "vllm/model_executor/layers/utils.py"
 # exactly as on 0.31.0.
 # Re-anchored for vLLM 0.34.0: the import list lost on_gfx1250 and gained on_gfx11
 # (on_gfx1x, on_gfx9, on_gfx11, on_gfx950); same position, same hook.
+# Re-anchored for vLLM main@1bdc437: the same import list gained on_rdna4 (upstream's new
+# M 5..8 swmmac skinny branch below); same position, same hook -- radiance still decides first.
 #
 # The hook reads the module-global `_radiance_gemm`: 0.31-time inserted the `try: import`
 # block by rewriting the `def` itself; the 0.32 re-anchor dropped that and shipped only the
@@ -31,10 +33,10 @@ UTIL = SP / "vllm/model_executor/layers/utils.py"
 # signature (unique in both versions), so fresh 0.31 and 0.32 trees, re-runs and
 # already-patched cross-version copies all land here.
 ANCHOR = (
-    "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950\n"
+    "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4\n"
 )
 NEW = (
-    "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950\n"
+    "    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4\n"
     "    # --- RADIANCE skinny GEMM kernel (patch_skinny_gemm.py) ---\n"
     "    if (_radiance_gemm is not None and _radiance_gemm.ENABLED and bias is None\n"
     "            and weight.dim() == 2 and x.dtype == torch.bfloat16\n"

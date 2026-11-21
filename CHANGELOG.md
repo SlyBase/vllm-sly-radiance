@@ -12,6 +12,71 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+### Changed
+- **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
+  `KVCacheLayerConfig` / `MambaManager.layer_config` (`v1/kv_cache_interface.py`), which Inkling 2 Mini
+  needs, so the image builds that commit (merged upstream PR #69028) instead of a tag. `ARG VLLM_REF`
+  is the official pin (Renovate `git-refs` digest); `VLLM_VERSION=0.34.0` stays as the last release the
+  commit descends from and still stamps the wheel and the image labels. Every CI consumer (patch dry
+  run, constraints replay, stack resolver, aiter contract) reads the same ref through
+  `ci/read_pins.py --vllm-ref`. A release image keeps the plain `<version>-rocm10.1` tag; only a
+  `vllm_ref` dispatch override of the pin gets the `-vllm<sha9>` spike suffix.
+- **aiter 0.1.28.post1 -> 0.1.29.post1** (the new base's sanctioned stand, derived by
+  `ci/resolve_stack.py`), flydsl 0.4.2 -> 0.5.0 with it. The torch/triton/torchvision trio is unchanged
+  (2.13.0 / 3.8.0+git669b31ac / 0.28.0). `constraints.txt` resolves against main's requirements and the
+  generated Renovate caps follow (compressed-tensors 0.20.1, tensorizer 2.12.1,
+  mooncake-transfer-engine-rocm 0.3.14 now exact-pinned). vLLM's own ROCm base builds on python 3.14;
+  this image stays on 3.12, which main's `requires-python = ">=3.11,<3.15"` allows — the resolver now
+  gates on that instead of on the base image's interpreter (warning, not a red check).
+- **Nine production patches re-anchored to main@1bdc437, behaviour unchanged** (dry run: 191 hunks
+  apply, pass 2 all NOOP, no loop patch skipped):
+  - `patch_skinny_gemm`: the ROCm platform import gained `on_rdna4`; the hook keeps its place ahead of
+    upstream's skinny branches (which now include an M 5..8 swmmac path on RDNA4).
+  - `patch_gdn_lazy`: `get_kv_cache_spec` became `get_kv_cache_config` + `MambaManager.layer_config`;
+    the lazy stash count hooks the same argument. The GDN builder now passes `num_speculative_blocks`
+    to `mamba_get_block_table_tensor` explicitly (0.34 read it off the KV spec), so it follows the lazy
+    count too — otherwise the block table is sliced 1+k wide while the cache reserves 1+1 and column 1
+    is no longer the stash. Inert unless `RADIANCE_GDN_LAZY=1`. The mamba_utils kernel anchors only
+    changed a comment / docstring wording.
+  - `sly/patch_quark_mxfp4`: the MXFP4 kernel list gained a CUDA batch-invariance filter; the aiter fp4
+    GEMM import moved from `kernels/linear/mxfp4/aiter.py` into `_aiter_ops.py`. The op-registration
+    gate hunk is native upstream now (`register_ops_once` gates on CDNA **or** RDNA) and reports SKIP.
+  - `sly/patch_w4a16_tiles`: the skinny limit became `_max_skinny_batch_size()`; the apply op gained a
+    scale/zp carrier argument.
+  - `sly/patch_fused_norm_quant` / `sly/patch_w4a16_fuse`: upstream deleted `qwen2_moe.py` and
+    `qwen2.py` — `Qwen3NextMLP` is now `Qwen3MoeMLP` (qwen3_moe.py) and the drafter's `Qwen3MLP` lives in
+    qwen3.py; the hooks follow the classes (same forward bodies). The V2 runner's drafter block gained
+    `free_unused_weights()`; the post-load hook keeps its original scope.
+  - `sly/patch_embed_host`: the loader's weight-processing tail is wrapped in a try/except now; the
+    offload still runs after it, before `gc.collect()` / `model.eval()`.
+  - `sly/patch_adaptive_width`: the scheduler inlined `num_draft_tokens` into `num_rejected`; the
+    observe hook reads the same locals. **Not dropped**: `RADIANCE_ADAPTIVE_WIDTH=perseq` is in the
+    production launch. The NOT-ADOPTED entry of 2026-11-20 (avab) rejects vLLM's *native*
+    `enable_adaptive_verification`, a different mechanism.
+  - `sly/patch_embed_int8`, `sly/patch_nvfp4_compile_key`, `sly/patch_graph_knob_keys` apply again once
+    the two patches above install their `compile_factors` lines (they were cascade failures).
+
+### Fixed
+- **The MXFP4 aiter fallback op name** (`sly/mxfp4/radiance_mxfp4.py`): main renamed
+  `torch.ops.vllm.gemm_with_dynamic_quant` to `rocm_aiter_mxfp4_gemm_dynamic_quant`. The dispatch
+  resolves whichever name the installed vLLM registers, so the sub-MIN_M / non-W4A8-layer fallback
+  keeps working on both bases instead of raising inside the custom op. TDD:
+  `sly/tests/test_mxfp4_aiter_op_name_cpu.py` (RED against the old name only, GREEN here).
+
+### Removed
+- **KVCACHE=ram/disk (KV tiering) is unsupported on this base until ported.** main@1bdc437 rewrote the
+  offloading connector scheduler (the per-group `SchedulerOffloadConfig` / `RequestGroupState` classes
+  are gone, 2671 -> 1748 lines) and removed the eagle-group annotation from `kv_cache_utils.py`; 9 of
+  the 14 launcher patches need a port, not a re-anchor. They are listed in `ci/kv_dryrun_skip.txt` and
+  the dry run reports them as SKIP. Production is unaffected: `KVCACHE` defaults to `off` and the
+  docker-vllm7 launch does not set it. A tiering launch fails loudly at container start (those patches
+  are fatal there) instead of running half-patched.
+
+*Measured: not yet — CPU CI only on this base (patch dry run 191 hunks / pass 2 all NOOP, constraints
+212 packages resolved, cpu-tests 305 passed / 27 skipped, aiter + attention-metadata contracts green,
+resolve green). No GPU window has run on main@1bdc437, so no throughput / tokens-per-update /
+per-category numbers exist for it; the accept gate is the next step before a release.*
+
 ## [1.13.4] - 2026-11-19
 
 ### Fixed

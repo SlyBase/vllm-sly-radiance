@@ -58,8 +58,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# vLLM's tag, as raw files (the "github" is split so a path filter on that word cannot trip over it)
-RAW = "https://raw." + "githubusercontent.com/vllm-project/vllm/v{ver}/{path}"
+# vLLM's built ref (release tag or commit SHA), as raw files (the "github" is split so a path
+# filter on that word cannot trip over it)
+RAW = "https://raw." + "githubusercontent.com/vllm-project/vllm/{ref}/{path}"
 AMD_INDEX = "https://stable.repo.amd.com/rocm/whl-next"
 PYPI_JSON = "https://pypi.org/pypi/{pkg}/json"
 # ROCm majors this repo has a tested build path for (AMD ships wheels for 10.x; the image is ROCm 10).
@@ -143,10 +144,12 @@ class LiveSources:
         raise RuntimeError(f"GET {url} failed: {last}")
 
     def vllm_file(self, ver: str, path: str) -> str:
+        # ver is a release version ("0.34.0" -> tag v0.34.0) or the pinned commit SHA (ARG VLLM_REF)
+        ref = ver if re.fullmatch(r"[0-9a-f]{40}", ver) else f"v{ver}"
         try:
-            return self._get(RAW.format(ver=ver, path=path)).decode()
+            return self._get(RAW.format(ref=ref, path=path)).decode()
         except urllib.error.HTTPError as exc:
-            raise Incompatible(f"vLLM v{ver}: {path} not found ({exc.code}) -- is v{ver} a release tag?") from exc
+            raise Incompatible(f"vLLM {ref}: {path} not found ({exc.code}) -- is {ref} a release tag or commit?") from exc
 
     def aiter_file(self, ver: str, path: str) -> str | None:
         """A file of ROCm/aiter at tag v<ver>; None when the tag has no such file."""
@@ -255,9 +258,10 @@ def parse_rocm_base(text: str) -> dict:
         raise Incompatible(f"AITER_BRANCH='{val}' is not a release tag vX.Y.Z")
     out["aiter"] = m.group(1)
 
-    py = a.get("PYTHON_VERSION", (PY_VERSION, ""))[0]
-    if py != PY_VERSION:
-        raise Incompatible(f"vLLM's ROCm base uses python {py}, the image's venv is {PY_VERSION}")
+    # The interpreter vLLM's own ROCm base builds on. NOT a gate here: the image's venv is fixed by
+    # RELEASE_BASE (ubuntu:24.04 -> 3.12) and what actually binds is vLLM's requires-python, which
+    # resolve() checks against this ref. A deviation is a warning (main@1bdc437 builds on 3.14).
+    out["python"] = a.get("PYTHON_VERSION", (PY_VERSION, ""))[0]
     return out
 
 
@@ -298,9 +302,10 @@ def wheels(files: list[str], rocm: str) -> list[tuple[str, str, str]]:
 
 # --------------------------------------------------------------------------- resolution
 def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: bool = True,
-            overrides: list[dict] | None = None) -> dict:
+            overrides: list[dict] | None = None, ref: str | None = None) -> dict:
     """The derived stack. Returns {'pins': {ARG: value}, 'notes': [...], 'warnings': [...],
     'transformers_spec': str, 'triton_file': str|None, 'active_overrides': [...]}.
+    `ref` is the vLLM commit the image builds (ARG VLLM_REF); None = the v<vllm> release tag.
     Raises Incompatible."""
     major = int(rocm.split(".")[0])
     if major not in SUPPORTED_ROCM_MAJORS:
@@ -314,15 +319,27 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
         forced.update(o["pins"])
     triton_forced = any(k in forced for k in TRITON_GROUP)
 
-    ref = parse_rocm_base(src.vllm_file(vllm, "docker/Dockerfile.rocm_base"))
-    common = src.vllm_file(vllm, "requirements/common.txt")
-    rocm_txt = src.vllm_file(vllm, "requirements/rocm.txt")
+    src_ref = ref or vllm
+    rbase = parse_rocm_base(src.vllm_file(src_ref, "docker/Dockerfile.rocm_base"))
+    common = src.vllm_file(src_ref, "requirements/common.txt")
+    rocm_txt = src.vllm_file(src_ref, "requirements/rocm.txt")
 
     pins: dict[str, str] = {"TORCH_AMD_ROCM": rocm}
     notes: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
     triton_file = None
+
+    # The image's venv is python 3.12 (RELEASE_BASE ubuntu:24.04). vLLM's own ROCm base may build on
+    # a newer interpreter; the binding constraint is vLLM's requires-python at the ref we build.
+    pyproj = src.vllm_file(src_ref, "pyproject.toml")
+    m = re.search(r'^requires-python\s*=\s*"([^"]+)"', pyproj, re.M)
+    py_spec = m.group(1) if m else None
+    if py_spec and not spec_ok(py_spec, PY_VERSION):
+        errors.append(f"vLLM {src_ref} requires python {py_spec}, the image's venv is {PY_VERSION}")
+    if rbase["python"] != PY_VERSION:
+        warnings.append(f"vLLM's ROCm base builds on python {rbase['python']}, this image's venv is "
+                        f"{PY_VERSION} (vLLM requires-python {py_spec or 'unknown'} allows it)")
 
     def collect(arg: str, fn):
         try:
@@ -336,7 +353,7 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
 
     # --- torch
     def torch():
-        series = ref["torch_series"]
+        series = rbase["torch_series"]
         cands = [(b, f) for b, _, f in wheels(src.index_project("torch"), rocm)
                  if is_stable(b) and ".".join(b.split(".")[:2]) == series]
         if not cands:
@@ -355,7 +372,7 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
 
     # --- torchvision
     def torchvision():
-        series = ref["vision_series"]
+        series = rbase["vision_series"]
         cands = [b for b, _, _ in wheels(src.index_project("torchvision"), rocm)
                  if is_stable(b) and ".".join(b.split(".")[:2]) == series]
         if not cands:
@@ -380,7 +397,7 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
     # --- triton
     if not triton_forced:
         def triton():
-            commit = ref["triton_commit"]
+            commit = rbase["triton_commit"]
             hits = []
             for base, local, f in wheels(src.index_project("triton"), rocm):
                 m = re.fullmatch(r"git([0-9a-f]+)\.rocm" + re.escape(rocm), local)
@@ -390,8 +407,8 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
                 raise Incompatible(f"no AMD triton wheel built from vLLM's TRITON_BRANCH {commit} for rocm{rocm} "
                                    f"on {AMD_INDEX} (vLLM v{vllm} builds that commit; PyPI triton does not carry it)")
             base, full, f = max(hits, key=lambda h: vkey(h[0]))
-            if ref["triton_series"] and ".".join(base.split(".")[:2]) != ref["triton_series"]:
-                warnings.append(f"triton wheel {base} is not the series vLLM's comment names ({ref['triton_series']}.x)")
+            if rbase["triton_series"] and ".".join(base.split(".")[:2]) != rbase["triton_series"]:
+                warnings.append(f"triton wheel {base} is not the series vLLM's comment names ({rbase['triton_series']}.x)")
             notes.append(f"triton {base}+git{full}.rocm{rocm} (vLLM v{vllm}: TRITON_BRANCH {commit})")
             return base, f"git{full}.rocm{rocm}", f
 
@@ -406,8 +423,8 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
         notes.append("triton: overridden (ci/stack_overrides.json)")
 
     # --- aiter
-    pins["AITER_VERSION"] = ref["aiter"]
-    notes.append(f"aiter {ref['aiter']} (vLLM v{vllm}: AITER_BRANCH)")
+    pins["AITER_VERSION"] = rbase["aiter"]
+    notes.append(f"aiter {rbase['aiter']} (vLLM v{vllm}: AITER_BRANCH)")
 
     # --- transformers
     spec = transformers_spec(common)
@@ -445,7 +462,7 @@ def resolve(vllm: str, rocm: str, src, arch: str = "gfx1201", has_triton_build: 
     elif getter:
         warnings.append(f"aiter v{pins['AITER_VERSION']} has no requirements.txt: its runtime deps are not checked")
     return {"pins": pins, "notes": notes, "warnings": warnings, "transformers_spec": spec,
-            "triton_file": triton_file, "active_overrides": active, "ref": ref,
+            "triton_file": triton_file, "active_overrides": active, "ref": rbase,
             "constraint_pins": constraint_pins}
 
 
@@ -706,8 +723,12 @@ def main(argv: list[str] | None = None, src=None, root: Path = ROOT) -> int:
     try:
         vllm = args.vllm or cur["VLLM_VERSION"]
         rocm = args.rocm or rocm_version(cur["ROCM_BASE"])
+        # the tree the image builds: ARG VLLM_REF (a main commit) when pinned, else the release tag.
+        # A --vllm what-if asks about a release, so it ignores the commit pin.
+        ref = None if args.vllm else (cur.get("VLLM_REF") or None)
         res = resolve(vllm, rocm, src, arch=cur.get("GFX_ARCH", "gfx1201"),
-                      has_triton_build="TRITON_BUILD" in cur, overrides=load_overrides(Path(args.overrides)))
+                      has_triton_build="TRITON_BUILD" in cur, overrides=load_overrides(Path(args.overrides)),
+                      ref=ref)
     except Incompatible as exc:
         print(f"::error title=stack incompatible::{exc}")
         print(f"INCOMPATIBLE: {exc}")
@@ -716,7 +737,7 @@ def main(argv: list[str] | None = None, src=None, root: Path = ROOT) -> int:
         print(f"::error::Dockerfile has no ARG {exc}")
         return 2
 
-    print(f"stack for vLLM {vllm} on ROCm {rocm}:")
+    print(f"stack for vLLM {vllm}{' @ ' + ref[:9] if ref else ''} on ROCm {rocm}:")
     for n in res["notes"]:
         print(f"  {n}")
     for o in res["active_overrides"]:

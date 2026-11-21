@@ -31,6 +31,11 @@ SENT = "radiance lazy gdn"
 # tracks on the pinned version.
 apply_any(SP / "model_executor/layers/mamba/abstract.py",
 [(
+'''            num_speculative_blocks=get_mamba_num_speculative_blocks(vllm_config),
+''',
+'''            num_speculative_blocks=_radiance_lazy_spec_blocks(self, vllm_config),  # radiance lazy gdn
+'''
+), (
 '''            num_speculative_blocks=(
                 0
                 if vllm_config.cache_config.use_replayssm
@@ -68,6 +73,18 @@ class MambaBase(AttentionLayerBase):''', SENT + " helper", "abstract: lazy spec-
 
 # ---- 2. builder ------------------------------------------------------------------------------
 G = SP / "v1/attention/backends/gdn_attn.py"
+# Re-anchored for vLLM main@1bdc437: 0.34's mamba_get_block_table_tensor read the stash count off
+# the KV spec (which hunk 1 reduces to 1 under lazy); main hands it in explicitly from a fresh
+# get_mamba_num_speculative_blocks(vllm_config). Without this the block table is sliced 1+num_spec
+# wide while the cache reserves 1+1, and radiance_stash_indices (column 1) is no longer the stash.
+# Inert unless RADIANCE_GDN_LAZY=1: the stock count is untouched.
+apply(G,
+'''        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+''',
+'''        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+        if self.num_speculative_blocks > 0 and __import__("os").environ.get("RADIANCE_GDN_LAZY", "0") == "1":
+            self.num_speculative_blocks = 1  # radiance lazy gdn count: one stash block, as the KV spec
+''', SENT + " count", "gdn_attn: builder stash count follows the lazy spec")
 apply(G,
 '''    num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 ''',
@@ -104,8 +121,7 @@ apply(G,
 # returns dict[MambaSpec, list[int]]. The LAZY_TEMPORAL skip sits directly before the shared
 # _copy_mamba_state_block body; the materialize calls bracket the precopy / align postprocess.
 M = SP / "v1/worker/mamba_utils.py"
-apply(M,
-'''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
+_POST_SIG = '''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
     # FlashInfer ReplaySSM migrates temporal state through its ring materializer.
@@ -119,8 +135,8 @@ apply(M,
     # the existing 2D-grid contract.
     TEMPORAL_TILES: tl.constexpr = 1,
 ):
-''',
-'''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
+'''
+_POST_SIG_NEW = '''    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
     # FlashInfer ReplaySSM migrates temporal state through its ring materializer.
@@ -135,7 +151,15 @@ apply(M,
     TEMPORAL_TILES: tl.constexpr = 1,
     LAZY_TEMPORAL: tl.constexpr = False,  # radiance lazy gdn post-sig: temporal states are materialised elsewhere
 ):
-''', SENT + " post-sig", "mamba_utils: LAZY_TEMPORAL on the postprocess kernel")
+'''
+# Re-anchored for vLLM main@1bdc437: the ReplaySSM comment was reworded (FlashInfer -> trackers),
+# the signature itself is unchanged. Same LAZY_TEMPORAL constexpr, same position.
+_C_OLD = "    # FlashInfer ReplaySSM migrates temporal state through its ring materializer.\n"
+_C_MAIN = "    # ReplaySSM trackers migrate temporal state through their ring materializer.\n"
+apply_any(M,
+          [(_POST_SIG.replace(_C_OLD, _C_MAIN), _POST_SIG_NEW.replace(_C_OLD, _C_MAIN)),
+           (_POST_SIG, _POST_SIG_NEW)],
+          SENT + " post-sig", "mamba_utils: LAZY_TEMPORAL on the postprocess kernel")
 # Re-anchored for vLLM 0.32.0: the kernels no longer compute a local `bt_row_idx` (the
 # idx-mapping resolves straight into `req_idx` before the decision logic, and the call sites pass
 # it directly). The skip sits directly before each kernel's _copy_mamba_state_block call, as on
@@ -173,6 +197,8 @@ apply_any(M,
 '''
 )
 ], SENT + " post-skip", "mamba_utils: postprocess skips temporal states under lazy")
+# Re-anchored for vLLM main@1bdc437: the precopy docstring lost the word "align"; the anchor ends
+# at the signature now (HAS_IDX_MAPPING=True + ZERO_TEMPORAL_TOKEN_BIAS is unique to this kernel).
 apply(M,
 '''    CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
@@ -181,7 +207,6 @@ apply(M,
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
 ):
-    """Pre-copy mamba "align" state across block boundaries.
 ''',
 '''    CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
@@ -191,7 +216,6 @@ apply(M,
     TEMPORAL_TILES: tl.constexpr = 1,
     LAZY_TEMPORAL: tl.constexpr = False,  # radiance lazy gdn pre-sig
 ):
-    """Pre-copy mamba "align" state across block boundaries.
 ''', SENT + " pre-sig", "mamba_utils: LAZY_TEMPORAL on the precopy kernel")
 # vLLM 0.32.0: the precopy passes `req_idx` where 0.30/0.31 passed `batch_idx` (see post-skip
 # note); old shape kept for the launchers.

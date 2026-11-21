@@ -672,8 +672,14 @@ def mxfp4_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tens
                              f"N={weight.shape[0]}, w4a8_ok={w4a8_ok})\n")
         # MIN_M <= 0 makes this unreachable: aiter's W4A4 path is measured WRONG on some shapes
         # (N=5120 K=3072 returns ~1/35th of the correct magnitude), so it is not a safe fallback.
-        y_aiter = torch.ops.vllm.gemm_with_dynamic_quant(x, weight, weight_scale, False,
-                                                         torch.bfloat16)
+        # vLLM main@1bdc437 renamed this op to rocm_aiter_mxfp4_gemm_dynamic_quant and moved its
+        # registration into _aiter_ops.py (register_ops_once, which gates on CDNA *or* RDNA, so it
+        # is present on gfx1201 without our own gate hunk). Same positional signature; resolve
+        # whichever name the installed vLLM registers -- a missing op kills the EngineCore.
+        _aiter_op = getattr(torch.ops.vllm, "rocm_aiter_mxfp4_gemm_dynamic_quant", None)
+        if _aiter_op is None:
+            _aiter_op = torch.ops.vllm.gemm_with_dynamic_quant
+        y_aiter = _aiter_op(x, weight, weight_scale, False, torch.bfloat16)
         if SHADOW_NK is not None and (int(weight.shape[0]), int(x.shape[1])) == SHADOW_NK \
                 and x.shape[0] <= 128:
             k = (int(weight.shape[0]), int(x.shape[1]), int(x.shape[0]))
@@ -982,9 +988,12 @@ def layer_is_supported(layer, K: int) -> bool:
 # --------------------------------------------------------------------------------------------
 # Deliberately NOT composed with AiterMxfp4LinearKernel. Its __init__ asserts is_supported(), which
 # gates on current_platform.supports_mx() -- a CDNA4 (gfx950/gfx1250) allowlist that gfx1201 fails.
-# The sub-MIN_M fallback calls torch.ops.vllm.gemm_with_dynamic_quant directly instead. That op is
-# registered by vllm/model_executor/kernels/linear/mxfp4/aiter.py under
-# `if is_aiter_found_and_supported():`, which does NOT consult supports_mx(), so it is present here.
+# The sub-MIN_M fallback calls vLLM's aiter dynamic-quant op directly instead. Up to 0.34 that was
+# torch.ops.vllm.gemm_with_dynamic_quant, registered by kernels/linear/mxfp4/aiter.py under
+# `if is_aiter_found_and_supported():`; from main@1bdc437 it is
+# torch.ops.vllm.rocm_aiter_mxfp4_gemm_dynamic_quant, registered by _aiter_ops.register_ops_once()
+# under `is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()`. Neither gate
+# consults supports_mx(), so the op is present on gfx1201; mxfp4_linear resolves the name.
 
 
 def _on_gfx12x() -> bool:

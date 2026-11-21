@@ -67,7 +67,7 @@ on:
         type: boolean
         default: false
       vllm_ref:
-        description: "spike: build this vLLM commit SHA instead of the pinned tag (empty = tag)"
+        description: "spike: build this vLLM commit SHA instead of the pinned ARG VLLM_REF (empty = the pin)"
         type: string
         default: ""
       vllm_repo:
@@ -126,7 +126,13 @@ jobs:
           # rocm/dev-ubuntu-24.04:10.1.0-full@sha256:... -> rocm10.1
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           TAG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
-          SUFFIX=${VLLM_REF_INPUT:+-vllm${VLLM_REF_INPUT:0:9}}  # a spike image never takes a release tag
+          # VLLM_REF is the official base pin (Dockerfile). Only an OVERRIDE of it is a spike and
+          # gets the -vllm<sha9> suffix, so a spike image never takes a release tag; a build of the
+          # pin itself -- dispatch input empty or equal -- keeps the plain release tag.
+          SUFFIX=""
+          if [ -n "$VLLM_REF_INPUT" ] && [ "$VLLM_REF_INPUT" != "$VLLM_REF" ]; then
+            SUFFIX="-vllm${VLLM_REF_INPUT:0:9}"
+          fi
           TAG="${TAG}${SUFFIX}"
           TORCH_REMOTE="${REGISTRY_IMAGE}-torch:$(python3 ci/torch_key.py --rocm-base "$ROCM_BASE")"
           {

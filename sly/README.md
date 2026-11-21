@@ -5,6 +5,18 @@ This directory contains all of SlyBase's own patches and configs on top of
 Goal: RDNA4/gfx1201 MXFP4 support for `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` on
 AMD Radeon AI PRO R9700.
 
+**Base move to vLLM main@1bdc437 (Inkling 2 Mini):** `patch_quark_mxfp4`, `patch_w4a16_tiles`,
+`patch_fused_norm_quant`, `patch_w4a16_fuse`, `patch_embed_host`, `patch_adaptive_width` (and the
+top-level `patch_skinny_gemm` / `patch_gdn_lazy`) were re-anchored to that commit with identical
+behaviour — upstream deleted `qwen2_moe.py` / `qwen2.py` (the MLP hooks follow `Qwen3MoeMLP` in
+`qwen3_moe.py` and `Qwen3MLP` in `qwen3.py`), moved the aiter MXFP4 dynamic-quant op into
+`_aiter_ops.py` (renamed `rocm_aiter_mxfp4_gemm_dynamic_quant`; its RDNA registration gate is native
+now, so that hunk reports SKIP), reshaped the KV-cache spec API (`get_kv_cache_config` +
+`MambaManager.layer_config`) and reworded a few kernel signatures. `patch_embed_int8`,
+`patch_nvfp4_compile_key` and `patch_graph_knob_keys` anchor on lines those patches install, so they
+apply again with them. `mxfp4/radiance_mxfp4.py` resolves the aiter op by either name. See
+CHANGELOG `[Unreleased]` for the per-patch detail.
+
 ## Contents
 
 | File | Purpose |

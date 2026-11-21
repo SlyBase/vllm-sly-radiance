@@ -74,9 +74,23 @@ ARG TORCHVISION_VERSION=0.28.0
 # (aiter/ops/triton/__init__.py: "unified_attention": "attention.unified_attention", checked in
 # the v0.1.24.post1 tree). rocm_aiter_unified_attn stays usable, so nothing holds the pin here.
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.28.post1
+# main@1bdc437's sanctioned stand (docker/Dockerfile.rocm_base AITER_BRANCH v0.1.29.post1), derived
+# by ci/resolve_stack.py from the built ref. The trio (torch 2.13 / triton 3.8.0+git669b31ac /
+# torchvision 0.28) is unchanged at this base move.
+ARG AITER_VERSION=0.1.29.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
+# VLLM_VERSION is the last RELEASE the built commit descends from: it stamps the wheel
+# (VLLM_VERSION_OVERRIDE), the image labels and the aiter sanctioned-stand comparison. The tree
+# that is actually built is VLLM_REF below.
 ARG VLLM_VERSION=0.34.0
+# The official vLLM build base: a commit on main, not a release tag. Inkling 2 Mini needs
+# KVCacheLayerConfig / MambaManager.layer_config (v1/kv_cache_interface.py), which no release up to
+# v0.34.0 carries, so the image builds main@1bdc437 (the merged Inkling 2 Mini PR #69028). Every CI
+# consumer resolves this ref through ci/read_pins.py:vllm_source_ref(), so the dry run, the
+# constraints replay and the stack resolver all read the same tree. Empty = build v$VLLM_VERSION.
+# renovate: datasource=git-refs depName=https://github.com/vllm-project/vllm.git branch=main (digest pin; keep VLLM_REPO below in sync)
+ARG VLLM_REF=1bdc437402d6eee29d3ca543c91574f8acc72c8d
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
@@ -339,10 +353,12 @@ RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
 # ARG at the point of use, not at the top of the stage: an ARG line is a cache-key instruction, so
 # declaring it up there would make a vLLM bump rebuild torch, triton, torchvision and aiter too.
 ARG VLLM_VERSION
-# Spike hook: VLLM_REF (a commit SHA) builds that commit of VLLM_REPO instead of the v${VLLM_VERSION}
-# tag -- for model support that is on main or in an open PR but in no release yet. Empty = the tag.
-ARG VLLM_REF=""
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+# VLLM_REF (a commit SHA) builds that commit of VLLM_REPO instead of the v${VLLM_VERSION} tag.
+# It is the OFFICIAL base pin (top of this file): main@1bdc437 for Inkling 2 Mini. Bare ARG here so
+# the stage inherits that default -- a value here would override the pin. A build-arg override
+# (build.yml's vllm_ref input) still spikes a different commit; that image gets a -vllm<sha9> tag.
+ARG VLLM_REF
+ARG VLLM_REPO
 RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
     if [ -n "${VLLM_REF}" ]; then \
       git init -q /src/vllm && git -C /src/vllm fetch -q --depth 1 "${VLLM_REPO}" "${VLLM_REF}" \

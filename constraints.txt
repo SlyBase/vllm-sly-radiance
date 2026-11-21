@@ -58,7 +58,7 @@ fastapi-cloud-cli==0.28.0
 fastar==0.12.0
 fastsafetensors==0.5.0
 filelock==4.2.11
-flydsl==0.4.2
+flydsl==0.5.0
 frozenlist==1.8.0
 fsspec==2026.9.0
 google-api-core==2.44.0
