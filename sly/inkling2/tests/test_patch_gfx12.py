@@ -181,3 +181,11 @@ def test_hardware_e2m1_branch_is_removed_not_just_gated(tree):
     assert "inline_asm_elementwise" not in s
     ast.parse(s)
     assert "_e2m1(a)" in s and "_e2m1(b)" in s  # the software path survives
+
+
+def test_mxfp8_gemm_tiles_fit_the_64k_lds_of_gfx12(tree):
+    """Fifth finding: the sm120 MXFP8 tiles (BN 256, BT 128, 3 stages) need 99 KB of shared memory,
+    gfx12 has 64 KB."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/moe_sm120.py").read_text()
+    assert "if torch.version.hip:  # 64 KB LDS" in s

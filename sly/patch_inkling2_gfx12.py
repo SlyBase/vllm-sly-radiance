@@ -21,6 +21,7 @@ ROCm path, with four kinds of edits:
 
   4b. libdevice `tldevice.rcp_rn(x)` -> `tl.div_rn(1.0, x)`, `tldevice.div_rn` -> `tl.div_rn` (hip libdevice lacks both).
   4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
+  4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -177,6 +178,15 @@ def main():
         '    supported_quantization: list[str] = [\n        "inkling2",\n        "awq",\n',
         '"inkling2",\n        "awq"',
         "rocm platform: inkling2 in supported_quantization",
+    )
+    apply(
+        ROOT / "nvidia/ops/moe_sm120.py",
+        "            block_n, block_t, num_warps = 256, 128, 8\n",
+        "            block_n, block_t, num_warps = 256, 128, 8\n"
+        "        if torch.version.hip:  # 64 KB LDS (sm120 tiles need 99 KB)\n"
+        "            block_n, block_t, num_warps = min(block_n, 64), min(block_t, 32), 4\n",
+        "if torch.version.hip:  # 64 KB LDS",
+        "inkling2 moe_sm120: MXFP8 tiles for 64 KB LDS",
     )
 
 
