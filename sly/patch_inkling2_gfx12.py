@@ -24,6 +24,7 @@ ROCm path, with four kinds of edits:
   4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   4e. rel_attention num_stages 2 -> 1 on ROCm.
   4f. linear(): `not use_sm100_kernels()` before `is_flashinfer_autotuning()` (imports flashinfer).
+  4g. DSpark draft `_RMSNorm`: torch implementation of flashinfer's rmsnorm contract.
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -203,6 +204,23 @@ def main():
         "        x.shape[0] > LOW_M_MAX_TOKENS\n        or not use_sm100_kernels()\n        or is_flashinfer_autotuning()\n",
         "        or not use_sm100_kernels()\n        or is_flashinfer_autotuning()",
         "inkling2 linear: short-circuit before the flashinfer probe",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "        from flashinfer.norm import fused_add_rmsnorm, rmsnorm\n\n"
+        "        if residual is None:\n            return rmsnorm(x, self.weight, self.eps)\n"
+        "        # In place: residual += x; x = norm(residual), from the unrounded sum.\n"
+        "        fused_add_rmsnorm(x, residual, self.weight, self.eps)\n        return x\n",
+        "        # CUDA-only library's rmsnorm / fused-add contract, in torch:\n"
+        "        # fp32 norm, bf16 out; with a residual: residual += x (rounded once), x = norm(fp32 sum).\n"
+        "        v = x.float() if residual is None else x.float() + residual.float()\n"
+        "        if residual is not None:\n            residual.copy_(v)\n"
+        "        y = (v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + self.eps)\n"
+        "             * self.weight.float()).to(x.dtype)\n"
+        "        if residual is None:\n            return y\n"
+        "        x.copy_(y)\n        return x\n",
+        "fp32 norm, bf16 out; with a residual",
+        "inkling2 dspark draft: torch RMSNorm instead of flashinfer",
     )
 
 

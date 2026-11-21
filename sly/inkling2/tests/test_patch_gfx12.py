@@ -205,3 +205,49 @@ def test_flashinfer_is_never_touched_on_rocm(tree):
     s = (tree / "vllm/models/inkling2/nvidia/ops/linear.py").read_text()
     cond = s.split("# Autotuning would profile")[1].split("):")[0]
     assert cond.index("use_sm100_kernels") < cond.index("is_flashinfer_autotuning")
+
+
+def _patched_rmsnorm(tree):
+    """Exec the patched `_RMSNorm` of the DSpark draft on CPU (no vLLM import needed)."""
+    import torch.nn as nn
+
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == "_RMSNorm")
+    ns = {"torch": torch, "nn": nn}
+    exec(ast.get_source_segment(src, node), ns)
+    return ns["_RMSNorm"]
+
+
+def test_draft_rmsnorm_needs_no_flashinfer(tree):
+    run(tree)
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    seg = src.split("class _RMSNorm")[1].split("def all_reduce_add_rmsnorm")[0]
+    assert "flashinfer" not in seg
+
+
+@pytest.mark.parametrize("with_residual", [False, True])
+def test_draft_rmsnorm_matches_the_flashinfer_contract(tree, with_residual):
+    """rmsnorm: bf16 out of an fp32 norm. fused_add: residual += x in place (rounded to bf16), x =
+    norm(unrounded fp32 sum) in place."""
+    run(tree)
+    N = _patched_rmsnorm(tree)
+    g = torch.Generator().manual_seed(1)
+    x = torch.randn(5, 64, generator=g).bfloat16()
+    r = torch.randn(5, 64, generator=g).bfloat16()
+    norm = N(64, 1e-6)
+    norm.weight.data = torch.rand(64, generator=g).bfloat16() + 0.5
+    w = norm.weight.float()
+
+    def ref(v):
+        return (v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6) * w).bfloat16()
+
+    if not with_residual:
+        out = norm(x.clone())
+        torch.testing.assert_close(out, ref(x.float()))
+        return
+    xs, rs = x.clone(), r.clone()
+    out = norm(xs, rs)
+    total = x.float() + r.float()
+    torch.testing.assert_close(rs, total.bfloat16())      # residual rounded once
+    torch.testing.assert_close(out, ref(total))           # norm from the UNROUNDED sum
+    assert out.data_ptr() == xs.data_ptr()                # in place, as flashinfer does
