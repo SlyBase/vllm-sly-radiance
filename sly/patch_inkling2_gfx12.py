@@ -28,6 +28,13 @@ ROCm path, with four kinds of edits:
   4h. DSpark draft KV write -> radiance_inkling2_kv.kv_scatter (Triton; reshape_and_cache_flash is CUDA-only).
   4i. MXFP8 experts (layers 20-23) -> radiance_inkling2_moe.mxfp8_expert_gemm on ROCm: the hand-written HIP
       GEMV for decode / spec-verify tiles (tile 8), vLLM's `_mxfp8_gemm` (ROCm tiles) for the rest.
+  4j. launch folding (lossless, same math in fewer launches; sly/inkling2/radiance_inkling2_draft.py): the DSpark
+      draft's RMSNorm (10 torch launches -> 1), Markov step (cat + embedding + addmm + gate -> 1) and fold
+      GEMM + softcap (2 -> 1 pass); the dynamic sconv taps on the low-M GEMV instead of hipBLASLt.
+  4k. drafter shortlist (RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>, default 0 = off, dense draft logits): the Markov correction
+      is computed for the vocabulary entries within each draft row's top-k base logits only (one 103 MB pass
+      over the fold weight per draft step -> ~2 MB); the draft logits handed to the sampler and to the
+      rejection sampler are -inf elsewhere, so the target's output distribution is untouched.
   5. platform   platforms/rocm.py `supported_quantization` gains "inkling2" (the quantization name
                 Inkling's ModelConfig resolves to; otherwise ModelConfig refuses it on ROCm).
 
@@ -286,6 +293,120 @@ def main():
         "        if plan.tile <= 16:\n",
         "from radiance_inkling2_moe import mxfp8_expert_gemm",
         "inkling2 moe_sm120: MXFP8 experts -> radiance_inkling2_moe (HIP GEMV for decode tiles) on ROCm",
+    )
+
+
+    # --- launch folding (lossless: same math, fewer launches; radiance_inkling2_draft) ---
+    # One block, anchored on upstream text or on the output of the hunks above, so it applies to a tree
+    # that already carries them. Each hook falls back to the original ops for shapes the kernels decline.
+    apply(
+        ROOT / "nvidia/sconv.py",
+        "        return nn.functional.linear(x, self.weight_proj)\n",
+        "        if torch.version.hip:  # the low-M GEMV: hipBLASLt takes ~10 us for this 0.15 MB weight\n"
+        "            from .ops.linear import linear\n\n"
+        "            return linear(x, self.weight_proj)\n"
+        "        return nn.functional.linear(x, self.weight_proj)\n",
+        "from .ops.linear import linear\n",
+        "inkling2 sconv dynamic taps: low-M GEMV on ROCm",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "        # CUDA-only library's rmsnorm / fused-add contract, in torch:\n",
+        "        if x.dim() == 2 and x.stride(-1) == 1:  # one kernel instead of ~10 torch launches\n"
+        "            from radiance_inkling2_draft import rmsnorm\n\n"
+        "            return rmsnorm(x, self.weight, self.eps, residual)\n"
+        "        # CUDA-only library's rmsnorm / fused-add contract, in torch:\n",
+        "from radiance_inkling2_draft import rmsnorm",
+        "inkling2 dspark draft: RMSNorm in one kernel",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "        inputs = torch.cat([state, self.markov_w1(prev_tokens)], dim=-1)\n"
+        "        weight = self.rnn_proj.weight[:, : 2 * self.markov_rank]\n",
+        "        weight = self.rnn_proj.weight[:, : 2 * self.markov_rank]\n"
+        "        if torch.version.hip:  # cat + embedding + addmm + gate in one kernel; returns the LATENT:\n"
+        "            # the fold GEMM runs in markov_logits, fused with the softcap\n"
+        "            from radiance_inkling2_draft import markov_step\n\n"
+        "            return markov_step(state, prev_tokens, context, self.markov_w1.weight, weight)\n"
+        "        inputs = torch.cat([state, self.markov_w1(prev_tokens)], dim=-1)\n",
+        "from radiance_inkling2_draft import markov_step",
+        "inkling2 dspark markov step: one kernel",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "        logits = add_softcap(base_logits, bias, self.config.final_logit_softcapping)\n",
+        "        head, softcap = self.model.markov_head, self.config.final_logit_softcapping\n"
+        "        logits = None\n"
+        "        if torch.version.hip and bias.shape[-1] == head.markov_rank:\n"
+        "            # `bias` is markov_step's latent (the real bias is vocab wide): fold + softcap, one pass\n"
+        "            from radiance_inkling2_draft import fold_softcap, fold_softcap_gather\n\n"
+        "            if short is not None:  # drafter shortlist: -inf outside it, in the logits handed to the\n"
+        "                # sampler and the rejection sampler alike (see shortlist)\n"
+        "                logits = fold_softcap_gather(\n"
+        "                    *short, head.fold_weight, head.fold_bias, bias, softcap, base_logits.shape[-1]\n"
+        "                )\n"
+        "            else:\n"
+        "                logits = fold_softcap(base_logits, head.fold_weight, head.fold_bias, bias, softcap)\n"
+        "            if logits is None:  # more rows than the kernel's tile: the original two ops\n"
+        "                bias = torch.addmm(head.fold_bias, bias, head.fold_weight.T)\n"
+        "        if logits is None:\n"
+        "            logits = add_softcap(base_logits, bias, softcap)\n",
+        "from radiance_inkling2_draft import fold_softcap",
+        "inkling2 dspark markov logits: fold + softcap in one pass",
+    )
+
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "    def markov_logits(\n        self, base_logits: torch.Tensor, bias: torch.Tensor\n    ) -> torch.Tensor:\n",
+        "    def markov_logits(\n"
+        "        self,\n"
+        "        base_logits: torch.Tensor,\n"
+        "        bias: torch.Tensor,\n"
+        "        short: tuple[torch.Tensor, torch.Tensor] | None = None,\n"
+        "    ) -> torch.Tensor:\n",
+        "        short: tuple[torch.Tensor, torch.Tensor] | None = None,\n",
+        "inkling2 dspark markov logits: shortlist argument",
+    )
+    apply(
+        ROOT / "nvidia/dspark.py",
+        "    def markov_step(\n        self, state: torch.Tensor, prev_tokens: torch.Tensor, context: torch.Tensor\n"
+        "    ) -> tuple[torch.Tensor, torch.Tensor]:\n"
+        "        \"\"\"Advance the recurrent head; return the state and TP-local bias.\"\"\"\n",
+        "    def shortlist(\n"
+        "        self, base_logits: torch.Tensor\n"
+        "    ) -> tuple[torch.Tensor, torch.Tensor] | None:\n"
+        "        \"\"\"(values, indices) (rows, n_spec, k) of the k largest base logits per draft row, or None\n"
+        "        (RADIANCE_INKLING2_DRAFT_SHORTLIST = 0, or not ROCm). Only the draft's distribution changes (to\n"
+        "        the softmax over the shortlist, which the rejection sampler is handed as such), never the\n"
+        "        target's output.\"\"\"\n"
+        "        if not torch.version.hip:\n"
+        "            return None\n"
+        "        from radiance_inkling2_draft import SHORTLIST_K, shortlist\n\n"
+        "        return shortlist(base_logits, SHORTLIST_K)\n\n"
+        "    def markov_step(\n        self, state: torch.Tensor, prev_tokens: torch.Tensor, context: torch.Tensor\n"
+        "    ) -> tuple[torch.Tensor, torch.Tensor]:\n"
+        "        \"\"\"Advance the recurrent head; return the state and TP-local bias.\"\"\"\n",
+        "    def shortlist(\n",
+        "inkling2 dspark: drafter shortlist",
+    )
+    apply(
+        ROOT / "speculator.py",
+        "        base_logits = self.model.compute_base_logits(hidden).view(num_reqs, n_spec, -1)\n",
+        "        base_logits = self.model.compute_base_logits(hidden).view(num_reqs, n_spec, -1)\n"
+        "        top = self.model.shortlist(base_logits)  # None = dense draft logits\n",
+        "top = self.model.shortlist(base_logits)",
+        "inkling2 speculator: shortlist of the draft rows",
+    )
+    apply(
+        ROOT / "speculator.py",
+        "                logits = self.model.markov_logits(base_logits[:, i], bias)\n",
+        "                logits = self.model.markov_logits(\n"
+        "                    base_logits[:, i],\n"
+        "                    bias,\n"
+        "                    None if top is None else (top[0][:, i], top[1][:, i]),\n"
+        "                )\n",
+        "None if top is None else (top[0][:, i], top[1][:, i])",
+        "inkling2 speculator: shortlist into the draft logits",
     )
 
 

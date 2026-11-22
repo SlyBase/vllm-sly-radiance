@@ -296,3 +296,170 @@ def test_fused_route_is_not_a_cooperative_launch_on_rocm(tree):
     assert "launch_cooperative_grid=True," not in moe
     assert "launch_cooperative_grid=not torch.version.hip," in moe
     assert "multi_processor_count" in moe  # co-residency guard on ROCm
+
+
+# ---------------------------------------------------------------- launch folding (draft, dynamic taps)
+
+
+class _Torch:
+    """`torch` for exec'd model methods: the real one with `torch.version.hip` set and an `addmm` that
+    honours out_dtype on CPU."""
+
+    def __init__(self, hip):
+        self.version = types.SimpleNamespace(hip=hip)
+
+    def __getattr__(self, name):
+        return getattr(torch, name)
+
+    @staticmethod
+    def addmm(bias, a, b, out_dtype=None):
+        return (bias.float() + a.float() @ b.float()).to(out_dtype or a.dtype)
+
+
+def _method(tree, cls, name):
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    c = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == cls)
+    f = next(n for n in c.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    return ast.get_source_segment(src, f)
+
+
+def test_dynamic_taps_use_the_low_m_gemv_on_rocm(tree):
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/sconv.py").read_text()
+    taps = s.split("def dynamic_taps")[1].split("    def forward")[0]
+    assert "from .ops.linear import linear" in taps
+    assert taps.index("torch.version.hip") < taps.index("nn.functional.linear(x, self.weight_proj)")
+    assert "linear_k_groups" in taps  # the 2560+ wide branch is untouched
+
+
+def test_draft_rmsnorm_is_one_kernel_on_rocm(tree):
+    run(tree)
+    src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
+    seg = src.split("class _RMSNorm")[1].split("def all_reduce_add_rmsnorm")[0]
+    assert "from radiance_inkling2_draft import rmsnorm" in seg
+    assert "flashinfer" not in seg
+    assert "residual.copy_(v)" in seg  # the torch body stays for what the kernel declines
+
+
+def test_markov_step_and_logits_use_the_folded_kernels_on_rocm(tree):
+    run(tree)
+    step = _method(tree, "Inkling2MarkovHead", "step")
+    assert "from radiance_inkling2_draft import markov_step" in step
+    logits = _method(tree, "Inkling2DSparkModel", "markov_logits")
+    assert "from radiance_inkling2_draft import fold_softcap" in logits
+
+
+def _ref_gate(raw, state):
+    r = state.shape[1]
+    b = lambda t: t.bfloat16().float()
+    gate, cand, out = b(raw[:, :r]), b(raw[:, r:2 * r]), b(raw[:, 2 * r:])
+    gate = b(torch.sigmoid(gate))
+    cand = b(torch.tanh(cand))
+    keep = b(gate * state.float())
+    update = b(b(1.0 - gate) * cand)
+    return (keep + update).bfloat16(), torch.tanh(out).bfloat16()
+
+
+def _ref_softcap(a, bias, cap):
+    x = (a.float() + bias.float()).bfloat16().float()
+    return (cap * torch.tanh(x / cap)).bfloat16()
+
+
+def test_folded_markov_path_equals_the_original_ops(tree):
+    """Patched Inkling2MarkovHead.step + Inkling2DSparkModel.markov_logits, run once with the original
+    ops (hip off) and once folded (hip on), on the same inputs: the draft logits agree."""
+    run(tree)
+    r, rows, V, H = 32, 3, 200, 24
+    g = torch.Generator().manual_seed(7)
+    bf = lambda *shape, s=1.0: (torch.randn(*shape, generator=g) * s).bfloat16()
+    head = types.SimpleNamespace(
+        markov_rank=r,
+        # fp32 holding bf16 values: the interpreter's bf16 tl.dot is wrong, the kernels follow the dtype
+        fold_weight=bf(V, r, s=0.3).float(), fold_bias=bf(V).float(),
+        markov_w1=types.SimpleNamespace(weight=bf(50, r).float()),
+        rnn_proj=types.SimpleNamespace(weight=bf(3 * r, 2 * r + 2 * H, s=0.2).float()),
+    )
+    head.markov_w1.__call__ = None
+    model = types.SimpleNamespace(
+        model=types.SimpleNamespace(markov_head=head),
+        config=types.SimpleNamespace(final_logit_softcapping=30.0, vocab_size=V - 3))
+    state, prev = torch.tanh(bf(rows, r).float()).bfloat16(), torch.randint(0, 50, (rows,), generator=g)
+    context = torch.randn(rows, 3 * r, generator=g)
+    base = (bf(rows, 7, V, s=10))[:, 4]
+    results = []
+    sys.modules.pop("radiance_inkling2_draft", None)
+    for hip in (None, "6.4"):
+        ns = {"torch": _Torch(hip), "markov_gate": _ref_gate, "add_softcap": _ref_softcap,
+              "tensor_model_parallel_all_gather": lambda x: x}
+        exec(_method(tree, "Inkling2MarkovHead", "step"), ns)
+        exec(_method(tree, "Inkling2DSparkModel", "markov_logits"), ns)
+        h = types.SimpleNamespace(**vars(head))
+        h.markov_w1 = lambda ids, w=head.markov_w1.weight: w[ids]   # nn.Embedding stand-in
+        h.markov_w1.weight = head.markov_w1.weight
+        m = types.SimpleNamespace(model=types.SimpleNamespace(markov_head=h), config=model.config)
+        new_state, bias = ns["step"](h, state, prev, context)
+        logits = ns["markov_logits"](m, base, bias)
+        results.append((new_state, logits))
+    assert "radiance_inkling2_draft" in sys.modules  # the hip run really took the folded path
+    (s0, l0), (s1, l1) = results
+    assert l1.shape == l0.shape == (rows, V - 3)
+    torch.testing.assert_close(s1.float(), s0.float(), atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(l1.float(), l0.float(), atol=0.25, rtol=2e-2)
+
+
+def test_shortlist_is_plumbed_from_the_speculator_to_the_fold(tree):
+    run(tree)
+    spec = (tree / "vllm/models/inkling2/speculator.py").read_text()
+    assert "top = self.model.shortlist(base_logits)" in spec
+    assert "None if top is None else (top[0][:, i], top[1][:, i])" in spec
+    assert "markov_argmax(base_logits[:, i], bias)" in spec  # the greedy-only draft keeps the dense path
+    assert "short: tuple[torch.Tensor, torch.Tensor] | None = None" in \
+        _method(tree, "Inkling2DSparkModel", "markov_logits")
+    assert "from radiance_inkling2_draft import SHORTLIST_K, shortlist" in \
+        _method(tree, "Inkling2DSparkModel", "shortlist")
+
+
+def test_shortlist_path_matches_dense_on_members_and_masks_the_rest(tree, monkeypatch):
+    """Same harness as the folded-path test, shortlist on (k=20 of 200): members carry the dense
+    logits, the rest is -inf, and k=0 is the dense path again."""
+    run(tree)
+    r, rows, V, H, n_spec = 32, 3, 200, 24, 7
+    g = torch.Generator().manual_seed(11)
+    bf = lambda *shape, s=1.0: (torch.randn(*shape, generator=g) * s).bfloat16()
+    head = types.SimpleNamespace(
+        markov_rank=r, fold_weight=bf(V, r, s=0.3).float(), fold_bias=bf(V).float(),
+        markov_w1=types.SimpleNamespace(weight=bf(50, r).float()),
+        rnn_proj=types.SimpleNamespace(weight=bf(3 * r, 2 * r + 2 * H, s=0.2).float()))
+    w1 = head.markov_w1.weight
+    head.markov_w1 = lambda ids, w=w1: w[ids]   # nn.Embedding stand-in
+    head.markov_w1.weight = w1
+    cfg = types.SimpleNamespace(final_logit_softcapping=30.0, vocab_size=V - 3)
+    model = types.SimpleNamespace(model=types.SimpleNamespace(markov_head=head), config=cfg)
+    state = torch.tanh(bf(rows, r).float()).bfloat16()
+    prev = torch.randint(0, 50, (rows,), generator=g)
+    context = torch.randn(rows, 3 * r, generator=g)
+    base_all = bf(rows, n_spec, V, s=10)
+
+    def run_path(hip, k):
+        monkeypatch.setenv("RADIANCE_INKLING2_DRAFT_SHORTLIST", str(k))
+        sys.modules.pop("radiance_inkling2_draft", None)
+        ns = {"torch": _Torch(hip), "markov_gate": _ref_gate, "add_softcap": _ref_softcap,
+              "tensor_model_parallel_all_gather": lambda x: x}
+        exec(_method(tree, "Inkling2MarkovHead", "step"), ns)
+        exec(_method(tree, "Inkling2DSparkModel", "markov_logits"), ns)
+        exec(_method(tree, "Inkling2DSparkModel", "shortlist"), ns)
+        _, bias = ns["step"](head, state, prev, context)
+        top = ns["shortlist"](model, base_all)
+        short = None if top is None else (top[0][:, 3], top[1][:, 3])
+        return ns["markov_logits"](model, base_all[:, 3], bias, short), top
+
+    dense, _ = run_path(None, 20)
+    folded, top0 = run_path("6.4", 0)
+    assert top0 is None
+    torch.testing.assert_close(folded.float(), dense.float(), atol=0.25, rtol=2e-2)
+    short, top = run_path("6.4", 20)
+    assert top[1].shape == (rows, n_spec, 20)
+    member = torch.zeros(rows, V, dtype=torch.bool).scatter_(1, top[1][:, 3], True)[:, : V - 3]
+    assert torch.isneginf(short[~member].float()).all()
+    torch.testing.assert_close(short[member].float(), dense[member].float(), atol=0.25, rtol=2e-2)
+    assert int(member.sum()) >= rows * 20 - rows * 3   # at most 3 members per row are sliced off

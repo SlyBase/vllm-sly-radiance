@@ -13,6 +13,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Added
+- **Inkling 2 Mini DSpark: launch folding, same math in fewer launches** (`sly/inkling2/radiance_inkling2_draft.py`,
+  patch hooks 4j in `sly/patch_inkling2_gfx12.py`): draft RMSNorm 10 torch
+  launches -> 1 (27.8 -> 3.3 us, bit exact), Markov step (cat + embedding + addmm + gate) and fold GEMM +
+  softcap each in one kernel (draft Markov tail 200 -> 177 us per step), dynamic sconv taps on the low-M GEMV
+  (7.8 -> 5.1 us). Verify step 30.3 -> 29.55 ms (2 starts per arm,
+  gfx1201, graphs, k=7). Optional `RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>` (default off): Markov correction on
+  the top-k base logits of each draft row only (-inf elsewhere, target output unchanged); measured -1.7 ms
+  per step but fewer accepted tokens on code (acc/step 3.43 -> 2.97 at k=4096), so not enabled.
 - **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
   the model's sm120 (Triton) path on ROCm: capability gates, PDL removed, hot-path PTX rewritten to
   Triton math, hip libdevice gaps, 64 KB LDS tiles, flashinfer-free DSpark drafter (torch RMSNorm,
