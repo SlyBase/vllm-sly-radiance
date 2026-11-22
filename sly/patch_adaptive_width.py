@@ -297,7 +297,9 @@ def main():
         "async_scheduler.py hook",
     )
 
-    # cudagraph descriptors. vLLM 0.34 restructured _init_candidates: the capture_sizes and
+    # cudagraph descriptors (main dropped the max_decode_tokens local: the cap is
+    # max_num_reqs * decode_query_len, 0.34's max_num_reqs * uniform_decode_query_len).
+    # vLLM 0.34 restructured _init_candidates: the capture_sizes and
     # max_cg_capture_size locals are gone. Derive the decode token counts from the descriptors
     # already built and the cap from decode_cudagraph_capture_max_tokens(compilation_config)
     # (both in scope there). The 0.34 shape anchors on the descs_by_mode build loop, unique to
@@ -312,7 +314,7 @@ def main():
         "        _radiance_aw_extra_descs(\n"
         "            self, descs_by_mode, decode_mode,\n"
         "            sorted({d.num_tokens for d in descs_by_mode.get(decode_mode, [])}),\n"
-        "            max_decode_tokens,\n"
+        "            self.max_num_reqs * self.decode_query_len,\n"
         "            decode_cudagraph_capture_max_tokens(compilation_config),\n"
         "            separate_decode_routine,\n"
         "        )\n"

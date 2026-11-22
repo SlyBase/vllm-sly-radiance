@@ -104,6 +104,8 @@ run_pass 2
 if grep -q '^  OK ' "$WORK/pass2.log"; then
   echo "FAIL: pass 2 applied hunks again (patch not idempotent):"; grep '^  OK ' "$WORK/pass2.log"; exit 1
 fi
+# a clean anchor can still read a local the pinned upstream removed (latent NameError at runtime)
+"$PY" "$ROOT/ci/check_new_names.py" "$WORK/src/vllm/vllm" "$SP/vllm" || exit 1
 
 # --- kv-cache ram-mode patches (serve-mxfp4.sh KVCACHE=ram applies them at container start, not
 #     the Dockerfile) against the same pinned vLLM, launcher order, same two-pass rule. A hunk the
