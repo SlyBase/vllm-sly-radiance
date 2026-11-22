@@ -32,6 +32,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
   drafter projections, bf16 activations, M <= 4; 1.6-1.9x faster than the bf16 Triton GEMV at M=1.
 
+- **Inkling 2 Mini: no cooperative launch for the fused route kernel on ROCm.** A cooperative launch
+  gets its own HIP hardware queue; the route kernel then alternated with the main queue 48x per step
+  and on ~2/3 of the container starts every small kernel of the step hit a ~17 us duration floor
+  (62 vs 31 ms per DSpark verify step, ~67 vs ~135 tok/s). The grid (<= 28 programs) is co-resident
+  on any idle gfx12, which is all its spin-wait needs; asserted before the launch. Measured 4/4 fast
+  starts (128-153 tok/s on a 2000-token code request) vs 4/12 before.
+
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
   `KVCacheLayerConfig` / `MambaManager.layer_config` (`v1/kv_cache_interface.py`), which Inkling 2 Mini
