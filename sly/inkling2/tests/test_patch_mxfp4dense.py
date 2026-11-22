@@ -46,16 +46,41 @@ def test_hooks_land_and_parse(tree):
     assert linear.index("mxfp4_dense_linear") < linear.index("if out is not None:")
 
 
+def method(source, cls, name):
+    """Source of `cls.name` in `source` (None if absent)."""
+    for c in ast.walk(ast.parse(source)):
+        if isinstance(c, ast.ClassDef) and c.name == cls:
+            for f in c.body:
+                if isinstance(f, ast.FunctionDef) and f.name == name:
+                    return ast.get_source_segment(source, f)
+    return None
+
+
+def test_load_time_hooks_land_in_the_right_classes(tree):
+    run(GFX12, tree)
+    assert run(PATCH, tree).returncode == 0
+    ink = tree / "vllm/models/inkling2/nvidia"
+    target = method((ink / "model.py").read_text(), "Inkling2ForConditionalGeneration",
+                    "process_weights_after_loading")
+    assert target and "process_target(self)" in target and "torch.version.hip" in target
+    dspark = (ink / "dspark.py").read_text()
+    draft = method(dspark, "Inkling2DSparkModel", "process_weights_after_loading")
+    assert draft and "process_draft(self)" in draft and "torch.version.hip" in draft
+    attach = method(dspark, "Inkling2DSparkModel", "attach_target")
+    # the head is released only after the fold has read it in bf16
+    assert attach.index("self.refresh_derived_weights()") < attach.index("release_head(self.lm_head.weight)")
+
+
 def test_idempotent(tree):
     run(GFX12, tree)
     assert run(PATCH, tree).returncode == 0
-    linear1 = (tree / "vllm/models/inkling2/nvidia/ops/linear.py").read_text()
-    model1 = (tree / "vllm/models/inkling2/nvidia/model.py").read_text()
+    files = ("ops/linear.py", "model.py", "dspark.py")
+    first = {f: (tree / "vllm/models/inkling2/nvidia" / f).read_text() for f in files}
     r2 = run(PATCH, tree)
     assert r2.returncode == 0, r2.stdout + r2.stderr
-    assert "NOOP" in r2.stdout
-    assert (tree / "vllm/models/inkling2/nvidia/ops/linear.py").read_text() == linear1
-    assert (tree / "vllm/models/inkling2/nvidia/model.py").read_text() == model1
+    assert "NOOP" in r2.stdout and "  OK  " not in r2.stdout
+    for f in files:
+        assert (tree / "vllm/models/inkling2/nvidia" / f).read_text() == first[f]
 
 
 def test_noop_without_inkling2(tmp_path):

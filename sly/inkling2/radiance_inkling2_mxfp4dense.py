@@ -1,11 +1,18 @@
 """Opt-in MXFP4 (4-bit) quantization of Inkling-2-Mini's DENSE bf16 projections + lm_head.
 
 Default stays lossless bf16. RADIANCE_INKLING2_MXFP4_DENSE=1 quantizes the dense weights to MXFP4
-(group-32 E2M1 codes + E8M0 scales, RTN or a small MSE exponent search) at LOAD time (lazily, on the
-first eager call) and routes the matmul through the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel
-(radiance_mxfp4_fp8.so, the same one prod Qwen runs). The bf16 original stays alive: the DSpark
-drafter reads lm_head.weight in bf16 (fold + its own head linear), and any weight first seen under
-CUDA-graph capture falls back to bf16. This is a quality trade-off like Qwen's own 4-bit, NOT lossless.
+(group-32 E2M1 codes + E8M0 scales, RTN or a small MSE exponent search) at LOAD time and routes the
+matmul through the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (radiance_mxfp4_fp8.so, the same one
+prod Qwen runs). This is a quality trade-off like Qwen's own 4-bit, NOT lossless.
+
+Memory: the bf16 originals are RELEASED right after quantization (the Parameter keeps its shape and
+dtype over a one-value-per-row stub, see _stub), so vLLM's memory profiling sees the freed bytes before
+it sizes the KV cache. Nothing is quantized lazily: every weight the model hands to linear() is
+registered at load (process_target / process_draft, called from the models' process_weights_after_loading),
+so the dispatch never needs a bf16 fallback and nothing is allocated under CUDA-graph capture. What
+still reads bf16: only the lm_head, until the DSpark draft has folded it (Inkling2MarkovHead.fold reads
+lm_head.weight row by row in fp64 at attach_target); release_head() frees it right after. Without a
+draft the head stays bf16. Weight reload / RL weight transfer is not supported with the knob on.
 
 Why: Inkling keeps its dense projections + lm_head in bf16 (only the MoE experts are 4-bit), so it
 streams ~4x the dense weight bytes of the fully-4-bit prod Qwen. MXFP4 dense cuts those bytes ~3.8x.
@@ -41,7 +48,7 @@ _E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 # ties to the lower magnitude, matching argmin-first nearest.
 _BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 
-# (data_ptr, K, N) -> entry. The weight ref keeps the address from being reused by another tensor.
+# (data_ptr, K, N) of the weight (or of a row slice of it) the model passes to linear() -> entry.
 _CACHE: dict = {}
 _linear_op = None  # resolved lazily; overridable in CPU tests
 _ext = None
@@ -53,10 +60,12 @@ def _resolve_op():
     """Import radiance_mxfp4 (registers torch.ops.radiance.mxfp4_linear + loads the .so)."""
     global _linear_op, _ext
     if _linear_op is not None:
-        return _linear_op
+        return _linear_op or None
     try:
-        import radiance_mxfp4  # noqa: F401  (registers the custom op, imports the .so)
+        import radiance_mxfp4  # registers the custom op, imports the .so
         import radiance_mxfp4_fp8 as ext
+        # M <= MIN_M goes to aiter's W4A4 GEMM, which is wrong on this weight layout (decode is M <= 8 * 8)
+        assert radiance_mxfp4.MIN_M <= 0, "RADIANCE_MXFP4_W4A8_MIN_M must be 0 (the op sends M <= MIN_M to aiter)"
         _ext = ext
         _linear_op = torch.ops.radiance.mxfp4_linear
     except Exception as e:  # noqa: BLE001  # .so missing: stay on bf16
@@ -66,12 +75,10 @@ def _resolve_op():
 
 
 def _setup_scratch(device):
-    """Allocate the decode kernel's split-K scratch once, outside capture (same sizing as
-    radiance_mxfp4.py). No-op when the decode band is dark (DECODE_MAX_M=0 -> folded GEMM)."""
+    """Allocate the decode kernel's split-K scratch once, at load (same sizing as radiance_mxfp4.py).
+    No-op when the decode band is dark (DECODE_MAX_M=0 -> folded GEMM)."""
     global _scratch_ready
     if _scratch_ready or DECODE_MAX_M <= 0 or _ext is None:
-        return
-    if torch.cuda.is_current_stream_capturing():
         return
     partial = torch.empty(4 * max(64, DECODE_MAX_M) * 36864, dtype=torch.float32, device=device)
     cnt = torch.zeros(36864 // 128 + 8, dtype=torch.int32, device=device)
@@ -159,20 +166,6 @@ def dequant_mxfp4(packed: torch.Tensor, scale_kn: torch.Tensor) -> torch.Tensor:
     return (val * sc).to(torch.bfloat16)
 
 
-def _entry(weight: torch.Tensor):
-    key = (weight.data_ptr(), weight.shape[1], weight.shape[0])
-    ent = _CACHE.get(key)
-    if ent is not None:
-        return ent
-    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-        return None  # first seen under capture: fall back to bf16
-    packed, scale, wref = quantize_mxfp4(weight)
-    ent = {"w": weight, "packed": packed, "scale": scale, "wref": wref, "dq": None}
-    _CACHE[key] = ent
-    _setup_scratch(weight.device)
-    return ent
-
-
 def _finish(y, x, n, out, bias):
     if bias is not None:
         y = y + bias
@@ -183,29 +176,134 @@ def _finish(y, x, n, out, bias):
     return y
 
 
+def _eligible(w: torch.Tensor) -> bool:
+    return w.dtype == torch.bfloat16 and w.ndim == 2 and w.shape[0] >= MIN_N and w.shape[1] % 64 == 0
+
+
+def _key(w: torch.Tensor):
+    return (w.data_ptr(), w.shape[1], w.shape[0])
+
+
+def _stub(w: torch.Tensor) -> torch.Tensor:
+    """Same shape/dtype/device as `w` over ONE NaN per row (strides (1, 0)): ~2 bytes per row instead of
+    2 * K, a distinct address per row (so the row slices the model takes still key into _CACHE), and
+    NaN logits instead of plausible numbers if anything ever reads it as a real weight."""
+    return torch.full((w.shape[0],), float("nan"), dtype=w.dtype, device=w.device).as_strided(w.shape, (1, 0))
+
+
+def _is_stub(w: torch.Tensor) -> bool:
+    return w.ndim == 2 and w.stride(-1) == 0
+
+
+def _entry(w: torch.Tensor) -> dict:
+    packed, scale, wref = quantize_mxfp4(w)
+    # w4a16 (quality arm) runs the bf16 matmul on the dequantized codes: build it now, not on first call
+    return {"packed": packed, "scale": scale, "wref": wref,
+            "dq": dequant_mxfp4(packed, scale) if MODE == "w4a16" else None}
+
+
+def _rows(ent: dict, r0: int, n: int) -> dict:
+    """Entry of rows [r0, r0+n): quantization is per row, so this is bit-identical to quantizing the slice.
+    The kernel reads scale [K/32, n] and wref [n] densely, hence the copies (small: K/32 + 1 bytes a row)."""
+    return {"packed": ent["packed"][r0:r0 + n], "scale": ent["scale"][:, r0:r0 + n].contiguous(),
+            "wref": ent["wref"][r0:r0 + n].clone(),
+            "dq": None if ent["dq"] is None else ent["dq"][r0:r0 + n]}
+
+
+@torch.no_grad()
+def register(p: torch.nn.Parameter, rows=(), free: bool = True) -> None:
+    """Quantize the bf16 weight `p` now and route linear() calls on it (and on the row slices `rows`
+    = [(first row, count)] the model takes of it) to the MXFP4 copy; free=True releases the bf16."""
+    w = p.data
+    if _key(w) in _CACHE or _is_stub(w) or not _eligible(w):  # already done (a second finalize pass)
+        return
+    assert all(_eligible(w[r0:r0 + n]) for r0, n in rows), "row slice not routable (N < MIN_N)"
+    view = _stub(w) if free else w
+    ent = _entry(w)
+    _CACHE[_key(view)] = ent
+    for r0, n in rows:
+        _CACHE[_key(view[r0:r0 + n])] = _rows(ent, r0, n)
+    if free:
+        p.data = view
+
+
+def _ready(model) -> bool:
+    """Knob on and the kernel usable (checked once, at load); allocates the decode scratch."""
+    if not ENABLED:
+        return False
+    if MODE != "w4a16":
+        if _resolve_op() is None:
+            return False
+        _setup_scratch(next(model.parameters()).device)
+    return True
+
+
+def _qkvr_rows(attn):
+    """The row slices Inkling2Attention._project() takes of qkvr.weight when q, k, v have separate inputs
+    (full layers, and local loop-core layers after the first pass): q side (+ alignment pad), k, v."""
+    q_side, kv = sum(attn.split_sizes[:4]), attn.split_sizes[4]
+    return [(0, sum(attn.q_side_splits)), (q_side, kv), (q_side + kv, kv)]
+
+
+def process_target(model) -> None:
+    """Load-time hook of Inkling2ForConditionalGeneration: quantize + release every attention qkvr / wo_ud
+    (the weights ops.linear.linear() gets), quantize the lm_head and KEEP it (see release_head)."""
+    if not _ready(model):
+        return
+    for m in model.modules():
+        if hasattr(m, "qkvr") and hasattr(m, "wo_ud"):
+            register(m.qkvr.weight, _qkvr_rows(m))
+            register(m.wo_ud.weight)
+    # LoRA swaps in the stock LogitsProcessor, which reads the bf16 head itself: leave that one alone
+    if "_apply_head" in vars(type(model.logits_processor)):
+        register(model.lm_head.weight, free=False)
+
+
+# the DSpark draft's own projections, all passed whole to linear() (its lm_head is the target's)
+_DRAFT_LINEARS = (".qkv_proj.weight", ".kv_proj_ctx.weight", ".o_proj.weight", ".gate_up_proj.weight",
+                  ".down_proj.weight")
+
+
+def process_draft(model) -> None:
+    """Load-time hook of Inkling2DSparkModel. hidden_out / rnn_proj / markov_w1 are read directly
+    (fold, addmm, the markov kernel): they stay bf16 by name, not by shape."""
+    if not _ready(model):
+        return
+    for name, p in model.named_parameters():
+        if name.endswith(_DRAFT_LINEARS):
+            register(p)
+
+
+@torch.no_grad()
+def release_head(p: torch.nn.Parameter) -> None:
+    """Free the bf16 lm_head once the draft has folded it (no-op if it was not registered)."""
+    ent = _CACHE.pop(_key(p.data), None)
+    if ent is None:
+        return
+    p.data = _stub(p.data)
+    _CACHE[_key(p.data)] = ent
+    torch.cuda.empty_cache()  # attach_target runs after the loader's own empty_cache
+
+
 def mxfp4_dense_linear(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor | None = None,
                        bias: torch.Tensor | None = None):
-    """x @ weight.T via the MXFP4 copy of `weight`; None = not handled (caller runs bf16)."""
-    if not ENABLED or weight.dtype != torch.bfloat16 or weight.ndim != 2:
+    """x @ weight.T via the MXFP4 copy registered for `weight`; None = not ours (caller runs bf16)."""
+    if not ENABLED or weight.ndim != 2:
         return None
     n, k = weight.shape
-    if n < MIN_N or k % 64 or x.dtype != torch.bfloat16 or x.shape[-1] != k:
-        return None
-    x2 = x.reshape(-1, k)
-    if x2.shape[0] == 0:
-        return None
-    ent = _entry(weight)
+    ent = _CACHE.get(_key(weight))
     if ent is None:
+        if _is_stub(weight):  # its bf16 is gone: running bf16 on it would be garbage
+            raise RuntimeError(f"[radiance.inkling2.mxfp4dense] released {n}x{k} weight has no MXFP4 entry")
         return None
+    assert x.dtype == torch.bfloat16 and x.shape[-1] == k, (x.dtype, tuple(x.shape), k)
+    x2 = x.reshape(-1, k)
+    if not x2.shape[0]:  # the kernel has no empty launch
+        return _finish(x2.new_empty((0, n)), x, n, out, bias)
     if MODE == "w4a16":
-        if ent["dq"] is None:
-            ent["dq"] = dequant_mxfp4(ent["packed"], ent["scale"])
         y = torch.nn.functional.linear(x2, ent["dq"])
-        return _finish(y, x, n, out, bias)
-    op = _resolve_op()
-    if op is None:
-        return None
-    y = op(x2, ent["packed"], ent["scale"], ent["wref"])
+    else:
+        y = _resolve_op()(x2, ent["packed"], ent["scale"], ent["wref"])
     return _finish(y, x, n, out, bias)
 
 

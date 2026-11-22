@@ -65,8 +65,10 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   projections + lm_head in bf16 (only the MoE experts are 4-bit), streaming ~4x the dense weight
   bytes of the fully-4-bit prod Qwen; this quantizes them at load time to the compressed-tensors
   MXFP4 grid (group-32 E2M1 + E8M0, RTN or a small MSE exponent search) and routes the matmul through
-  the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (`radiance_mxfp4_fp8.so`). The bf16 original stays
-  alive (the DSpark drafter reads lm_head.weight in bf16; capture-first weights fall back to bf16).
+  the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (`radiance_mxfp4_fp8.so`). Memory: the weights are
+  quantized in `process_weights_after_loading` and the bf16 originals are released right there, before
+  vLLM sizes the KV cache (2.74 GB bf16 of the attention, draft and head projections become 0.74 GB
+  MXFP4; only the lm_head stays bf16 until the DSpark draft has folded it, then it is freed too).
   `RADIANCE_INKLING2_MXFP4_DENSE_MODE=w4a16` dequantizes the codes back to bf16 to isolate the
   weight-quantization quality cost. The MoE router and tiny projections (N < 256) stay bf16; the loop
   message controllers (~4% of dense bytes, batched bmm) stay bf16. A quality trade-off like Qwen's own
