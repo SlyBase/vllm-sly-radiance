@@ -50,7 +50,9 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `RADIANCE_INKLING2_MXFP4_DENSE_MODE=w4a16` dequantizes the codes back to bf16 to isolate the
   weight-quantization quality cost. The MoE router and tiny projections (N < 256) stay bf16; the loop
   message controllers (~4% of dense bytes, batched bmm) stay bf16. A quality trade-off like Qwen's own
-  4-bit, NOT lossless.
+  4-bit, NOT lossless. Load-time quantizer on the real weights (`sly/inkling2/check_mxfp4dense_cpu.py`,
+  CPU-only): 0.115 relRMS RTN / 0.112 MSE, dequant bit-exact against the format grid; the quantizable
+  dense reads drop from 4.77 to 1.27 GB per step (3.76x fewer weight bytes).
 
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
