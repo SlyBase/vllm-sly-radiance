@@ -25,6 +25,30 @@ MUTATIONS = {
     "splitbase": ("partials[((int64_t)split * M + m) * N + n] = tot[j][m];",
                   "partials[((int64_t)0 * M + m) * N + n] = tot[j][m];"),
     "splitstart": ("const int i0 = (int)(((int64_t)nit * split) / nsplit);", "const int i0 = 0;"),
+    # gemv_bf16 (tests/test_gemv_bf16_hip.py). Only mutations that stay inside the allocated buffers:
+    # the OOB guards (row clamp, K clamps and masks, columns >= M, stores past N) are never mutated on the
+    # shared GPU.
+    "bf_opsame": ("__builtin_bit_cast(bf16x8, a),", "__builtin_bit_cast(bf16x8, xv),"),
+    "bf_swz_write": ("tile[(t * 16 + row) * 8 + (lc ^ (row & 7))] =", "tile[(t * 16 + row) * 8 + lc] ="),
+    "bf_swz_read": ("tile[(t * 16 + r) * 8 + ((2 * j + h) ^ (r & 7))]", "tile[(t * 16 + r) * 8 + (2 * j + h)]"),
+    "bf_chunk_h": ("((2 * j + h) ^ (r & 7))", "((2 * j) ^ (r & 7))"),
+    "bf_step_j": ("((2 * j + h) ^ (r & 7))", "((2 * (j ^ 1) + h) ^ (r & 7))"),
+    "bf_xrow": ("const uint16_t* xr0 = x + (int64_t)(xlive ? r : 0) * SX;", "const uint16_t* xr0 = x + (int64_t)(xlive ? 0 : 0) * SX;"),
+    "bf_xlive_off1": ("const bool xlive = r < M;", "const bool xlive = r < M - (M > 1);"),
+    "bf_wstride": ("N - 1) * SW;", "N - 1) * K;"),
+    "bf_wrow": ("min(nbase + 16 * t + 4 * q + lr, N - 1)", "min(nbase + 16 * t + lr, N - 1)"),
+    "bf_wtile": ("min(nbase + 16 * t + 4 * q + lr, N - 1)", "min(nbase + 4 * q + lr, N - 1)"),
+    "bf_split": ("const int g0 = (int)((int64_t)ngroups * wv / W), g1 = (int)((int64_t)ngroups * (wv + 1) / W);", "const int g0 = 0, g1 = (int)((int64_t)ngroups / W);"),
+    "bf_gstep": ("const uint16_t* p = wl[t][q] + g * BF_GROUP + lc * 8;", "const uint16_t* p = wl[t][q] + g * 32 + lc * 8;"),
+    "bf_pipe": ("      if (g + 2 < g1) load(wa, xa, g + 2);\n", "      if (g + 2 < g1) load(wa, xa, g + 1);\n"),
+    "bf_nosum": ("for (int g = 0; g < W; g++) v += redb[g * T * 256 + id];", "for (int g = 0; g < 1; g++) v += redb[g * T * 256 + id];"),
+    "bf_rowhalf": ("n = nbase + 16 * t + (l >> 4) * 8 + e;", "n = nbase + 16 * t + (l >> 4) * 4 + e;"),
+    "bf_negbias": ("v += bias ? __uint_as_float", "v -= bias ? __uint_as_float"),
+    "bf_bias0": ("v += bias ? __uint_as_float((uint32_t)bias[n] << 16)", "v += bias ? __uint_as_float((uint32_t)bias[0] << 16)"),
+    "bf_ystride": ("else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB", "else ((uint16_t*)y)[(int64_t)m * N + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB"),
+    "bf_y32stride": ("if (out32) ((float*)y)[(int64_t)m * SY + n] = v;\n    else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB", "if (out32) ((float*)y)[(int64_t)m * N + n] = v;\n    else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB"),
+    "bf_rne": ("return (uint16_t)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);", "return (uint16_t)((u + 0x7FFFu) >> 16);"),
+    "bf_blocks": ("const int blocks = (a.N + 16 * T - 1) / (16 * T);", "const int blocks = (a.N + 16 * T - 1) / (16 * T) - (a.N > 16 * T);"),
 }
 
 

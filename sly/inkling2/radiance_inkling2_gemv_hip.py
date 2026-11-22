@@ -1,11 +1,15 @@
-"""int8 (Q8_0) weight HIP GEMV dispatch for Inkling 2's low-M bf16 projections on gfx12 (RDNA4).
+"""HIP GEMV dispatch for Inkling 2's low-M projections on gfx12 (RDNA4): bf16 (default) and int8 (opt-in).
 
 The patch hook in ops/gemv.py (sly/patch_inkling2_gfx12.py) calls hip_gemv() before vLLM's Triton
-_gemv_kernel; False means "not handled", Triton on the original bf16 weight stays the fallback.
-Only the quantized arm lives here: vLLM's Triton bf16 GEMV already streams at DRAM bandwidth, so a
-bf16 HIP kernel cannot win; fewer bytes can.
+_gemv_kernel; False means "not handled", the Triton kernel on the original bf16 weight stays the
+fallback.
 
-Opt-in RADIANCE_INKLING2_W8=1 (default 0): big projection weights (>= Q8_MIN_NUMEL = 3M elements; NOT
+bf16 (default on, RADIANCE_INKLING2_HIP_GEMV=0 = Triton): the model's own bf16 weight, M 1..16, fp32
+accumulation (lossless). Triton pads M to 16 rows and its tl.dot streams a spec-verify width (M=8)
+slower than the card can; the HIP kernel reads each weight row once with 16 B non-temporal loads and
+accumulates all M rows per load. No copy, no scratch: it routes under graph capture too.
+
+int8: opt-in RADIANCE_INKLING2_W8=1 (default 0): big projection weights (>= Q8_MIN_NUMEL = 3M elements; NOT
 the MoE router, NOT tiny tensors) are converted once, lazily, on the first eager call to int8
 with one fp32 scale per 32 consecutive K values (symmetric, scale = amax / 127, round to
 nearest) = ggml Q8_0 with an fp32 scale; activations stay bf16 -> fp32. Cost: 1.125 B/weight
@@ -23,6 +27,7 @@ import os
 import torch
 
 W8 = os.environ.get("RADIANCE_INKLING2_W8", "0") == "1"
+HIP_BF16 = os.environ.get("RADIANCE_INKLING2_HIP_GEMV", "1") != "0"
 Q8_MIN_NUMEL = 3 << 20  # k/v 1024 x 2304 (2.4M) gains <= 5 %: stays on Triton; router 0.3M too
 Q8_BLOCK = 32  # K values per scale
 MAX_M = 16  # kernel range
@@ -80,10 +85,49 @@ def _scratch():
     return _SCRATCH.data_ptr(), _SCRATCH.numel() * 4
 
 
-def hip_gemv(x2: torch.Tensor, weight: torch.Tensor, bias, out: torch.Tensor) -> bool:
-    """out = x2 @ weight.T (+ bias) via the int8 copy of `weight`; True if handled."""
-    if _ext is None or not _want_q8(weight):
+def _aligned(t: torch.Tensor) -> bool:
+    return t.data_ptr() % 16 == 0
+
+
+def _hip_bf16(x2: torch.Tensor, weight: torch.Tensor, bias, out: torch.Tensor) -> bool:
+    """out = x2 @ weight.T (+ bias) reading `weight` as it is; True if handled."""
+    m, k = x2.shape
+    n = weight.shape[0]
+    if not (
+        0 < m <= MAX_M
+        and weight.ndim == 2
+        and weight.shape[1] == k
+        and x2.dtype == weight.dtype == torch.bfloat16
+        and out.dtype in (torch.bfloat16, torch.float32)
+        and tuple(out.shape) == (m, n)
+        and k % 8 == 0  # 16 B vector weight loads
+        and x2.stride(-1) == 1
+        and weight.stride(-1) == 1
+        and out.stride(-1) == 1
+        and x2.stride(0) % 8 == 0  # 16 B vector x staging
+        and weight.stride(0) % 8 == 0
+        and _aligned(x2)
+        and _aligned(weight)
+        and (bias is None or (bias.dtype == torch.bfloat16 and bias.stride(0) == 1 and bias.shape == (n,)))
+    ):
         return False
+    _ext.gemv_bf16(x2.data_ptr(), weight.data_ptr(), bias.data_ptr() if bias is not None else 0,
+                   out.data_ptr(), m, n, k, x2.stride(0), weight.stride(0), out.stride(0),
+                   int(out.dtype == torch.float32), torch.cuda.current_stream().cuda_stream, -1)
+    return True
+
+
+def hip_gemv(x2: torch.Tensor, weight: torch.Tensor, bias, out: torch.Tensor) -> bool:
+    """out = x2 @ weight.T (+ bias) on the HIP kernels; True if handled, False = Triton."""
+    if _ext is None:
+        return False
+    if _want_q8(weight) and _hip_q8(x2, weight, bias, out):
+        return True
+    return HIP_BF16 and _hip_bf16(x2, weight, bias, out)
+
+
+def _hip_q8(x2: torch.Tensor, weight: torch.Tensor, bias, out: torch.Tensor) -> bool:
+    """out = x2 @ weight.T (+ bias) via the int8 copy of `weight`; True if handled."""
     m, k = x2.shape
     n = weight.shape[0]
     if not (

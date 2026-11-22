@@ -236,9 +236,10 @@ def main():
         "from radiance_inkling2_kv import kv_scatter",
         "inkling2 dspark draft: Triton KV scatter instead of the CUDA cache op",
     )
-    # --- low-M GEMV: hand-written HIP kernel on an opt-in int8 weight copy; Triton bf16 otherwise ---
-    # One self-contained hunk; the dispatch lives in radiance_inkling2_gemv_hip.py (falls back
-    # to the Triton kernel below unless RADIANCE_INKLING2_W8=1 and the module is present).
+    # --- low-M GEMV: hand-written HIP bf16 kernel (default), int8 copy opt-in; Triton otherwise ---
+    # One self-contained hunk; the dispatch lives in radiance_inkling2_gemv_hip.py (falls back to the
+    # Triton kernel below when the module is missing, RADIANCE_INKLING2_HIP_GEMV=0 or the input is
+    # outside the kernel's contract).
     apply(
         ROOT / "nvidia/ops/gemv.py",
         "    if m:\n        _gemv_kernel[(triton.cdiv(n, _BN),)](\n",
@@ -248,7 +249,7 @@ def main():
         "            return out.view(*lead, n)\n"
         "    if m:\n        _gemv_kernel[(triton.cdiv(n, _BN),)](\n",
         "from radiance_inkling2_gemv_hip import hip_gemv",
-        "inkling2 gemv: HIP int8 (Q8_0) GEMV on ROCm, opt-in RADIANCE_INKLING2_W8",
+        "inkling2 gemv: HIP bf16 GEMV on ROCm (RADIANCE_INKLING2_HIP_GEMV=0 = Triton), int8 opt-in RADIANCE_INKLING2_W8",
     )
 
 

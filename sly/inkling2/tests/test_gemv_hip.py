@@ -364,6 +364,7 @@ def routed(monkeypatch):
     state = {"capturing": False}
     monkeypatch.setattr(disp, "_ext", fake)
     monkeypatch.setattr(disp, "W8", True)
+    monkeypatch.setattr(disp, "HIP_BF16", False)  # these tests isolate the int8 route
     monkeypatch.setattr(disp, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: state["capturing"])
@@ -376,15 +377,16 @@ def _t(m, n, k=2304, dtype=torch.bfloat16):
     return torch.randn(m, k, dtype=dtype), torch.randn(n, k, dtype=dtype), torch.empty(m, n, dtype=dtype)
 
 
-def test_w8_defaults_off_and_bf16_is_never_routed(monkeypatch):
+def test_w8_defaults_off_and_the_int8_route_needs_it(monkeypatch):
     fake = FakeExt()
     monkeypatch.setattr(disp, "_ext", fake)
     monkeypatch.setattr(disp, "W8", False)
+    monkeypatch.setattr(disp, "HIP_BF16", False)  # the bf16 route has its own tests (test_gemv_bf16_hip.py)
     x, w, out = _t(1, 4096)
     assert disp.hip_gemv(x, w, None, out) is False
-    assert fake.calls == [] and not hasattr(disp, "ENABLED")  # one knob: W8
+    assert fake.calls == [] and not hasattr(disp, "ENABLED")  # int8 knob: W8
     src = (HERE.parent / "radiance_inkling2_gemv.hip").read_text()
-    assert "gemv_q8" in src and 'm.def("gemv"' not in src  # no bf16 entry point any more
+    assert "gemv_q8" in src
 
 
 def test_routes_big_weight_to_q8_with_scale_and_strides(routed):
@@ -558,6 +560,7 @@ def _arm(m, monkeypatch, capturing=False):
     fake = FakeExt()
     monkeypatch.setattr(m, "_ext", fake)
     monkeypatch.setattr(m, "W8", True)
+    monkeypatch.setattr(m, "HIP_BF16", False)
     monkeypatch.setattr(m, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)

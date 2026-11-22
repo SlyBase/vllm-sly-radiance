@@ -22,6 +22,12 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   through `v_dot4_f32_fp8_fp8` (exact), MXFP8 unchanged. Micro-bench (rotated >300 MB pool):
   529-648 GB/s, NVFP4 3.1-3.4x and MXFP8 6.0-6.8x faster than the Triton dequant kernels; NVFP4 output
   bit-identical. `RADIANCE_INKLING2_HIP_MOE=0` = Triton.
+- **HIP bf16 GEMV for the dense low-M projections, default on** (`RADIANCE_INKLING2_HIP_GEMV=0` = Triton;
+  `gemv_bf16` in `sly/inkling2/radiance_inkling2_gemv.hip`): lossless (bf16 weights, fp32 accumulate), M 1..16
+  alike (one `v_wmma_f32_16x16x16_bf16` per 16 weight rows x 16 K, activation rows as columns), weights
+  streamed as whole cache lines through LDS with non-temporal loads, no scratch, graph-capture safe.
+  Rotated-pool micro-bench at M=8: 558-596 GB/s on the big projections (Triton 547-595), 502-529 on
+  wo/down/kv_ctx (Triton 482-484), 1.5x on the rnn_proj; the unembed ties (570 vs 572).
 - **Opt-in int8 (Q8_0) weight GEMV for the dense projections** (`RADIANCE_INKLING2_W8=1`,
   `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
   drafter projections, bf16 activations, M <= 4; 1.6-1.9x faster than the bf16 Triton GEMV at M=1.

@@ -609,11 +609,11 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/kernels/radiance_inkling2_moe.hip -o /out/radiance_inkling2_moe_hip.so \
  && PYTHONPATH=/out python -c "import torch, radiance_inkling2_moe_hip as m; print('radiance_inkling2_moe_hip built:', m.__file__, m.geometry())"
 
-# sly/inkling2/radiance_inkling2_gemv.hip: hand-written low-M int8 (Q8_0) weight GEMV for
-# Inkling-2-Mini on gfx1201. Same single-file pybind11 build as mxfp4/gdn above; imported as
-# radiance_inkling2_gemv by radiance_inkling2_gemv_hip.py, which only routes to it under
-# RADIANCE_INKLING2_W8=1 (default off). Built here because it links against the same ROCm
-# toolchain the venv loads.
+# sly/inkling2/radiance_inkling2_gemv.hip: hand-written low-M GEMV for Inkling-2-Mini on gfx1201:
+# bf16 weights through the wmma unit (default route, RADIANCE_INKLING2_HIP_GEMV=0 = Triton) and an
+# int8 (Q8_0) copy (opt-in RADIANCE_INKLING2_W8=1). Same single-file pybind11 build as mxfp4/gdn
+# above; imported as radiance_inkling2_gemv by radiance_inkling2_gemv_hip.py. Built here because it
+# links against the same ROCm toolchain the venv loads.
 COPY sly/inkling2/radiance_inkling2_gemv.hip /opt/kernels/
 RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       $(python -m pybind11 --includes) \
