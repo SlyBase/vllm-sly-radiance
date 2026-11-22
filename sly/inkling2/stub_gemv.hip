@@ -7,7 +7,7 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(radiance_inkling2_gemv, m) {
-  m.attr("NCFG") = 8;
+  m.attr("NCFG") = 12;
   m.attr("CFGS") = py::list();
   m.attr("BF16_NCFG") = 3;
   py::list cfgs;
@@ -21,13 +21,12 @@ PYBIND11_MODULE(radiance_inkling2_gemv, m) {
   }, "stub: zero output", py::arg("x"), py::arg("w"), py::arg("bias"), py::arg("y"), py::arg("M"),
      py::arg("N"), py::arg("K"), py::arg("SX"), py::arg("SW"), py::arg("SY"), py::arg("out32"),
      py::arg("stream"), py::arg("cfg") = -1);
-  m.def("gemv_q8", [](uintptr_t x, uintptr_t w, uintptr_t scale, uintptr_t bias, uintptr_t y,
-                      int64_t M, int64_t N, int64_t K, int64_t SX, int64_t SW, int64_t SY,
-                      int64_t out32, uintptr_t scratch, uintptr_t scratch_bytes,
+  m.def("gemv_q8", [](uintptr_t x, uintptr_t q, uintptr_t s, uintptr_t bias, uintptr_t y, int64_t M,
+                      int64_t N, int64_t K, int64_t SX, int64_t SY, int64_t out32, int64_t ntiles,
                       uintptr_t stream, int64_t cfg) {
-    (void)hipMemsetAsync((void*)y, 0, (size_t)M * (size_t)N * (out32 ? 4 : 2), (hipStream_t)stream);
-  }, "stub: zero output", py::arg("x"), py::arg("w"), py::arg("scale"), py::arg("bias"),
-     py::arg("y"), py::arg("M"), py::arg("N"), py::arg("K"), py::arg("SX"), py::arg("SW"),
-     py::arg("SY"), py::arg("out32"), py::arg("scratch"), py::arg("scratch_bytes"),
-     py::arg("stream"), py::arg("cfg") = -1);
+    if (M >= 1 && M <= 16)  // never writes more than M * N elements, whatever the arguments
+      (void)hipMemsetAsync((void*)y, 0, (size_t)M * (size_t)N * (out32 ? 4 : 2), (hipStream_t)stream);
+  }, "stub: zero output", py::arg("x"), py::arg("q"), py::arg("s"), py::arg("bias"), py::arg("y"),
+     py::arg("M"), py::arg("N"), py::arg("K"), py::arg("SX"), py::arg("SY"), py::arg("out32"),
+     py::arg("ntiles"), py::arg("stream"), py::arg("cfg") = -1);
 }

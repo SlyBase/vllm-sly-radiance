@@ -30,7 +30,19 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   wo/down/kv_ctx (Triton 482-484), 1.5x on the rnn_proj; the unembed ties (570 vs 572).
 - **Opt-in int8 (Q8_0) weight GEMV for the dense projections** (`RADIANCE_INKLING2_W8=1`,
   `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
-  drafter projections, bf16 activations, M <= 4; 1.6-1.9x faster than the bf16 Triton GEMV at M=1.
+  drafter projections, bf16 activations, fp32 accumulation, **M 1..16 (a DSpark k=7 verify step is M=8)**.
+  The K sum runs on the matrix unit like the bf16 kernel (the old ALU kernel lost beyond M=4): the int8
+  codes are widened to bf16 exactly, a wave reads a pre-tiled copy (16 rows x 64 K, one 512 B coalesced
+  load per wave, no LDS) and applies each block's fp32 scale to the exact K=32 partial sum. Rotated-pool
+  micro-bench at M=8: 533-585 GB/s of int8 bytes on the big projections (wo 479, kv_ctx 440: launch
+  bound), 1.56-1.73x faster than the bf16 HIP GEMV for every routed shape and every M 1..16, 1.5x on the
+  rnn_proj. `RADIANCE_INKLING2_W8_HEAD=0` keeps the 201024-row LM head on bf16. Default behaviour is unchanged.
+  Model level (eager, no drafter, greedy top-20 logprobs, 32 prompts x 256 tokens, KLD on the reference's top-20
+  up to the first token divergence): mean 0.0081, median 0.0007, p99 0.080, top-1 97.3 % for both Q8 variants
+  (the lossless bf16 HIP kernels vs Triton measure 0.0148 / 0.0006 / 0.218 / 96.5 % on the 8-prompt set, so Q8
+  costs no more than switching bf16 kernels); the LM head in Q8 changes nothing measurable (top-1 identical,
+  KLD 3.4e-6 vs the head-in-bf16 arm). Graphs + DSpark k=7, 2000-token code request, 2 requests per start:
+  109.8 tok/s at W8=1 on 3/3 starts vs 97.6 and 90.4 at W8=0 (acceptance 1.91 tokens/draft in both arms).
 
 - **Inkling 2 Mini: no cooperative launch for the fused route kernel on ROCm.** A cooperative launch
   gets its own HIP hardware queue; the route kernel then alternated with the main queue 48x per step

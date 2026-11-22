@@ -2,15 +2,17 @@
 
 Weight format of the opt-in RADIANCE_INKLING2_W8 path: int8 with one fp32 scale per 32 consecutive
 K values (symmetric, scale = amax / 127, round to nearest) = ggml Q8_0 with an fp32 scale,
-1.125 B/weight; activations stay bf16 -> fp32. bf16 stays on vLLM's Triton GEMV (measured: Triton
-bf16 already runs at DRAM bandwidth); only the int8 copy is routed to the HIP kernel.
+1.125 B/weight; activations stay bf16 -> fp32. The kernel reads a TILED copy (pack_q8: 16 weight rows
+x 64 K per tile group, laid out in the order one wave loads it, see the .hip header); the plain
+[N, K] int8 + [N, K/32] scale pair (to_q8) is the reference format of these tests.
 
-CPU part: Q8_0 conversion math, routing decisions (fake extension), fallback without the
-extension, the gemv.py patch hook (against a copy of the real tree) and mutation checks of the
-dispatcher and of the kernel source (anchors).
-GPU part: int8 kernel vs an independent torch fp32 reference, every M 1..16, every launch config,
-real shapes, odd N, split-K tiny N, K tails, x strides, bias, fp32 out, all 256 int8 codes,
-per-block scales, graph capture. Skips cleanly without a GPU or the compiled module (CI is CPU only).
+CPU part: Q8_0 conversion math, tile layout against an independent emulation of the kernel's
+loads, routing decisions (fake extension), fallback without the extension, the gemv.py patch hook
+(against a copy of the real tree) and mutation checks of the dispatcher and of the kernel source.
+GPU part: int8 kernel vs an independent torch fp32 reference (and bit-exact on integer data), every
+M 1..16, every launch config, real shapes, odd N, tiny N, K tails, x strides, bias, fp32 out, all
+256 int8 codes, per-block scales, graph capture. Skips cleanly without a GPU or the compiled module
+(CI is CPU only).
 
 RADIANCE_GEMV_BUILD=<dir> asserts which build (RED stub / mutant runs) the process imported.
 """
@@ -46,7 +48,7 @@ REAL_SHAPES = [
     (8600, 2304), (6552, 2304), (1024, 2304), (2304, 3072), (201024, 2304),
     (5120, 2304), (2048, 2304), (18432, 2304), (2304, 9216), (2304, 256), (768, 5120),
 ]
-NCFG = 8  # launch configs of the kernel (R rows per 8-lane group x U loads in flight)
+NCFG = 12  # launch configs of the kernel (T row tiles per wave, W K-splitting waves, D groups in flight)
 
 
 def _load_ext():
@@ -94,20 +96,19 @@ def _check(y, ref, out_dtype):
         torch.testing.assert_close(y.float(), ref.float(), rtol=2**-7, atol=1e-3)
 
 
-def _call(ext, x, wq, scale, b, y, *, cfg=-1, scratch=True):
+def _call(ext, x, wq, scale, b, y, *, cfg=-1):
     m, k = x.shape
     n = wq.shape[0]
-    sc = torch.empty(1 << 20, dtype=torch.float32, device="cuda")
+    qt, st = disp.pack_q8(wq, scale)
     stream = torch.cuda.current_stream().cuda_stream
-    ext.gemv_q8(x.data_ptr(), wq.data_ptr(), scale.data_ptr(),
+    ext.gemv_q8(x.data_ptr(), qt.data_ptr(), st.data_ptr(),
                 b.data_ptr() if b is not None else 0, y.data_ptr(),
-                m, n, k, x.stride(0), wq.stride(0), y.stride(0), int(y.dtype == torch.float32),
-                sc.data_ptr() if scratch else 0, sc.numel() * 4 if scratch else 0,
+                m, n, k, x.stride(0), y.stride(0), int(y.dtype == torch.float32), qt.shape[0],
                 int(stream), cfg)
     torch.cuda.synchronize()
 
 
-def _run(ext, m, n, k, *, bias=False, out32=False, sx=None, cfg=-1, scratch=True, seed=0):
+def _run(ext, m, n, k, *, bias=False, out32=False, sx=None, cfg=-1, seed=0):
     g = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(m, sx or k, device="cuda", dtype=torch.bfloat16, generator=g)[:, :k]
     w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16, generator=g) / k**0.5
@@ -115,7 +116,7 @@ def _run(ext, m, n, k, *, bias=False, out32=False, sx=None, cfg=-1, scratch=True
     b = torch.randn(n, device="cuda", dtype=torch.bfloat16, generator=g) if bias else None
     dt = torch.float32 if out32 else torch.bfloat16
     y = torch.empty(m, n, device="cuda", dtype=dt)
-    _call(ext, x, wq, scale, b, y, cfg=cfg, scratch=scratch)
+    _call(ext, x, wq, scale, b, y, cfg=cfg)
     _check(y, _ref(x, _deq(wq, scale), b, dt), dt)
     return y
 
@@ -150,28 +151,73 @@ def test_real_shapes(ext, m, n, k):
     _run(ext, m, n, k, out32=(n == 201024), bias=(n == 768))
 
 
-@pytest.mark.parametrize("m", [1, 3])
-@pytest.mark.parametrize("n", [1, 23, 1023, 8601])
+@pytest.mark.parametrize("m", [1, 3, 8, 16])
+@pytest.mark.parametrize("n", [1, 15, 17, 23, 1023, 8601])
 def test_odd_n(ext, m, n):
     _run(ext, m, n, 2304)
 
 
+@pytest.mark.parametrize("cfg", range(NCFG))
+@pytest.mark.parametrize("n", [1, 7, 33])  # fewer rows than one block, rows past N never stored
+def test_tiny_n_every_config(ext, cfg, n):
+    _run_exact(ext, 8, n, 2304, cfg=cfg)
+
+
 @pytest.mark.parametrize("m", [1, 16])
 @pytest.mark.parametrize("n,k", [(24, 2304), (1, 256), (64, 2304), (100, 9216)])
-def test_tiny_n_split_k(ext, m, n, k):
+def test_tiny_n(ext, m, n, k):
     _run(ext, m, n, k)
 
 
-def test_split_k_matches_unsplit(ext):  # scratch 0 (graph capture before scratch exists) = 1 split
-    a = _run(ext, 2, 64, 2304, scratch=True)
-    b = _run(ext, 2, 64, 2304, scratch=False)
-    torch.testing.assert_close(a.float(), b.float(), rtol=2**-7, atol=1e-3)
-
-
 @pytest.mark.parametrize("m", [1, 16])
-@pytest.mark.parametrize("k", [2432, 288, 32, 4128])  # %32 == 0 but not a multiple of the 256 K slice
+@pytest.mark.parametrize("k", [2368, 192, 64, 4160])  # %64 == 0 but an odd number of 64 K groups / not %128
 def test_k_tail(ext, m, k):
     _run(ext, m, 1024, k)
+
+
+def _guarded(m, n, dt, pad=64):
+    buf = torch.full((m + 1, n + pad), 7.0, device="cuda", dtype=dt)
+    return buf, buf[:m, :n]
+
+
+def _run_exact(ext, m, n, k, *, out32=True, bias=False, sx=0, cfg=-1, seed=0):
+    """Small integer codes, power-of-two block scales, small integer x: every product and partial sum
+    is exact in fp32 in ANY order, so the result must equal the double reference bit for bit. x rows
+    have a NaN-poisoned stride padding, y a sentinel border (nothing may be written outside [m, n])."""
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    xb = torch.full((m, max(sx, k)), float("nan"), device="cuda", dtype=torch.bfloat16)
+    xb[:, :k] = torch.randint(-3, 4, (m, k), device="cuda", generator=g).to(torch.bfloat16)
+    x = xb[:, :k]
+    wq = torch.randint(-3, 4, (n, k), device="cuda", generator=g, dtype=torch.int8)
+    scale = 2.0 ** torch.randint(-2, 3, (n, k // BLK), device="cuda", generator=g).float()
+    b = torch.randint(-3, 4, (n,), device="cuda", generator=g).to(torch.bfloat16) if bias else None
+    dt = torch.float32 if out32 else torch.bfloat16
+    buf, y = _guarded(m, n, dt)
+    _call(ext, x, wq, scale, b, y, cfg=cfg)
+    ref = x.double() @ _deq(wq, scale).double().t()
+    if b is not None:
+        ref = ref + b.double()
+    ref = ref.float().to(dt)
+    assert torch.equal(y, ref), f"max |diff| {(y.float() - ref.float()).abs().max().item()}"
+    assert (buf[:, n:] == 7.0).all() and (buf[m:] == 7.0).all(), "wrote outside [m, n]"
+
+
+@pytest.mark.parametrize("cfg", range(NCFG))
+@pytest.mark.parametrize("m", range(1, 17))
+def test_every_m_every_config_exact(ext, cfg, m):
+    _run_exact(ext, m, 2000, 2368, cfg=cfg)
+
+
+@pytest.mark.parametrize("m", range(1, 17))
+def test_every_m_auto_config_exact(ext, m):
+    _run_exact(ext, m, 2304, 3072)
+    _run_exact(ext, m, 8600, 2304, out32=False)
+
+
+@pytest.mark.parametrize("m", [1, 8, 16])
+def test_bias_and_strides_exact(ext, m):
+    _run_exact(ext, m, 1001, 2304, bias=True, sx=4096)
+    _run_exact(ext, m, 4097, 2368, bias=True, out32=False, sx=2368 + 8)
 
 
 @pytest.mark.parametrize("m", [1, 5, 16])
@@ -181,9 +227,9 @@ def test_x_row_stride(ext, m):
 
 @pytest.mark.parametrize("m", [1, 16])
 def test_bias_and_fp32_out(ext, m):
-    _run(ext, m, 1024, 2304, bias=True)  # N small: split-K, bias applied by gemv_reduce
+    _run(ext, m, 1024, 2304, bias=True)
     _run(ext, m, 1024, 2304, bias=True, out32=True, sx=2560)
-    _run(ext, m, 4096, 2304, bias=True)  # one split: bias applied by the main kernel
+    _run(ext, m, 4096, 2304, bias=True)
     _run(ext, m, 4096, 2304, bias=True, out32=True)
 
 
@@ -215,6 +261,38 @@ def test_scale_is_per_32_block_not_per_row(ext):
     assert ((y.double() - ref).abs() <= 1e-5 * bound).all()
 
 
+def test_auto_config_follows_the_measured_table(ext):
+    """Rotated-pool sweep (bench_gemv.py --q8 --cfgs, M 1 / 8 / 16 alike): T=1 W=4 D=2 (cfg 1) for every shape but
+    the 6552 / 8600-row qkv (cfg 0, W=2) and the unembed (cfg 6, T=2 W=2)."""
+    table = {(1024, 2304): 1, (2048, 2304): 1, (2304, 3072): 1, (2304, 9216): 1, (5120, 2304): 1,
+             (6552, 2304): 0, (8600, 2304): 0, (18432, 2304): 1, (201024, 2304): 6}
+    for (n, k), cfg in table.items():
+        for m in (1, 8, 16):
+            assert ext.auto_cfg_q8(m, n, k) == cfg, (m, n, k)
+
+
+def test_guards_throw_instead_of_faulting(ext):
+    m, n, k = 2, 64, 2304
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    qt, st = disp.pack_q8(*disp.to_q8(torch.randn(n, k, device="cuda", dtype=torch.bfloat16)))
+    y = torch.empty(m, n, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.current_stream().cuda_stream
+
+    def call(**kw):
+        a = dict(x=x.data_ptr(), q=qt.data_ptr(), s=st.data_ptr(), bias=0, y=y.data_ptr(), M=m, N=n,
+                 K=k, SX=k, SY=n, out32=0, ntiles=qt.shape[0], stream=stream, cfg=-1)
+        a.update(kw)
+        ext.gemv_q8(**a)
+
+    call()  # the arguments themselves are valid
+    for bad in (dict(M=0), dict(M=17), dict(N=0), dict(K=2272), dict(K=32), dict(SX=k - 8), dict(SX=k + 4),
+                dict(x=x.data_ptr() + 2), dict(q=qt.data_ptr() + 8), dict(s=st.data_ptr() + 2),
+                dict(ntiles=qt.shape[0] - 1), dict(N=n + 1), dict(cfg=NCFG), dict(cfg=-2)):
+        with pytest.raises((ValueError, RuntimeError)):
+            call(**bad)
+    torch.cuda.synchronize()
+
+
 # ---------------------------------------------------------------- GPU: graph capture
 
 
@@ -223,20 +301,20 @@ def test_graph_capture(ext):
     x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) / k**0.5
     wq, scale = disp.to_q8(w)
-    nsm, nsk = 64, 2304  # also a split-K shape: its partials live in caller-owned scratch
+    nsm, nsk = 64, 2304  # a tiny shape too
     wq2, scale2 = disp.to_q8(torch.randn(nsm, nsk, device="cuda", dtype=torch.bfloat16))
+    qt, st = disp.pack_q8(wq, scale)
+    qt2, st2 = disp.pack_q8(wq2, scale2)
     y1 = torch.empty(m, n, device="cuda", dtype=torch.bfloat16)
     y2 = torch.empty(m, nsm, device="cuda", dtype=torch.float32)
     x2 = torch.randn(m, nsk, device="cuda", dtype=torch.bfloat16)
-    scratch = torch.empty(1 << 20, dtype=torch.float32, device="cuda")
     gs = torch.cuda.Stream()  # capture + launch on a dedicated non-default stream
 
     def launch(sptr: int) -> None:
-        ext.gemv_q8(x.data_ptr(), wq.data_ptr(), scale.data_ptr(), 0, y1.data_ptr(),
-                    m, n, k, k, k, n, 0, int(scratch.data_ptr()), scratch.numel() * 4, sptr, -1)
-        ext.gemv_q8(x2.data_ptr(), wq2.data_ptr(), scale2.data_ptr(), 0, y2.data_ptr(),
-                    m, nsm, nsk, nsk, nsk, nsm, 1, int(scratch.data_ptr()),
-                    scratch.numel() * 4, sptr, -1)
+        ext.gemv_q8(x.data_ptr(), qt.data_ptr(), st.data_ptr(), 0, y1.data_ptr(),
+                    m, n, k, k, n, 0, qt.shape[0], sptr, -1)
+        ext.gemv_q8(x2.data_ptr(), qt2.data_ptr(), st2.data_ptr(), 0, y2.data_ptr(),
+                    m, nsm, nsk, nsk, nsm, 1, qt2.shape[0], sptr, -1)
 
     for _ in range(3):  # eager warmup on the capture stream
         launch(int(gs.cuda_stream))
@@ -330,10 +408,11 @@ def test_q8_cache_reuses_and_dedups_prefix():
     a = disp._q8_for(w)
     b = disp._q8_for(w)
     assert a[0].data_ptr() == b[0].data_ptr()  # converted once
+    assert a[0].shape == (538, 36, 1024) and a[1].shape == (538, 36, 32)
     assert len(disp._Q8_CACHE) == 1
-    q = disp._q8_for(w[:6552])  # row-0 prefix slice shares the base pointer
-    assert q[0].data_ptr() == a[0].data_ptr() and q[0].shape[0] == 6552
-    assert q[1].data_ptr() == a[1].data_ptr() and q[1].shape == (6552, 2304 // BLK)
+    q = disp._q8_for(w[:6552])  # row-0 prefix slice shares the base pointer: 6552 rows = 410 tiles
+    assert q[0].data_ptr() == a[0].data_ptr() and q[0].shape[0] == 410
+    assert q[1].data_ptr() == a[1].data_ptr() and q[1].shape == (410, 36, 32)
     assert len(disp._Q8_CACHE) == 1
     other = torch.randn(8600, 2304, dtype=torch.bfloat16)
     disp._q8_for(other)
@@ -341,10 +420,67 @@ def test_q8_cache_reuses_and_dedups_prefix():
     disp._Q8_CACHE.clear()
 
 
+def test_conversion_is_announced_once_per_weight(capsys):
+    """The server log is the proof an arm really ran int8: one line per converted weight, none for a cache hit."""
+    disp._Q8_CACHE.clear()
+    w = torch.randn(64, 2304, dtype=torch.bfloat16)
+    disp._q8_for(w)
+    disp._q8_for(w)
+    out = capsys.readouterr().out
+    assert out.count("radiance_inkling2: int8 copy") == 1 and "64x2304" in out
+    disp._Q8_CACHE.clear()
+
+
 def test_q8_memory_cost_is_1_125_bytes_per_weight():
     w = torch.randn(1024, 2304, dtype=torch.bfloat16)
     wq, scale = disp.to_q8(w)
     assert (wq.numel() * wq.element_size() + scale.numel() * scale.element_size()) / w.numel() == 1.125
+
+
+def test_pack_layout_matches_the_addressing_of_the_kernel():
+    """Independent emulation of what each lane of a wave loads (see the .hip header): lane = 16 h + c
+    reads 16 B at ((tile * KG + g) * 1024 + b * 512 + lane * 16) = weight row 16 tile + c, K = 64 g +
+    32 b + 16 h ..+15, and 8 B of scale at (tile * KG + g) * 32 floats + c * 2 = that row's blocks 2g, 2g+1."""
+    n, k = 40, 192  # 3 tiles (the last one holds 8 real rows), 3 groups
+    g = torch.Generator().manual_seed(3)
+    wq = torch.randint(-127, 128, (n, k), dtype=torch.int8, generator=g)
+    scale = torch.rand(n, k // BLK, generator=g) + 0.5
+    qt, st = disp.pack_q8(wq, scale)
+    kg = k // 64
+    assert qt.dtype == torch.int8 and qt.shape == (3, kg, 1024)
+    assert st.dtype == torch.float32 and st.shape == (3, kg, 32)
+    qf, sf = qt.reshape(-1), st.reshape(-1)
+    for tile in range(3):
+        for gi in range(kg):
+            for b in range(2):
+                for lane in range(32):
+                    c, h = lane % 16, lane // 16
+                    row = tile * 16 + c
+                    off = (tile * kg + gi) * 1024 + b * 512 + lane * 16
+                    want = wq[row, gi * 64 + b * 32 + 16 * h:][:16] if row < n else torch.zeros(16, dtype=torch.int8)
+                    assert qf[off:off + 16].equal(want), (tile, gi, b, lane)
+            for c in range(16):
+                row = tile * 16 + c
+                off = (tile * kg + gi) * 32 + c * 2
+                want = scale[row, 2 * gi:2 * gi + 2] if row < n else torch.zeros(2)
+                assert sf[off:off + 2].equal(want), (tile, gi, c)
+
+
+def test_pack_is_1_125_bytes_per_weight_without_padding_rows():
+    qt, st = disp.pack_q8(*disp.to_q8(torch.randn(1024, 2304, dtype=torch.bfloat16)))
+    assert (qt.numel() + st.numel() * 4) / (1024 * 2304) == 1.125
+
+
+@pytest.mark.parametrize("n,k", [(16, 63), (16, 100), (0, 64)])
+def test_pack_rejects_what_the_kernel_cannot_read(n, k):
+    with pytest.raises(AssertionError):
+        disp.pack_q8(torch.zeros(n, k, dtype=torch.int8), torch.zeros(n, max(k // 32, 1)))
+
+
+def test_hip_source_constants_match_the_python_format():
+    src = (HERE.parent / "radiance_inkling2_gemv.hip").read_text()
+    for name, val in (("Q_GROUP", disp.Q8_GROUP), ("Q_TILE", disp.Q8_TILE), ("Q_GROUP_BYTES", disp.Q8_GROUP * disp.Q8_TILE)):
+        assert f"#define {name} {val}" in src, name
 
 
 class FakeExt:
@@ -365,7 +501,6 @@ def routed(monkeypatch):
     monkeypatch.setattr(disp, "_ext", fake)
     monkeypatch.setattr(disp, "W8", True)
     monkeypatch.setattr(disp, "HIP_BF16", False)  # these tests isolate the int8 route
-    monkeypatch.setattr(disp, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: state["capturing"])
     disp._Q8_CACHE.clear()
@@ -393,14 +528,14 @@ def test_routes_big_weight_to_q8_with_scale_and_strides(routed):
     fake, _ = routed
     x, w, out = _t(2, 4096)
     assert disp.hip_gemv(x, w, None, out) is True
-    (xp, wp, sp, bp, yp, m, n, k, sx, sw, sy, o32, scr, scrb, stream, cfg), = fake.calls
+    (xp, wp, sp, bp, yp, m, n, k, sx, sy, o32, nt, stream, cfg), = fake.calls
     wq, sc = disp.to_q8(w)
-    assert (m, n, k, sx, sw, sy, o32, bp, stream, cfg) == (2, 4096, 2304, 2304, 2304, 4096, 0, 0, 7, -1)
-    assert (xp, yp, scr, scrb) == (x.data_ptr(), out.data_ptr(), 1234, 4 << 20)
+    assert (m, n, k, sx, sy, o32, bp, nt, stream, cfg) == (2, 4096, 2304, 2304, 4096, 0, 0, 256, 7, -1)
+    assert (xp, yp) == (x.data_ptr(), out.data_ptr())
     ent = disp._Q8_CACHE[(w.data_ptr(), 2304)]
     assert wp == ent[1].data_ptr() and sp == ent[2].data_ptr()  # the cached int8 copy, not bf16
-    torch.testing.assert_close(ent[2], sc, rtol=0, atol=0)
-    assert wq.stride(0) == 2304 and sc.shape == (4096, 2304 // BLK)
+    qt, st = disp.pack_q8(wq, sc)  # the tiled copy of the plain conversion
+    assert ent[1].equal(qt) and ent[2].equal(st)
 
 
 def test_fp32_out_and_bias_are_passed(routed):
@@ -410,21 +545,18 @@ def test_fp32_out_and_bias_are_passed(routed):
     out = torch.empty(1, 4096, dtype=torch.float32)
     assert disp.hip_gemv(x, w, bias, out) is True
     a = fake.calls[0]
-    assert a[3] == bias.data_ptr() and a[11] == 1
+    assert a[3] == bias.data_ptr() and a[10] == 1
 
 
-@pytest.mark.parametrize("m", range(1, 17))
-def test_m_threshold(routed, m):
+@pytest.mark.parametrize("m", range(1, 18))
+def test_every_spec_verify_width_is_routed(routed, m):
+    """DSpark verify feeds k + 1 = 8 rows (any k up to 15 must stay on the int8 kernel); 17+ is prefill."""
     fake, _ = routed
     x, w, out = _t(m, 4096)
-    assert disp.hip_gemv(x, w, None, out) is (m <= disp.Q8_MAX_M)
-    assert len(fake.calls) == (1 if m <= disp.Q8_MAX_M else 0)
-    if m > disp.Q8_MAX_M:
-        assert disp._Q8_CACHE == {}  # no conversion for a call the kernel would lose
-
-
-def test_threshold_is_inside_the_kernel_range():
-    assert 1 <= disp.Q8_MAX_M <= disp.MAX_M == 16
+    assert disp.hip_gemv(x, w, None, out) is (m <= 16)
+    assert len(fake.calls) == (1 if m <= 16 else 0)
+    if m > 16:
+        assert disp._Q8_CACHE == {}  # no conversion for a call the kernel cannot take
 
 
 @pytest.mark.parametrize("n", [128, 1024])
@@ -437,12 +569,12 @@ def test_small_tensors_and_router_stay_on_triton(routed, n):
     assert disp.hip_gemv(x, w, None, out) is True
 
 
-@pytest.mark.parametrize("what", ["k%32", "fp32_x", "xstride", "xalign", "out_dtype"])
+@pytest.mark.parametrize("what", ["k%64", "fp32_x", "xstride", "xalign", "out_dtype"])
 def test_unsupported_inputs_fall_back(routed, what):
     fake, _ = routed
     x, w, out = _t(2, 4096)
-    if what == "k%32":
-        x, w = x[:, :2288].contiguous(), w[:, :2288].contiguous()  # 2288 % 16 == 0, % 32 == 16
+    if what == "k%64":
+        x, w, out = _t(2, 4096, k=2336)  # 2336 % 32 == 0, % 64 == 32
     elif what == "fp32_x":
         x = x.float()
     elif what == "xstride":
@@ -475,7 +607,23 @@ def test_prefix_slice_reuses_the_conversion(routed):
     out2 = torch.empty(1, 6552, dtype=torch.bfloat16)
     assert disp.hip_gemv(x, w[:6552], None, out2) is True  # global layers: q-side row prefix
     assert len(disp._Q8_CACHE) == 1 and fake.calls[1][1] == fake.calls[0][1]
-    assert fake.calls[1][6] == 6552
+    assert fake.calls[1][6] == 6552 and fake.calls[1][11] == 410  # 6552 rows = 409.5 tiles: 410 of 538
+
+
+def test_head_stays_bf16_without_w8_head(routed, monkeypatch):
+    """RADIANCE_INKLING2_W8_HEAD=0 (fidelity arm 'q8nohead'): a vocab-sized projection is not quantized."""
+    fake, _ = routed
+    x, head, out = _t(2, 201024)
+    assert disp.hip_gemv(x, head, None, out) is True  # default W8_HEAD=1: the head goes int8
+    monkeypatch.setattr(disp, "W8_HEAD", False)
+    fake.calls.clear()
+    assert disp.hip_gemv(x, head, None, out) is False and fake.calls == []
+    x, w, out = _t(2, 18432)
+    assert disp.hip_gemv(x, w, None, out) is True  # every other projection stays int8
+
+
+def test_w8_head_defaults_on():
+    assert disp.W8_HEAD is True  # RADIANCE_INKLING2_W8_HEAD unset
 
 
 def test_w8_gating():
@@ -561,7 +709,6 @@ def _arm(m, monkeypatch, capturing=False):
     monkeypatch.setattr(m, "_ext", fake)
     monkeypatch.setattr(m, "W8", True)
     monkeypatch.setattr(m, "HIP_BF16", False)
-    monkeypatch.setattr(m, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
     m._Q8_CACHE.clear()
@@ -592,8 +739,14 @@ def test_mutations_are_caught(tmp_path, monkeypatch):
 
     def check_m(m):
         fake = _arm(m, monkeypatch)
-        x, big, out = _t(m.Q8_MAX_M + 1, 4096)
-        assert m.hip_gemv(x, big, None, out) is False, "M above the measured threshold routed"
+        x, big, out = _t(m.MAX_M + 1, 4096)
+        assert m.hip_gemv(x, big, None, out) is False, "M above the kernel range routed"
+
+    def check_head(m):
+        fake = _arm(m, monkeypatch)
+        m.W8_HEAD = False
+        x, head, out = _t(2, 201024)
+        assert m.hip_gemv(x, head, None, out) is False, "head quantized with W8_HEAD=0"
 
     def check_capture(m):
         fake = _arm(m, monkeypatch, capturing=True)
@@ -602,9 +755,8 @@ def test_mutations_are_caught(tmp_path, monkeypatch):
 
     def check_k(m):
         _arm(m, monkeypatch)
-        x, big, out = _t(2, 4096)
-        x, big = x[:, :2288].contiguous(), big[:, :2288].contiguous()
-        assert m.hip_gemv(x, big, None, out) is False, "K % 32 != 0 routed"
+        x, big, out = _t(2, 4096, k=2336)
+        assert m.hip_gemv(x, big, None, out) is False, "K % 64 != 0 routed"
 
     def check_align(m):
         _arm(m, monkeypatch)
@@ -622,9 +774,11 @@ def test_mutations_are_caught(tmp_path, monkeypatch):
         ("Q8_MIN_NUMEL = 3 << 20", "Q8_MIN_NUMEL = 0", check_threshold),  # tiny tensors quantized
         (".round()", ".trunc()", check_round),  # round to nearest, not toward zero
         ("Q8_BLOCK = 32", "Q8_BLOCK = 64", check_scale_blocks),
-        ("0 < m <= Q8_MAX_M", "0 < m <= MAX_M", check_m),  # slower than Triton above the threshold
+        ("1 <= m <= MAX_M  # the kernel's M range: a spec-verify step (k + 1 rows) is routed whole",
+         "1 <= m  # the kernel's M range: a spec-verify step (k + 1 rows) is routed whole", check_m),  # the kernel takes M <= 16
+        ("and (W8_HEAD or weight.shape[0] < Q8_HEAD_MIN_N)", "", check_head),
         ("elif not torch.cuda.is_current_stream_capturing():", "elif True:", check_capture),
-        ("k % 32 == 0", "k % 16 == 0", check_k),  # one scale per 32 K values
+        ("k % 64 == 0", "k % 32 == 0", check_k),  # the kernel reads whole 64 K tile groups
         ("x2.data_ptr() % 16 == 0", "True", check_align),  # 16 B vector x staging
         ("weight.dtype == torch.bfloat16 and", "", check_bf16_weight_only),
     ]

@@ -318,7 +318,6 @@ def routed(monkeypatch):
     monkeypatch.setattr(disp, "_ext", fake)
     monkeypatch.setattr(disp, "W8", False)
     monkeypatch.setattr(disp, "HIP_BF16", True)
-    monkeypatch.setattr(disp, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: state["capturing"])
     disp._Q8_CACHE.clear()
@@ -465,15 +464,18 @@ def test_graph_capture_routes_without_any_conversion(routed):
     assert len(fake.bf16) == 1 and disp._Q8_CACHE == {}
 
 
-def test_int8_opt_in_keeps_its_range_and_bf16_takes_the_rest(routed, monkeypatch):
+def test_int8_opt_in_takes_every_m_and_bf16_takes_the_rest(routed, monkeypatch):
     fake, state = routed
     monkeypatch.setattr(disp, "W8", True)
     x, w, out = _t(2, 4096)
     assert disp.hip_gemv(x, w, None, out) is True
-    assert len(fake.q8) == 1 and fake.bf16 == []  # M <= Q8_MAX_M with W8: the int8 copy
+    assert len(fake.q8) == 1 and fake.bf16 == []  # W8: the int8 copy
     x, w2, out = _t(8, 4096)
     assert disp.hip_gemv(x, w2, None, out) is True
-    assert len(fake.q8) == 1 and len(fake.bf16) == 1  # M 5..16: bf16 HIP, not Triton
+    assert len(fake.q8) == 2 and fake.bf16 == []  # M 5..16 (a spec-verify step) too
+    x, w2, out = _t(2, 128)
+    assert disp.hip_gemv(x, w2, None, out) is True
+    assert len(fake.q8) == 2 and len(fake.bf16) == 1  # a tensor too small for int8: bf16 HIP, not Triton
     assert (w2.data_ptr(), 2304) not in disp._Q8_CACHE  # and no conversion for a call it would not serve
     x, w3, out = _t(2, 4096)
     state["capturing"] = True
@@ -502,7 +504,6 @@ def _arm(mod, monkeypatch, capturing=False):
     monkeypatch.setattr(mod, "_ext", fake)
     monkeypatch.setattr(mod, "W8", False)
     monkeypatch.setattr(mod, "HIP_BF16", True)
-    monkeypatch.setattr(mod, "_scratch", lambda: (1234, 4 << 20))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: type("S", (), {"cuda_stream": 7})())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
     mod._Q8_CACHE.clear()
