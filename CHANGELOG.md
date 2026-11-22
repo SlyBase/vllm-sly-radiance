@@ -77,6 +77,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   keeps working on both bases instead of raising inside the custom op. TDD:
   `sly/tests/test_mxfp4_aiter_op_name_cpu.py` (RED against the old name only, GREEN here).
 
+- **`patch_adaptive_width`: graph start no longer dies with `NameError: max_decode_tokens`** on the
+  main base. The re-anchored hunk still passed the old `_init_candidates` local, which main removed;
+  every start with CUDA graphs and `RADIANCE_ADAPTIVE_WIDTH` (production) failed at engine init. The
+  cap is now `max_num_reqs * decode_query_len`. New gate in the patch dry run,
+  `ci/check_new_names.py`: a patched file may not read a name its scope cannot resolve (stdlib
+  `symtable`; only names a patch introduced are reported).
+
 ### Removed
 - **KVCACHE=ram/disk (KV tiering) is unsupported on this base until ported.** main@1bdc437 rewrote the
   offloading connector scheduler (the per-group `SchedulerOffloadConfig` / `RequestGroupState` classes
