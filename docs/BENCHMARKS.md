@@ -553,3 +553,29 @@ sampling temperature 0.7 / top_p 0.95 / top_k 20. Two power settings, no other t
 
 What that means: code, JSON, math and edits decode at 140–175 tok/s (the drafter lands 5–6 tokens per step),
 free prose at ~85; long contexts stay fast (99k tokens of context cost ~7 ms per step instead of 83).
+
+## Inkling 2 Mini on gfx1201 (2026-11)
+
+`thinkingmachines/Inkling-2-Mini` + DSpark k = 7, branch `feat/inkling2-mini` (vLLM `main@1bdc437`), arguments and
+knobs in [INKLING2-MINI.md](INKLING2-MINI.md). BetterBench single-stream decode, 65,536 context, prefix caching
+off, no async scheduling, CUDA graphs, seed 42, 210 W, two container starts per arm, tok/s.
+
+| Category | `ink-k3` default, start 1 | start 2 | `ink-k4` default (x2) | `ink-k4` `RADIANCE_INKLING2_W8=1` (x2) |
+|---|---:|---:|---|---|
+| chat | 90.3 | 90.1 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| code | 125.6 | 125.3 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| file_edit | 154.5 | 154.4 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| json | 152.6 | 152.3 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| math | 140.5 | 140.2 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| prose | 91.3 | 91.3 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| reasoning | 110.7 | 110.7 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| summarization | 148.8 | 148.8 | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+| **weighted** | **126.7** | **126.6** | `TBD (run ink-k4 default)` | `TBD (run ink-k4 W8)` |
+
+Step about 30 ms in every category; code 3.74 tokens per update. Before the cooperative-launch fix
+(`ink-k2`): code 62.9, weighted 62.0 (the bimodal step, see
+[TECHNICAL.md](TECHNICAL.md#inkling-2-mini-on-gfx1201-unreleased)). The production Qwen
+(Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ, fully 4-bit dense) decodes code at 155; Inkling's dense weights are bf16
+(four times the bytes), see [INKLING2-MINI.md](INKLING2-MINI.md#why-inkling-decodes-code-at-1256-and-qwen-at-155).
+
+MXFP4 dense (`RADIANCE_INKLING2_MXFP4_DENSE=1`), code category: `TBD (run mxfp4-dense BetterBench code)`.

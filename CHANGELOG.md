@@ -13,18 +13,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Added
-- **Inkling 2 Mini DSpark: launch folding, same math in fewer launches** (`sly/inkling2/radiance_inkling2_draft.py`,
-  patch hooks 4j in `sly/patch_inkling2_gfx12.py`): draft RMSNorm 10 torch
-  launches -> 1 (27.8 -> 3.3 us, bit exact), Markov step (cat + embedding + addmm + gate) and fold GEMM +
-  softcap each in one kernel (draft Markov tail 200 -> 177 us per step), dynamic sconv taps on the low-M GEMV
-  (7.8 -> 5.1 us). Verify step 30.3 -> 29.55 ms (2 starts per arm,
-  gfx1201, graphs, k=7). Optional `RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>` (default off): Markov correction on
-  the top-k base logits of each draft row only (-inf elsewhere, target output unchanged); measured -1.7 ms
-  per step but fewer accepted tokens on code (acc/step 3.43 -> 2.97 at k=4096), so not enabled.
 - **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
   the model's sm120 (Triton) path on ROCm: capability gates, PDL removed, hot-path PTX rewritten to
   Triton math, hip libdevice gaps, 64 KB LDS tiles, flashinfer-free DSpark drafter (torch RMSNorm,
   Triton KV scatter). NOOP on a vLLM without `models/inkling2`.
+  Recipe (DSpark k=7 `--speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`,
+  `--reasoning-parser inkling`, `--no-async-scheduling`, graph sizes 1-8, `GPU_MAX_HW_QUEUES=1`), knobs and numbers:
+  [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md). The model is in no vLLM release (see *Changed*).
 - **HIP expert GEMV for decode / spec-verify tiles** (`sly/inkling2/radiance_inkling2_moe.hip`, tile 8 =
   up to 8 tokens): one pass over each routed expert's weights for all its rows, NVFP4 codes as e4m3
   through `v_dot4_f32_fp8_fp8` (exact), MXFP8 unchanged. Micro-bench (rotated >300 MB pool):
@@ -36,6 +31,21 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   streamed as whole cache lines through LDS with non-temporal loads, no scratch, graph-capture safe.
   Rotated-pool micro-bench at M=8: 558-596 GB/s on the big projections (Triton 547-595), 502-529 on
   wo/down/kv_ctx (Triton 482-484), 1.5x on the rnn_proj; the unembed ties (570 vs 572).
+- **Inkling 2 Mini: no cooperative launch for the fused route kernel on ROCm.** A cooperative launch
+  gets its own HIP hardware queue; the route kernel then alternated with the main queue 48x per step
+  and on ~2/3 of the container starts every small kernel of the step hit a ~17 us duration floor
+  (62 vs 31 ms per DSpark verify step, ~67 vs ~135 tok/s). The grid (<= 28 programs) is co-resident
+  on any idle gfx12, which is all its spin-wait needs; asserted before the launch. Measured 4/4 fast
+  starts (128-153 tok/s on a 2000-token code request) vs 4/12 before.
+- **Inkling 2 Mini DSpark: launch folding, same math in fewer launches** (`sly/inkling2/radiance_inkling2_draft.py`,
+  patch hooks 4j in `sly/patch_inkling2_gfx12.py`): draft RMSNorm 10 torch
+  launches -> 1 (27.8 -> 3.3 us, bit exact), Markov step (cat + embedding + addmm + gate) and fold GEMM +
+  softcap each in one kernel (draft Markov tail 200 -> 177 us per step), dynamic sconv taps on the low-M GEMV
+  (7.8 -> 5.1 us). Verify step 30.3 -> 29.55 ms (2 starts per arm,
+  gfx1201, graphs, k=7).
+- **Optional drafter shortlist for Inkling 2 Mini** (`RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>`, default off): Markov correction on
+  the top-k base logits of each draft row only (-inf elsewhere, target output unchanged); measured -1.7 ms
+  per step but fewer accepted tokens on code (acc/step 3.43 -> 2.97 at k=4096), so not enabled.
 - **Opt-in int8 (Q8_0) weight GEMV for the dense projections** (`RADIANCE_INKLING2_W8=1`,
   `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
   drafter projections, bf16 activations, fp32 accumulation, **M 1..16 (a DSpark k=7 verify step is M=8)**.
@@ -51,14 +61,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   costs no more than switching bf16 kernels); the LM head in Q8 changes nothing measurable (top-1 identical,
   KLD 3.4e-6 vs the head-in-bf16 arm). Graphs + DSpark k=7, 2000-token code request, 2 requests per start:
   109.8 tok/s at W8=1 on 3/3 starts vs 97.6 and 90.4 at W8=0 (acceptance 1.91 tokens/draft in both arms).
-
-- **Inkling 2 Mini: no cooperative launch for the fused route kernel on ROCm.** A cooperative launch
-  gets its own HIP hardware queue; the route kernel then alternated with the main queue 48x per step
-  and on ~2/3 of the container starts every small kernel of the step hit a ~17 us duration floor
-  (62 vs 31 ms per DSpark verify step, ~67 vs ~135 tok/s). The grid (<= 28 programs) is co-resident
-  on any idle gfx12, which is all its spin-wait needs; asserted before the launch. Measured 4/4 fast
-  starts (128-153 tok/s on a 2000-token code request) vs 4/12 before.
-
+  Decode A/B on the final image: `TBD (run ink-k4 W8)`. One of four W8 starts died with `ILLEGAL_INSTRUCTION` at graph capture
+  (a foreign 512-thread kernel, cause unexplained), hence opt-in.
 - **Opt-in MXFP4 (4-bit) dense projections + lm_head for Inkling 2 Mini**
   (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `sly/inkling2/radiance_inkling2_mxfp4dense.py` +
   `sly/patch_inkling2_mxfp4dense.py`). Default stays lossless bf16. Inkling keeps its dense
@@ -75,6 +79,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   4-bit, NOT lossless. Load-time quantizer on the real weights (`sly/inkling2/check_mxfp4dense_cpu.py`,
   CPU-only): 0.115 relRMS RTN / 0.112 MSE, dequant bit-exact against the format grid; the quantizable
   dense reads drop from 4.77 to 1.27 GB per step (3.76x fewer weight bytes).
+  Model KLD, kernel micro-bench and decode speed: `TBD (run mxfp4-dense bench)`, code decode: `TBD (run mxfp4-dense BetterBench code)`.
 
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
@@ -92,8 +97,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   mooncake-transfer-engine-rocm 0.3.14 now exact-pinned). vLLM's own ROCm base builds on python 3.14;
   this image stays on 3.12, which main's `requires-python = ">=3.11,<3.15"` allows — the resolver now
   gates on that instead of on the base image's interpreter (warning, not a red check).
-- **Nine production patches re-anchored to main@1bdc437, behaviour unchanged** (dry run: 191 hunks
-  apply, pass 2 all NOOP, no loop patch skipped):
+- **Eight production patches re-anchored to main@1bdc437, behaviour unchanged** (dry run: 191 hunks
+  apply, pass 2 all NOOP, no loop patch skipped; three more apply again as a cascade, last bullet):
   - `patch_skinny_gemm`: the ROCm platform import gained `on_rdna4`; the hook keeps its place ahead of
     upstream's skinny branches (which now include an M 5..8 swmmac path on RDNA4).
   - `patch_gdn_lazy`: `get_kv_cache_spec` became `get_kv_cache_config` + `MambaManager.layer_config`;
@@ -143,10 +148,16 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   docker-vllm7 launch does not set it. A tiering launch fails loudly at container start (those patches
   are fatal there) instead of running half-patched.
 
-*Measured: not yet — CPU CI only on this base (patch dry run 191 hunks / pass 2 all NOOP, constraints
-212 packages resolved, cpu-tests 305 passed / 27 skipped, aiter + attention-metadata contracts green,
-resolve green). No GPU window has run on main@1bdc437, so no throughput / tokens-per-update /
-per-category numbers exist for it; the accept gate is the next step before a release.*
+*Measured, Inkling 2 Mini (one R9700, 210 W, vLLM main@1bdc437, BetterBench single-stream decode, 65,536 context, prefix caching
+off, graphs, k=7, seed 42, image `ink-k3`, two container starts): weighted 126.7 / 126.6 tok/s; chat 90.3 / 90.1, code 125.6 / 125.3,
+file_edit 154.5 / 154.4, json 152.6 / 152.3, math 140.5 / 140.2, prose 91.3 / 91.3, reasoning 110.7 / 110.7, summarization 148.8 / 148.8;
+step ~30 ms in every category, code 3.74 tokens per update. Before the cooperative-launch fix (`ink-k2`): code 62.9, weighted 62.0.
+Per-category table and the pending runs (`ink-k4` default and W8, MXFP4 dense): [docs/BENCHMARKS.md](docs/BENCHMARKS.md#inkling-2-mini-on-gfx1201-2026-11).*
+
+*Measured, production Qwen on this base: not yet — CPU CI only (patch dry run 191 hunks / pass 2 all NOOP, constraints 212 packages
+resolved, CPU suite 246 passed / 595 skipped, aiter + attention-metadata contracts green, resolve green). No GPU window has run the
+Qwen production launch on main@1bdc437, so no throughput / tokens-per-update / per-category numbers exist for it; the accept gate is
+the next step before a release.*
 
 ## [1.13.4] - 2026-11-19
 

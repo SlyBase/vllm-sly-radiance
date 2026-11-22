@@ -869,3 +869,36 @@ disk-mode win (5.14× TTFT) is post-restart survival, independent of policy.
 
 **Decision.** `arc` shows a measurable benefit in the RAM-only pattern, so the prerequisite is
 satisfied; it is kept **opt-in** (default stays `lru`) until the production launch is re-decided.
+
+## Inkling 2 Mini on gfx1201 (unreleased)
+
+Model, recipe and numbers: [INKLING2-MINI.md](INKLING2-MINI.md). Here: why the kernels look the way they
+do, and the one root cause that took a measurement campaign.
+
+**Step budget.** One DSpark verify step (M = 8 rows) takes about 30 ms: experts 11.3 ms and dense
+projections 8.9 ms, both at DRAM bandwidth; the rest is not. So the work is bytes per step, not FLOPs.
+
+**Experts (`radiance_inkling2_moe.hip`).** A decode or verify tile (<= 8 tokens) reads each routed expert's
+weights once for all its rows. NVFP4 codes are widened to e4m3 and go through `v_dot4_f32_fp8_fp8`, which is
+exact for that grid (output bit-identical to the Triton kernel); MXFP8 stays as it is. gfx12 has
+no FP4 matrix instruction, so prefill tiles stay on the Triton dequant GEMMs.
+
+**Dense bf16 (`radiance_inkling2_gemv.hip`).** One `v_wmma_f32_16x16x16_bf16` per 16 weight rows x 16 K,
+the activation rows (M 1..16) as the other operand; the weights stream as whole cache lines through LDS
+with non-temporal loads. The opt-in int8 copy keeps the K sum on the matrix unit: int8 codes widen to bf16
+exactly, each block's fp32 scale is applied to the exact K = 32 partial sum. The MXFP4 option reuses the
+existing `radiance_mxfp4_fp8` W4A8 kernel.
+
+**The bimodal step (root cause, fixed).** A start of the container ran the verify step either in ~31 ms or in
+~62 ms (~135 vs ~67 tok/s on a 2000-token code request); 4 of 12 starts were fast. In the slow state every
+small kernel of the step had a duration floor of about 17 us. The cause was the fused route kernel's
+**cooperative launch**: on ROCm a cooperative launch gets its own HIP hardware queue, the kernel then
+alternated between that queue and the main queue 48 times per step, and on about two thirds of the starts
+every small kernel of the step hit that floor. The kernel's grid is at most 28 programs, which is co-resident on any idle
+gfx12, and that is all its spin-wait needs, so the launch is now an ordinary one with the residency
+asserted before it. Result: 4 of 4 fast starts. Knobs tried before the cause was found, none with
+effect: [NOT-ADOPTED.md](NOT-ADOPTED.md#inkling-2-mini-2026-11).
+
+**DSpark launch folding.** The draft path ran many tiny launches (RMSNorm 10 torch launches, Markov step,
+fold GEMM + softcap, dynamic sconv taps). Folded into single kernels with the same math (RMSNorm bit
+exact, 27.8 -> 3.3 us): verify step 30.3 -> 29.55 ms.
