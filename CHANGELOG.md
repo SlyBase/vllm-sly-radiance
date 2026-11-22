@@ -59,6 +59,21 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   on any idle gfx12, which is all its spin-wait needs; asserted before the launch. Measured 4/4 fast
   starts (128-153 tok/s on a 2000-token code request) vs 4/12 before.
 
+- **Opt-in MXFP4 (4-bit) dense projections + lm_head for Inkling 2 Mini**
+  (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `sly/inkling2/radiance_inkling2_mxfp4dense.py` +
+  `sly/patch_inkling2_mxfp4dense.py`). Default stays lossless bf16. Inkling keeps its dense
+  projections + lm_head in bf16 (only the MoE experts are 4-bit), streaming ~4x the dense weight
+  bytes of the fully-4-bit prod Qwen; this quantizes them at load time to the compressed-tensors
+  MXFP4 grid (group-32 E2M1 + E8M0, RTN or a small MSE exponent search) and routes the matmul through
+  the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (`radiance_mxfp4_fp8.so`). The bf16 original stays
+  alive (the DSpark drafter reads lm_head.weight in bf16; capture-first weights fall back to bf16).
+  `RADIANCE_INKLING2_MXFP4_DENSE_MODE=w4a16` dequantizes the codes back to bf16 to isolate the
+  weight-quantization quality cost. The MoE router and tiny projections (N < 256) stay bf16; the loop
+  message controllers (~4% of dense bytes, batched bmm) stay bf16. A quality trade-off like Qwen's own
+  4-bit, NOT lossless. Load-time quantizer on the real weights (`sly/inkling2/check_mxfp4dense_cpu.py`,
+  CPU-only): 0.115 relRMS RTN / 0.112 MSE, dequant bit-exact against the format grid; the quantizable
+  dense reads drop from 4.77 to 1.27 GB per step (3.76x fewer weight bytes).
+
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
   `KVCacheLayerConfig` / `MambaManager.layer_config` (`v1/kv_cache_interface.py`), which Inkling 2 Mini
