@@ -284,3 +284,15 @@ def test_draft_kv_write_calls_the_triton_scatter(tree):
     src = (tree / "vllm/models/inkling2/nvidia/dspark.py").read_text()
     fn = src.split("def _write_kv")[1].split("    def forward")[0]
     assert "kv_scatter(self.attn.kv_cache, k, v, slot_mapping)" in fn
+
+
+def test_fused_route_is_not_a_cooperative_launch_on_rocm(tree):
+    """A cooperative launch gets its own HIP hardware queue: the route kernel then alternates with
+    queue 1 48x per step and every small kernel of the step hit a ~17 us floor on ~2/3 of the starts
+    (62 vs 31 ms per verify step). The grid (routers + <= 16 tokens = 28 programs) is co-resident on
+    any idle gfx12 anyway, which is all the spin-wait needs -- asserted before the launch."""
+    assert run(tree).returncode == 0
+    moe = (tree / "vllm/models/inkling2/nvidia/ops/moe.py").read_text()
+    assert "launch_cooperative_grid=True," not in moe
+    assert "launch_cooperative_grid=not torch.version.hip," in moe
+    assert "multi_processor_count" in moe  # co-residency guard on ROCm

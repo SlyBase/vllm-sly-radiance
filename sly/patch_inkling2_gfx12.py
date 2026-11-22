@@ -178,6 +178,27 @@ def main():
         "from radiance_inkling2_moe import nvfp4_expert_gemm",
         "inkling2 moe_sm120: NVFP4 experts -> dequant GEMM on ROCm",
     )
+    # A cooperative launch gets its own HIP hardware queue; the route kernel then alternates with
+    # the main queue 48x per step and every small kernel of the step pays a ~17 us floor on ~2/3 of
+    # the container starts. The spin-wait only needs the tiny grid co-resident, which it is.
+    apply(
+        ROOT / "nvidia/ops/moe.py",
+        "        _fused_route_kernel[(routers + tokens,)](\n",
+        "        if torch.version.hip:  # no cooperative launch: the grid must still be co-resident\n"
+        "            assert routers + tokens <= torch.cuda.get_device_properties(\n"
+        "                device\n"
+        "            ).multi_processor_count, (routers, tokens)\n"
+        "        _fused_route_kernel[(routers + tokens,)](\n",
+        "the grid must still be co-resident",
+        "inkling2 fused route: co-residency guard on ROCm",
+    )
+    apply(
+        ROOT / "nvidia/ops/moe.py",
+        "            launch_cooperative_grid=True,\n",
+        "            launch_cooperative_grid=not torch.version.hip,\n",
+        "launch_cooperative_grid=not torch.version.hip,",
+        "inkling2 fused route: no cooperative launch (own HW queue) on ROCm",
+    )
     apply(
         SP / "vllm/platforms/rocm.py",
         '    supported_quantization: list[str] = [\n        "awq",\n',
