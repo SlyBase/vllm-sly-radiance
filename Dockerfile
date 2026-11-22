@@ -668,6 +668,8 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
      sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py ${SP}/
 COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
+# launch folding of the DSpark draft (hooks: sly/patch_inkling2_gfx12.py)
+COPY sly/inkling2/radiance_inkling2_draft.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
