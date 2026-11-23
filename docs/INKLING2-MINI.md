@@ -92,7 +92,7 @@ top-1 97.3 %. The lossless bf16 HIP kernels against Triton measure 0.0148 / 0.00
 `sly/inkling2/check_mxfp4dense_cpu.py`. Kernel micro-bench: `TBD (run mxfp4-dense bench)`. Model KLD:
 `TBD (run mxfp4-dense bench)`. Decode speed, code category: `TBD (run mxfp4-dense BetterBench code)`.
 
-**Default vs int8 on this image** (two starts each): `TBD (run ink-k4 default)` / `TBD (run ink-k4 W8)`.
+**Default vs int8 on this image** (two starts each): default 127.3 / 124.4 code, 128.1 / 126.6 weighted; `RADIANCE_INKLING2_W8=1` 151.1 / 145.9 code, 148.5 / 145.7 weighted (BetterBench, image ink-k5 @3f5e138, 2026-11-23, two starts each; prod Qwen code 155, weighted 142).
 
 ### Why Inkling decodes code at 125.6 and Qwen at 155
 

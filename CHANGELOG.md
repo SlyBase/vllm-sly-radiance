@@ -61,7 +61,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   costs no more than switching bf16 kernels); the LM head in Q8 changes nothing measurable (top-1 identical,
   KLD 3.4e-6 vs the head-in-bf16 arm). Graphs + DSpark k=7, 2000-token code request, 2 requests per start:
   109.8 tok/s at W8=1 on 3/3 starts vs 97.6 and 90.4 at W8=0 (acceptance 1.91 tokens/draft in both arms).
-  Decode A/B on the final image: `TBD (run ink-k4 W8)`. One of four W8 starts died with `ILLEGAL_INSTRUCTION` at graph capture
+  Decode A/B on the final image (BetterBench, two starts each): code 151.1 / 145.9 vs 127.3 / 124.4 default, weighted 148.5 / 145.7 vs 128.1 / 126.6. One of four W8 starts died with `ILLEGAL_INSTRUCTION` at graph capture
   (a foreign 512-thread kernel, cause unexplained), hence opt-in.
 - **Opt-in MXFP4 (4-bit) dense projections + lm_head for Inkling 2 Mini**
   (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `sly/inkling2/radiance_inkling2_mxfp4dense.py` +
