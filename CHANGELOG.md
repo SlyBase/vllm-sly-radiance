@@ -76,8 +76,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   to bf16 per call. Only the tiles are kept (no [N, K/2] copy). `_MODE=w4a8` keeps the radiance MXFP4 W4A8
   fp8-WMMA kernel (`radiance_mxfp4_fp8.so`), `_MODE=w4a16` the fake-quant quality arm. Memory: the weights are
   quantized in `process_weights_after_loading` and the bf16 originals are released right there, before
-  vLLM sizes the KV cache (2.74 GB bf16 of the attention, draft and head projections become 0.74 GB
-  MXFP4; only the lm_head stays bf16 until the DSpark draft has folded it, then it is freed too).
+  vLLM sizes the KV cache (2.74 GB bf16 of the attention, draft and head projections become 751 MiB of MXFP4
+  tiles, the load-time proof line counts them, including the unaligned k/v slices' own tile copies; only the lm_head stays bf16 until the DSpark draft has folded it, then it is freed too).
   `RADIANCE_INKLING2_MXFP4_DENSE_MODE=w4a16` dequantizes the codes back to bf16 to isolate the
   weight-quantization quality cost. The MoE router and tiny projections (N < 256) stay bf16; the loop
   message controllers (~4% of dense bytes, batched bmm) stay bf16. A quality trade-off like Qwen's own
@@ -87,7 +87,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   Measured (R9700 gfx1201, 210 W, graphs + DSpark k=7): kernel per call at M = 8 in a replayed CUDA graph
   (rotated > 300 MB pool) 4.5 / 6.0 / 10.3 / 10.6 / 18.6 / 22.4 us at N = 384 / 1024 / 3072 / 2304 (K 3072) /
   6552 / 8600 (105-469 GB/s of codes + scales; 1.4-2.7x the W4A8 kernel, 1.3-1.8x the int8 GEMV), lm_head
-  (N = 201024) 452 us (544 GB/s, 3.0x W4A8, 2.1x int8). The old W4A8 route's flat ~29 us per call was host time
+  (N = 201024) 394-452 us (544-624 GB/s, 3.0-3.5x W4A8, 2.1-2.4x int8). The old W4A8 route's flat ~29 us per call was host time
   in the eager micro-bench; in a graph it is 12.5-31.7 us. Model KLD mean 0.0176 / p99 0.179 / top-1 95.7 %
   (W4A8 0.026 / 0.34 / 96.6 %, int8 0.008): 4-bit dense stays opt-in. BetterBench code 162.4 / 161.6 tok/s (weighted 157.2 / 156.8, two starts each) vs int8 151.1 / 145.9, default 127.3 / 124.4, prod Qwen 155.
 

@@ -105,9 +105,11 @@ replayed CUDA graph; GB/s of the arm's weight bytes: MXFP4 codes + E8M0 scales, 
 | 3072 x 2304 | 10.3 (364) | 17.0 | 16.1 | 27.7 | 1.7x | 1.6x |
 | 6552 x 2304 | 18.6 (432) | 28.0 | 31.2 | 53.5 | 1.5x | 1.7x |
 | 8600 x 2304 | 22.4 (469) | 31.9 | 39.7 | 69.3 | 1.4x | 1.8x |
-| 201024 x 2304 (lm_head) | 452 (544) | 1378 | 950 | 1549 | 3.0x | 2.1x |
+| 201024 x 2304 (lm_head) | 394-452 (544-624) | 1378 | 950 | 1549 | 3.0-3.5x | 2.1-2.4x |
 
 Mid-size shapes are launch bound (~4 us fixed + bytes at ~550 GB/s); the same is true at M = 1 and 16 (within 5 %).
+Two runs of the table agree within 2 % except the lm_head (452 / 394 us). The load-time proof line reports 751 MiB
+of MXFP4 tiles after the draft (the unaligned k/v slices carry their own tile copies; the aligned ones are views).
 The `w4a8` route's flat ~29 us per call in the old eager micro-bench (`bench_mxfp4dense.py`) was HOST time: ~28.7 us
 of CPU per call (custom-op dispatch + fp8 activation-quant launch + `torch.empty` + kernel launch), the same op in a
 graph costs 12.5 / 17.1 / 31.7 us at N = 384 / 3072 / 8600 (rocprofv3: quant kernel 3 us + the Qwen-tuned decode

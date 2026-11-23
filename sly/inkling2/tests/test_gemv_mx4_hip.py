@@ -331,6 +331,8 @@ def test_graph_capture(ext):
 
 
 def test_module_route_matches_the_dequant_dot_for_every_decode_m_and_prefill(ext):
+    """Through radiance_inkling2_mxfp4dense (tiles, slices, chunking, prefill dequant), with a counting wrapper
+    around the real extension: decode = one launch per 16 rows, prefill = one dequant + no GEMV launch."""
     import importlib
 
     for k_ in [k for k in os.environ if k.startswith("RADIANCE_INKLING2_MXFP4_DENSE")]:
@@ -340,6 +342,20 @@ def test_module_route_matches_the_dequant_dot_for_every_decode_m_and_prefill(ext
     sys.modules.pop("radiance_inkling2_mxfp4dense", None)
     md = importlib.import_module("radiance_inkling2_mxfp4dense")
     assert md._resolve_mx() is not None  # what _ready() does at load
+
+    class Spy:
+        def __init__(self):
+            self.gemv, self.dq = [], []
+
+        def gemv_mx4(self, *a):
+            self.gemv.append(a[4])  # M of the launch
+            return ext.gemv_mx4(*a)
+
+        def dequant_mx4(self, *a):
+            self.dq.append(a[3])  # N
+            return ext.dequant_mx4(*a)
+
+    spy = md._mx = Spy()
     g = torch.Generator(device="cuda").manual_seed(7)
     w = (torch.randn(3000, 2304, device="cuda", dtype=torch.bfloat16, generator=g) / 48)
     p = torch.nn.Parameter(w.clone(), requires_grad=False)
@@ -349,5 +365,17 @@ def test_module_route_matches_the_dequant_dot_for_every_decode_m_and_prefill(ext
     for mm in (1, 7, 16, 17, 40):
         x = torch.randn(mm, 2304, device="cuda", dtype=torch.bfloat16, generator=g)
         for r0, nn in ((0, 3000), (0, 1000), (1000, 777)):
+            spy.gemv.clear(); spy.dq.clear()
             y = md.mxfp4_dense_linear(x, p.data[r0:r0 + nn])
             _check(y, (x.float() @ deq[r0:r0 + nn].t()).to(torch.bfloat16), torch.bfloat16)
+            if mm <= 16:
+                assert spy.gemv == [mm] and not spy.dq, (mm, r0, nn, spy.gemv, spy.dq)
+            else:
+                assert not spy.gemv and spy.dq == [nn], (mm, r0, nn, spy.gemv, spy.dq)
+    # the unembed class (HEAD_MIN_N lowered to the test size): every M chunks through the GEMV, never a dequant
+    md.HEAD_MIN_N = 3000
+    x = torch.randn(40, 2304, device="cuda", dtype=torch.bfloat16, generator=g)
+    spy.gemv.clear(); spy.dq.clear()
+    y = md.mxfp4_dense_linear(x, p.data)
+    assert spy.gemv == [16, 16, 8] and not spy.dq
+    _check(y, (x.float() @ deq.t()).to(torch.bfloat16), torch.bfloat16)
