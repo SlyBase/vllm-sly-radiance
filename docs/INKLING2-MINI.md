@@ -2,8 +2,7 @@
 
 Serving recipe, knobs and measurements for `thinkingmachines/Inkling-2-Mini` with its DSpark drafter on
 gfx1201 (AMD Radeon AI PRO R9700). Branch `feat/inkling2-mini` ([PR #259](https://github.com/SlyBase/vllm-sly-radiance/pull/259)),
-not yet in a release. Numbers marked `TBD (run <name>)` are runs that have not finished; see
-[Pending runs](#pending-runs).
+vLLM `main@1bdc437` (the model is in no vLLM release). All numbers below are measured on the R9700 at 210 W.
 
 ## The model
 
