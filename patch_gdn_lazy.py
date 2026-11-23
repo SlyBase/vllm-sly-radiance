@@ -291,6 +291,18 @@ apply_any(M,
 '''
 )
 ], SENT + " pre-skip", "mamba_utils: precopy skips temporal states under lazy")
+# vLLM main declares MambaSpecDecodeGPUContext with dataclass(slots=True): the attributes below must be fields
+apply(M,
+'''    replayssm: ReplaySSMModelContext | None = None
+''',
+'''    replayssm: ReplaySSMModelContext | None = None
+    # radiance lazy gdn fields: slots=True has no __dict__, so the glue's attributes are declared here
+    _radiance_kv_cfg: Any = None
+    _radiance_fwd_ctx: Any = None
+    _radiance_copy_funcs: Any = None
+    _radiance_lazy_temporal: bool = False
+    _radiance_lazy_tables: Any = None
+''', SENT + " fields", "mamba_utils: declare the lazy attributes on the slotted context")
 # remember what the tables need (initialize_from_forward_context owns the copy-funcs / ctx)
 apply(M,
 '''        if self.is_initialized:

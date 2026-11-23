@@ -149,6 +149,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
     the two patches above install their `compile_factors` lines (they were cascade failures).
 
 ### Fixed
+- **Qwen production profile crashed at KV-cache init on the vLLM main base** (`AttributeError:
+  'MambaSpecDecodeGPUContext' object has no attribute '_radiance_kv_cfg'`, `mamba_utils.py
+  initialize_from_forward_context`): main declares the context with `@dataclass(slots=True)`, so the lazy-GDN
+  glue (`patch_gdn_lazy.py`, runs on every start, not only with `RADIANCE_GDN_LAZY=1`) could not store its five
+  attributes. They are now declared as dataclass fields (idempotent hunk). Found by the acceptance gate of PR #259
+  (run 45237859572, ink-k8) right after the `apply_flattened` crash below; CPU test
+  `sly/tests/test_gdn_lazy_ctx_slots_cpu.py` runs the patch on verbatim copies of the three upstream files.
 - **Qwen production profile crashed in `profile_run` on the vLLM main base** (`AttributeError: 'tuple' object
   has no attribute 'ndim'`, `Qwen3MoeMLP.down_proj`): main routes every linear layer through
   `apply_flattened(fn, x)`, which reads `x.ndim` before the quant method runs, and the
