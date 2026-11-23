@@ -149,6 +149,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
     the two patches above install their `compile_factors` lines (they were cascade failures).
 
 ### Fixed
+- **Qwen production profile crashed in `profile_run` on the vLLM main base** (`AttributeError: 'tuple' object
+  has no attribute 'ndim'`, `Qwen3MoeMLP.down_proj`): main routes every linear layer through
+  `apply_flattened(fn, x)`, which reads `x.ndim` before the quant method runs, and the
+  `RADIANCE_FUSED_NORM_QUANT=1` hooks hand the W4A8 GEMMs a `(q, scale)` tuple. New
+  `sly/patch_linear_carrier.py` passes the tuple (always a 2D token batch) straight to the kernel; NOOP on a
+  vLLM without `apply_flattened`. Found by the acceptance gate of PR #259 (run 45225663768, ink-k7); the
+  patch dry run only checks anchors and could not see it. Tensor inputs are unchanged.
 - **The MXFP4 aiter fallback op name** (`sly/mxfp4/radiance_mxfp4.py`): main renamed
   `torch.ops.vllm.gemm_with_dynamic_quant` to `rocm_aiter_mxfp4_gemm_dynamic_quant`. The dispatch
   resolves whichever name the installed vLLM registers, so the sub-MIN_M / non-W4A8-layer fallback

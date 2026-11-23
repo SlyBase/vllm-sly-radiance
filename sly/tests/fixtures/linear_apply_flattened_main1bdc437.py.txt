@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Test fixture: `apply_flattened` of vllm/model_executor/layers/linear.py at vLLM main@1bdc437 (the
+# commit the image builds), verbatim, plus the two names it needs. sly/tests/test_linear_carrier_patch_cpu.py
+# applies sly/patch_linear_carrier.py to a copy and runs the result on CPU. Re-extract it when the
+# pinned vLLM changes this function (the test compares it with the real file when INKLING_VLLM_SRC is set,
+# ci/patch_dryrun.sh checks the real anchor).
+from collections.abc import Callable
+from typing import Any
+
+import torch
+
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+
+
+def apply_flattened(
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
+) -> torch.Tensor:
+    """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
+
+    Linear methods and kernels may assume 2D activations, but callers such as
+    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
+    """
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
+        return fn(x)
+    return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
