@@ -5,6 +5,10 @@ radiance_mxfp4._exact_ref (fp32 ground truth) on the actual dense shapes, then b
 PACKED 4-bit bytes over a rotated weight pool (>=256 MB, never a single cached matrix), M=1..16.
 Also compares against the bf16 HIP GEMV (radiance_inkling2_gemv) at the decode M band.
 
+NOTE: the loop here is EAGER, so every W4A8 call reads ~29 us whatever the shape: that is the host (Python custom-op
+dispatch + fp8 quant launch + empty + launch, ~28.7 us of CPU per call), not the kernel. The model runs the op
+inside CUDA graphs; bench_mx4.py times it (and the HIP W4A16 GEMV, the int8 and bf16 GEMVs) as a replayed graph.
+
 Env: RADIANCE_MXFP4_W4A8=1 RADIANCE_MXFP4_W4A8_MIN_M=0 RADIANCE_MXFP4_DECODE_MAX_M=16
      RADIANCE_MXFP4_WPERM=0 RADIANCE_MXFP4_AT_PSW=0 RADIANCE_INKLING2_MXFP4_DENSE=1
 """

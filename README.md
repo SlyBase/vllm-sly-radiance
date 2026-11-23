@@ -589,7 +589,7 @@ single-stream decode at 210 W (code 125.6), step ~30 ms. Arguments, measurements
 | `RADIANCE_INKLING2_HIP_MOE` | on (`0` = Triton) | HIP expert GEMV for decode / verify tiles, 3.1-6.8x the Triton kernels, NVFP4 bit-identical |
 | `RADIANCE_INKLING2_HIP_GEMV` | on (`0` = Triton) | lossless HIP bf16 GEMV for the dense projections at M 1..16 |
 | `RADIANCE_INKLING2_W8` + `..._W8_HEAD` | off (`..._W8_HEAD` `1`) | opt-in int8 (Q8_0) dense weights: 1.5-1.8x the bf16 GEMV, KLD mean 0.0081, top-1 97.3 %. `_W8_HEAD=0` keeps the LM head bf16. BetterBench code 151.1 / 145.9 vs 127.3 / 124.4 default (two starts each) |
-| `RADIANCE_INKLING2_MXFP4_DENSE` (+ `..._MODE=w4a8\|w4a16`, `..._CLIP=rtn\|mse`) | off | opt-in 4-bit dense projections + LM head, dense bytes 4.77 -> 1.27 GB per step; not lossless. Model KLD and speed: `TBD (run mxfp4-dense bench)` |
+| `RADIANCE_INKLING2_MXFP4_DENSE` (+ `..._MODE=gemv\|w4a8\|w4a16`, `..._CLIP=rtn\|mse`) | off | opt-in 4-bit dense projections + LM head on the HIP W4A16 GEMV (`gemv`, default: one launch, bf16 activations), dense bytes 4.77 -> 1.27 GB per step; not lossless. GEMV 4.5-22 us per call (1.3-2.7x the W4A8 kernel, 1.3-1.8x int8), KLD mean 0.018 (int8: 0.008). BetterBench code 162.4 / 161.6 vs 151.1 / 145.9 int8 and 127.3 / 124.4 default (two starts each) |
 | `RADIANCE_INKLING2_DRAFT_SHORTLIST` | off | drafter shortlist: -1.7 ms per step but acceptance on code 3.43 -> 2.97; do not enable |
 | `RADIANCE_INKLING2_HIP_DEBUG` | off | `1` = host-side launch checks of the expert kernel |
 

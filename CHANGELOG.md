@@ -68,8 +68,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `sly/patch_inkling2_mxfp4dense.py`). Default stays lossless bf16. Inkling keeps its dense
   projections + lm_head in bf16 (only the MoE experts are 4-bit), streaming ~4x the dense weight
   bytes of the fully-4-bit prod Qwen; this quantizes them at load time to the compressed-tensors
-  MXFP4 grid (group-32 E2M1 + E8M0, RTN or a small MSE exponent search) and routes the matmul through
-  the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (`radiance_mxfp4_fp8.so`). Memory: the weights are
+  MXFP4 grid (group-32 E2M1 + E8M0, RTN or a small MSE exponent search) and routes the matmul to the
+  hand-written HIP W4A16 GEMV `sly/inkling2/radiance_inkling2_mx4.hip` (`RADIANCE_INKLING2_MXFP4_DENSE_MODE=gemv`,
+  the default): e2m1 codes widened exactly to bf16 (byte-LUT `v_perm`), the E8M0 scale on the exact K=32 fp32
+  partial sum, a pre-tiled copy read in whole 512 B wave loads, K split over waves, one launch per call, bf16
+  activations (no fp8 activation quantization), no scratch, graph safe; M > 16 (prefill) dequantizes the tiles
+  to bf16 per call. Only the tiles are kept (no [N, K/2] copy). `_MODE=w4a8` keeps the radiance MXFP4 W4A8
+  fp8-WMMA kernel (`radiance_mxfp4_fp8.so`), `_MODE=w4a16` the fake-quant quality arm. Memory: the weights are
   quantized in `process_weights_after_loading` and the bf16 originals are released right there, before
   vLLM sizes the KV cache (2.74 GB bf16 of the attention, draft and head projections become 0.74 GB
   MXFP4; only the lm_head stays bf16 until the DSpark draft has folded it, then it is freed too).
@@ -79,7 +84,12 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   4-bit, NOT lossless. Load-time quantizer on the real weights (`sly/inkling2/check_mxfp4dense_cpu.py`,
   CPU-only): 0.115 relRMS RTN / 0.112 MSE, dequant bit-exact against the format grid; the quantizable
   dense reads drop from 4.77 to 1.27 GB per step (3.76x fewer weight bytes).
-  Model KLD, kernel micro-bench and decode speed: `TBD (run mxfp4-dense bench)`, code decode: `TBD (run mxfp4-dense BetterBench code)`.
+  Measured (R9700 gfx1201, 210 W, graphs + DSpark k=7): kernel per call at M = 8 in a replayed CUDA graph
+  (rotated > 300 MB pool) 4.5 / 6.0 / 10.3 / 10.6 / 18.6 / 22.4 us at N = 384 / 1024 / 3072 / 2304 (K 3072) /
+  6552 / 8600 (105-469 GB/s of codes + scales; 1.4-2.7x the W4A8 kernel, 1.3-1.8x the int8 GEMV), lm_head
+  (N = 201024) 452 us (544 GB/s, 3.0x W4A8, 2.1x int8). The old W4A8 route's flat ~29 us per call was host time
+  in the eager micro-bench; in a graph it is 12.5-31.7 us. Model KLD mean 0.0176 / p99 0.179 / top-1 95.7 %
+  (W4A8 0.026 / 0.34 / 96.6 %, int8 0.008): 4-bit dense stays opt-in. BetterBench code 162.4 / 161.6 tok/s (weighted 157.2 / 156.8, two starts each) vs int8 151.1 / 145.9, default 127.3 / 124.4, prod Qwen 155.
 
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries

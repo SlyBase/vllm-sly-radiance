@@ -578,4 +578,4 @@ Step about 30 ms in every category; code 3.74 tokens per update. Before the coop
 (Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ, fully 4-bit dense) decodes code at 155; Inkling's dense weights are bf16
 (four times the bytes), see [INKLING2-MINI.md](INKLING2-MINI.md#why-inkling-decodes-code-at-1256-and-qwen-at-155).
 
-MXFP4 dense (`RADIANCE_INKLING2_MXFP4_DENSE=1`), code category: `TBD (run mxfp4-dense BetterBench code)`.
+MXFP4 dense (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `MODE=gemv`, the HIP W4A16 GEMV), code category: 162.4 / 161.6 (two starts, ink-k5 + overlay, graphs + DSpark k=7); weighted 157.2 / 156.8. The earlier `MODE=w4a8` arm (radiance fp8-WMMA kernel, one start) measured code 143.5, weighted 142.3. KLD mean 0.018 vs int8 0.008; per-shape kernel us/call in [INKLING2-MINI.md](INKLING2-MINI.md).

@@ -247,3 +247,9 @@ def test_load_prints_one_proof_line_with_mode_and_bytes(capsys):
     err = capsys.readouterr().err
     assert "[radiance.inkling2.mxfp4dense] MODE=gemv" in err and "weights" in err and "MiB" in err
     assert err.count("MODE=gemv") == 1
+    seen = {}
+    for e in m._CACHE.values():  # aligned slices are views of the same tiles: count each storage once
+        seen.setdefault(e["qt"].data_ptr(), e)
+    nbytes = sum(t.numel() * t.element_size() for e in seen.values() for t in e.values())
+    assert f"{m._STATS[0]} weights registered after the target, {nbytes >> 20} MiB" in err
+    assert m._STATS[1] == nbytes  # bytes of the tiles only, counted once per weight (the slices share them)

@@ -2,8 +2,7 @@
 
 Default stays lossless bf16. RADIANCE_INKLING2_MXFP4_DENSE=1 quantizes the dense weights to MXFP4
 (group-32 E2M1 codes + E8M0 scales, RTN or a small MSE exponent search) at LOAD time and routes the
-matmul through the EXISTING radiance MXFP4 W4A8 fp8-WMMA kernel (radiance_mxfp4_fp8.so, the same one
-prod Qwen runs). This is a quality trade-off like Qwen's own 4-bit, NOT lossless.
+matmul to a 4-bit kernel. This is a quality trade-off like Qwen's own 4-bit, NOT lossless.
 
 Memory: the bf16 originals are RELEASED right after quantization (the Parameter keeps its shape and
 dtype over a one-value-per-row stub, see _stub), so vLLM's memory profiling sees the freed bytes before
@@ -18,7 +17,13 @@ Why: Inkling keeps its dense projections + lm_head in bf16 (only the MoE experts
 streams ~4x the dense weight bytes of the fully-4-bit prod Qwen. MXFP4 dense cuts those bytes ~3.8x.
 
 Modes (RADIANCE_INKLING2_MXFP4_DENSE_MODE):
-  w4a8  (default) fp8 activations through the W4A8 kernel -- the speed point.
+  gemv  (default) W4A16 on the HIP GEMV radiance_inkling2_mx4 (the int8 GEMV's design with 4-bit codes): bf16
+                  activations (no fp8 activation quantization), one launch per call, only a pre-tiled copy of
+                  the codes + E8M0 scales is kept (pack_mx4). M <= 16 rows (every decode / spec-verify step and
+                  the lm_head at any M) run the GEMV; M > 16 (prefill) dequantizes the tiles to bf16 per call
+                  (dequant_mx4) and runs the bf16 GEMM. Falls back to w4a8 when the .so is missing.
+  w4a8            fp8 activations through the radiance W4A8 fp8-WMMA kernel (radiance_mxfp4_fp8.so, the one prod
+                  Qwen runs): ~29 us per call in an eager loop, 12-32 us in a graph, 300-330 GB/s on the big shapes.
   w4a16           dequantize the MXFP4 codes back to bf16 and run the bf16 matmul -- isolates the
                   weight-quantization quality cost (no fp8 activation error, no speed gain).
 
@@ -27,9 +32,9 @@ router would move expert routing. The loop message controllers run as a batched 
 4 streams (different weights per stream); they are ~4% of the dense bytes and stay bf16 for now
 (ponytail: a grouped MXFP4 launch for 4% of bytes is not worth a new kernel path).
 
-The quantizer matches the compressed-tensors mxfp4-pack-quantized grid the kernel reads: packed
+The quantizer matches the compressed-tensors mxfp4-pack-quantized grid the kernels read: packed
 [N, K/2] uint8 (low nibble = even k, bit3 = sign), weight_scale [K/32, N] uint8 E8M0 (2^(e-127)),
-per-row reference exponent wref [N] = max block exponent (the folded kernel's epilogue scale).
+per-row reference exponent wref [N] = max block exponent (the folded W4A8 kernel's epilogue scale).
 """
 import os
 import sys
@@ -291,6 +296,9 @@ def register(p: torch.nn.Parameter, rows=(), free: bool = True) -> None:
     _STATS[1] += sum(t.numel() * t.element_size() for t in ent.values() if t is not None)
     for (r0, n), e in zip(rows, sub):
         _CACHE[_key(view[r0:r0 + n])] = e
+        if (e["qt"] if e.get("qt") is not None else e["packed"]).data_ptr() != \
+                (ent["qt"] if ent.get("qt") is not None else ent["packed"]).data_ptr():  # the slice's own copy
+            _STATS[1] += sum(t.numel() * t.element_size() for t in e.values() if t is not None)
     if free:
         p.data = view
 
