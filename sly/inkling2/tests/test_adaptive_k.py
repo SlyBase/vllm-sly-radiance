@@ -21,7 +21,7 @@ def test_low_acceptance_goes_to_k3():
 
 
 def test_medium_acceptance_stays_k5():
-    """EMA in [2.0, 3.5] with k=5: no change."""
+    """EMA at the 2.8 boundary with k=5: no drop (strict <)."""
     assert decide_k(ema_accepted=2.8, current_k=5, steps_since_switch=20) == 5
 
 
@@ -31,12 +31,12 @@ def test_high_acceptance_goes_to_k7():
 
 
 def test_k7_drops_to_k5_on_low_ema():
-    """EMA below 3.0 with k=7: drop to k=5."""
+    """EMA below 3.4 with k=7: drop to k=5."""
     assert decide_k(ema_accepted=2.5, current_k=7, steps_since_switch=20) == 5
 
 
 def test_k7_stays_on_high_ema():
-    """EMA above 3.5 with k=7: no change."""
+    """EMA above 3.4 with k=7: no change."""
     assert decide_k(ema_accepted=4.2, current_k=7, steps_since_switch=20) == 7
 
 
@@ -57,19 +57,44 @@ def test_hysteresis_k5_to_k7_needs_ema_above_4():
     assert decide_k(ema_accepted=3.8, current_k=5, steps_since_switch=20) == 5
 
 
-def test_hysteresis_k5_to_k3_needs_ema_below_2():
-    """EMA in [2.0, 3.0) with k=5: no switch (hysteresis band)."""
-    assert decide_k(ema_accepted=2.5, current_k=5, steps_since_switch=20) == 5
+def test_hysteresis_k5_to_k3_needs_ema_below_2p8():
+    """EMA in [2.8, 4.0] with k=5: no switch (hysteresis band)."""
+    assert decide_k(ema_accepted=2.9, current_k=5, steps_since_switch=20) == 5
 
 
-def test_hysteresis_k7_to_k5_needs_ema_below_3():
-    """EMA in [3.0, 3.5) with k=7: no switch (hysteresis band)."""
-    assert decide_k(ema_accepted=3.2, current_k=7, steps_since_switch=20) == 7
+def test_hysteresis_k7_to_k5_needs_ema_below_3p4():
+    """EMA in [3.4, ...) with k=7: no switch (hysteresis band)."""
+    assert decide_k(ema_accepted=3.5, current_k=7, steps_since_switch=20) == 7
 
 
 def test_hysteresis_k3_to_k5_needs_ema_above_3():
     """EMA in [2.0, 3.0) with k=3: no switch (hysteresis band)."""
     assert decide_k(ema_accepted=2.8, current_k=3, steps_since_switch=20) == 3
+
+
+# ------------------------------------------------- cluster calibration (FACTS values)
+
+def test_low_cluster_drops_from_k7():
+    """prose/chat/reasoning acceptance (~2.5-3.2) all drop k=7 -> k=5."""
+    for ema in (2.52, 2.67, 3.16):
+        assert decide_k(ema, 7, 20) == 5, ema
+
+
+def test_high_cluster_stays_k7():
+    """code/math/json/file_edit acceptance (~3.8-4.6) keep k=7."""
+    for ema in (3.79, 3.97, 4.45, 4.63):
+        assert decide_k(ema, 7, 20) == 7, ema
+
+
+def test_prose_chat_reach_k3():
+    """The lowest acceptance (prose/chat ~2.5-2.7) drops k=5 -> k=3 (k3 reachable)."""
+    for ema in (2.52, 2.67):
+        assert decide_k(ema, 5, 20) == 3, ema
+
+
+def test_reasoning_stays_k5():
+    """reasoning (~3.16) drops to k=5 but not k=3."""
+    assert decide_k(3.16, 5, 20) == 5
 
 
 # ------------------------------------------------------------------------ cooldown
@@ -181,12 +206,14 @@ def test_mutants_killed():
     import radiance_inkling2_adaptive_k as m
 
     cases = [
-        # (mutant: attr -> value, original behaviour the mutant must break)
-        ("_K5_TO_K7", 3.0, lambda: m.decide_k(3.8, 5, 20) == 5),
-        ("_K5_TO_K3", 3.0, lambda: m.decide_k(2.5, 5, 20) == 5),
-        ("_K7_TO_K5", 4.0, lambda: m.decide_k(3.5, 7, 20) == 7),
-        ("_K3_TO_K5", 4.0, lambda: m.decide_k(3.5, 3, 20) == 5),
-        ("COOLDOWN", 5, lambda: m.decide_k(1.0, 5, 7) == 5),
+        # (mutant: attr -> value, original behaviour the mutant must break).
+        # Probes sit just inside the no-switch side of each threshold, so a shift
+        # of the threshold across the probe flips the decision.
+        ("_K5_TO_K7", 2.9, lambda: m.decide_k(3.9, 5, 20) == 5),   # 3.9<4.0 stays; mutant 2.9 -> rises
+        ("_K5_TO_K3", 3.8, lambda: m.decide_k(2.9, 5, 20) == 5),   # 2.9>2.8 stays; mutant 3.8 -> drops
+        ("_K7_TO_K5", 4.4, lambda: m.decide_k(3.5, 7, 20) == 7),   # 3.5>3.4 stays; mutant 4.4 -> drops
+        ("_K3_TO_K5", 1.9, lambda: m.decide_k(2.9, 3, 20) == 3),   # 2.9<3.0 stays; mutant 1.9 -> rises
+        ("COOLDOWN", 5, lambda: m.decide_k(1.0, 5, 7) == 5),       # cooldown blocks; mutant 5 -> switches
     ]
     for attr, val, check in cases:
         orig = getattr(m, attr)

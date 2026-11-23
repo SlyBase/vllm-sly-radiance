@@ -9,10 +9,13 @@ from a running per-step acceptance estimate.
 
 Hysteresis (per current k, EMA of accepted tokens per step):
   k = 3: rise to 5 when ema >  3.0
-  k = 5: rise to 7 when ema >  4.0, drop to 3 when ema <  2.0
-  k = 7: drop to 5 when ema <  3.0
-The band widths (2.0 on the way down from 7, 3.0 on the way up from 3) keep a
-borderline workload from ping-ponging k=5 <-> k=7; the cooldown does the rest.
+  k = 5: rise to 7 when ema >  4.0, drop to 3 when ema <  2.8
+  k = 7: drop to 5 when ema <  3.4
+The bands (3.4..4.0 for 5<->7, 2.8..3.0 for 3<->5) keep a borderline workload from
+ping-ponging; the cooldown does the rest. The down-from-7 threshold (3.4) sits above
+the low-acceptance cluster (prose/chat/reasoning ~2.5-3.2) and below the high one
+(code/math/json/file_edit ~3.8-4.6); the down-from-5 threshold (2.8) is above the
+lowest acceptance (~2.5) so k=3 is actually reachable, not dead code.
 """
 
 # Cooldown in steps after a k switch before another switch is allowed.
@@ -21,9 +24,9 @@ COOLDOWN = 10
 ALPHA = 0.1
 
 _K3_TO_K5 = 3.0   # k=3 rises to 5 above this
-_K5_TO_K3 = 2.0   # k=5 drops to 3 below this
+_K5_TO_K3 = 2.8   # k=5 drops to 3 below this
 _K5_TO_K7 = 4.0   # k=5 rises to 7 above this
-_K7_TO_K5 = 3.0   # k=7 drops to 5 below this
+_K7_TO_K5 = 3.4   # k=7 drops to 5 below this
 
 
 def update_ema(old, accepted, alpha=ALPHA):
