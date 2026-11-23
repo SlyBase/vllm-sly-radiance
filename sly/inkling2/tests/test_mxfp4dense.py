@@ -221,6 +221,7 @@ def storage(p):
 
 def serving(**env):
     """Module with the W4A8 op replaced by the format-spec matmul (the kernel itself is GPU-only)."""
+    env.setdefault("RADIANCE_INKLING2_MXFP4_DENSE_MODE", "w4a8")
     m = load(RADIANCE_INKLING2_MXFP4_DENSE="1", RADIANCE_INKLING2_MXFP4_DENSE_MIN_N="32", **env)
     def op(x2, packed, scale, wref):
         # the kernel's operand contract: dense, scale [K/32, N], wref [N]

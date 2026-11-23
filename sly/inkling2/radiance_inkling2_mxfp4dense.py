@@ -37,10 +37,12 @@ import sys
 import torch
 
 ENABLED = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE", "0") == "1"
-MODE = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MODE", "w4a8")
+MODE = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MODE", "gemv")
 CLIP = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_CLIP", "rtn")
 MIN_N = int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MIN_N", "256"))
 DECODE_MAX_M = int(os.environ.get("RADIANCE_MXFP4_DECODE_MAX_M", "0"))
+MX_MAX_M = 16  # rows per gemv_mx4 launch (the kernel's range; a DSpark verify step is k + 1 <= 16)
+HEAD_MIN_N = int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_HEAD_MIN_N", str(1 << 17)))  # the 201024-row unembed
 CHUNK_ROWS = 8192  # bounds the fp32 transient (lm_head 201024 x 2304 fp32 = 1.85 GB at once)
 
 _E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
@@ -52,7 +54,9 @@ _BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 _CACHE: dict = {}
 _linear_op = None  # resolved lazily; overridable in CPU tests
 _ext = None
+_mx = None  # radiance_inkling2_mx4 (gemv mode), resolved once at load; False = not importable
 _scratch_ready = False
+_STATS = [0, 0]  # weights registered, bytes of their MXFP4 copies (the proof line printed at load)
 _SCRATCH_KEEP = []  # holds the decode scratch tensors alive for the process
 
 
@@ -72,6 +76,20 @@ def _resolve_op():
         sys.stderr.write(f"[radiance.inkling2.mxfp4dense] W4A8 op unavailable, bf16 fallback: {e!r}\n")
         _linear_op = False
     return _linear_op or None
+
+
+def _resolve_mx():
+    """Import the HIP W4A16 GEMV extension (radiance_inkling2_mx4.so); None if it is not there."""
+    global _mx
+    if _mx is None:
+        try:
+            import torch  # noqa: F401  # a bare HIP extension needs torch's runtime loaded first
+            import radiance_inkling2_mx4 as ext
+            _mx = ext
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[radiance.inkling2.mxfp4dense] radiance_inkling2_mx4 unavailable: {e!r}\n")
+            _mx = False
+    return _mx or None
 
 
 def _setup_scratch(device):
@@ -166,6 +184,36 @@ def dequant_mxfp4(packed: torch.Tensor, scale_kn: torch.Tensor) -> torch.Tensor:
     return (val * sc).to(torch.bfloat16)
 
 
+MX_TILE = 16   # weight rows per kernel tile (one wmma operand)
+MX_GROUP = 64  # K values per tile group = 2 scale blocks; the kernel reads whole groups
+# position p of a code dword's 8 nibbles holds the wmma operand slot _SLOT_OF_POS[p] (the decode chain of
+# radiance_inkling2_mx4.hip yields the slots in the order 0 2 4 6 1 3 5 7 of the nibbles)
+_SLOT_OF_POS = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def pack_mx4(packed: torch.Tensor, scale_kn: torch.Tensor):
+    """(packed [N, K/2] u8, scale [K/32, N] u8) -> the kernel's tiles: codes u8 [NT, K/64, 512], scales u8 [NT, K/64, 32].
+
+    Per (tile of 16 rows, group of 64 K) the codes are ordered [half h][row c][block b][step j][4 B]: lane
+    16 h + c of a wave reads its 16 B at lane * 16, one wave load = 512 contiguous bytes. Its dword 2 b + j
+    holds the 8 codes of K 64 g + 32 b + 16 h + 8 j + slot, nibble _SLOT_OF_POS^-1 order. The scale bytes are
+    [row c][block b]. Rows past N (last tile) are zero: code 0, scale byte 0 (= factor 0)."""
+    n, kh = packed.shape
+    k = kh * 2
+    assert n > 0 and k % MX_GROUP == 0 and tuple(scale_kn.shape) == (k // 32, n)
+    nt, kg = -(-n // MX_TILE), k // MX_GROUP
+    sc = scale_kn.T
+    if nt * MX_TILE != n:
+        packed = torch.cat([packed, packed.new_zeros(nt * MX_TILE - n, kh)])
+        sc = torch.cat([sc, sc.new_zeros(nt * MX_TILE - n, k // 32)])
+    codes = torch.stack([packed & 0x0F, packed >> 4], -1).reshape(nt, MX_TILE, kg, 2, 2, 2, 8)  # [t,c,g,b,h,j,slot]
+    codes = codes[..., _SLOT_OF_POS]  # nibble position p <- slot _SLOT_OF_POS[p]
+    byts = codes[..., 0::2] | (codes[..., 1::2] << 4)  # [t,c,g,b,h,j,4]
+    qt = byts.permute(0, 2, 4, 1, 3, 5, 6).reshape(nt, kg, 512)  # [t,g,h,c,b,j,4]
+    st = sc.reshape(nt, MX_TILE, kg, 2).permute(0, 2, 1, 3).reshape(nt, kg, 32)
+    return qt.contiguous(), st.contiguous()
+
+
 def _finish(y, x, n, out, bias):
     if bias is not None:
         y = y + bias
@@ -195,11 +243,16 @@ def _is_stub(w: torch.Tensor) -> bool:
     return w.ndim == 2 and w.stride(-1) == 0
 
 
-def _entry(w: torch.Tensor) -> dict:
-    packed, scale, wref = quantize_mxfp4(w)
-    # w4a16 (quality arm) runs the bf16 matmul on the dequantized codes: build it now, not on first call
-    return {"packed": packed, "scale": scale, "wref": wref,
-            "dq": dequant_mxfp4(packed, scale) if MODE == "w4a16" else None}
+def _gemv_entry(packed: torch.Tensor, scale: torch.Tensor) -> dict:
+    qt, st = pack_mx4(packed, scale)
+    return {"qt": qt, "st": st}
+
+
+def _tiles(ent: dict, r0: int, n: int) -> dict:
+    """Entry of the tile-aligned rows [r0, r0+n): a view of the tiles that hold them (the last tile may carry
+    rows past n, the kernel never stores them)."""
+    t0 = r0 // MX_TILE
+    return {"qt": ent["qt"][t0:t0 + -(-n // MX_TILE)], "st": ent["st"][t0:t0 + -(-n // MX_TILE)]}
 
 
 def _rows(ent: dict, r0: int, n: int) -> dict:
@@ -208,6 +261,19 @@ def _rows(ent: dict, r0: int, n: int) -> dict:
     return {"packed": ent["packed"][r0:r0 + n], "scale": ent["scale"][:, r0:r0 + n].contiguous(),
             "wref": ent["wref"][r0:r0 + n].clone(),
             "dq": None if ent["dq"] is None else ent["dq"][r0:r0 + n]}
+
+
+def _entries(w: torch.Tensor, rows) -> tuple:
+    """Quantize `w` -> (entry, [entry per row slice in `rows`]) in the layout MODE's kernel reads."""
+    packed, scale, wref = quantize_mxfp4(w)
+    if MODE == "gemv":  # tiles only: the [N, K/2] copy is not kept
+        ent = _gemv_entry(packed, scale)
+        return ent, [_tiles(ent, r0, n) if r0 % MX_TILE == 0 else _gemv_entry(packed[r0:r0 + n], scale[:, r0:r0 + n])
+                     for r0, n in rows]
+    # w4a16 (quality arm) runs the bf16 matmul on the dequantized codes: build it now, not on first call
+    ent = {"packed": packed, "scale": scale, "wref": wref,
+           "dq": dequant_mxfp4(packed, scale) if MODE == "w4a16" else None}
+    return ent, [_rows(ent, r0, n) for r0, n in rows]
 
 
 @torch.no_grad()
@@ -219,23 +285,36 @@ def register(p: torch.nn.Parameter, rows=(), free: bool = True) -> None:
         return
     assert all(_eligible(w[r0:r0 + n]) for r0, n in rows), "row slice not routable (N < MIN_N)"
     view = _stub(w) if free else w
-    ent = _entry(w)
+    ent, sub = _entries(w, rows)
     _CACHE[_key(view)] = ent
-    for r0, n in rows:
-        _CACHE[_key(view[r0:r0 + n])] = _rows(ent, r0, n)
+    _STATS[0] += 1
+    _STATS[1] += sum(t.numel() * t.element_size() for t in ent.values() if t is not None)
+    for (r0, n), e in zip(rows, sub):
+        _CACHE[_key(view[r0:r0 + n])] = e
     if free:
         p.data = view
 
 
 def _ready(model) -> bool:
     """Knob on and the kernel usable (checked once, at load); allocates the decode scratch."""
+    global MODE
     if not ENABLED:
         return False
-    if MODE != "w4a16":
+    if MODE not in ("gemv", "w4a8", "w4a16"):
+        raise ValueError(f"RADIANCE_INKLING2_MXFP4_DENSE_MODE must be gemv, w4a8 or w4a16, got {MODE!r}")
+    if MODE == "gemv" and _resolve_mx() is None:  # no HIP GEMV in this image: the W4A8 kernel serves
+        sys.stderr.write("[radiance.inkling2.mxfp4dense] MODE=gemv needs radiance_inkling2_mx4, using w4a8\n")
+        MODE = "w4a8"
+    if MODE == "w4a8":
         if _resolve_op() is None:
             return False
         _setup_scratch(next(model.parameters()).device)
     return True
+
+
+def _report(what: str) -> None:
+    sys.stderr.write(f"[radiance.inkling2.mxfp4dense] MODE={MODE}: {_STATS[0]} weights registered after {what}, "
+                     f"{_STATS[1] >> 20} MiB of MXFP4\n")
 
 
 def _qkvr_rows(attn):
@@ -257,6 +336,7 @@ def process_target(model) -> None:
     # LoRA swaps in the stock LogitsProcessor, which reads the bf16 head itself: leave that one alone
     if "_apply_head" in vars(type(model.logits_processor)):
         register(model.lm_head.weight, free=False)
+    _report("the target")
 
 
 # the DSpark draft's own projections, all passed whole to linear() (its lm_head is the target's)
@@ -272,6 +352,7 @@ def process_draft(model) -> None:
     for name, p in model.named_parameters():
         if name.endswith(_DRAFT_LINEARS):
             register(p)
+    _report("the draft")
 
 
 @torch.no_grad()
@@ -285,9 +366,27 @@ def release_head(p: torch.nn.Parameter) -> None:
     torch.cuda.empty_cache()  # attach_target runs after the loader's own empty_cache
 
 
+def _stream(t: torch.Tensor) -> int:
+    return torch.cuda.current_stream().cuda_stream if t.is_cuda else 0
+
+
+def _gemv(x2: torch.Tensor, ent: dict, n: int, dt: torch.dtype) -> torch.Tensor:
+    """y [M, n] = x2 @ W^T, W4A16 on the HIP GEMV, 16 rows per launch (more rows only for the unembed)."""
+    m, k = x2.shape
+    if x2.stride(-1) != 1 or x2.stride(0) % 8 or x2.data_ptr() % 16:  # the kernel's 16 B vector loads
+        x2 = x2.clone(memory_format=torch.contiguous_format)
+    y = torch.empty((m, n), dtype=dt, device=x2.device)
+    qt, st, stream = ent["qt"], ent["st"], _stream(x2)
+    for r in range(0, m, MX_MAX_M):
+        _mx.gemv_mx4(x2[r:].data_ptr(), qt.data_ptr(), st.data_ptr(), y[r:].data_ptr(), min(MX_MAX_M, m - r), n, k,
+                     x2.stride(0), y.stride(0), int(dt == torch.float32), -(-n // MX_TILE), stream, -1)
+    return y
+
+
 def mxfp4_dense_linear(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor | None = None,
-                       bias: torch.Tensor | None = None):
-    """x @ weight.T via the MXFP4 copy registered for `weight`; None = not ours (caller runs bf16)."""
+                       bias: torch.Tensor | None = None, dtype: torch.dtype | None = None):
+    """x @ weight.T via the MXFP4 copy registered for `weight`; None = not ours (caller runs bf16).
+    `dtype` (default bf16): result dtype, fp32 straight from the kernel's accumulator in gemv mode."""
     if not ENABLED or weight.ndim != 2:
         return None
     n, k = weight.shape
@@ -300,16 +399,21 @@ def mxfp4_dense_linear(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor 
     x2 = x.reshape(-1, k)
     if not x2.shape[0]:  # the kernel has no empty launch
         return _finish(x2.new_empty((0, n)), x, n, out, bias)
-    if MODE == "w4a16":
+    if "qt" in ent:  # gemv mode
+        if x2.shape[0] <= MX_MAX_M or n >= HEAD_MIN_N:
+            y = _gemv(x2, ent, n, torch.float32 if dtype == torch.float32 else torch.bfloat16)
+        else:  # prefill: dequantize the tiles to bf16 once per call and run the bf16 GEMM
+            dq = torch.empty((n, k), dtype=torch.bfloat16, device=x2.device)
+            _mx.dequant_mx4(ent["qt"].data_ptr(), ent["st"].data_ptr(), dq.data_ptr(), n, k, ent["qt"].shape[0],
+                            _stream(x2))
+            y = torch.nn.functional.linear(x2, dq)
+    elif MODE == "w4a16":
         y = torch.nn.functional.linear(x2, ent["dq"])
     else:
         y = _resolve_op()(x2, ent["packed"], ent["scale"], ent["wref"])
-    return _finish(y, x, n, out, bias)
+    return _finish(y if dtype is None else y.to(dtype), x, n, out, bias)
 
 
 def mxfp4_dense_head(weight: torch.Tensor, hidden_states: torch.Tensor, head_dtype):
     """The lm_head/unembed matmul through the MXFP4 copy, cast to head_dtype; None = bf16 fallback."""
-    y = mxfp4_dense_linear(hidden_states, weight)
-    if y is None:
-        return None
-    return y.to(head_dtype)
+    return mxfp4_dense_linear(hidden_states, weight, dtype=head_dtype)

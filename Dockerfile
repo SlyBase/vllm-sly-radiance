@@ -620,6 +620,16 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/kernels/radiance_inkling2_gemv.hip -o /out/radiance_inkling2_gemv.so \
  && PYTHONPATH=/out python -c "import torch, radiance_inkling2_gemv as m; print('radiance_inkling2_gemv built:', m.__file__)"
 
+# sly/inkling2/radiance_inkling2_mx4.hip: MXFP4 (e2m1 + E8M0) W4A16 low-M GEMV + prefill dequant for the
+# opt-in RADIANCE_INKLING2_MXFP4_DENSE=1 dense route (MODE=gemv, the default of that knob; MODE=w4a8 keeps the
+# radiance_mxfp4_fp8 route). Same single-file pybind11 build; imported as radiance_inkling2_mx4 by
+# radiance_inkling2_mxfp4dense.py.
+COPY sly/inkling2/radiance_inkling2_mx4.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_inkling2_mx4.hip -o /out/radiance_inkling2_mx4.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_inkling2_mx4 as m; print('radiance_inkling2_mx4 built:', m.__file__)"
+
 # ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
 # above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
 # paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
