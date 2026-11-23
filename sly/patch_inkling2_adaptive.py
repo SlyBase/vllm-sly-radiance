@@ -86,7 +86,7 @@ _RAD_IK_STATE = _rad_ik_state_from_env() if _rad_ik_state_from_env is not None e
 def _rad_ik_observe(self, num_draft_tokens, num_accepted):
     """Feed one (drafted, accepted) spec step into the running acceptance EMA."""
     if _RAD_IK_STATE is not None:
-        _RAD_IK_STATE.observe(num_accepted)
+        _RAD_IK_STATE.observe(num_accepted, num_draft_tokens)
 
 
 def _rad_ik_k(self, k):
