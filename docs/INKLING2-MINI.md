@@ -106,7 +106,6 @@ dense options are for. The other 9.8 ms of the step (30 - 11.3 - 8.9, derived) a
 
 | Run | When (UTC) | Fills |
 |---|---|---|
-| `ink-k4` BetterBench, default x2 and `RADIANCE_INKLING2_W8=1` x2 | 2026-11-23 05:00 | default vs int8 decode per category |
 | `mxfp4-dense bench`: micro-bench, model KLD, speed | 2026-11-23 07:15 | MXFP4 dense bandwidth, quality, step time |
 | `mxfp4-dense BetterBench code` | 2026-11-23 08:00 | code decode with 4-bit dense |
 

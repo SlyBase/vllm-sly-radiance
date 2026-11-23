@@ -152,7 +152,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 off, graphs, k=7, seed 42, image `ink-k3`, two container starts): weighted 126.7 / 126.6 tok/s; chat 90.3 / 90.1, code 125.6 / 125.3,
 file_edit 154.5 / 154.4, json 152.6 / 152.3, math 140.5 / 140.2, prose 91.3 / 91.3, reasoning 110.7 / 110.7, summarization 148.8 / 148.8;
 step ~30 ms in every category, code 3.74 tokens per update. Before the cooperative-launch fix (`ink-k2`): code 62.9, weighted 62.0.
-Per-category table and the pending runs (`ink-k4` default and W8, MXFP4 dense): [docs/BENCHMARKS.md](docs/BENCHMARKS.md#inkling-2-mini-on-gfx1201-2026-11).*
+Per-category table (default and W8 on `ink-k5`) and the pending MXFP4 dense run: [docs/BENCHMARKS.md](docs/BENCHMARKS.md#inkling-2-mini-on-gfx1201-2026-11).*
 
 *Measured, production Qwen on this base: not yet — CPU CI only (patch dry run 191 hunks / pass 2 all NOOP, constraints 212 packages
 resolved, CPU suite 246 passed / 595 skipped, aiter + attention-metadata contracts green, resolve green). No GPU window has run the
