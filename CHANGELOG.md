@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [Unreleased]
+## [1.14.0] - 2026-11-23
 
 ### Added
 - **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
