@@ -677,7 +677,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
      sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
      sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py \
-     sly/inkling2/radiance_inkling2_mxfp4dense.py ${SP}/
+     sly/inkling2/radiance_inkling2_mxfp4dense.py sly/inkling2/radiance_inkling2_adaptive_k.py ${SP}/
 COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
 # launch folding of the DSpark draft (hooks: sly/patch_inkling2_gfx12.py)
 COPY sly/inkling2/radiance_inkling2_draft.py ${SP}/
@@ -825,7 +825,7 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_prefill_skip \
              sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm sly/patch_inkling2_gfx12 \
-             sly/patch_inkling2_mxfp4dense; do \
+             sly/patch_inkling2_mxfp4dense sly/patch_inkling2_adaptive; do \
       case " ${PATCH_SKIP} " in *" $p "*) echo "== SKIP $p =="; continue;; esac; \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \

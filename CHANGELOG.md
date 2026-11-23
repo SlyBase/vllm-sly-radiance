@@ -90,6 +90,17 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   (N = 201024) 394-452 us (544-624 GB/s, 3.0-3.5x W4A8, 2.1-2.4x int8). The old W4A8 route's flat ~29 us per call was host time
   in the eager micro-bench; in a graph it is 12.5-31.7 us. Model KLD mean 0.0176 / p99 0.179 / top-1 95.7 %
   (W4A8 0.026 / 0.34 / 96.6 %, int8 0.008): 4-bit dense stays opt-in. BetterBench code 162.4 / 161.6 tok/s (weighted 157.2 / 156.8, two starts each) vs int8 151.1 / 145.9, default 127.3 / 124.4, prod Qwen 155.
+- **Opt-in adaptive DSpark verify window for Inkling 2 Mini**
+  (`RADIANCE_INKLING2_ADAPTIVE_K`, `sly/inkling2/radiance_inkling2_adaptive_k.py` +
+  `sly/patch_inkling2_adaptive.py`). The DSpark checkpoint's block size fixes the MAX verify window at
+  k = 7 (a verify step is M = 8 rows); a shorter window (k in {3, 5}) verifies exactly the same way —
+  rejection sampling is exact for any k — and reads fewer distinct MoE experts + less dense attention per
+  step, so the step is cheaper (the MoE part scales with rows, the dense GEMV is weight-bound). The
+  scheduler picks k per step from a running acceptance EMA (accepted tokens per step) with hysteresis +
+  cooldown (no oscillation), through the native per-step `num_spec_tokens_to_schedule` seam; the override
+  runs after the batch-size `dynamic_sd_lookup`, so it wins. The knob is a comma list of k's, each in
+  {3, 5, 7}, at most three entries (`"3,5,7"` adaptive, `"5"` fixed); default off = k = 7 unchanged.
+  NOOP on a vLLM without `models/inkling2`.
 
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
