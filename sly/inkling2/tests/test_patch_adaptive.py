@@ -85,3 +85,59 @@ def test_off_by_default_is_a_noop_on_k(tree):
     ns = {}
     exec(compile(code, str(policy), "exec"), ns)
     assert ns["state_from_env"]() is None  # unset env -> off -> no k change
+
+
+MR = "vllm/v1/worker/gpu/model_runner.py"
+
+
+def _query_lens_fn(tree):
+    """Extract the appended _rad_ik_query_lens helper from the patched model_runner."""
+    src = (tree / MR).read_text()
+    start = src.index("def _rad_ik_query_lens")
+    ns = {}
+    exec(compile(src[start:], "mr_tail", "exec"), ns)
+    return ns["_rad_ik_query_lens"]
+
+
+class _Cfg:
+    scheduler_config = type("sc", (), {"max_num_seqs": 8})()
+
+    def __init__(self, lens):
+        self._lens = lens
+
+    def get_decode_cudagraph_query_lens(self, q):
+        return dict(self._lens)
+
+
+def test_multiwidth_hook_lands_and_parses(tree):
+    assert run(tree).returncode == 0
+    m = (tree / MR).read_text()
+    ast.parse(m)
+    assert "decode_query_lens=_rad_ik_query_lens(" in m
+    assert "def _rad_ik_query_lens" in m
+
+
+def test_query_lens_adds_adaptive_widths(tree, monkeypatch):
+    run(tree)
+    fn = _query_lens_fn(tree)
+    monkeypatch.setenv("RADIANCE_INKLING2_ADAPTIVE_K", "3,5,7")
+    lens = fn(_Cfg({8: 8}), 8)
+    assert set(lens) == {4, 6, 8}, lens  # k=3,5,7 -> q=4,6,8 FULL graphs
+    # fixed single k adds only its width
+    monkeypatch.setenv("RADIANCE_INKLING2_ADAPTIVE_K", "3")
+    assert set(fn(_Cfg({8: 8}), 8)) == {4, 8}
+
+
+def test_query_lens_inert_when_off(tree, monkeypatch):
+    run(tree)
+    fn = _query_lens_fn(tree)
+    monkeypatch.delenv("RADIANCE_INKLING2_ADAPTIVE_K", raising=False)
+    assert fn(_Cfg({8: 8}), 8) == {8: 8}  # unchanged -> only the config width captured
+
+
+def test_idempotent_includes_model_runner(tree):
+    run(tree)
+    first = (tree / MR).read_text()
+    r2 = run(tree)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert (tree / MR).read_text() == first, "second apply changed model_runner"

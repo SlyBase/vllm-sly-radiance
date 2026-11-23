@@ -98,9 +98,11 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   step, so the step is cheaper (the MoE part scales with rows, the dense GEMV is weight-bound). The
   scheduler picks k per step from a running acceptance EMA (accepted tokens per step) with hysteresis +
   cooldown (no oscillation), through the native per-step `num_spec_tokens_to_schedule` seam; the override
-  runs after the batch-size `dynamic_sd_lookup`, so it wins. The knob is a comma list of k's, each in
-  {3, 5, 7}, at most three entries (`"3,5,7"` adaptive, `"5"` fixed); default off = k = 7 unchanged.
-  NOOP on a vLLM without `models/inkling2`.
+  runs after the batch-size `dynamic_sd_lookup`, so it wins. The target's FULL decode cudagraph is captured
+  only for the config verify width (q=8); the patch also captures the adaptive widths (q=4/6) so a shorter
+  window replays a FULL graph instead of falling to the ~2x slower PIECEWISE route. The knob is a comma list
+  of k's, each in {3, 5, 7}, at most three entries (`"3,5,7"` adaptive, `"5"` fixed); default off = k = 7
+  unchanged. NOOP on a vLLM without `models/inkling2`.
 
 ### Changed
 - **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries

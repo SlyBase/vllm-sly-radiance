@@ -28,6 +28,7 @@ from _patchlib import apply
 SP = Path(os.environ.get("RADIANCE_PATCH_TARGET_DIR") or sysconfig.get_paths()["purelib"])
 ROOT = SP / "vllm/models/inkling2"
 SCHED = SP / "vllm/v1/core/sched/scheduler.py"
+MR = SP / "vllm/v1/worker/gpu/model_runner.py"
 
 OBSERVE_ANCHOR = (
     "                num_rejected = len(scheduled_spec_token_ids) - num_accepted\n"
@@ -41,6 +42,36 @@ K_ANCHOR = (
     "            ]\n"
 )
 K_NEW = K_ANCHOR + "        num_spec_tokens_to_schedule = self._rad_ik_k(num_spec_tokens_to_schedule)\n"
+
+# The target's FULL decode cudagraph is captured only for the config verify width
+# (q = k+1 = 8). A shorter window (q = 4 / 6) would find no FULL graph and fall to
+# the ~2x slower PIECEWISE route. Capture the adaptive widths too, so every allowed
+# k replays a FULL graph. Inert unless the knob lists those k's.
+MR_ANCHOR = (
+    "            decode_query_lens=self.vllm_config.get_decode_cudagraph_query_lens(\n"
+    "                self.decode_query_len\n"
+    "            ),\n"
+)
+MR_NEW = (
+    "            decode_query_lens=_rad_ik_query_lens(\n"
+    "                self.vllm_config, self.decode_query_len\n"
+    "            ),\n"
+)
+MR_TAIL = '''
+
+def _rad_ik_query_lens(vllm_config, decode_query_len):
+    """Target decode query lens plus the adaptive verify widths (k+1), so a shorter
+    window still replays a FULL cudagraph instead of falling to PIECEWISE."""
+    lens = vllm_config.get_decode_cudagraph_query_lens(decode_query_len)
+    import os
+    raw = os.environ.get("RADIANCE_INKLING2_ADAPTIVE_K", "")
+    ks = {int(p) for p in raw.split(",") if p.strip() in ("3", "5", "7")}
+    if ks:
+        cap = max(lens.values()) if lens else vllm_config.scheduler_config.max_num_seqs
+        for k in ks:
+            lens.setdefault(k + 1, cap)
+    return lens
+'''
 
 TAIL = '''
 # ---- RADIANCE adaptive DSpark verify window (patch_inkling2_adaptive.py) ----
@@ -86,6 +117,17 @@ def main():
         print("  OK    inkling2 adaptive-k scheduler helpers")
     else:
         print("  NOOP  inkling2 adaptive-k scheduler helpers already applied")
+    # capture the adaptive verify widths as FULL decode graphs (target runner)
+    apply(MR, MR_ANCHOR, MR_NEW, "_rad_ik_query_lens(", "inkling2 adaptive-k multi-width capture")
+    m = MR.read_text()
+    if "def _rad_ik_query_lens" not in m:
+        m = m.rstrip("\n") + "\n" + MR_TAIL
+        import ast
+        ast.parse(m)
+        MR.write_text(m)
+        print("  OK    inkling2 adaptive-k query-lens helper")
+    else:
+        print("  NOOP  inkling2 adaptive-k query-lens helper already applied")
 
 
 if __name__ == "__main__":
