@@ -21,6 +21,15 @@ PYBIND11_MODULE(radiance_inkling2_gemv, m) {
   }, "stub: zero output", py::arg("x"), py::arg("w"), py::arg("bias"), py::arg("y"), py::arg("M"),
      py::arg("N"), py::arg("K"), py::arg("SX"), py::arg("SW"), py::arg("SY"), py::arg("out32"),
      py::arg("stream"), py::arg("cfg") = -1);
+  m.def("gemv_bf16_batched", [](uintptr_t x, uintptr_t w, uintptr_t y, int64_t nb, int64_t M, int64_t N,
+                                int64_t K, int64_t SX, int64_t SW, int64_t SY, int64_t BX, int64_t BW,
+                                int64_t BY, int64_t out32, uintptr_t stream, int64_t cfg) {
+    if (nb >= 1 && nb <= 64 && M >= 1 && M <= 16 && N >= 1 && SY >= N && BY >= 0)  // only the batch's own span
+      (void)hipMemsetAsync((void*)y, 0, (size_t)((nb - 1) * BY + (M - 1) * SY + N) * (out32 ? 4 : 2),
+                           (hipStream_t)stream);
+  }, "stub: zero output", py::arg("x"), py::arg("w"), py::arg("y"), py::arg("nb"), py::arg("M"),
+     py::arg("N"), py::arg("K"), py::arg("SX"), py::arg("SW"), py::arg("SY"), py::arg("BX"), py::arg("BW"),
+     py::arg("BY"), py::arg("out32"), py::arg("stream"), py::arg("cfg") = -1);
   m.def("gemv_q8", [](uintptr_t x, uintptr_t q, uintptr_t s, uintptr_t bias, uintptr_t y, int64_t M,
                       int64_t N, int64_t K, int64_t SX, int64_t SY, int64_t out32, int64_t ntiles,
                       uintptr_t stream, int64_t cfg) {

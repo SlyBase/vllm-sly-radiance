@@ -13,6 +13,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Added
+- **Inkling 2 Mini step-time knobs, both opt-in (default off, not yet measured end to end).**
+  `RADIANCE_INKLING2_HIP_CTRL=1`: the loop message controllers' two `torch.bmm` per sublayer visit (hipBLASLt,
+  0.92 ms per verify step in the 2026-11-23 kernel trace) run on a new batched variant of the HIP bf16 GEMV
+  (`gemv_bf16_batched`, stream = grid.y); same weights, fp32 accumulation. `RADIANCE_INKLING2_FOLD_INT8=1`:
+  the DSpark Markov fold weight is read as int8 + a fp32 row scale (103 -> 51 MB per Markov step, 7 per verify
+  step); lossy for the draft only, the target verifies every token. Micro-benchmarks `bench_ctrl.py`,
+  `bench_fold.py`. *Measured*: CPU tests only so far; projected -0.4..-0.5 ms and -0.6 ms of the 23.1 ms step.
 - **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
   the model's sm120 (Triton) path on ROCm: capability gates, PDL removed, hot-path PTX rewritten to
   Triton math, hip libdevice gaps, 64 KB LDS tiles, flashinfer-free DSpark drafter (torch RMSNorm,

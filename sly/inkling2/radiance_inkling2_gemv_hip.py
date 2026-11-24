@@ -9,6 +9,10 @@ accumulation (lossless). Triton pads M to 16 rows and its tl.dot streams a spec-
 slower than the card can; the HIP kernel reads each weight row once with 16 B non-temporal loads and
 accumulates all M rows per load. No copy, no scratch: it routes under graph capture too.
 
+loop controllers: opt-in RADIANCE_INKLING2_HIP_CTRL=1 (default 0): the two torch.bmm of the loop blend
+(hipBLASLt, 0.92 ms per verify step) run as two launches of gemv_bf16_batched (stream = grid.y), see
+controller_gemms. Same bf16 weights, fp32 accumulation; only the summation order differs.
+
 int8: opt-in RADIANCE_INKLING2_W8=1 (default 0): big projection weights (>= Q8_MIN_NUMEL = 3M elements; NOT
 the MoE router, NOT tiny tensors) are converted once, lazily, on the first eager call to int8
 with one fp32 scale per 32 consecutive K values (symmetric, scale = amax / 127, round to
@@ -30,6 +34,7 @@ import torch
 W8 = os.environ.get("RADIANCE_INKLING2_W8", "0") == "1"
 W8_HEAD = os.environ.get("RADIANCE_INKLING2_W8_HEAD", "1") != "0"  # only read when W8 is on
 HIP_BF16 = os.environ.get("RADIANCE_INKLING2_HIP_GEMV", "1") != "0"
+HIP_CTRL = os.environ.get("RADIANCE_INKLING2_HIP_CTRL", "0") == "1"  # loop controllers on the batched GEMV
 Q8_MIN_NUMEL = 3 << 20  # k/v 1024 x 2304 (2.4M, launch bound, 1.4x) and the router stay bf16 by choice
 Q8_HEAD_MIN_N = 1 << 17  # rows: the 201024-row unembed is the only projection this tall
 Q8_BLOCK = 32  # K values per scale
@@ -173,3 +178,34 @@ def _hip_q8(x2: torch.Tensor, weight: torch.Tensor, bias, out: torch.Tensor) -> 
                  m, n, k, x2.stride(0), out.stride(0), int(out.dtype == torch.float32),
                  -(-n // Q8_TILE), torch.cuda.current_stream().cuda_stream, -1)
     return True
+
+
+def controller_gemms(pair: torch.Tensor, down: torch.Tensor, gain_forget: torch.Tensor):
+    """The loop controllers' two batched products on gemv_bf16_batched: fp32 [S, T, 2D] =
+    bf16(pair [S, T, 2D] @ down [S, r, 2D]^T) @ gain_forget [S, 2D, r]^T, or None = caller runs torch.bmm
+    (knob off, no batched kernel in the build, T > 16, anything not dense bf16, r % 8)."""
+    if not HIP_CTRL or _ext is None or not hasattr(_ext, "gemv_bf16_batched"):
+        return None
+    s, t, d2 = pair.shape
+    r = down.shape[1]
+    if not (
+        0 < t <= MAX_M
+        and r % 8 == 0
+        and pair.dtype == down.dtype == gain_forget.dtype == torch.bfloat16
+        and tuple(down.shape) == (s, r, d2)
+        and tuple(gain_forget.shape) == (s, d2, r)
+        and pair.is_contiguous()
+        and down.is_contiguous()
+        and gain_forget.is_contiguous()
+        and d2 % 8 == 0
+        and all(_aligned(a) for a in (pair, down, gain_forget))
+    ):
+        return None
+    stream = torch.cuda.current_stream().cuda_stream
+    hidden = torch.empty((s, t, r), dtype=torch.bfloat16, device=pair.device)
+    out = torch.empty((s, t, d2), dtype=torch.float32, device=pair.device)
+    _ext.gemv_bf16_batched(pair.data_ptr(), down.data_ptr(), hidden.data_ptr(), s, t, r, d2,
+                           d2, d2, r, t * d2, r * d2, t * r, 0, stream, -1)
+    _ext.gemv_bf16_batched(hidden.data_ptr(), gain_forget.data_ptr(), out.data_ptr(), s, t, d2, r,
+                           r, r, d2, t * r, d2 * r, t * d2, 1, stream, -1)
+    return out

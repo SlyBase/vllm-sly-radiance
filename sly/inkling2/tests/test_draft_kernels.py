@@ -199,3 +199,86 @@ def test_shortlist_declines_when_it_cannot_shrink_anything(k):
     from radiance_inkling2_draft import shortlist
 
     assert shortlist(torch.zeros(1, 7, 300).bfloat16(), k) is None
+
+
+# ---------------------------------------------------------------- int8 fold weight (RADIANCE_INKLING2_FOLD_INT8, drafter-only, lossy)
+
+
+def _fold_inputs(rows, V, r, seed=6):
+    g = torch.Generator().manual_seed(seed)
+    base = (torch.randn(rows, V, generator=g) * 6).bfloat16()
+    fw = (torch.randn(V, r, generator=g) * 0.3).bfloat16().float()
+    fb = torch.randn(V, generator=g).bfloat16().float()
+    latent = torch.tanh(torch.randn(rows, r, generator=g)).bfloat16()
+    return base, fw, fb, latent
+
+
+def _dq(fw):
+    """Independent int8 round trip: per-row symmetric, scale = amax / 127, round to nearest."""
+    s = fw.abs().amax(1, keepdim=True) / 127.0
+    return (fw / s).round().clamp(-127, 127) * s
+
+
+@pytest.fixture()
+def int8_on(monkeypatch):
+    import radiance_inkling2_draft as d
+    monkeypatch.setattr(d, "FOLD_INT8", True)
+    d._FOLD_Q8.clear()
+    yield d
+    d._FOLD_Q8.clear()
+
+
+def test_fold_int8_knob_defaults_off():
+    import radiance_inkling2_draft as d
+    assert d.FOLD_INT8 is False
+
+
+@pytest.mark.parametrize("rows,V,r", [(1, 300, 32), (3, 513, 64), (8, 200, 256)])
+def test_fold_int8_equals_the_fold_of_the_dequantized_weight(int8_on, rows, V, r):
+    base, fw, fb, latent = _fold_inputs(rows, V, r)
+    out = int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    want = ref_fold(base.float(), _dq(fw), fb, latent, 30.0).float()
+    torch.testing.assert_close(out.float(), want, atol=0.25, rtol=2e-2)  # bf16 ulp of a logit near 30
+
+
+@pytest.mark.parametrize("rows,V,r", [(1, 300, 32), (8, 400, 256)])
+def test_fold_int8_error_vs_the_bf16_fold_is_bounded(int8_on, monkeypatch, rows, V, r):
+    """Weight error <= scale / 2 per entry, so |d bias| <= sum_k |latent_k| * scale / 2; the softcap only
+    shrinks it (|tanh'| <= 1). The bound is checked, not assumed."""
+    base, fw, fb, latent = _fold_inputs(rows, V, r, seed=8)
+    q = int8_on.fold_softcap(base, fw, fb, latent, 30.0).float()
+    monkeypatch.setattr(int8_on, "FOLD_INT8", False)
+    full = int8_on.fold_softcap(base, fw, fb, latent, 30.0).float()
+    bound = (latent.float().abs().sum(1, keepdim=True) * (fw.abs().amax(1) / 127.0 / 2)[None, :])
+    assert ((q - full).abs() <= bound + 0.25 + 0.0).all()  # + one bf16 ulp near the cap
+    assert not torch.equal(q, full)  # the knob really changes the weights read
+
+
+def test_fold_int8_reads_one_int8_copy_cached_per_weight(int8_on):
+    base, fw, fb, latent = _fold_inputs(2, 300, 32)
+    int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    (key, (ref, q, s)), = int8_on._FOLD_Q8.items()
+    assert q.dtype == torch.int8 and q.shape == fw.shape and s.dtype == torch.float32 and s.shape == (300,)
+    assert (q.abs().amax(1) == 127).all() and torch.equal(s * 127, fw.abs().amax(1))  # amax / 127 per row
+    int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    assert len(int8_on._FOLD_Q8) == 1 and int8_on._FOLD_Q8[key][1] is q
+
+
+def test_fold_int8_never_allocates_under_graph_capture(int8_on, monkeypatch):
+    """A weight first seen during capture stays on the bf16 kernel (the copy is made by an eager warmup)."""
+    monkeypatch.setattr(int8_on, "_capturing", lambda: True)
+    base, fw, fb, latent = _fold_inputs(2, 300, 32)
+    out = int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    assert int8_on._FOLD_Q8 == {}
+    torch.testing.assert_close(out.float(), ref_fold(base.float(), fw, fb, latent, 30.0).float(),
+                               atol=0.25, rtol=2e-2)
+
+
+def test_fold_int8_off_changes_nothing(monkeypatch):
+    import radiance_inkling2_draft as d
+    assert d.FOLD_INT8 is False
+    base, fw, fb, latent = _fold_inputs(3, 513, 64)
+    out = d.fold_softcap(base, fw, fb, latent, 30.0)
+    torch.testing.assert_close(out.float(), ref_fold(base.float(), fw, fb, latent, 30.0).float(),
+                               atol=0.25, rtol=2e-2)
+    assert d._FOLD_Q8 == {}

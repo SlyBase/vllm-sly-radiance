@@ -463,3 +463,66 @@ def test_shortlist_path_matches_dense_on_members_and_masks_the_rest(tree, monkey
     assert torch.isneginf(short[~member].float()).all()
     torch.testing.assert_close(short[member].float(), dense[member].float(), atol=0.25, rtol=2e-2)
     assert int(member.sum()) >= rows * 20 - rows * 3   # at most 3 members per row are sliced off
+
+
+# ---------------------------------------------------------------- loop controllers (RADIANCE_INKLING2_HIP_CTRL)
+
+
+def _blend(tree, hip, controller_gemms, calls):
+    """The patched Inkling2LoopDecoderLayer.blend, exec'd with stub kernels: pair_rms_norm / blend_rms_norm
+    record, torch.bmm is the real one (counted), radiance_inkling2_gemv_hip is `controller_gemms`."""
+    src = (tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    cls = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == "Inkling2LoopDecoderLayer")
+    fn = ast.get_source_segment(src, next(n for n in cls.body if getattr(n, "name", "") == "blend"))
+    mod = types.ModuleType("radiance_inkling2_gemv_hip")
+    mod.controller_gemms = controller_gemms
+    sys.modules["radiance_inkling2_gemv_hip"] = mod
+
+    class T(_Torch):
+        def bmm(self, a, b, out_dtype=None):
+            calls.append("bmm")
+            return (a.float() @ b.float()).to(out_dtype or a.dtype)
+
+    ns = {"torch": T(hip), "pair_rms_norm": lambda d, m: m.bfloat16().repeat(1, 1, 2),
+          "blend_rms_norm": lambda d, m, gf, w, e: gf}
+    exec("from __future__ import annotations\n" + fn.replace("    def blend", "def blend", 1).replace("\n    ", "\n"), ns)
+    return ns["blend"]
+
+
+def _layer():
+    return types.SimpleNamespace(controller_down=torch.randn(4, 64, 8).bfloat16(),
+                                 controller_gain_forget=torch.randn(4, 8, 64).bfloat16())
+
+
+@pytest.mark.parametrize("hip", [True, False])
+def test_loop_blend_uses_the_batched_controller_gemms_on_rocm_only(tree, hip):
+    assert run(tree).returncode == 0
+    calls, seen = [], []
+    sentinel = torch.full((3, 2, 8), 7.0)
+
+    def cg(pair, down, gf):
+        seen.append((tuple(pair.shape), tuple(down.shape), tuple(gf.shape)))
+        return sentinel
+
+    blend = _blend(tree, hip, cg, calls)
+    out = blend(_layer(), slice(0, 3), torch.randn(3, 2, 4), torch.randn(3, 2, 4), torch.ones(3, 4), 1e-6)
+    if hip:  # the kernels' result goes straight into blend_rms_norm, torch.bmm never runs
+        assert out is sentinel and calls == [] and seen == [((3, 2, 8), (3, 64, 8), (3, 8, 64))]
+    else:
+        assert seen == [] and calls == ["bmm", "bmm"]
+
+
+def test_loop_blend_falls_back_to_bmm_when_the_kernels_decline(tree):
+    assert run(tree).returncode == 0
+    calls = []
+    blend = _blend(tree, True, lambda p, d, g: None, calls)
+    blend(_layer(), slice(3, 4), torch.randn(1, 2, 4), torch.randn(1, 2, 4), torch.ones(1, 4), 1e-6)
+    assert calls == ["bmm", "bmm"]
+
+
+def test_loop_blend_hook_is_idempotent(tree):
+    run(tree)
+    first = (tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    assert first.count("controller_gemms") >= 2
+    run(tree)
+    assert (tree / "vllm/models/inkling2/nvidia/loop.py").read_text() == first

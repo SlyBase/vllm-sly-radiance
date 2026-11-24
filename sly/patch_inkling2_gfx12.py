@@ -280,6 +280,36 @@ def main():
         "inkling2 gemv: HIP bf16 GEMV on ROCm (RADIANCE_INKLING2_HIP_GEMV=0 = Triton), int8 opt-in RADIANCE_INKLING2_W8",
     )
 
+    # --- loop message controllers: the two torch.bmm (hipBLASLt) on the batched HIP GEMV, opt-in ---
+    # RADIANCE_INKLING2_HIP_CTRL=1; controller_gemms returns None (knob off, shape outside the kernel's
+    # range) and the original bmm pair runs.
+    apply(
+        ROOT / "nvidia/loop.py",
+        "        pair = pair_rms_norm(dest, message)\n"
+        "        hidden = torch.bmm(pair, self.controller_down[streams].transpose(1, 2))\n"
+        "        gain_forget = torch.bmm(\n"
+        "            hidden,\n"
+        "            self.controller_gain_forget[streams].transpose(1, 2),\n"
+        "            out_dtype=torch.float32,\n"
+        "        )\n",
+        "        pair = pair_rms_norm(dest, message)\n"
+        "        gain_forget = None\n"
+        "        if torch.version.hip:  # hipBLASLt takes 6-12 us per call on 0.6-1.8 MB: batched HIP GEMV\n"
+        "            from radiance_inkling2_gemv_hip import controller_gemms\n\n"
+        "            gain_forget = controller_gemms(\n"
+        "                pair, self.controller_down[streams], self.controller_gain_forget[streams]\n"
+        "            )\n"
+        "        if gain_forget is None:\n"
+        "            hidden = torch.bmm(pair, self.controller_down[streams].transpose(1, 2))\n"
+        "            gain_forget = torch.bmm(\n"
+        "                hidden,\n"
+        "                self.controller_gain_forget[streams].transpose(1, 2),\n"
+        "                out_dtype=torch.float32,\n"
+        "            )\n",
+        "from radiance_inkling2_gemv_hip import controller_gemms",
+        "inkling2 loop blend: controller GEMMs on the batched HIP GEMV (RADIANCE_INKLING2_HIP_CTRL=1)",
+    )
+
 
     apply(
         ROOT / "nvidia/ops/moe_sm120.py",

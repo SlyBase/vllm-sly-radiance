@@ -65,6 +65,12 @@ MUTATIONS = {
     "bf_ystride": ("else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB", "else ((uint16_t*)y)[(int64_t)m * N + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB"),
     "bf_y32stride": ("if (out32) ((float*)y)[(int64_t)m * SY + n] = v;\n    else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB", "if (out32) ((float*)y)[(int64_t)m * N + n] = v;\n    else ((uint16_t*)y)[(int64_t)m * SY + n] = f2bf(v);\n  }\n}\n\nstruct ArgsB"),
     "bf_rne": ("return (uint16_t)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);", "return (uint16_t)((u + 0x7FFFu) >> 16);"),
+    # gemv_bf16_batched (tests/test_gemv_batched_hip.py): the grid.y offsets of x, w and y
+    "bz_x": ("  x += bz * BX;\n", "  x += 0 * BX;\n"),
+    "bz_w": ("  w += bz * BW;\n", "  w += 0 * BW;\n"),
+    "bz_y": ("(void*)((float*)y + bz * BY) : (void*)((uint16_t*)y + bz * BY);", "(void*)((float*)y + 0 * BY) : (void*)((uint16_t*)y + 0 * BY);"),
+    "bz_y16": ("(void*)((float*)y + bz * BY) : (void*)((uint16_t*)y + bz * BY);", "(void*)((float*)y + bz * BY) : (void*)((float*)y + bz * BY);"),
+    "bz_swap": ("  x += bz * BX;\n  w += bz * BW;\n", "  x += bz * BW;\n  w += bz * BX;\n"),
     "bf_blocks": ("const int blocks = (a.N + 16 * T - 1) / (16 * T);", "const int blocks = (a.N + 16 * T - 1) / (16 * T) - (a.N > 16 * T);"),
 }
 
