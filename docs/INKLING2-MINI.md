@@ -142,6 +142,14 @@ bytes) 162.4 / 161.6 -- above Qwen's 155.
 Not adopted for this model (Strata, Basalt, W8A8, queue and power knobs):
 [NOT-ADOPTED.md](NOT-ADOPTED.md#inkling-2-mini-2026-11).
 
+## DFlash2 drafter (opt-in)
+
+`incoai/Inkling-2-Mini-DFlash2` (0.5B, 5 sliding-window layers, candidate selector) runs on vLLM's native `dflash2`
+speculator through `sly/patch_inkling2_dflash2.py`. Serve with
+`--speculative-config '{"method":"dflash","model":"<dir named *dflash2*>","num_speculative_tokens":7,"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}'`.
+Vendor card (H200, SGLang, temperature 1.0): acceptance length 4.80 vs 3.66 (DSpark) on HumanEval. Our numbers: see the
+analysis report of the A/B window; not yet in this file.
+
 ## Tests
 
 CPU: `pytest sly/tests sly/inkling2/tests` (the GPU-only tests skip). GPU: `INKLING_VLLM_SRC=<vllm src dir>

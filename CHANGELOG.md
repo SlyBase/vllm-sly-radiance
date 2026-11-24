@@ -13,6 +13,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Added
+- **Inkling 2 Mini with vLLM's native DFlash2 drafter (`incoai/Inkling-2-Mini-DFlash2`), opt-in by serving flag.**
+  `sly/patch_inkling2_dflash2.py` carries the four Inkling points of the vendor's SGLang patch into vLLM's own
+  `dflash2` speculator: capture ids are the target's layer visits ending at the final-norm visit (no DFlash `+1`),
+  `selector_softcap_mode: after_correction` caps unary + edge score, and the candidate logits run through
+  Inkling's logits processor (MXFP4 dense head) with the target's `embed_norm` on the draft input
+  (`RADIANCE_INKLING2_DFLASH2_EMBED_NORM=0` = raw embedding). Serve with `method: dflash`, the draft dir
+  (its name must contain `dflash2`), `attention_backend: TRITON_ATTN`, `kv_cache_dtype: auto`. The DSpark default
+  is untouched. *Measured*: CPU tests only so far; vendor card (H200, SGLang): acceptance length 4.80 vs 3.66 on HumanEval.
 - **Inkling 2 Mini step-time knobs, both opt-in (default off, not yet measured end to end).**
   `RADIANCE_INKLING2_HIP_CTRL=1`: the loop message controllers' two `torch.bmm` per sublayer visit (hipBLASLt,
   0.92 ms per verify step in the 2026-11-23 kernel trace) run on a new batched variant of the HIP bf16 GEMV
