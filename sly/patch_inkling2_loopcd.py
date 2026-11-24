@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""LoopCD-Hidden for Inkling-2-Mini (arxiv 2610.02185), opt-in source patch.
+
+Contrasts the final loop pass's hidden state against the first pass's before
+the coda layers (h' = h_R + omega * (h_R - h_1)), then the existing coda +
+lm_head run once -- zero extra output pass.
+
+Opt-in: RADIANCE_INKLING2_LOOPCD=1, strength RADIANCE_INKLING2_LOOPCD_OMEGA
+(default 0.5), pass-count override RADIANCE_INKLING2_LOOPS (e.g. 2 to run
+3 -> 2 looped passes). NOOP on a vLLM without models/inkling2.
+
+Patches vllm/models/inkling2/nvidia/loop.py (Inkling2LoopModel.forward +
+one new helper method). Idempotent: re-running is a NOOP.
+"""
+import os
+import sysconfig
+from pathlib import Path
+
+from _patchlib import apply
+
+SP = Path(os.environ.get("RADIANCE_PATCH_TARGET_DIR") or sysconfig.get_paths()["purelib"])
+ROOT = SP / "vllm/models/inkling2"
+LOOP = ROOT / "nvidia" / "loop.py"
+
+# ---- import the radiance logic (guarded: inert if the module is absent)
+IMPORT_ANCHOR = "from .ops.loop import blend_rms_norm, pair_rms_norm\n"
+IMPORT_NEW = IMPORT_ANCHOR + (
+    "\ntry:\n"
+    "    from radiance_inkling2_loopcd import (\n"
+    "        apply_hidden as _rad_apply_hidden,\n"
+    "        enabled as _rad_loopcd_enabled,\n"
+    "        loops_override as _rad_loopcd_loops,\n"
+    "        omega as _rad_loopcd_omega,\n"
+    "    )\nexcept Exception:  # module missing: stay inert\n"
+    "    _rad_apply_hidden = None\n"
+    "    def _rad_loopcd_enabled():\n"
+    "        return False\n"
+    "    def _rad_loopcd_loops():\n"
+    "        return None\n"
+    "    def _rad_loopcd_omega():\n"
+    "        return 0.0\n"
+)
+
+# ---- honor RADIANCE_INKLING2_LOOPS (clamp pass count downward)
+NPASSES_ANCHOR = (
+    "        num_passes = self.config.num_loop_passes\n"
+    "        stack = inputs_embeds.new_empty(\n"
+)
+NPASSES_NEW = (
+    "        num_passes = self.config.num_loop_passes\n"
+    "        _rad_loops = _rad_loopcd_loops()\n"
+    "        if _rad_loops is not None:\n"
+    "            num_passes = min(_rad_loops, num_passes)\n"
+    "        stack = inputs_embeds.new_empty(\n"
+)
+
+# ---- capture h_1 after pass 0, inject h' before the coda, per forward call
+INJECT_ANCHOR = "            )\n        assert inputs is not None\n"
+INJECT_NEW = (
+    "            )\n"
+    "            # ---- RADIANCE LoopCD-Hidden (patch_inkling2_loopcd.py) ----\n"
+    "            if _rad_loopcd_enabled():\n"
+    "                self._rad_h1 = None\n"
+    "            inputs = self._rad_loopcd_step(\n"
+    "                i, pass_idx, num_passes, inputs, stack, num_blocks\n"
+    "            )\n"
+    "        assert inputs is not None\n"
+)
+
+# ---- the helper method appended after forward
+METHOD_TAIL = '''
+def _rad_loopcd_step(
+    self, i, pass_idx, num_passes, inputs, stack, num_blocks
+):
+    """LoopCD-Hidden: capture h_1 after pass 0, inject h' before the coda.
+
+    h' = h_R + omega * (h_R - h_1) replaces the last pass's state so the
+    coda + lm_head run once on the guided state (zero extra output pass).
+    """
+    if not _rad_loopcd_enabled():
+        return inputs
+    core = self.loop_core
+    if not core or i != core.stop - 1:
+        return inputs
+    if pass_idx == 0:
+        self._rad_h1 = inputs[0].clone()
+        return inputs
+    if pass_idx == num_passes - 1 and self._rad_h1 is not None:
+        h_prime = _rad_apply_hidden(
+            inputs[0], self._rad_h1, _rad_loopcd_omega()
+        )
+        if h_prime is not inputs[0]:
+            stack[num_blocks].copy_(h_prime)
+            inputs = (h_prime,) + inputs[1:]
+    return inputs
+
+
+Inkling2LoopModel._rad_loopcd_step = _rad_loopcd_step
+'''
+
+
+def main():
+    if not ROOT.is_dir():
+        print(f"  NOOP  inkling2 loopcd: this vLLM has no models/inkling2 ({ROOT})")
+        return
+    if not LOOP.is_file():
+        print(f"  NOOP  inkling2 loopcd: {LOOP} missing")
+        return
+    apply(LOOP, IMPORT_ANCHOR, IMPORT_NEW, "_rad_apply_hidden", "inkling2 loopcd import")
+    apply(LOOP, NPASSES_ANCHOR, NPASSES_NEW, "_rad_loops = _rad_loopcd_loops()", "inkling2 loopcd loops override")
+    apply(LOOP, INJECT_ANCHOR, INJECT_NEW, "# ---- RADIANCE LoopCD-Hidden", "inkling2 loopcd contrast injection")
+    s = LOOP.read_text()
+    if "def _rad_loopcd_step" not in s:
+        s = s.rstrip("\n") + "\n" + METHOD_TAIL
+        import ast
+        ast.parse(s)
+        LOOP.write_text(s)
+        print("  OK    inkling2 loopcd helper method")
+    else:
+        print("  NOOP  inkling2 loopcd helper method already applied")
+
+
+if __name__ == "__main__":
+    main()
