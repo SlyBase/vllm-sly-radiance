@@ -464,5 +464,7 @@ def test_patch_wires_remap_into_capture(loop_tree):
     assert "visit in self.aux_hidden_state_layers" not in loop
     assert "_rad_aux_capture_ids(" in loop
     assert "_rad_aux.count(visit)" in loop
+    # checkpoint passes (not the clamped count) are the "old" side of the remap
+    assert "self.config.num_loop_passes, num_passes," in loop
     import ast
     ast.parse(loop)
