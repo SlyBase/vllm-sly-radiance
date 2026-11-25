@@ -66,8 +66,9 @@ arithmetic of the model except the coda layers 20-23, which the entrypoint defau
 ## Default decode profile (SLAK + adaptive k, lossless subset)
 
 `radiance_entrypoint.sh` exports `RADIANCE_INKLING2_CODA_FP4=1` for every Inkling model (any drafter; lossy, see the
-table above) and two lossless knobs when a serve argument names an Inkling model (`*inkling*`,
-case-insensitive) and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
+table above) and two lossless knobs when the **target model** (`--model X`, `--model=X`, or a first positional) names an Inkling
+model (`*inkling*`, case-insensitive; the drafter path, `--tokenizer` and `--served-model-name` are ignored, no
+`config.json` is read, so a local Inkling dir must keep `inkling` in its name) and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
 under "Recommended decode config"); every explicit value, an empty one included, wins, and other models are untouched. The
 `--entrypoint vllm` override of a test harness bypasses it: pass the knobs with `-e`.
 
@@ -179,6 +180,14 @@ Not adopted for this model (Strata, Basalt, W8A8, queue and power knobs):
 
 `incoai/Inkling-2-Mini-DFlash2` (0.5B, bf16, 5 sliding-window layers, candidate selector) runs on vLLM's native `dflash2`
 speculator through `sly/patch_inkling2_dflash2.py`. Serve it (the draft dir name must contain `dflash2`):
+
+Pin (the only verified artifact): repo `incoai/Inkling-2-Mini-DFlash2`, revision
+`4f9088ea66c21f2b99ed657d1941c306b03e84d2`, license Apache-2.0, `model.safetensors` sha256
+`217980ab00d116693fa5946df7bbfd967caf5fac1f529afd541fbd470ddb54ee`. Download and verify:
+
+```
+hf download incoai/Inkling-2-Mini-DFlash2 --revision 4f9088ea66c21f2b99ed657d1941c306b03e84d2 --local-dir /models/inkling-2-mini-dflash2 && echo "217980ab00d116693fa5946df7bbfd967caf5fac1f529afd541fbd470ddb54ee  /models/inkling-2-mini-dflash2/model.safetensors" | sha256sum -c -
+```
 
 ```
 --speculative-config '{"method":"dflash","model":"<dir named *dflash2*>","num_speculative_tokens":7,"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}'
