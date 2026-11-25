@@ -36,6 +36,22 @@ SHORTLIST_K = int(os.environ.get("RADIANCE_INKLING2_DRAFT_SHORTLIST", "0"))
 FOLD_INT8 = os.environ.get("RADIANCE_INKLING2_FOLD_INT8", "0") == "1"
 _FOLD_Q8: dict = {}  # (data_ptr, shape) -> (weight, int8 weight, fp32 row scale); the ref pins the address
 _Q8_CHUNK = 16384  # rows per conversion step: bounds the fp32 transient
+_LOGGED: set = set()
+
+
+def _log_once(msg: str) -> None:
+    if msg not in _LOGGED:
+        _LOGGED.add(msg)
+        print(f"[radiance.inkling2] {msg}", flush=True)
+
+
+def log_knobs() -> None:
+    """Startup note for knobs that cancel each other out."""
+    if FOLD_INT8 and SHORTLIST_K:
+        _log_once("FOLD_INT8=1 has no effect with DRAFT_SHORTLIST>0: the shortlist path reads only k fold rows")
+
+
+log_knobs()
 
 
 @triton.jit
@@ -193,6 +209,7 @@ def _fold_q8(fw):
             q[i:i + _Q8_CHUNK] = torch.where(s[:, None] > 0, w / s[:, None], 0.0).round().clamp(-127, 127).to(torch.int8)
             sc[i:i + _Q8_CHUNK] = s
         ent = _FOLD_Q8[key] = (fw, q, sc)
+        _log_once("FOLD_INT8 active: int8 fold weight + fp32 row scale in use")
     return ent[1], ent[2]
 
 

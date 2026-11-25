@@ -80,6 +80,10 @@ arm): code **170.49 tok/s** against 162.41 / 162.23 / 161.91 for three same-wind
 math 188, prose 140, reasoning 149, summarization 191. The rule is lossy (NSD widens acceptance, the drafter
 sees a shortlist); the user chose speed. Not yet run: a quality gate (GSM8K / perplexity) for this profile.
 
+K1 (`HIP_CTRL` + `FOLD_INT8`) showed no effect in W2 because that arm's image had the new `.so` but not the
+Python that reads the knobs (no K1 result yet); both now log a proof line (`[radiance.inkling2] HIP_CTRL active` /
+`FOLD_INT8 active`) and say why when a knob falls back.
+
 ## Measurements
 
 Environment for all rows: one R9700, 210 W, image `ink-k3` (this branch), vLLM `main@1bdc437`, the

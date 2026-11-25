@@ -48,6 +48,15 @@ try:
 except ImportError:
     _ext = None
 
+_LOGGED: set = set()
+
+
+def _log_once(msg: str) -> None:
+    """Proof line: a knob that only changes a result silently cannot be told from a dead one."""
+    if msg not in _LOGGED:
+        _LOGGED.add(msg)
+        print(f"[radiance.inkling2] {msg}", flush=True)
+
 # (data_ptr, K) -> (weight_ref, tiled int8 [NT, K/64, 1024], tiled fp32 scale [NT, K/64, 32]). The ref
 # keeps the address from being reused by a different tensor; a row-0 prefix slice (global layers'
 # q-side of the fused qkvr) reuses the entry instead of quantizing the same rows twice.
@@ -184,7 +193,10 @@ def controller_gemms(pair: torch.Tensor, down: torch.Tensor, gain_forget: torch.
     """The loop controllers' two batched products on gemv_bf16_batched: fp32 [S, T, 2D] =
     bf16(pair [S, T, 2D] @ down [S, r, 2D]^T) @ gain_forget [S, 2D, r]^T, or None = caller runs torch.bmm
     (knob off, no batched kernel in the build, T > 16, anything not dense bf16, r % 8)."""
-    if not HIP_CTRL or _ext is None or not hasattr(_ext, "gemv_bf16_batched"):
+    if not HIP_CTRL:
+        return None
+    if _ext is None or not hasattr(_ext, "gemv_bf16_batched"):
+        _log_once("HIP_CTRL=1 but the radiance_inkling2_gemv extension has no gemv_bf16_batched: torch.bmm runs")
         return None
     s, t, d2 = pair.shape
     r = down.shape[1]
@@ -200,7 +212,9 @@ def controller_gemms(pair: torch.Tensor, down: torch.Tensor, gain_forget: torch.
         and d2 % 8 == 0
         and all(_aligned(a) for a in (pair, down, gain_forget))
     ):
+        _log_once(f"HIP_CTRL=1 but a call is outside the kernel contract (pair {tuple(pair.shape)}): torch.bmm runs")
         return None
+    _log_once("HIP_CTRL active: loop controllers on gemv_bf16_batched")
     stream = torch.cuda.current_stream().cuda_stream
     hidden = torch.empty((s, t, r), dtype=torch.bfloat16, device=pair.device)
     out = torch.empty((s, t, d2), dtype=torch.float32, device=pair.device)

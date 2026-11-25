@@ -135,3 +135,31 @@ def test_declines_outside_its_contract(on, monkeypatch, what):
         pair = pair[:, :0]
     assert disp.controller_gemms(pair, down, gf) is None
     assert on.calls == []
+
+
+# ---------------------------------------------------------------- proof lines: a silent knob cannot be told from a dead one
+def test_proof_line_on_first_batched_launch_only(on, capsys):
+    disp._LOGGED.clear()
+    pair, down, gf = _inputs(3, 8)
+    disp.controller_gemms(pair, down, gf)
+    disp.controller_gemms(pair, down, gf)
+    out = capsys.readouterr().out
+    assert out.count("[radiance.inkling2] HIP_CTRL active") == 1
+
+
+def test_fallback_reason_is_logged_once_when_the_knob_is_on(on, monkeypatch, capsys):
+    disp._LOGGED.clear()
+    monkeypatch.setattr(disp, "_ext", None)
+    pair, down, gf = _inputs(3, 8)
+    assert disp.controller_gemms(pair, down, gf) is None
+    assert disp.controller_gemms(pair, down, gf) is None
+    out = capsys.readouterr().out
+    assert out.count("[radiance.inkling2] HIP_CTRL=1 but") == 1 and "extension" in out
+
+
+def test_no_log_when_the_knob_is_off(monkeypatch, capsys):
+    disp._LOGGED.clear()
+    monkeypatch.setattr(disp, "HIP_CTRL", False)
+    pair, down, gf = _inputs(3, 8)
+    assert disp.controller_gemms(pair, down, gf) is None
+    assert capsys.readouterr().out == ""

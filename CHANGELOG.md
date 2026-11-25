@@ -21,6 +21,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   (+5.1 %), step 19.73 ms, accept 0.478, all 8 categories up. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
 
 ### Added
+- `RADIANCE_INKLING2_HIP_CTRL` / `RADIANCE_INKLING2_FOLD_INT8` log a proof line on first use (and once why they
+  fall back); `FOLD_INT8` with a drafter shortlist is logged as inert. A silent knob could not be told from a dead one.
 - **Inkling 2 Mini with vLLM's native DFlash2 drafter (`incoai/Inkling-2-Mini-DFlash2`), opt-in by serving flag.**
   `sly/patch_inkling2_dflash2.py` carries the four Inkling points of the vendor's SGLang patch into vLLM's own
   `dflash2` speculator: capture ids are the target's layer visits ending at the final-norm visit (no DFlash `+1`),

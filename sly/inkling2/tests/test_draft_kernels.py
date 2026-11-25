@@ -282,3 +282,21 @@ def test_fold_int8_off_changes_nothing(monkeypatch):
     torch.testing.assert_close(out.float(), ref_fold(base.float(), fw, fb, latent, 30.0).float(),
                                atol=0.25, rtol=2e-2)
     assert d._FOLD_Q8 == {}
+
+
+def test_fold_int8_proof_line_once_per_weight(int8_on, capsys):
+    int8_on._LOGGED.clear()
+    base, fw, fb, latent = _fold_inputs(2, 300, 32)
+    int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    int8_on.fold_softcap(base, fw, fb, latent, 30.0)
+    assert capsys.readouterr().out.count("[radiance.inkling2] FOLD_INT8 active") == 1
+
+
+def test_fold_int8_shortlist_note(monkeypatch, capsys):
+    """FOLD_INT8 + DRAFT_SHORTLIST: the gather path never reads the full fold weight, so the knob is inert; say so."""
+    import radiance_inkling2_draft as d
+    monkeypatch.setattr(d, "FOLD_INT8", True)
+    monkeypatch.setattr(d, "SHORTLIST_K", 4096)
+    d._LOGGED.clear()
+    d.log_knobs()
+    assert "FOLD_INT8=1 has no effect with DRAFT_SHORTLIST" in capsys.readouterr().out
