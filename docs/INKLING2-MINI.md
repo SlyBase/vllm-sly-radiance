@@ -64,7 +64,8 @@ MXFP8 arithmetic of the model.
 ## Default decode profile (SLAK + adaptive k, lossless subset)
 
 `radiance_entrypoint.sh` exports two knobs when a serve argument names an Inkling model (`*inkling*`,
-case-insensitive); every explicit value, an empty one included, wins, and other models are untouched. The
+case-insensitive) and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
+under "Recommended decode config"); every explicit value, an empty one included, wins, and other models are untouched. The
 `--entrypoint vllm` override of a test harness bypasses it: pass the knobs with `-e`.
 
 | Knob | Default |
@@ -197,6 +198,18 @@ token, so it only cost proposals, never correctness). Vendor card (H200, SGLang,
 
 DSpark stays the fallback: serve `{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}`
 when the DFlash2 model directory is not present.
+
+| Config | Drafter | Image knobs (SLAK 4096 + adaptive k 3,5,7) | code tok/s | tok/update |
+|---|---|---|---:|---:|
+| **Recommended** | DFlash2 bf16, k = 7 | **none** (the entrypoint leaves them unset) | **224** (223.97 / 223.95, two starts) | 5.13 |
+| Fallback | DSpark, k = 7 | on (entrypoint default) | 173.6 (NQ arm SL; control without them 161.8, +7.3 %, greedy gate 4/4) | – |
+| Not recommended | DFlash2 bf16 + the knobs forced on | on | 221.46 | 4.86 |
+
+*MEASURED* 2026-11-25, image `ink-200`, R9700 at 210 W, BetterBench code. The knobs help DSpark but cost the DFlash2
+drafter about 1 % (its step is 22.07 vs 23.29 ms, but acceptance drops 5.13 -> 4.86), so
+`radiance_entrypoint.sh` sets them only when `--speculative-config` does not contain `"method":"dflash"` (JSON with
+or without spaces; no speculative config = DSpark default, knobs on). `-e RADIANCE_INKLING2_DRAFT_SHORTLIST=...` /
+`RADIANCE_INKLING2_ADAPTIVE_K=...` still win.
 
 ## Tests
 

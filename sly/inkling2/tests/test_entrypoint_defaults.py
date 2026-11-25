@@ -59,3 +59,45 @@ def test_explicit_env_wins_even_when_empty(serve):
 def test_other_models_are_unchanged(serve):
     env = serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
     assert not [k for k in KNOBS if k in env]
+
+
+MODEL = ["--model", "thinkingmachines/Inkling-2-Mini"]
+
+
+def _spec(method):
+    return {"method": method, "model": "/m/drafter", "num_speculative_tokens": 7}
+
+
+@pytest.mark.parametrize("cfg", [
+    json.dumps(_spec("dflash")),                      # spaces after : and ,
+    json.dumps(_spec("dflash"), separators=(",", ":")),  # compact
+    json.dumps(_spec("DFlash")),                      # case-insensitive
+])
+@pytest.mark.parametrize("form", ["split", "equals"])
+def test_dflash2_drafter_gets_no_slak_or_adaptive_k(serve, cfg, form):
+    spec = ["--speculative-config", cfg] if form == "split" else [f"--speculative-config={cfg}"]
+    env = serve(MODEL + spec)
+    assert not [k for k in KNOBS if k in env]  # MEASURED: -1 % tok/s with the DFlash2 drafter
+
+
+@pytest.mark.parametrize("cfg", [
+    json.dumps(_spec("dspark")),
+    json.dumps(_spec("dspark"), separators=(",", ":")),
+    json.dumps({"method": "mtp"}),
+])
+def test_other_drafter_methods_keep_the_defaults(serve, cfg):
+    env = serve(MODEL + ["--speculative-config", cfg])
+    assert {k: env.get(k) for k in KNOBS} == KNOBS
+
+
+def test_no_speculative_config_keeps_the_defaults(serve):
+    # the DSpark drafter is the model's built-in default; only an explicit DFlash method opts out
+    env = serve(MODEL)
+    assert {k: env.get(k) for k in KNOBS} == KNOBS
+
+
+def test_explicit_env_wins_with_the_dflash2_drafter(serve):
+    env = serve(MODEL + ["--speculative-config", json.dumps(_spec("dflash"))],
+                RADIANCE_INKLING2_DRAFT_SHORTLIST="2048")
+    assert env["RADIANCE_INKLING2_DRAFT_SHORTLIST"] == "2048"
+    assert "RADIANCE_INKLING2_ADAPTIVE_K" not in env

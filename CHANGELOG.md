@@ -13,6 +13,13 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
+- **The Inkling entrypoint defaults (SLAK 4096 + adaptive k 3,5,7) are drafter-aware: not set with the DFlash2 drafter.**
+  `radiance_entrypoint.sh` skips them when `--speculative-config` contains `"method":"dflash"` (JSON with or without
+  spaces); DSpark and no speculative config keep them, explicit env still wins. *Why, MEASURED* 2026-11-25 (image
+  `ink-200`, R9700 210 W, BetterBench code): DFlash2 without the knobs 223.97 / 223.95 tok/s (5.13 tokens per update), via the
+  entrypoint with them 221.46 (4.86, -1 %); with DSpark they help (173.57 vs 161.8, +7.3 %, gate 4/4). Docs: recommended
+  table in [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7). Test
+  `sly/inkling2/tests/test_entrypoint_defaults.py`.
 - **Recommended Inkling 2 Mini decode config: the DFlash2 drafter at k = 7** (arguments in
   [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)): +38 % code decode
   over DSpark, *MEASURED* 2026-11-25 on one R9700 at 210 W (BetterBench code, T 0.7, seed 42): 224.16 vs 161.96 tok/s,

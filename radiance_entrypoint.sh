@@ -84,9 +84,13 @@ fi
 # docs/INKLING2-MINI.md). NSD is NOT a default: W3 2026-11-25 changed the greedy text (gate 2/4, degraded).
 # The knobs are module-level reads in every engine process, before the model is known, so the model name in
 # the serve args decides here.
+# Not with the DFlash2 drafter (`"method":"dflash"` in --speculative-config, any JSON spacing): MEASURED 221.46 vs
+# 223.96 tok/s (-1 %, 4.86 vs 5.13 tokens per update). DSpark or no speculative config keeps them.
 # `${VAR-default}` (no colon): any explicit value, even an empty one, wins. Other models: untouched.
+_dflash='"method"[[:space:]]*:[[:space:]]*"dflash"'
 case "${*,,}" in
   *inkling*)
+    [[ "${*,,}" =~ $_dflash ]] || \
     export RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
       RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}" ;;
 esac
