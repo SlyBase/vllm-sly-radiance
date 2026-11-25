@@ -80,15 +80,14 @@ if [ -n "$_numa_spec" ]; then
 fi
 [ "${#NUMACTL[@]}" -gt 0 ] && export RADIANCE_NUMA_ACTIVE="numactl ${NUMACTL[*]}"
 
-# Inkling-2-Mini decode defaults (NSD + SLAK; MEASURED on the R9700 at 210 W, BetterBench code decode:
-# 162.2 -> 170.5 tok/s, all 8 categories up, docs/INKLING2-MINI.md). The knobs are module-level reads in
-# every engine process, before the model is known, so the model name in the serve args decides here.
+# Inkling-2-Mini decode defaults: only the knobs that keep the greedy output (drafter shortlist + adaptive k;
+# docs/INKLING2-MINI.md). NSD is NOT a default: W3 2026-11-25 changed the greedy text (gate 2/4, degraded).
+# The knobs are module-level reads in every engine process, before the model is known, so the model name in
+# the serve args decides here.
 # `${VAR-default}` (no colon): any explicit value, even an empty one, wins. Other models: untouched.
 case "${*,,}" in
   *inkling*)
-    export RADIANCE_NSD="${RADIANCE_NSD-1}" RADIANCE_NSD_THETA="${RADIANCE_NSD_THETA-0.95}" \
-      RADIANCE_CACTUS_DELTA="${RADIANCE_CACTUS_DELTA-0}" \
-      RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
+    export RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
       RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}" ;;
 esac
 

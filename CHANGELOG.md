@@ -13,12 +13,15 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
-- **Inkling 2 Mini decodes with NSD + SLAK + adaptive k by default.** `radiance_entrypoint.sh` exports
-  `RADIANCE_NSD=1`, `RADIANCE_NSD_THETA=0.95`, `RADIANCE_CACTUS_DELTA=0`, `RADIANCE_INKLING2_DRAFT_SHORTLIST=4096`,
-  `RADIANCE_INKLING2_ADAPTIVE_K=3,5,7` when a serve argument names an Inkling model; explicit values (an empty one
-  too) win, other models are untouched. Lossy (accepts nucleus tokens, shortlisted drafter). *Measured on R9700 at
-  210 W* (BetterBench code decode, seed 42, W2 2026-11-25): 170.49 tok/s vs 162.41 / 162.23 / 161.91 controls
-  (+5.1 %), step 19.73 ms, accept 0.478, all 8 categories up. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
+- **Inkling 2 Mini decodes with the shortlisted drafter + adaptive k by default; NSD is opt-in again.**
+  `radiance_entrypoint.sh` exports `RADIANCE_INKLING2_DRAFT_SHORTLIST=4096` and `RADIANCE_INKLING2_ADAPTIVE_K=3,5,7`
+  when a serve argument names an Inkling model; explicit values (an empty one too) win, other models are untouched.
+  It no longer exports `RADIANCE_NSD`, `RADIANCE_NSD_THETA`, `RADIANCE_CACTUS_DELTA`. *Why:* the earlier five-knob
+  default (+5.1 %, 170.49 vs 162.2 tok/s, W2) **degrades output quality**: W3 2026-11-25, greedy gate on 4 code
+  prompts, control 4/4 identical across starts, NSD profile 2/4 with visibly broken text ("binary binary in Python
+  and Python and..."). Probable cause: NSD is OR-ed into the acceptance of greedy and masked draft slots whose nucleus-mass buffer
+  is never written (`sly/patch_nsd.py`), so its speed gain may be partly bogus (code reading, not yet proven). Which knob costs what is measured by
+  the NQ chain (not yet run). Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
 
 ### Added
 - **`RADIANCE_INKLING2_CODA_FP4` (opt-in, lossy): Inkling-2-Mini coda experts MXFP8 -> NVFP4 at load.** Layers 20-23 are the only

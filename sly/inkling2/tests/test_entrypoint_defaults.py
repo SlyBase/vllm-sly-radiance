@@ -1,7 +1,7 @@
-"""radiance_entrypoint.sh: Inkling-2-Mini serve defaults (NSD + SLAK), CPU only, no vLLM.
+"""radiance_entrypoint.sh: Inkling-2-Mini serve defaults (SLAK + adaptive k), CPU only, no vLLM.
 
-Runs the real entrypoint with a fake `vllm` on PATH that dumps its environment. Measured on the
-R9700 (210 W, BetterBench code, W2 2026-11-25): 162.2 -> 170.5 tok/s with these five knobs.
+Runs the real entrypoint with a fake `vllm` on PATH that dumps its environment. Only the lossless
+knobs are defaults: NSD changed the greedy output in W3 (gate 2/4, degraded text), so it is opt-in.
 """
 import json
 import os
@@ -12,9 +12,6 @@ import pytest
 
 ENTRY = Path(__file__).resolve().parents[3] / "radiance_entrypoint.sh"
 KNOBS = {
-    "RADIANCE_NSD": "1",
-    "RADIANCE_NSD_THETA": "0.95",
-    "RADIANCE_CACTUS_DELTA": "0",
     "RADIANCE_INKLING2_DRAFT_SHORTLIST": "4096",
     "RADIANCE_INKLING2_ADAPTIVE_K": "3,5,7",
 }
@@ -42,18 +39,21 @@ def serve(tmp_path):
     ["thinkingmachines/Inkling-2-Mini"],
     ["--model=/models/inkling-2-mini"],
 ])
-def test_inkling_gets_the_five_defaults(serve, args):
+def test_inkling_gets_the_two_lossless_defaults(serve, args):
     env = serve(args)
     assert {k: env.get(k) for k in KNOBS} == KNOBS
 
 
+def test_lossy_knobs_stay_opt_in(serve):
+    env = serve(["--model", "thinkingmachines/Inkling-2-Mini"])
+    assert not [k for k in env if k.startswith(("RADIANCE_NSD", "RADIANCE_CACTUS"))]
+
+
 def test_explicit_env_wins_even_when_empty(serve):
-    env = serve(["--model", "thinkingmachines/Inkling-2-Mini"], RADIANCE_NSD="0",
-                RADIANCE_CACTUS_DELTA="0.5", RADIANCE_INKLING2_ADAPTIVE_K="")
-    assert env["RADIANCE_NSD"] == "0"
-    assert env["RADIANCE_CACTUS_DELTA"] == "0.5"
+    env = serve(["--model", "thinkingmachines/Inkling-2-Mini"],
+                RADIANCE_INKLING2_DRAFT_SHORTLIST="0", RADIANCE_INKLING2_ADAPTIVE_K="")
+    assert env["RADIANCE_INKLING2_DRAFT_SHORTLIST"] == "0"
     assert env["RADIANCE_INKLING2_ADAPTIVE_K"] == ""  # empty = explicitly off
-    assert env["RADIANCE_NSD_THETA"] == "0.95"        # the rest keep the default
 
 
 def test_other_models_are_unchanged(serve):
