@@ -152,3 +152,33 @@ def test_inkling_target_is_found_in_any_position(serve, args):
 
 def test_no_arguments_do_not_crash_the_target_detection(serve):
     assert CODA not in serve([])
+
+
+def _ckpt(tmp_path_factory, cfg):
+    d = tmp_path_factory.mktemp("ckpt")  # neutral name, like the documented `/model` mount (tmp_path embeds the test name)
+    (d / "config.json").write_text(json.dumps(cfg))
+    return str(d)
+
+
+@pytest.mark.parametrize("cfg", [
+    {"model_type": "inkling2_loop", "architectures": ["Inkling2LoopForConditionalGeneration"]},  # real host-51 value
+    {"model_type": "x", "architectures": ["Inkling2ForCausalLM"]},
+])
+def test_local_dir_with_an_inkling_config_gets_the_defaults(serve, tmp_path_factory, cfg):
+    env = serve([_ckpt(tmp_path_factory, cfg), "--speculative-config", json.dumps(DRAFT | {"method": "dspark"})])
+    assert {k: env.get(k) for k in KNOBS} == KNOBS and env[CODA] == "1"
+
+
+def test_local_dir_with_a_qwen_config_gets_none_even_with_an_inkling_drafter(serve, tmp_path_factory):
+    cfg = {"model_type": "qwen3_5", "architectures": ["Qwen3_5ForCausalLM"]}
+    env = serve([_ckpt(tmp_path_factory, cfg), "--speculative-config", json.dumps(DRAFT)])
+    assert not [k for k in (*KNOBS, CODA) if k in env]
+
+
+@pytest.mark.parametrize("extra", [["--reasoning-parser", "inkling"], ["--reasoning-parser=inkling"]])
+def test_reasoning_parser_inkling_is_a_fallback_signal(serve, extra):
+    assert serve(["/nonexistent/model", *extra])[CODA] == "1"  # target unreadable
+
+
+def test_other_reasoning_parser_is_no_signal(serve):
+    assert CODA not in serve(["/nonexistent/model", "--reasoning-parser", "qwen3"])

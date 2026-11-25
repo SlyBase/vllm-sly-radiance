@@ -16,7 +16,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 - **Inkling entrypoint defaults key on the target model only, not the whole argv.** `radiance_entrypoint.sh` looked for
   `*inkling*` in every argument, so a Qwen target with an `inkling` drafter path got `RADIANCE_INKLING2_CODA_FP4=1` (and SLAK +
   adaptive k without DFlash). Now `--model X` / `--model=X` / a first positional decides; the drafter path, `--tokenizer` and
-  `--served-model-name` are ignored. DFlash2 drafter pinned in [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)
+  `--served-model-name` are ignored; a local target is also Inkling when its `config.json` `model_type`/`architectures` say so (the `/model` mount) and `--reasoning-parser inkling` is a fallback signal. DFlash2 drafter pinned in [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)
   (`incoai/Inkling-2-Mini-DFlash2` @ `4f9088ea`, Apache-2.0, sha256 `217980ab...`). Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
 - **Inkling default: coda experts NVFP4 (`RADIANCE_INKLING2_CODA_FP4=1`) from `radiance_entrypoint.sh`, for every drafter.**
   Lossy, user-approved on a measured gate (<= 0.010 nats): *MEASURED* 2026-11-25, R9700 210 W, vs the exact MXFP8 run,

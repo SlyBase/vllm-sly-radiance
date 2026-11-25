@@ -92,14 +92,21 @@ fi
 _dflash='"method"[[:space:]]*:[[:space:]]*"dflash"'
 # Target model = `--model X` / `--model=X` (last wins) or else a first positional; the drafter path, the tokenizer
 # and --served-model-name are labels, not the target (a Qwen target with an `inkling` drafter dir is not Inkling).
+# Inkling if (a) the target name says so, (b) a local target's config.json model_type/architectures says so (the
+# documented `/model` mount; real value `inkling2_loop`), or (c) `--reasoning-parser inkling` (Inkling-only parser).
 _target=""; [ "${1:-}" != "" ] && [ "${1:0:1}" != "-" ] && _target="$1"
+_parser=""
 for ((_i=1; _i<=$#; _i++)); do
   case "${!_i}" in
     --model=*) _target="${!_i#--model=}" ;;
     --model) _j=$((_i+1)); _target="${!_j-}" ;;
+    --reasoning-parser=*) _parser="${!_i#--reasoning-parser=}" ;;
+    --reasoning-parser) _j=$((_i+1)); _parser="${!_j-}" ;;
   esac
 done
-case "${_target,,}" in
+_cfg=""
+[ -f "$_target/config.json" ] && _cfg=$(python3 -I -c 'import json,sys;c=json.load(open(sys.argv[1]));print(c.get("model_type"),c.get("architectures"))' "$_target/config.json" 2>/dev/null)
+case "${_target,,} ${_cfg,,} ${_parser,,}" in
   *inkling*)
     export RADIANCE_INKLING2_CODA_FP4="${RADIANCE_INKLING2_CODA_FP4-1}"
     [[ "${*,,}" =~ $_dflash ]] || \

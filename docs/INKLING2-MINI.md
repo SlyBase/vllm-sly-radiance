@@ -66,9 +66,11 @@ arithmetic of the model except the coda layers 20-23, which the entrypoint defau
 ## Default decode profile (SLAK + adaptive k, lossless subset)
 
 `radiance_entrypoint.sh` exports `RADIANCE_INKLING2_CODA_FP4=1` for every Inkling model (any drafter; lossy, see the
-table above) and two lossless knobs when the **target model** (`--model X`, `--model=X`, or a first positional) names an Inkling
-model (`*inkling*`, case-insensitive; the drafter path, `--tokenizer` and `--served-model-name` are ignored, no
-`config.json` is read, so a local Inkling dir must keep `inkling` in its name) and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
+table above) and two lossless knobs when the **target model** is Inkling: `--model X`, `--model=X` or a first positional whose name
+contains `inkling` (case-insensitive), **or** a local dir whose `config.json` `model_type`/`architectures` contain
+`inkling` (the `/model` mount; real value `inkling2_loop` / `Inkling2LoopForConditionalGeneration`), **or**
+`--reasoning-parser inkling` (Inkling-only, fallback). The drafter path, `--tokenizer` and `--served-model-name` are ignored,
+so a Qwen target with an `inkling` drafter gets nothing. and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
 under "Recommended decode config"); every explicit value, an empty one included, wins, and other models are untouched. The
 `--entrypoint vllm` override of a test harness bypasses it: pass the knobs with `-e`.
 
