@@ -303,3 +303,89 @@ def test_step_omega_zero_is_identity(loop_tree):
     inputs = (h_R, torch.tensor([7.0, 8.0]))
     out = step(self, 17, 2, 3, inputs, stack, num_blocks)
     assert out[0] is h_R  # omega 0 -> identity, nothing replaced
+
+
+# ---------------------------------------------------------------- DSpark x LoopCD-Kompatibilitaet
+#
+# Befund (CODE-EVIDENZ, aus Quellen gelesen):
+#  * vllm/models/inkling2/configs.py (ink-k9-src):
+#    Inkling2DSparkConfig.from_target liest `target_layer_ids` fest aus dem
+#    mtp_config des Checkpoints und verlangt features[-1] == text.num_layer_visits.
+#    num_layer_visits = num_hidden_layers + (num_loop_passes - 1) * len(core)
+#                       = 24 + (3 - 1) * 12 = 48  (3 Passes, Core L6-17).
+#  * vllm/v1/worker/gpu/spec_decode/eagle/eagle3_utils.py (ink-k9-src):
+#    get_eagle3_aux_layers_from_config liest eagle_aux_hidden_state_layer_ids
+#    (= target_layer_ids, configs.py:262) OHNE "+1"-Verschiebung und legt sie
+#    als aux_hidden_state_layers (Besuchs-Indizes des Loop-Forwards) an.
+#    F1-Server-Log belegt die tatsaechlichen IDs: (5, 23, 41, 48).
+#  * vllm/models/inkling2/nvidia/loop.py:340-342, 372-397 (ink-k9-src):
+#    Der Forward baut die Besuchsfolge (Prelude 1x, Core num_passes x, Coda 1x)
+#    und clippt bei Besuchszahl in aux_hidden_state_states; 48 ==
+#    num_layer_visits ist der Sentinel fuer den Final-Norm-Output, der separat
+#    zurueckgegeben wird ([*aux_hidden_states, out]).
+#  * Die LoopCD-LOOPS-Override (sly/patch_inkling2_loopcd.py) aendert num_passes
+#    NUR zur Laufzeit im Forward (nicht im Config-Objekt). num_layer_visits
+#    behauptet also weiter 48, der Forward laeuft aber mit 36 Besuchen.
+#
+# Follow: RADIANCE_INKLING2_LOOPS=2 bricht DSpark -> Arm LCD2 laeuft OHNE
+# --speculative-config (reiner Target-Decode), siehe l1-gpu-loopcd.md.
+
+DSARK_TARGET_LAYER_IDS = (5, 23, 41, 48)
+NUM_LAYERS = 24
+CORE = (6, 18)  # Core-Schichten L6..L17, 12 Schichten
+
+
+def _visit_layers(num_passes: int) -> list[int]:
+    """Layer-ID je Besuch, wie Inkling2LoopModel.forward die Visits baut.
+
+    Prelude 1x, Core `num_passes` x, Coda 1x. Rueckgabe: die Schicht, deren
+    Eingang bei jedem Besuch (0-basiert) erfasst wird.
+    """
+    layers = [i for i in range(CORE[0])]
+    for _ in range(num_passes):
+        layers += list(range(CORE[0], CORE[1]))
+    layers += [i for i in range(CORE[1], NUM_LAYERS)]
+    return layers
+
+
+def test_dspark_loops_3_covers_all_capture_ids():
+    """LOOPS=3 (Checkpoint): 48 Besuche, alle 4 DSpark-Capture-Punkte valide.
+
+    Besuch 5 = L5-Prelude, 23 = L11-Pass 1, 41 = L17-Pass 2, 48 = Sentinel
+    Final-Output. DSpark bekommt seine 4 Features (3 Besuche + out).
+    """
+    layers = _visit_layers(3)
+    assert len(layers) == 48
+    assert layers[5] == 5
+    assert layers[23] == 11
+    assert layers[41] == 17
+    assert 48 not in layers  # 48 kommt als Besuch nie vor (Sentinel -> out)
+
+
+def test_dspark_loops_2_breaks_capture_ids():
+    """LOOPS=2 (LoopCD-Override): nur 36 Besuche, DSpark-Capture bricht.
+
+    Besuch 41 (L17-Pass 2) existiert nicht mehr (Besuche enden bei 35); der
+    Sentinel 48 wird zwar als Final-Output mitgeliefert, aber DSpark bekommt
+    statt 4 nur 3 Features -> Fuse-Mix liest eine fehlende Spalte (garbage/
+    Index-Fehler im Speculator).
+    """
+    layers = _visit_layers(2)
+    assert len(layers) == 36
+    assert layers[5] == 5
+    assert layers[23] == 11  # ident mit LOOPS=3, also nicht das Problem
+    assert 41 not in layers
+    assert 48 not in layers
+    covered = [v for v in DSARK_TARGET_LAYER_IDS[:3] if v < len(layers)]
+    assert covered == [5, 23]  # nur 2 von 3 Besuch-Captures valide
+
+
+def test_num_layer_visits_stays_at_checkpoint_passes():
+    """num_layer_visits ist Config-Ebene; der LOOPS-Forward-Override aendert es nicht.
+
+    Mit LoopCD LOOPS=2 behauptet der Checkpoint weiter 48 Besuche, laeuft aber
+    mit 36. Die DSpark-Load-Pruefung (features[-1] == num_layer_visits == 48)
+    laeuft also durch; der Bruch entsteht erst zur Laufzeit im Forward.
+    """
+    assert 24 + (3 - 1) * 12 == 48  # Checkpoint: 48 Besuche
+    assert 24 + (2 - 1) * 12 == 36  # LoopCD-Override zur Laufzeit: 36 Besuche
