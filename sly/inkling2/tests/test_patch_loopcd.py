@@ -29,9 +29,11 @@ sys.path.insert(0, str(INK))
 
 from radiance_inkling2_loopcd import (  # noqa: E402  (RED until module exists)
     apply_hidden,
+    aux_capture_ids,
     enabled,
     loops_override,
     omega,
+    remap_capture_ids,
 )
 
 LOOPCD_ENV = "RADIANCE_INKLING2_LOOPCD"
@@ -389,3 +391,78 @@ def test_num_layer_visits_stays_at_checkpoint_passes():
     """
     assert 24 + (3 - 1) * 12 == 48  # Checkpoint: 48 Besuche
     assert 24 + (2 - 1) * 12 == 36  # LoopCD-Override zur Laufzeit: 36 Besuche
+
+
+# ---------------------------------------------------------------- DSpark capture-id remap
+# Visits: prelude 0-5, core 6-17 x passes, coda after. With LOOPS < checkpoint
+# passes the ids (5, 23, 41, 48) must still select 4 features.
+
+def test_remap_identity_when_passes_unchanged():
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 3) == (5, 23, 41, 48)
+
+
+def test_remap_identity_when_new_passes_above_checkpoint():
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 5) == (5, 23, 41, 48)
+
+
+def test_remap_two_passes():
+    # 41 = pass 2 layer 11 -> last remaining pass (1), layer 11 -> 6+12+11
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 2) == (5, 23, 29, 36)
+
+
+def test_remap_one_pass_maps_core_ids_to_last_remaining_pass():
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 1) == (5, 11, 17, 24)
+
+
+def test_remap_coda_id_shifts_by_removed_visits():
+    # visit 42 = first coda visit (L18) at 3 passes -> 30 at 2 passes
+    assert remap_capture_ids((42,), 6, 12, 3, 2) == (30,)
+
+
+def _captured(ids, visits):
+    return [v for v in visits for _ in range(ids.count(v))]
+
+
+def test_two_pass_remap_yields_four_features():
+    ids = remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    assert len(_captured(ids, range(36))) == 3  # visits; sentinel 36 = final out
+    assert len(ids) == 4  # 3 visits + sentinel -> DSpark still gets 4 features
+
+
+def test_duplicate_ids_are_counted_not_collapsed():
+    # two ids landing on one visit must yield two features
+    assert _captured((5, 11, 11), range(24)) == [5, 11, 11]
+
+
+def test_aux_capture_ids_returns_sorted_tuple_from_set(monkeypatch):
+    assert aux_capture_ids({48, 5, 41, 23}, 6, 12, 3, 2) == (5, 23, 29, 36)
+
+
+def test_aux_capture_ids_logs_proof_line_once(monkeypatch, capsys):
+    monkeypatch.setenv(LOOPCD_ENV, "1")
+    monkeypatch.setenv(OMEGA_ENV, "0.3")
+    import radiance_inkling2_loopcd as m
+    monkeypatch.setattr(m, "_LOGGED", False)
+    aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    out = capsys.readouterr().out
+    assert out.count("RADIANCE_LOOPCD_PROOF") == 1
+    assert "loops=2/3 loopcd=1 omega=0.3 capture_ids=(5, 23, 41, 48)->(5, 23, 29, 36)" in out
+
+
+def test_proof_line_loopcd_off_reports_omega_zero(monkeypatch, capsys):
+    monkeypatch.delenv(LOOPCD_ENV, raising=False)
+    import radiance_inkling2_loopcd as m
+    monkeypatch.setattr(m, "_LOGGED", False)
+    aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    assert "loops=2/3 loopcd=0 omega=0.0 " in capsys.readouterr().out
+
+
+def test_patch_wires_remap_into_capture(loop_tree):
+    assert run_patch(loop_tree).returncode == 0
+    loop = (loop_tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    assert "visit in self.aux_hidden_state_layers" not in loop
+    assert "_rad_aux_capture_ids(" in loop
+    assert "_rad_aux.count(visit)" in loop
+    import ast
+    ast.parse(loop)

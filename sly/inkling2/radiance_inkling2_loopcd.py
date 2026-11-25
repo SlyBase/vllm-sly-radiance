@@ -64,3 +64,48 @@ def apply_hidden(h_R, h_1, omega: float):
     if omega == 0.0 or h_1 is None:
         return h_R
     return h_R + omega * (h_R - h_1)
+
+
+def remap_capture_ids(ids, prelude: int, core: int, passes: int, new_passes: int):
+    """Remap DSpark capture visit ids when the loop runs `new_passes` < `passes`.
+
+    Visits: prelude [0, prelude), core `passes` x `core`, then the coda.
+    Prelude ids and ids in a kept pass stay; ids in a dropped pass map to the
+    same layer of the last kept pass; coda ids and the final-output sentinel
+    (== total visits) shift down by the removed visits. Identity if
+    new_passes >= passes. Duplicates are kept (one feature per id).
+    """
+    if new_passes >= passes:
+        return tuple(ids)
+    kept_end = prelude + core * new_passes
+    core_end = prelude + core * passes
+    shift = (passes - new_passes) * core
+    out = []
+    for v in ids:
+        if v < kept_end:
+            out.append(v)
+        elif v < core_end:
+            out.append(kept_end - core + (v - prelude) % core)
+        else:
+            out.append(v - shift)
+    return tuple(out)
+
+
+_LOGGED = False
+
+
+def aux_capture_ids(ids, prelude: int, core: int, passes: int, new_passes: int):
+    """Sorted, remapped capture ids for the forward; logs one proof line."""
+    global _LOGGED
+    old = tuple(sorted(ids))
+    new = remap_capture_ids(old, prelude, core, passes, new_passes)
+    if not _LOGGED:
+        _LOGGED = True
+        on = enabled()
+        print(
+            f"RADIANCE_LOOPCD_PROOF loops={min(new_passes, passes)}/{passes} "
+            f"loopcd={int(on)} omega={omega() if on else 0.0} "
+            f"capture_ids={old}->{new}",
+            flush=True,
+        )
+    return new

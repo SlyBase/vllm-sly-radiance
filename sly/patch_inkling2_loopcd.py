@@ -7,7 +7,7 @@ lm_head run once -- zero extra output pass.
 
 Opt-in: RADIANCE_INKLING2_LOOPCD=1, strength RADIANCE_INKLING2_LOOPCD_OMEGA
 (default 0.5), pass-count override RADIANCE_INKLING2_LOOPS (e.g. 2 to run
-3 -> 2 looped passes). NOOP on a vLLM without models/inkling2.
+3 -> 2 looped passes; DSpark capture visit ids are remapped to match). NOOP on a vLLM without models/inkling2.
 
 Patches vllm/models/inkling2/nvidia/loop.py (Inkling2LoopModel.forward +
 one new helper method). Idempotent: re-running is a NOOP.
@@ -28,11 +28,14 @@ IMPORT_NEW = IMPORT_ANCHOR + (
     "\ntry:\n"
     "    from radiance_inkling2_loopcd import (\n"
     "        apply_hidden as _rad_apply_hidden,\n"
+    "        aux_capture_ids as _rad_aux_capture_ids,\n"
     "        enabled as _rad_loopcd_enabled,\n"
     "        loops_override as _rad_loopcd_loops,\n"
     "        omega as _rad_loopcd_omega,\n"
     "    )\nexcept Exception:  # module missing: stay inert\n"
     "    _rad_apply_hidden = None\n"
+    "    def _rad_aux_capture_ids(ids, *_):\n"
+    "        return tuple(ids)\n"
     "    def _rad_loopcd_enabled():\n"
     "        return False\n"
     "    def _rad_loopcd_loops():\n"
@@ -51,7 +54,22 @@ NPASSES_NEW = (
     "        _rad_loops = _rad_loopcd_loops()\n"
     "        if _rad_loops is not None:\n"
     "            num_passes = min(_rad_loops, num_passes)\n"
+    "        # DSpark capture visit ids follow the shortened loop (see radiance module)\n"
+    "        _rad_aux = _rad_aux_capture_ids(\n"
+    "            self.aux_hidden_state_layers, core.start, len(core),\n"
+    "            self.config.num_loop_passes, num_passes,\n"
+    "        )\n"
     "        stack = inputs_embeds.new_empty(\n"
+)
+
+# ---- capture on the remapped ids (a duplicate id yields a duplicate feature)
+CAPTURE_ANCHOR = (
+    "            if visit in self.aux_hidden_state_layers:\n"
+    "                aux_hidden_states.append(stack[num_blocks].clone())\n"
+)
+CAPTURE_NEW = (
+    "            for _ in range(_rad_aux.count(visit)):\n"
+    "                aux_hidden_states.append(stack[num_blocks].clone())\n"
 )
 
 # ---- capture h_1 after pass 0, inject h' before the coda, per forward call
@@ -108,6 +126,7 @@ def main():
         return
     apply(LOOP, IMPORT_ANCHOR, IMPORT_NEW, "_rad_apply_hidden", "inkling2 loopcd import")
     apply(LOOP, NPASSES_ANCHOR, NPASSES_NEW, "_rad_loops = _rad_loopcd_loops()", "inkling2 loopcd loops override")
+    apply(LOOP, CAPTURE_ANCHOR, CAPTURE_NEW, "_rad_aux.count(visit)", "inkling2 loopcd capture-id remap")
     apply(LOOP, INJECT_ANCHOR, INJECT_NEW, "# ---- RADIANCE LoopCD-Hidden", "inkling2 loopcd contrast injection")
     s = LOOP.read_text()
     if "def _rad_loopcd_step" not in s:
