@@ -21,6 +21,10 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   (+5.1 %), step 19.73 ms, accept 0.478, all 8 categories up. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
 
 ### Added
+- **`RADIANCE_INKLING2_CODA_FP4` (opt-in, lossy): Inkling-2-Mini coda experts MXFP8 -> NVFP4 at load.** Layers 20-23 are the only
+  MXFP8 tensors in the checkpoint (experts; attention and router stay bf16 / MXFP4-dense). Serving them as NVFP4 cuts 0.44 GB
+  per decode step (29.6 unique experts x 4 layers x 3.73 MB; RECHNUNG ~0.7-0.8 ms of a 19.7 ms step). Quality gate
+  (KLD <= 0.010 nats) and tok/s not yet measured on GPU.
 - `RADIANCE_INKLING2_HIP_CTRL` / `RADIANCE_INKLING2_FOLD_INT8` log a proof line on first use (and once why they
   fall back); `FOLD_INT8` with a drafter shortlist is logged as inert. A silent knob could not be told from a dead one.
 - **Inkling 2 Mini with vLLM's native DFlash2 drafter (`incoai/Inkling-2-Mini-DFlash2`), opt-in by serving flag.**
