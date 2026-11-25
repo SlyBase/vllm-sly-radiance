@@ -213,3 +213,18 @@ def test_requant_prints_one_counted_proof_line_per_layer(capsys):
     cf.requant_experts(_Experts())
     lines = [l for l in capsys.readouterr().out.splitlines() if "RADIANCE_CODA_FP4_PROOF" in l]
     assert len(lines) == 2 and "n=1 " in lines[0] and "n=2 " in lines[1] and "mxfp8->nvfp4" in lines[0]
+
+
+def test_outer_scale_denominator_is_fp32_under_bf16_default_dtype():
+    """vLLM sets the torch default dtype to bf16 while loading; the Triton route kernel needs fp32
+    (`tl.div_rn(1.0, 1536.0 * tl.load(WDenominator))` fails to compile on bf16: Q1 init crash)."""
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        m = _Experts()
+        cf.requant_experts(m)
+    finally:
+        torch.set_default_dtype(old)
+    for n in ("w13", "w2"):
+        assert getattr(m, f"{n}_weight_outer_scale_denominator").dtype == torch.float32
+        assert getattr(m, f"{n}_weight_amax").dtype == torch.float32

@@ -102,7 +102,7 @@ def requant_experts(experts):
         experts.register_parameter(f"{name}_weight_amax", torch.nn.Parameter(amax, requires_grad=False))
         experts.register_parameter(
             f"{name}_weight_outer_scale_denominator",
-            torch.nn.Parameter(torch.full((1,), DENOMINATOR, device=amax.device), requires_grad=False))
+            torch.nn.Parameter(torch.full((1,), DENOMINATOR, dtype=torch.float32, device=amax.device), requires_grad=False))
     experts.nvfp4 = True
     _PROOF_N += 1
     print(f"RADIANCE_CODA_FP4_PROOF n={_PROOF_N} mxfp8->nvfp4 experts={experts.w13_weight.shape[0]} "
