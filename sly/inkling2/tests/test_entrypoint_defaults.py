@@ -123,3 +123,32 @@ def test_explicit_env_turns_coda_off(serve, val):
 
 def test_other_models_get_no_coda_knob(serve):
     assert CODA not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
+
+
+QWEN = "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"
+DRAFT = {"method": "dflash", "model": "/models/inkling-2-mini-dflash2", "num_speculative_tokens": 7}
+
+
+@pytest.mark.parametrize("args", [
+    [QWEN, "--speculative-config", json.dumps(DRAFT)],
+    ["--model", QWEN, "--speculative-config", json.dumps(DRAFT | {"method": "dspark"})],
+    [QWEN, "--served-model-name", "inkling-2-mini"],  # a served name is a label, not the target (decided: ignored)
+    ["--served-model-name", "inkling", "--model", QWEN],
+    ["--model", QWEN, "--tokenizer", "thinkingmachines/Inkling-2-Mini"],
+])
+def test_inkling_text_outside_the_target_model_sets_no_defaults(serve, args):
+    env = serve(args)
+    assert not [k for k in (*KNOBS, CODA) if k in env]
+
+
+@pytest.mark.parametrize("args", [
+    ["--model=thinkingmachines/Inkling-2-Mini", "--served-model-name", "qwen"],
+    ["--host", "0.0.0.0", "--model", "/m/inkling-2-mini"],
+    ["thinkingmachines/Inkling-2-Mini", "--host", "0.0.0.0"],
+])
+def test_inkling_target_is_found_in_any_position(serve, args):
+    assert serve(args)[CODA] == "1"
+
+
+def test_no_arguments_do_not_crash_the_target_detection(serve):
+    assert CODA not in serve([])

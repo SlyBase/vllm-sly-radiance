@@ -83,14 +83,23 @@ fi
 # Inkling-2-Mini decode defaults: drafter shortlist + adaptive k keep the greedy output (coda NVFP4 below does not;
 # docs/INKLING2-MINI.md). NSD is NOT a default: W3 2026-11-25 changed the greedy text (gate 2/4, degraded).
 # The knobs are module-level reads in every engine process, before the model is known, so the model name in
-# the serve args decides here.
+# the served target model (see _target) decides here.
 # Not with the DFlash2 drafter (`"method":"dflash"` in --speculative-config, any JSON spacing): MEASURED 221.46 vs
 # 223.96 tok/s (-1 %, 4.86 vs 5.13 tokens per update). DSpark or no speculative config keeps them.
 # `${VAR-default}` (no colon): any explicit value, even an empty one, wins. Other models: untouched.
 # Coda experts NVFP4 (L20-23, MXFP8->NVFP4 at load) is a LOSSY default, user-approved on a measured gate:
 # KLD 0.0033 nats vs 0.010 gate, dPPL +0.26 %, +3.9 % tok/s (2026-11-25). Any drafter; `=0` or empty turns it off.
 _dflash='"method"[[:space:]]*:[[:space:]]*"dflash"'
-case "${*,,}" in
+# Target model = `--model X` / `--model=X` (last wins) or else a first positional; the drafter path, the tokenizer
+# and --served-model-name are labels, not the target (a Qwen target with an `inkling` drafter dir is not Inkling).
+_target=""; [ "${1:-}" != "" ] && [ "${1:0:1}" != "-" ] && _target="$1"
+for ((_i=1; _i<=$#; _i++)); do
+  case "${!_i}" in
+    --model=*) _target="${!_i#--model=}" ;;
+    --model) _j=$((_i+1)); _target="${!_j-}" ;;
+  esac
+done
+case "${_target,,}" in
   *inkling*)
     export RADIANCE_INKLING2_CODA_FP4="${RADIANCE_INKLING2_CODA_FP4-1}"
     [[ "${*,,}" =~ $_dflash ]] || \
