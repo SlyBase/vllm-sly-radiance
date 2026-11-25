@@ -212,7 +212,8 @@ def controller_gemms(pair: torch.Tensor, down: torch.Tensor, gain_forget: torch.
         and d2 % 8 == 0
         and all(_aligned(a) for a in (pair, down, gain_forget))
     ):
-        _log_once(f"HIP_CTRL=1 but a call is outside the kernel contract (pair {tuple(pair.shape)}): torch.bmm runs")
+        _log_once("HIP_CTRL=1 but a call is outside the kernel contract (T > 16 = prefill/warmup, or layout): "
+                  "torch.bmm runs; decode / verify rows (T <= 16) are not affected")
         return None
     _log_once("HIP_CTRL active: loop controllers on gemv_bf16_batched")
     stream = torch.cuda.current_stream().cuda_stream

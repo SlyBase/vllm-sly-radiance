@@ -163,3 +163,14 @@ def test_no_log_when_the_knob_is_off(monkeypatch, capsys):
     pair, down, gf = _inputs(3, 8)
     assert disp.controller_gemms(pair, down, gf) is None
     assert capsys.readouterr().out == ""
+
+
+def test_out_of_contract_rows_log_one_line_not_one_per_shape(on, capsys):
+    # prefill / warmup calls have T = 29..2048 rows: one line for the class, not 100+ (one per shape)
+    disp._LOGGED.clear()
+    for t in (17, 64, 2048):
+        pair = torch.randn(3, t, D2).bfloat16()
+        _, down, gf = _inputs(3, 8)
+        assert disp.controller_gemms(pair, down, gf) is None
+    out = capsys.readouterr().out
+    assert out.count("[radiance.inkling2] HIP_CTRL=1 but") == 1 and "T > 16" in out
