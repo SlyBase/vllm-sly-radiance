@@ -361,7 +361,7 @@ the drafter): `RADIANCE_W4A16_TILES` (tile table), `RADIANCE_W4A16_SPLITK` (spli
 table; `RADIANCE_W4A16_SPLITK_TABLE=<json>` replaces it), `RADIANCE_W4A16_TILED` (weights in 1 KB 16-row
 blocks), `RADIANCE_LMHEAD_INT4_TILED` (the int4 lm_head too), `RADIANCE_W4A16_SILU` (gate_up + silu in one
 GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a 105 MB bf16 copy),
-`RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4). Set any to `0` only for an A/B.
+`RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4; unset = only for a W4A16 drafter, a bf16 drafter such as Inkling-2-Mini-DFlash2 keeps it bf16). Set any to `0` only for an A/B.
 `RADIANCE_GDN_BA_W4=1` (GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM) stays off: measured slower.
 
 ### vLLM arguments and trade-offs

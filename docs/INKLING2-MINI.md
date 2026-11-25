@@ -170,13 +170,33 @@ bytes) 162.4 / 161.6 -- above Qwen's 155.
 Not adopted for this model (Strata, Basalt, W8A8, queue and power knobs):
 [NOT-ADOPTED.md](NOT-ADOPTED.md#inkling-2-mini-2026-11).
 
-## DFlash2 drafter (opt-in)
+## Recommended decode config: DFlash2 drafter, k = 7
 
-`incoai/Inkling-2-Mini-DFlash2` (0.5B, 5 sliding-window layers, candidate selector) runs on vLLM's native `dflash2`
-speculator through `sly/patch_inkling2_dflash2.py`. Serve with
-`--speculative-config '{"method":"dflash","model":"<dir named *dflash2*>","num_speculative_tokens":7,"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}'`.
-Vendor card (H200, SGLang, temperature 1.0): acceptance length 4.80 vs 3.66 (DSpark) on HumanEval. Our numbers: see the
-analysis report of the A/B window; not yet in this file.
+`incoai/Inkling-2-Mini-DFlash2` (0.5B, bf16, 5 sliding-window layers, candidate selector) runs on vLLM's native `dflash2`
+speculator through `sly/patch_inkling2_dflash2.py`. Serve it (the draft dir name must contain `dflash2`):
+
+```
+--speculative-config '{"method":"dflash","model":"<dir named *dflash2*>","num_speculative_tokens":7,"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}'
+```
+
+No extra environment variable: the drafter is bf16, and the W4A16 post-load hook leaves its conv projections bf16 (it
+requantizes them to int4 only for a W4A16 drafter checkpoint, or with an explicit `RADIANCE_DFLASH_CONV_W4=1`).
+
+**MEASURED** (2026-11-25, one R9700 at 210 W, BetterBench code decode, T 0.7, seed 42, k = 7, image `ink-k9-df2-fix`):
+
+| Arm | Drafter | code tok/s | tok/update | step ms | weighted tok/s |
+|---|---|---|---|---|---|
+| C1 | DSpark (previous default) | 161.96 | 3.90 | 23.26 | 157.01 |
+| D1 | DFlash2, conv projections requantized to int4 (the old hook default) | 159.76 | 3.65 | 23.48 | 152.93 |
+| **D4** | **DFlash2, conv projections bf16 (`RADIANCE_DFLASH_CONV_W4=0`, now the default)** | **224.16 (+38 % vs C1)** | **5.13** | 23.26 | **210.70** |
+
+Greedy gate, 4 code prompts: D4 byte-identical to the control 4/4, no repetition. The int4 requantization is the whole
+difference between D1 and D4: same step time, acceptance 5.13 -> 3.65 tokens per update (the target verifies every
+token, so it only cost proposals, never correctness). Vendor card (H200, SGLang, T 1.0): acceptance length 4.80 vs 3.66
+(DSpark) on HumanEval. An earlier "DFlash2 does not win here" reading came from D1 and is superseded by D4.
+
+DSpark stays the fallback: serve `{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}`
+when the DFlash2 model directory is not present.
 
 ## Tests
 

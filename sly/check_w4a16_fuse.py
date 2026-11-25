@@ -158,10 +158,35 @@ err = (kv.cpu().float() - ref_kv).abs().max().item()
 report(kv.shape == (8, 5 * 64) and err <= fl(ref_kv) and model._radiance_kv_w4[0].dim() == 4,
        "DFlash context-KV on int4 rows (tiled)", f"err {err:.3e}")
 
-# --- DFlash2 conv kernel_projection -> int4 ---
+# --- DFlash2 conv kernel_projection -> int4: default only for a drafter that is itself W4A16 ---
+class Drafter(nn.Module):
+    def __init__(self, w4):
+        super().__init__()
+        self.conv = DFlashGroupedConv()
+        if w4:
+            self.mlp = MLP(64)  # a W4A16 layer in the drafter = a W4A16 checkpoint
+
+
+def conv_w4(w4, env=None):
+    """number of conv projections requantized for a drafter with / without W4A16 layers"""
+    os.environ.pop("RADIANCE_DFLASH_CONV_W4", None)
+    if env is not None:
+        os.environ["RADIANCE_DFLASH_CONV_W4"] = env
+    d = Drafter(w4)
+    n = H.radiance_w4a16_postload(d)["conv_w4"]
+    os.environ.pop("RADIANCE_DFLASH_CONV_W4", None)
+    return n, d
+
+
+report(conv_w4(False)[0] == 0, "conv projection: bf16 drafter, default env -> kept bf16")
+report(conv_w4(True)[0] == 1, "conv projection: W4A16 drafter, default env -> int4")
+report(conv_w4(False, "1")[0] == 1, "conv projection: bf16 drafter, RADIANCE_DFLASH_CONV_W4=1 -> int4")
+report(conv_w4(True, "0")[0] == 0, "conv projection: W4A16 drafter, RADIANCE_DFLASH_CONV_W4=0 -> kept bf16")
 conv = DFlashGroupedConv()
 ref_c = x.cpu().float() @ conv.kernel_projection.weight.cpu().float().t()
+os.environ["RADIANCE_DFLASH_CONV_W4"] = "1"
 cnt = H.radiance_w4a16_postload(conv)
+del os.environ["RADIANCE_DFLASH_CONV_W4"]
 report(cnt["conv_w4"] == 1 and isinstance(conv.kernel_projection, H.RadianceW4Linear), "conv projection replaced")
 kp = conv.kernel_projection
 out = call(lambda *a: kp(x), lambda *a: H._radiance_w4a16_gemm_impl(x, kp.w_q, kp.w_s, kp.group_size))

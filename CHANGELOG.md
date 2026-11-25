@@ -13,6 +13,17 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
+- **Recommended Inkling 2 Mini decode config: the DFlash2 drafter at k = 7** (arguments in
+  [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)): +38 % code decode
+  over DSpark, *MEASURED* 2026-11-25 on one R9700 at 210 W (BetterBench code, T 0.7, seed 42): 224.16 vs 161.96 tok/s,
+  5.13 vs 3.90 tokens per update, weighted 210.70 vs 157.01, greedy gate 4/4 byte-identical. DSpark stays the fallback when
+  the DFlash2 model directory is not present; the image defaults are unchanged (the drafter is a serving flag).
+- **A bf16 DFlash drafter keeps its conv projections bf16 (`radiance_w4a16_postload`).** The hook requantized the 10
+  `DFlashGroupedConv.kernel_projection` weights to int4 g128 whenever `RADIANCE_DFLASH_CONV_W4` was unset; the bf16
+  Inkling-2-Mini-DFlash2 lost acceptance for it (5.13 -> 3.65 tokens per update, 224.16 -> 159.76 tok/s, MEASURED).
+  Unset now means "only if the drafter has W4A16 layers" (the Qwen DFlash2-W4A16 drafter is unchanged); `=1` / `=0`
+  still win. Check: `sly/check_w4a16_fuse.py`. This also corrects the earlier reading that DFlash2 does not win on
+  Inkling: that was the int4-requantized arm.
 - **Inkling 2 Mini decodes with the shortlisted drafter + adaptive k by default; NSD is opt-in again.**
   `radiance_entrypoint.sh` exports `RADIANCE_INKLING2_DRAFT_SHORTLIST=4096` and `RADIANCE_INKLING2_ADAPTIVE_K=3,5,7`
   when a serve argument names an Inkling model; explicit values (an empty one too) win, other models are untouched.
@@ -37,7 +48,7 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   Inkling's logits processor (MXFP4 dense head) with the target's `embed_norm` on the draft input
   (`RADIANCE_INKLING2_DFLASH2_EMBED_NORM=0` = raw embedding). Serve with `method: dflash`, the draft dir
   (its name must contain `dflash2`), `attention_backend: TRITON_ATTN`, `kv_cache_dtype: auto`. The DSpark default
-  is untouched. *Measured*: CPU tests only so far; vendor card (H200, SGLang): acceptance length 4.80 vs 3.66 on HumanEval.
+  is untouched. *Measured* (R9700 210 W, code, k = 7): 224.16 tok/s vs DSpark 161.96, see Recommended above; vendor card (H200, SGLang): acceptance length 4.80 vs 3.66 on HumanEval.
 - **Inkling 2 Mini step-time knobs, both opt-in (default off, not yet measured end to end).**
   `RADIANCE_INKLING2_HIP_CTRL=1`: the loop message controllers' two `torch.bmm` per sublayer visit (hipBLASLt,
   0.92 ms per verify step in the 2026-11-23 kernel trace) run on a new batched variant of the HIP bf16 GEMV
