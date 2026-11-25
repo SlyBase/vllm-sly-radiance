@@ -468,3 +468,213 @@ def test_patch_wires_remap_into_capture(loop_tree):
     assert "self.config.num_loop_passes, num_passes," in loop
     import ast
     ast.parse(loop)
+
+
+# ---------------------------------------------------------------- Late Entry (arxiv 2611.24576), training-free
+# LOOP_MODE=late_entry skips the FIRST passes (not the last): every executed pass
+# keeps its checkpoint pass index, so per-pass KV/conv caches line up. Opt-in.
+
+MODE_ENV = "RADIANCE_INKLING2_LOOP_MODE"
+BANK_ENV = "RADIANCE_INKLING2_LE_BANK"
+SCALE_ENV = "RADIANCE_INKLING2_LE_MSG_SCALE"
+
+from radiance_inkling2_loopcd import (  # noqa: E402  (RED until implemented)
+    blends,
+    entry_bank,
+    first_pass,
+    loop_mode,
+    msg_scale,
+    pass_range,
+    select_bank,
+)
+
+
+def test_mode_default_early_exit(monkeypatch):
+    monkeypatch.delenv(MODE_ENV, raising=False)
+    assert loop_mode() == "early_exit"
+
+
+def test_mode_late_entry(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    assert loop_mode() == "late_entry"
+
+
+def test_mode_garbage_falls_back(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "bogus")
+    assert loop_mode() == "early_exit"
+
+
+def test_first_pass_default_is_zero(monkeypatch):
+    monkeypatch.delenv(MODE_ENV, raising=False)
+    assert first_pass(3, 2) == 0
+
+
+def test_first_pass_late_entry_skips_leading_passes(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    assert first_pass(3, 2) == 1
+    assert first_pass(3, 1) == 2
+
+
+def test_first_pass_late_entry_inert_without_reduction(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    assert first_pass(3, 3) == 0
+    assert first_pass(3, 5) == 0
+
+
+def test_pass_range_early_exit_is_prefix(monkeypatch):
+    monkeypatch.delenv(MODE_ENV, raising=False)
+    assert list(pass_range(3, 2)) == [0, 1]
+    assert list(pass_range(3, 3)) == [0, 1, 2]
+
+
+def test_pass_range_late_entry_is_suffix(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    assert list(pass_range(3, 2)) == [1, 2]
+    assert list(pass_range(3, 1)) == [2]
+
+
+def test_blends_default_matches_stock_loop(monkeypatch):
+    monkeypatch.delenv(BANK_ENV, raising=False)
+    assert [blends(p, 0) for p in range(3)] == [False, True, True]
+
+
+def test_blends_late_entry_first_pass_has_no_message(monkeypatch):
+    monkeypatch.delenv(BANK_ENV, raising=False)
+    assert [blends(p, 1) for p in (1, 2)] == [False, True]
+
+
+def test_blends_late_entry_prelude_bank_blends_first_pass(monkeypatch):
+    monkeypatch.setenv(BANK_ENV, "prelude")
+    assert [blends(p, 1) for p in (1, 2)] == [True, True]
+    assert blends(0, 0) is False  # stock first pass never blends
+
+
+def test_msg_scale_default_and_env(monkeypatch):
+    monkeypatch.delenv(SCALE_ENV, raising=False)
+    assert msg_scale() == 1.0
+    monkeypatch.setenv(SCALE_ENV, "0.7")
+    assert msg_scale() == 0.7
+    monkeypatch.setenv(SCALE_ENV, "x")
+    assert msg_scale() == 1.0
+
+
+def test_entry_bank_is_two_scaled_prelude_rows():
+    partial = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    bank = entry_bank(partial, 0.5)
+    assert tuple(bank.shape) == (2, 2, 2)
+    torch.testing.assert_close(bank[0], partial * 0.5)
+    torch.testing.assert_close(bank[1], partial * 0.5)
+    torch.testing.assert_close(partial, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+
+
+def test_select_bank_stock_semantics(monkeypatch):
+    monkeypatch.delenv(BANK_ENV, raising=False)
+    prev = torch.ones(2, 1, 2)
+    partial = torch.zeros(1, 2)
+    assert select_bank(prev, False, 0, 0, partial) is None
+    assert select_bank(prev, True, 1, 0, partial) is prev
+
+
+def test_select_bank_late_entry_none_mode_first_pass_has_no_bank(monkeypatch):
+    monkeypatch.delenv(BANK_ENV, raising=False)
+    assert select_bank(None, False, 1, 1, torch.zeros(1, 2)) is None
+
+
+def test_select_bank_late_entry_prelude_mode_first_pass_uses_entry_bank(monkeypatch):
+    monkeypatch.setenv(BANK_ENV, "prelude")
+    monkeypatch.setenv(SCALE_ENV, "2.0")
+    partial = torch.ones(1, 2)
+    bank = select_bank(None, True, 1, 1, partial)
+    torch.testing.assert_close(bank[1], partial * 2.0)
+    prev = torch.ones(2, 1, 2)
+    assert select_bank(prev, True, 2, 1, partial) is prev
+
+
+def test_remap_late_entry_keeps_pass_identity():
+    # ids 23 (pass1 L11) and 41 (pass2 L17) both survive; visits shift by 12
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 2, late=True) == (5, 11, 29, 36)
+
+
+def test_remap_late_entry_one_pass_collapses_dropped_ids_onto_first_kept():
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 1, late=True) == (5, 11, 17, 24)
+
+
+def test_remap_late_entry_coda_shifts_like_early_exit():
+    assert remap_capture_ids((42,), 6, 12, 3, 2, late=True) == (30,)
+
+
+def test_remap_late_entry_identity_without_reduction():
+    assert remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 3, late=True) == (5, 23, 41, 48)
+
+
+def test_late_entry_features_stay_four_valid_visits():
+    ids = remap_capture_ids((5, 23, 41, 48), 6, 12, 3, 2, late=True)
+    assert len(ids) == 4 and max(ids) == 36 and all(v <= 36 for v in ids)
+
+
+def test_aux_capture_ids_late_entry_via_env(monkeypatch):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    assert aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2) == (5, 11, 29, 36)
+
+
+def test_aux_capture_ids_default_unchanged(monkeypatch):
+    monkeypatch.delenv(MODE_ENV, raising=False)
+    assert aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2) == (5, 23, 29, 36)
+
+
+def test_proof_line_names_late_entry_arm(monkeypatch, capsys):
+    monkeypatch.setenv(MODE_ENV, "late_entry")
+    monkeypatch.setenv(BANK_ENV, "prelude")
+    monkeypatch.setenv(SCALE_ENV, "0.8")
+    import radiance_inkling2_loopcd as m
+    monkeypatch.setattr(m, "_LOGGED", False)
+    aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    out = capsys.readouterr().out
+    assert "RADIANCE_LOOPCD_PROOF loops=2/3 " in out
+    assert "capture_ids=(5, 23, 41, 48)->(5, 11, 29, 36)" in out
+    assert "mode=late_entry first=1 bank=prelude msg_scale=0.8" in out
+
+
+def test_proof_line_default_reports_early_exit(monkeypatch, capsys):
+    monkeypatch.delenv(MODE_ENV, raising=False)
+    import radiance_inkling2_loopcd as m
+    monkeypatch.setattr(m, "_LOGGED", False)
+    aux_capture_ids((5, 23, 41, 48), 6, 12, 3, 2)
+    assert "mode=early_exit first=0 bank=none msg_scale=1.0" in capsys.readouterr().out
+
+
+# ---- patch wiring: Late Entry hooks land in the real loop.py and stay inert by default
+
+def test_patch_wires_late_entry_hooks(loop_tree):
+    assert run_patch(loop_tree).returncode == 0
+    loop = (loop_tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    assert "for p in _rad_pass_range(" in loop
+    assert "range(num_passes) for i in core" not in loop
+    assert "looped = _rad_blends(pass_idx, _rad_first)" in loop
+    assert "i == core.start and pass_idx == _rad_first" in loop
+    assert "_rad_select_bank(bank, looped, pass_idx, _rad_first, prelude_partial)" in loop
+    assert "if _rad_blends(next_pass, _rad_first)" in loop
+    # LoopCD-Hidden sees pass index relative to the first executed pass
+    assert "pass_idx - _rad_first" in loop
+    import ast
+    ast.parse(loop)
+
+
+def test_patch_fallbacks_reproduce_stock_loop_when_module_missing(loop_tree):
+    """The except-branch stubs must equal stock behaviour (module absent = inert)."""
+    assert run_patch(loop_tree).returncode == 0
+    loop = (loop_tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    import ast
+    tree = ast.parse(loop)
+    handler = next(
+        h for n in tree.body if isinstance(n, ast.Try) for h in n.handlers
+        if any(isinstance(x, ast.FunctionDef) and x.name == "_rad_blends" for x in h.body)
+    )
+    ns = {}
+    exec(compile(ast.Module(handler.body, []), "stubs", "exec"), ns)
+    assert list(ns["_rad_pass_range"](3, 2)) == [0, 1]
+    assert ns["_rad_first_pass"](3, 2) == 0
+    assert [ns["_rad_blends"](p, 0) for p in range(3)] == [False, True, True]
+    b = object()
+    assert ns["_rad_select_bank"](b, True, 1, 0, None) is b
+    assert ns["_rad_select_bank"](b, False, 0, 0, None) is None

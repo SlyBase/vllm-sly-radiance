@@ -7,7 +7,10 @@ lm_head run once -- zero extra output pass.
 
 Opt-in: RADIANCE_INKLING2_LOOPCD=1, strength RADIANCE_INKLING2_LOOPCD_OMEGA
 (default 0.5), pass-count override RADIANCE_INKLING2_LOOPS (e.g. 2 to run
-3 -> 2 looped passes; DSpark capture visit ids are remapped to match). NOOP on a vLLM without models/inkling2.
+3 -> 2 looped passes; DSpark capture visit ids are remapped to match).
+RADIANCE_INKLING2_LOOP_MODE=late_entry runs the LAST n passes instead of the
+first n (arxiv 2611.24576, training-free; see radiance_inkling2_loopcd.py).
+NOOP on a vLLM without models/inkling2.
 
 Patches vllm/models/inkling2/nvidia/loop.py (Inkling2LoopModel.forward +
 one new helper method). Idempotent: re-running is a NOOP.
@@ -29,9 +32,13 @@ IMPORT_NEW = IMPORT_ANCHOR + (
     "    from radiance_inkling2_loopcd import (\n"
     "        apply_hidden as _rad_apply_hidden,\n"
     "        aux_capture_ids as _rad_aux_capture_ids,\n"
+    "        blends as _rad_blends,\n"
     "        enabled as _rad_loopcd_enabled,\n"
+    "        first_pass as _rad_first_pass,\n"
     "        loops_override as _rad_loopcd_loops,\n"
     "        omega as _rad_loopcd_omega,\n"
+    "        pass_range as _rad_pass_range,\n"
+    "        select_bank as _rad_select_bank,\n"
     "    )\nexcept Exception:  # module missing: stay inert\n"
     "    _rad_apply_hidden = None\n"
     "    def _rad_aux_capture_ids(ids, *_):\n"
@@ -42,6 +49,14 @@ IMPORT_NEW = IMPORT_ANCHOR + (
     "        return None\n"
     "    def _rad_loopcd_omega():\n"
     "        return 0.0\n"
+    "    def _rad_first_pass(passes, new_passes):\n"
+    "        return 0\n"
+    "    def _rad_pass_range(passes, new_passes):\n"
+    "        return range(min(new_passes, passes))\n"
+    "    def _rad_blends(pass_idx, first):\n"
+    "        return pass_idx > 0\n"
+    "    def _rad_select_bank(bank, looped, pass_idx, first, prelude_partial):\n"
+    "        return bank if looped else None\n"
 )
 
 # ---- honor RADIANCE_INKLING2_LOOPS (clamp pass count downward)
@@ -54,12 +69,43 @@ NPASSES_NEW = (
     "        _rad_loops = _rad_loopcd_loops()\n"
     "        if _rad_loops is not None:\n"
     "            num_passes = min(_rad_loops, num_passes)\n"
+    "        _rad_first = _rad_first_pass(self.config.num_loop_passes, num_passes)\n"
     "        # DSpark capture visit ids follow the shortened loop (see radiance module)\n"
     "        _rad_aux = _rad_aux_capture_ids(\n"
     "            self.aux_hidden_state_layers, core.start, len(core),\n"
     "            self.config.num_loop_passes, num_passes,\n"
     "        )\n"
     "        stack = inputs_embeds.new_empty(\n"
+)
+
+# ---- Late Entry hooks: pass range, message blending, first-pass bank
+VISITS_ANCHOR = "        visits += [(i, p) for p in range(num_passes) for i in core]\n"
+VISITS_NEW = (
+    "        visits += [\n"
+    "            (i, p)\n"
+    "            for p in _rad_pass_range(self.config.num_loop_passes, num_passes)\n"
+    "            for i in core\n"
+    "        ]\n"
+)
+LOOPED_ANCHOR = (
+    "            looped = pass_idx > 0\n"
+    "            if i == core.start and not looped:\n"
+)
+LOOPED_NEW = (
+    "            looped = _rad_blends(pass_idx, _rad_first)\n"
+    "            if i == core.start and pass_idx == _rad_first:\n"
+)
+NEXT_NORM_ANCHOR = "                next_norm = None if next_pass else self.layers[next_i].attn_norm\n"
+NEXT_NORM_NEW = (
+    "                next_norm = (\n"
+    "                    None\n"
+    "                    if _rad_blends(next_pass, _rad_first)\n"
+    "                    else self.layers[next_i].attn_norm\n"
+    "                )\n"
+)
+BANK_ANCHOR = "                bank if looped else None,\n"
+BANK_NEW = (
+    "                _rad_select_bank(bank, looped, pass_idx, _rad_first, prelude_partial),\n"
 )
 
 # ---- capture on the remapped ids (a duplicate id yields a duplicate feature)
@@ -80,7 +126,7 @@ INJECT_NEW = (
     "            if _rad_loopcd_enabled():\n"
     "                self._rad_h1 = None\n"
     "            inputs = self._rad_loopcd_step(\n"
-    "                i, pass_idx, num_passes, inputs, stack, num_blocks\n"
+    "                i, pass_idx - _rad_first, num_passes, inputs, stack, num_blocks\n"
     "            )\n"
     "        assert inputs is not None\n"
 )
@@ -127,6 +173,10 @@ def main():
     apply(LOOP, IMPORT_ANCHOR, IMPORT_NEW, "_rad_apply_hidden", "inkling2 loopcd import")
     apply(LOOP, NPASSES_ANCHOR, NPASSES_NEW, "_rad_loops = _rad_loopcd_loops()", "inkling2 loopcd loops override")
     apply(LOOP, CAPTURE_ANCHOR, CAPTURE_NEW, "_rad_aux.count(visit)", "inkling2 loopcd capture-id remap")
+    apply(LOOP, VISITS_ANCHOR, VISITS_NEW, "for p in _rad_pass_range(", "inkling2 late-entry pass range")
+    apply(LOOP, LOOPED_ANCHOR, LOOPED_NEW, "_rad_blends(pass_idx, _rad_first)", "inkling2 late-entry blend flag")
+    apply(LOOP, NEXT_NORM_ANCHOR, NEXT_NORM_NEW, "_rad_blends(next_pass", "inkling2 late-entry next norm")
+    apply(LOOP, BANK_ANCHOR, BANK_NEW, "pass_idx, _rad_first, prelude_partial", "inkling2 late-entry bank")
     apply(LOOP, INJECT_ANCHOR, INJECT_NEW, "# ---- RADIANCE LoopCD-Hidden", "inkling2 loopcd contrast injection")
     s = LOOP.read_text()
     if "def _rad_loopcd_step" not in s:
