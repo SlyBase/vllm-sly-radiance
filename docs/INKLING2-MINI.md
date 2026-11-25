@@ -70,7 +70,7 @@ table above) and two lossless knobs when the **target model** is Inkling: `--mod
 contains `inkling` (case-insensitive), **or** a local dir whose `config.json` `model_type`/`architectures` contain
 `inkling` (the `/model` mount; real value `inkling2_loop` / `Inkling2LoopForConditionalGeneration`), **or**
 `--reasoning-parser inkling` (Inkling-only, fallback). The drafter path, `--tokenizer` and `--served-model-name` are ignored,
-so a Qwen target with an `inkling` drafter gets nothing. and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
+so a Qwen target with an `inkling` drafter gets nothing. The two lossless knobs are skipped when `--speculative-config` selects the DFlash2 drafter (`"method":"dflash"`, see the table
 under "Recommended decode config"); every explicit value, an empty one included, wins, and other models are untouched. The
 `--entrypoint vllm` override of a test harness bypasses it: pass the knobs with `-e`.
 
