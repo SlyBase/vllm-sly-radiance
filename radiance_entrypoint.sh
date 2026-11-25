@@ -80,6 +80,18 @@ if [ -n "$_numa_spec" ]; then
 fi
 [ "${#NUMACTL[@]}" -gt 0 ] && export RADIANCE_NUMA_ACTIVE="numactl ${NUMACTL[*]}"
 
+# Inkling-2-Mini decode defaults (NSD + SLAK; MEASURED on the R9700 at 210 W, BetterBench code decode:
+# 162.2 -> 170.5 tok/s, all 8 categories up, docs/INKLING2-MINI.md). The knobs are module-level reads in
+# every engine process, before the model is known, so the model name in the serve args decides here.
+# `${VAR-default}` (no colon): any explicit value, even an empty one, wins. Other models: untouched.
+case "${*,,}" in
+  *inkling*)
+    export RADIANCE_NSD="${RADIANCE_NSD-1}" RADIANCE_NSD_THETA="${RADIANCE_NSD_THETA-0.95}" \
+      RADIANCE_CACTUS_DELTA="${RADIANCE_CACTUS_DELTA-0}" \
+      RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
+      RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}" ;;
+esac
+
 # Topology + bandwidth sweep, kicked off in the BACKGROUND so it never delays startup.
 # rocm-bandwidth-test (no args) prints: device list, inter-device access (P2P) matrix, NUMA
 # distance, and uni + bidirectional peak copy bandwidth (GB/s) for every agent pair (d2d, d2h,

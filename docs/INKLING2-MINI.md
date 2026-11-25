@@ -48,7 +48,9 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 | Int8 fold weight (`inkling2/radiance_inkling2_draft.py`) | `RADIANCE_INKLING2_FOLD_INT8=1` (off) | lossy, drafter only: fold weight as int8 + fp32 row scale, 103 -> 51 MB per Markov step (7 per verify step). Micro-bench `inkling2/bench_fold.py`; end-to-end not yet measured |
 | Fused route without cooperative launch | – (always on ROCm) | removes the bimodal 62 / 31 ms step, see [TECHNICAL.md](TECHNICAL.md#inkling-2-mini-on-gfx1201-unreleased) |
 | DSpark launch folding (`inkling2/radiance_inkling2_draft.py`) | – (always) | same math in fewer launches: 30.3 -> 29.55 ms per step |
-| Drafter shortlist | `RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>` (off) | Markov correction on the top-k base logits only: -1.7 ms per step, but acceptance on code 3.43 -> 2.97 tokens per step. Off |
+| Drafter shortlist (SLAK) | `RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>` (**4096** by the image entrypoint, `0` = off) | Markov correction on the top-k base logits only: -1.7 ms per step; alone, acceptance on code fell 3.43 -> 2.97 tokens per step, in the NSD + SLAK default below the net is positive. With it `FOLD_INT8` is inert (the gather path reads k fold rows only; logged) |
+| Nucleus speculative decoding (NSD) | `RADIANCE_NSD` (**1** by the image entrypoint), `RADIANCE_NSD_THETA` (**0.95**), `RADIANCE_CACTUS_DELTA` (**0**: mutually exclusive with NSD) | lossy acceptance rule in the rejection kernel, see `sly/patch_nsd.py` |
+| Adaptive verify window | `RADIANCE_INKLING2_ADAPTIVE_K` (**3,5,7** by the image entrypoint, empty = off) | k per step from the acceptance EMA, `sly/patch_inkling2_adaptive.py` |
 | int8 (Q8_0) dense weights | `RADIANCE_INKLING2_W8=1` (off) | opt-in, M 1..16: 533-585 GB/s of int8 bytes at M = 8, 1.5-1.8x the bf16 GEMV |
 | | `RADIANCE_INKLING2_W8_HEAD` (`1`; read only with `W8=1`) | `=0` keeps the 201,024-row LM head on bf16 |
 | MXFP4 dense weights (`patch_inkling2_mxfp4dense.py`) | `RADIANCE_INKLING2_MXFP4_DENSE=1` (off) | opt-in 4-bit dense projections + LM head on the HIP W4A16 GEMV (`radiance_inkling2_mx4.hip`); dense bytes 4.77 -> 1.27 GB per step. Quality trade-off, not lossless |
@@ -58,6 +60,25 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 
 With every knob at its default the dense path is lossless bf16 and the experts run the exact NVFP4 /
 MXFP8 arithmetic of the model.
+
+## Default decode profile (NSD + SLAK + adaptive k)
+
+`radiance_entrypoint.sh` exports five knobs when a serve argument names an Inkling model (`*inkling*`,
+case-insensitive); every explicit value, an empty one included, wins, and other models are untouched. The
+`--entrypoint vllm` override of a test harness bypasses it: pass the five knobs with `-e`.
+
+| Knob | Default |
+|---|---|
+| `RADIANCE_NSD` / `RADIANCE_NSD_THETA` | `1` / `0.95` |
+| `RADIANCE_CACTUS_DELTA` | `0` (NSD and the Cactus rule exclude each other) |
+| `RADIANCE_INKLING2_DRAFT_SHORTLIST` | `4096` |
+| `RADIANCE_INKLING2_ADAPTIVE_K` | `3,5,7` |
+
+**MEASURED on the R9700 at 210 W** (BetterBench code decode, seed 42, W2 2026-11-25, image `ink-k9`, one start per
+arm): code **170.49 tok/s** against 162.41 / 162.23 / 161.91 for three same-window controls (**+5.1 %**), step
+19.73 ms, acceptance 0.478. All eight categories rose (tok/s): chat 142, code 170, file_edit 195, json 197,
+math 188, prose 140, reasoning 149, summarization 191. The rule is lossy (NSD widens acceptance, the drafter
+sees a shortlist); the user chose speed. Not yet run: a quality gate (GSM8K / perplexity) for this profile.
 
 ## Measurements
 

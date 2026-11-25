@@ -12,6 +12,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+### Changed
+- **Inkling 2 Mini decodes with NSD + SLAK + adaptive k by default.** `radiance_entrypoint.sh` exports
+  `RADIANCE_NSD=1`, `RADIANCE_NSD_THETA=0.95`, `RADIANCE_CACTUS_DELTA=0`, `RADIANCE_INKLING2_DRAFT_SHORTLIST=4096`,
+  `RADIANCE_INKLING2_ADAPTIVE_K=3,5,7` when a serve argument names an Inkling model; explicit values (an empty one
+  too) win, other models are untouched. Lossy (accepts nucleus tokens, shortlisted drafter). *Measured on R9700 at
+  210 W* (BetterBench code decode, seed 42, W2 2026-11-25): 170.49 tok/s vs 162.41 / 162.23 / 161.91 controls
+  (+5.1 %), step 19.73 ms, accept 0.478, all 8 categories up. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
+
 ### Added
 - **Inkling 2 Mini with vLLM's native DFlash2 drafter (`incoai/Inkling-2-Mini-DFlash2`), opt-in by serving flag.**
   `sly/patch_inkling2_dflash2.py` carries the four Inkling points of the vendor's SGLang patch into vLLM's own
