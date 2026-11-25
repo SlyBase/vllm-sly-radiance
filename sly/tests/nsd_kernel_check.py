@@ -51,18 +51,22 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 @triton.jit
 def gumbel_block_argmax(logits, block, mask, resample_token_idx, expanded_idx_mapping_ptr, temp_ptr, seed_ptr,
                         pos_ptr, logits_cache_ptr, logits_cache_stride_0, logits_cache_stride_1,
-                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride, vocab_size,
+                        logits_cache_col_ptr, logits_cache_source_ptr, logits_cache_source_stride, logits_cache_row_mapping_ptr, vocab_size,
                         IS_DRAFTING: tl.constexpr, APPLY_TEMPERATURE: tl.constexpr, USE_FP64: tl.constexpr,
                         PER_TOKEN_COL: tl.constexpr = False):
-    # signature of vLLM 0.32.0 sample/gumbel.py
+    # signature of vLLM 0.34 sample/gumbel.py
     # Stand-in: plain argmax. The resample path is the same in the stock and the patched file; only the
     # accepted prefix is compared (the bonus / resampled token is not what NSD changes).
     return tl.max(tl.where(mask, logits, float("-inf")), axis=0, return_indices=True)
 
 
 _stub("vllm.triton_utils", tl=tl, tldevice=tl.math, triton=triton)
-_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32)
+_stub("vllm.v1.worker.gpu.sample.gumbel", gumbel_block_argmax=gumbel_block_argmax, tl_rand32=tl_rand32,
+      spec_step_seed=lambda seed, i: seed)
 _stub("vllm.v1.worker.gpu.sample.watermark", philox_gumbel_block_argmax=None)
+# vLLM >= 0.34 imports (never reached with FLY off / no draft logits cache)
+_stub("vllm.v1.worker.gpu.spec_decode.draft_logits", DraftLogitsCache=type("DraftLogitsCache", (), {}), draft_logits_row=None)
+_stub("vllm.v1.worker.gpu.spec_decode.fly", compute_fly_entropy=None)
 
 
 @triton.jit
@@ -166,8 +170,8 @@ def main(stock_path, patched_path):
     temps, logits, draft = make_batch(n, k, vocab, gen)
     seed = torch.randint(1, 2 ** 62, (n,), generator=gen, dtype=torch.int64)
 
-    stock = load(stock_path, "rsu_stock")
-    off = load(patched_path, "rsu_off")
+    stock = load(stock_path, "rsu_stock", RADIANCE_CACTUS_DELTA=0)
+    off = load(patched_path, "rsu_off", RADIANCE_CACTUS_DELTA=0)
     assert off.NSD_ENABLED is False
     off._nsd_nucleus_mass_kernel = _Boom()
     s_out, s_num = run(stock, temps, logits, draft, seed, k)

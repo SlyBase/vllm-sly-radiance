@@ -181,6 +181,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
     the two patches above install their `compile_factors` lines (they were cascade failures).
 
 ### Fixed
+- **NSD (`RADIANCE_NSD=1`) no longer accepts wrong tokens on greedy rows and masked draft slots (all models).** The
+  nucleus-mass kernel never writes the buffer entries of greedy rows and `-1` placeholder slots (`new_empty`), but the
+  rejection kernel OR-ed `mass <= theta` into `accepted` for them anyway, so uninitialised memory could accept a
+  token that is not the target argmax (greedy) or sit behind a placeholder. Fix in `sly/patch_nsd.py`: the OR only
+  applies to sampled rows with a real draft (`& is_valid_draft & (temp != 0.0)`), and the buffer starts at `+inf` (never in the
+  nucleus). The patch upgrades a tree that carries the old NSD hunks. Tests: `sly/tests/nsd_garbage_check.py` (Triton
+  interpreter; fails on the old code, 4 mutants checked). Any earlier NSD measurement (tok/s, acceptance, output text) is
+  suspect and needs a re-run; NSD stays opt-in.
 - **Qwen production profile crashed at KV-cache init on the vLLM main base** (`AttributeError:
   'MambaSpecDecodeGPUContext' object has no attribute '_radiance_kv_cfg'`, `mamba_utils.py
   initialize_from_forward_context`): main declares the context with `@dataclass(slots=True)`, so the lazy-GDN
