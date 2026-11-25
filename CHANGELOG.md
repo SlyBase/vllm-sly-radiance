@@ -13,6 +13,12 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
+- **Inkling default: coda experts NVFP4 (`RADIANCE_INKLING2_CODA_FP4=1`) from `radiance_entrypoint.sh`, for every drafter.**
+  Lossy, user-approved on a measured gate (<= 0.010 nats): *MEASURED* 2026-11-25, R9700 210 W, vs the exact MXFP8 run,
+  KLD mean 0.0033 nats (CI 0.0026-0.0042), median 0.00025, p99 0.053, top-1 98.46 %, dPPL +0.26 %; DFlash2 code decode
+  224.4 -> 233.0 tok/s (+3.9 %), step 23.26 -> 22.70 ms, greedy text diverges after ~110-220 characters.
+  An explicit `RADIANCE_INKLING2_CODA_FP4=0` (or empty) restores the exact experts; other models are untouched; the
+  `--entrypoint vllm` override of a harness bypasses it. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
 - **The Inkling entrypoint defaults (SLAK 4096 + adaptive k 3,5,7) are drafter-aware: not set with the DFlash2 drafter.**
   `radiance_entrypoint.sh` skips them when `--speculative-config` contains `"method":"dflash"` (JSON with or without
   spaces); DSpark and no speculative config keep them, explicit env still wins. *Why, MEASURED* 2026-11-25 (image

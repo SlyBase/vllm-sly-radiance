@@ -51,6 +51,7 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 | Drafter shortlist (SLAK) | `RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>` (**4096** by the image entrypoint, `0` = off) | Markov correction on the top-k base logits only: -1.7 ms per step; alone, acceptance on code fell 3.43 -> 2.97 tokens per step. Only the draft distribution changes, the rejection sampler gets it as such, so the target distribution is exact. Whether the net is positive without NSD: chain NQ. With it `FOLD_INT8` is inert (the gather path reads k fold rows only; logged) |
 | Nucleus speculative decoding (NSD) | `RADIANCE_NSD` (off, **opt-in**), `RADIANCE_NSD_THETA` (0.95), `RADIANCE_CACTUS_DELTA` (image default 0.5; must be `0` with NSD, else import error) | lossy acceptance rule in the rejection kernel, see `sly/patch_nsd.py`. Degraded the greedy text in W3 (see below); do not enable for quality-sensitive use |
 | Adaptive verify window | `RADIANCE_INKLING2_ADAPTIVE_K` (**3,5,7** by the image entrypoint, empty = off) | k per step from the acceptance EMA (exact for any k), `sly/patch_inkling2_adaptive.py` |
+| Coda experts NVFP4 (`inkling2/radiance_inkling2_coda_fp4.py`) | `RADIANCE_INKLING2_CODA_FP4` (**1** by the image entrypoint, `0` or empty = off, or a layer list `20,22-23`) | **lossy default.** The MXFP8 coda expert layers 20-23 are requantized to NVFP4 at load: -0.44 GB per decode step. *MEASURED* 2026-11-25 vs the exact MXFP8 run: KLD mean **0.0033 nats** (CI 0.0026-0.0042, gate <= 0.010), median 0.00025, p99 0.053, top-1 agreement 98.46 %, **dPPL +0.26 %**; DFlash2 code decode 224.4 -> 233.0 tok/s (**+3.9 %**), step 23.26 -> 22.70 ms. Greedy text diverges after about 110-220 characters (expected for a lossy quantization). `RADIANCE_INKLING2_CODA_FP4=0` restores the exact experts |
 | int8 (Q8_0) dense weights | `RADIANCE_INKLING2_W8=1` (off) | opt-in, M 1..16: 533-585 GB/s of int8 bytes at M = 8, 1.5-1.8x the bf16 GEMV |
 | | `RADIANCE_INKLING2_W8_HEAD` (`1`; read only with `W8=1`) | `=0` keeps the 201,024-row LM head on bf16 |
 | MXFP4 dense weights (`patch_inkling2_mxfp4dense.py`) | `RADIANCE_INKLING2_MXFP4_DENSE=1` (off) | opt-in 4-bit dense projections + LM head on the HIP W4A16 GEMV (`radiance_inkling2_mx4.hip`); dense bytes 4.77 -> 1.27 GB per step. Quality trade-off, not lossless |
@@ -58,18 +59,21 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 | | `RADIANCE_INKLING2_MXFP4_DENSE_CLIP` (`rtn`; `mse`) | exponent choice per group: round-to-nearest or a small MSE search |
 | | `RADIANCE_INKLING2_MXFP4_DENSE_MIN_N` (`256`) | projections with fewer output rows stay bf16 |
 
-With every knob at its default the dense path is lossless bf16 and the experts run the exact NVFP4 /
-MXFP8 arithmetic of the model.
+With every knob at its default the dense path is lossless bf16; the experts run the exact NVFP4 / MXFP8
+arithmetic of the model except the coda layers 20-23, which the entrypoint default requantizes to NVFP4
+(`RADIANCE_INKLING2_CODA_FP4=1`, KLD 0.0033 nats, dPPL +0.26 %; `=0` = exact).
 
 ## Default decode profile (SLAK + adaptive k, lossless subset)
 
-`radiance_entrypoint.sh` exports two knobs when a serve argument names an Inkling model (`*inkling*`,
+`radiance_entrypoint.sh` exports `RADIANCE_INKLING2_CODA_FP4=1` for every Inkling model (any drafter; lossy, see the
+table above) and two lossless knobs when a serve argument names an Inkling model (`*inkling*`,
 case-insensitive) and `--speculative-config` does not select the DFlash2 drafter (`"method":"dflash"`, see the table
 under "Recommended decode config"); every explicit value, an empty one included, wins, and other models are untouched. The
 `--entrypoint vllm` override of a test harness bypasses it: pass the knobs with `-e`.
 
 | Knob | Default |
 |---|---|
+| `RADIANCE_INKLING2_CODA_FP4` (all drafters) | `1` |
 | `RADIANCE_INKLING2_DRAFT_SHORTLIST` | `4096` |
 | `RADIANCE_INKLING2_ADAPTIVE_K` | `3,5,7` |
 

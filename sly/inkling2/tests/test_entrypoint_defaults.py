@@ -101,3 +101,25 @@ def test_explicit_env_wins_with_the_dflash2_drafter(serve):
                 RADIANCE_INKLING2_DRAFT_SHORTLIST="2048")
     assert env["RADIANCE_INKLING2_DRAFT_SHORTLIST"] == "2048"
     assert "RADIANCE_INKLING2_ADAPTIVE_K" not in env
+
+
+CODA = "RADIANCE_INKLING2_CODA_FP4"
+
+
+@pytest.mark.parametrize("extra", [
+    [],                                                                  # DSpark default
+    ["--speculative-config", json.dumps(_spec("dspark"))],
+    ["--speculative-config", json.dumps(_spec("dflash"))],               # DFlash2: coda is drafter-independent
+])
+def test_inkling_gets_coda_nvfp4_by_default(serve, extra):
+    # MEASURED KLD 0.0033 nats (gate 0.010), dPPL +0.26 %, +3.9 % tok/s: user-approved lossy default
+    assert serve(MODEL + extra)[CODA] == "1"
+
+
+@pytest.mark.parametrize("val", ["0", ""])
+def test_explicit_env_turns_coda_off(serve, val):
+    assert serve(MODEL, **{CODA: val})[CODA] == val
+
+
+def test_other_models_get_no_coda_knob(serve):
+    assert CODA not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
