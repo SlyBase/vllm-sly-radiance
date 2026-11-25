@@ -13,9 +13,9 @@ ROCm path, with four kinds of edits:
   3. PTX        every `tl.inline_asm_elementwise` that is hot-path math (ex2/lg2/rcp/rsqrt, sigmoid,
                 tanh, bf16 rounding, a no-op register move, an L2 prefetch hint) -> the equivalent
                 Triton expression (fast-math approximations become exact ones: a few ulp apart, not a
-                semantic change). Left alone on purpose: the fp8-KV unpack (attention_sm90.py, only
-                compiled with --kv-cache-dtype fp8), the e2m1 hardware path (dead behind the constexpr
-                `_HW_E2M1`) and the Gluon calls (`gl.inline_asm_elementwise`, sm100 only).
+                semantic change). Left alone on purpose: the e2m1 hardware path (dead behind the
+                constexpr `_HW_E2M1`) and the Gluon calls (`gl.inline_asm_elementwise`, sm100 only).
+                The fp8-KV unpack is rewritten by hunk 4l.
   4. experts    ops/moe_sm120.py: NVFP4 expert GEMM -> radiance_inkling2_moe.nvfp4_expert_gemm
                 (dequantize tiles + bf16 dot; gfx12 has no FP4 MMA / `tl.dot_scaled`).
 
@@ -23,6 +23,9 @@ ROCm path, with four kinds of edits:
   4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
   4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   4e. rel_attention num_stages 2 -> 1 on ROCm.
+  4l. fp8 KV (--kv-cache-dtype fp8): `_load_fp8_kv` unpacked E4M3 pairs with NVIDIA PTX
+      (`cvt.rn.f16x2.e4m3x2`); on ROCm it loads the fp8 pointer natively and converts (gfx12 has the
+      OCP e4m3 conversion). Without this hunk an fp8-KV start fails in the first attention compile.
   4f. linear(): `not use_sm100_kernels()` before `is_flashinfer_autotuning()` (imports flashinfer).
   4g. DSpark draft `_RMSNorm`: torch implementation of flashinfer's rmsnorm contract.
   4h. DSpark draft KV write -> radiance_inkling2_kv.kv_scatter (Triton; reshape_and_cache_flash is CUDA-only).
@@ -228,6 +231,32 @@ def main():
         "        num_warps=8 if block_m >= 128 else 4,\n        num_stages=1 if torch.version.hip else 2,\n",
         "num_stages=1 if torch.version.hip else 2,",
         "inkling2 rel_attention: 1 stage on ROCm (LDS)",
+    )
+    apply(
+        ROOT / "nvidia/ops/attention_sm90.py",
+        "    # Load each E4M3 pair once, retaining 16-bit packing for BF16 MMA order.\n"
+        "    half = tl.arange(0, D // 2)\n"
+        "    pair = tl.load(\n"
+        "        ptr.to(tl.pointer_type(tl.uint16))\n"
+        "        + tl.multiple_of(offsets // 2, D // 2)[:, None]\n"
+        "        + half[None, :],\n"
+        "        mask=mask[:, None],\n"
+        "        other=0,\n"
+        "    )\n"
+        "    lo, hi = tl.inline_asm_elementwise(\n"
+        "        \"{ .reg .b32 pair; cvt.rn.f16x2.e4m3x2 pair, $2; mov.b32 {$0, $1}, pair; }\",\n"
+        "        \"=h,=h,h\",\n"
+        "        [pair],\n"
+        "        dtype=(tl.float16, tl.float16),\n"
+        "        is_pure=True,\n"
+        "        pack=1,\n"
+        "    )\n"
+        "    return tl.interleave(lo, hi).to(dtype)\n",
+        "    # gfx12: native fp8 load + convert (the PTX pair unpack is NVIDIA-only)\n"
+        "    d = tl.arange(0, D)\n"
+        "    return tl.load(ptr + offsets[:, None] + d[None, :], mask=mask[:, None], other=0.0).to(dtype)\n",
+        "native fp8 load + convert (the PTX pair unpack",
+        "inkling2 rel_attention: fp8 KV unpack without PTX on ROCm",
     )
     apply(
         ROOT / "nvidia/ops/linear.py",

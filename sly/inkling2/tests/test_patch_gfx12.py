@@ -68,8 +68,8 @@ def test_only_the_deliberate_ptx_is_left(tree):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                     and n.func.attr == "inline_asm_elementwise" and n.func.value.id == "tl":
                 left.add(p.name)
-    # fp8-KV unpack (only compiled with --kv-cache-dtype fp8) and the dead e2m1 hardware branches
-    assert left <= {"attention_sm90.py", "nvfp4.py"}, left
+    # only the dead e2m1 hardware branches (the fp8-KV unpack is rewritten, see below)
+    assert left <= {"nvfp4.py"}, left
 
 
 @pytest.mark.parametrize("asm,args,expect", [
@@ -526,3 +526,42 @@ def test_loop_blend_hook_is_idempotent(tree):
     assert first.count("controller_gemms") >= 2
     run(tree)
     assert (tree / "vllm/models/inkling2/nvidia/loop.py").read_text() == first
+
+
+def test_fp8_kv_unpack_has_no_ptx_on_rocm(tree):
+    """--kv-cache-dtype fp8 compiled `cvt.rn.f16x2.e4m3x2` (NVIDIA PTX) into the attention kernel."""
+    run(tree)
+    src = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
+    assert "e4m3x2" not in src and "inline_asm_elementwise" not in src
+    assert "_load_fp8_kv(K, kv_ptrs" in src and "_load_fp8_kv(V, kv_ptrs" in src  # callers untouched
+
+
+def test_fp8_kv_unpack_reads_the_e4m3_values(tree):
+    """The patched helper, run in the Triton interpreter, returns each e4m3 byte as its value."""
+    import importlib.util
+
+    import triton
+    import triton.language as tl
+
+    run(tree)
+    path = tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py"
+    spec = importlib.util.spec_from_file_location("attn_sm90_patched", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    globals()["_patched_sm90"] = mod                              # a jit function resolves module globals
+
+    @triton.jit
+    def probe(Src, Offsets, Out, N: tl.constexpr, D: tl.constexpr):
+        i = tl.arange(0, N)
+        off = tl.load(Offsets + i)
+        x = _patched_sm90._load_fp8_kv(Src, off, i < N - 1, tl.float32, D)   # the last row is masked out
+        tl.store(Out + i[:, None] * D + tl.arange(0, D)[None, :], x)
+
+    D, N = 16, 4
+    src = (torch.arange(0, 256, dtype=torch.float32)[:8 * D].view(8, D) / 8 - 8).to(torch.float8_e4m3fn)
+    offsets = torch.tensor([3 * D, 0, 7 * D, 5 * D], dtype=torch.int64)
+    out = torch.full((N, D), -99.0)
+    probe[(1,)](src, offsets, out, N=N, D=D)
+    want = src.view(-1, D)[offsets // D].float()
+    want[N - 1] = 0.0                                             # masked row: other=0
+    assert torch.equal(out, want)
