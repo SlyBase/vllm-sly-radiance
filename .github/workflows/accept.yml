@@ -150,7 +150,9 @@ jobs:
   gate:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
-    runs-on: [self-hosted, linux, gpu-accept]
+    # The inkling leg starts its own container and stops/starts the prod unit (LocalDockerWindow), so it
+    # runs on the GPU host (LXC 2408: docker, the model dirs); the Qwen leg drives the helper over SSH.
+    runs-on: ${{ matrix.profile == 'inkling' && fromJSON('["self-hosted","linux","x64","rocm-build"]') || fromJSON('["self-hosted","linux","gpu-accept"]') }}
     # Protected: a reviewer has to approve before production is touched.
     environment: gpu-window
     timeout-minutes: 180
@@ -187,6 +189,10 @@ jobs:
           ACCEPT_BB_PYTHON: /opt/accept/venv/bin/python
           ACCEPT_BB_DIR: /opt/accept/betterbench
           ACCEPT_EVAL_PYTHON: /opt/accept/venv/bin/python
+          # inkling leg only (local container): host paths of the checkpoint, the drafter and the compile cache
+          ACCEPT_INKLING_MODEL: ${{ vars.ACCEPT_INKLING_MODEL || '/root/inkling2-mini' }}
+          ACCEPT_INKLING_DRAFTER: ${{ vars.ACCEPT_INKLING_DRAFTER || '/root/dflash2-ink/model' }}
+          ACCEPT_INKLING_CACHE: ${{ vars.ACCEPT_INKLING_CACHE || '/root/accept-inkling-cache' }}
         run: |
           set -o pipefail
           python3 ci/accept/accept.py \

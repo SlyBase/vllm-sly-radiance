@@ -1,6 +1,8 @@
 {
-  "description": "Inkling 2 Mini (DFlash2 drafter, k=7) release-tier profile. The release tier needs the GPU helper to know this service: gpu-window / gpu-window-ssh (homelab repo) accept only docker-vllm7.service and docker-vllm5.service today, so this profile fails closed at `start` until a docker-vllm-inkling.service unit (the ExecStart of the ink-200 release arm: /root/inkling2-mini, /models/dflash2, --max-model-len 32768, --max-num-seqs 8, reasoning/tool parser inkling) is added there and whitelisted. The profile only declares what to assert; the quick tier references are ci/accept/references/quick-inkling.json.",
-  "service": "docker-vllm-inkling.service",
+  "description": "Inkling 2 Mini (DFlash2 drafter, k=7) release-tier profile. No service unit in the gpu-window helper is needed: inside its own window the leg stops the prod unit, starts the release-arm container on :8001 (accept.py inkling_docker_argv, twin: ci/quick_backtest.sh start_inkling), runs the tier, removes the container, restarts prod, releases (class LocalDockerWindow). It must run on the GPU host (docker, permission to stop/start prod_service, model dirs ACCEPT_INKLING_MODEL / ACCEPT_INKLING_DRAFTER). The profile only declares what to assert; the references are ci/accept/references/quick-inkling.json.",
+  "window": "local-docker",
+  "prod_service": "docker-vllm7.service",
+  "port": 8001,
   "model": "inkling2-mini",
   "quick_profile": "inkling",
   "required_log_patterns": [],

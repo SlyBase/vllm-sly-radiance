@@ -188,7 +188,7 @@ class ReleaseTierProfiles(unittest.TestCase):
         for p in qb.RELEASE_PROFILES:
             prof = json.loads((CI / "accept" / "profiles" / f"{p}.json").read_text())
             self.assertIn(prof["quick_profile"], qb.HOOKS)
-            self.assertTrue(prof["service"].endswith(".service"))
+            self.assertTrue(prof.get("service", "").endswith(".service") or prof.get("window") == "local-docker")
 
 
 class ReleaseGate(unittest.TestCase):

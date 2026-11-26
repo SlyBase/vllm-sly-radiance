@@ -22,9 +22,11 @@
 # gpu-window enforces the same on its side: owner `accept-night` is refused outside 04:00-06:00 and its TTL
 # is clamped (homelab repo; interface assumptions in docs/MAINTENANCE.md).
 #
+# TODO: switch this night gate to the release tier (accept.py --mode release, both profiles) once the
+# backtest (ci/quick_backtest.sh) has passed and the references are recorded; then drop skip_tier_check below.
 # NOTE: this night gate still runs the old fast/full BetterBench gate (baselines), not the release tier;
 # its release.yml dispatch therefore passes skip_tier_check=true until the night path is moved to the release
-# tier (needs the Inkling service in gpu-window, see ci/README.md).
+# tier (see ci/README.md, "GPU tiers").
 #
 # Pause switch: repository variable AUTO_MAINTAIN=off skips this workflow (and Renovate's stack PRs).
 # The manual gate stays accept.yml (approval-gated environment `gpu-window`); the two share one

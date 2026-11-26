@@ -32,10 +32,12 @@ the first hard failure but still runs the release phase.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -133,6 +135,133 @@ class GpuWindow:
             return self._json("release", timeout=1800)
         finally:
             self.held = False
+
+
+def inkling_docker_argv(image: str, name: str, port: int, model_dir: str, drafter_dir: str,
+                        cache_dir: str, extra_env: list[str] | None = None) -> list[str]:
+    """`docker run` of the Inkling release arm (ink-200 rel/out5/ON/args.json); the hand-run twin is
+    start_inkling() in ci/quick_backtest.sh. One `-e` per variable."""
+    env = ["HIP_VISIBLE_DEVICES=0", "GPU_MAX_HW_QUEUES=1", "RADIANCE_INKLING2_HIP_MOE=1",
+           "RADIANCE_INKLING2_MXFP4_DENSE=1", "HF_HUB_OFFLINE=1", *(extra_env or [])]
+    argv = ["docker", "run", "-d", "--name", name, "--device=/dev/kfd", "--device=/dev/dri",
+            "--group-add", "video", "--security-opt", "label=disable", "--ipc=host"]
+    for kv in env:
+        argv += ["-e", kv]
+    argv += ["-p", f"{port}:8000", "-v", f"{model_dir}:/model:ro", "-v", f"{drafter_dir}:/models/dflash2:ro",
+             "-v", f"{cache_dir}/triton:/root/.triton", image, "/model",
+             "--served-model-name", "inkling2-mini", "--gpu-memory-utilization", "0.92",
+             "--limit-mm-per-prompt", '{"image":0}', "--reasoning-parser", "inkling",
+             "--enable-auto-tool-choice", "--tool-call-parser", "inkling", "--max-model-len", "32768",
+             "--max-num-seqs", "8", "--no-enable-prefix-caching", "--no-async-scheduling",
+             "--speculative-config",
+             '{"method":"dflash","model":"/models/dflash2","num_speculative_tokens":7,'
+             '"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}']
+    return argv
+
+
+class LocalDockerWindow(GpuWindow):
+    """A gpu-window whose candidate is a container we start ourselves (no service unit in the helper).
+
+    Runs on the GPU host (the runner needs docker and may stop/start the prod unit). Contract:
+        acquire (lock, via the helper) -> systemctl stop <prod> -> docker run -> health ...
+        docker rm -f -> systemctl start <prod> -> release (helper: verifies /health)
+    `cleanup()` is idempotent and runs from release(), from the atexit hook and from SIGTERM/SIGINT (a
+    cancelled GitHub job), so the container is removed and prod is restored on every exit path we control.
+    A SIGKILL is covered by gpu-window-guard.timer (restores prod when the TTL runs out).
+    """
+
+    def __init__(self, target, key, owner, ttl, dry_run=False, load_format="auto", *, run=None, ssh=None,
+                 health=None, sleep=time.sleep, prod_service="docker-vllm7.service", port=8001,
+                 container="vllm-accept-inkling", model_dir=None, drafter_dir=None, cache_dir=None,
+                 health_wait_s=1200, install_signals=True, extra_env=None):
+        super().__init__(target, key, owner, ttl, dry_run, load_format)
+        self._run = run or self._subprocess_run
+        if ssh:
+            self._ssh = lambda *a, timeout=900: ssh(*a)
+        self._health = health or (lambda url: http_get(url, timeout=10)[0])
+        self._sleep, self.prod, self.port, self.container = sleep, prod_service, port, container
+        self.model_dir = model_dir or os.environ.get("ACCEPT_INKLING_MODEL", "/root/inkling2-mini")
+        self.drafter_dir = drafter_dir or os.environ.get("ACCEPT_INKLING_DRAFTER", "/root/dflash2-ink/model")
+        self.cache_dir = cache_dir or os.environ.get("ACCEPT_INKLING_CACHE", "/root/accept-inkling-cache")
+        self.health_wait_s, self.extra_env = health_wait_s, extra_env
+        self._prod_stopped = self._started = self._cleaned = False
+        if install_signals:
+            self.install_signal_handlers()
+            atexit.register(self.cleanup)
+
+    @staticmethod
+    def install_signal_handlers() -> None:
+        def bye(signum, frame):  # noqa: ARG001 - raise so every `finally` / atexit runs
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, bye)
+        signal.signal(signal.SIGINT, bye)
+
+    @staticmethod
+    def _subprocess_run(argv, check=True, timeout=300, **kw):  # noqa: ARG004
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"{' '.join(argv[:3])} failed (rc={proc.returncode}): "
+                               f"{(proc.stderr or proc.stdout).strip()[:400]}")
+        return proc.stdout
+
+    def start(self, image: str, service: str) -> dict:  # noqa: ARG002 - `service` is the profile's, unused
+        t0 = time.time()
+        self._cleaned = False
+        # flag first: a stop that fails half way must still be answered by a start in cleanup()
+        self._prod_stopped = True
+        self._run(["systemctl", "stop", self.prod], timeout=600)
+        self._run(["docker", "rm", "-f", self.container], check=False)
+        self._started = True
+        self._run(inkling_docker_argv(image, self.container, self.port, self.model_dir, self.drafter_dir,
+                                      self.cache_dir, self.extra_env))
+        url = f"http://127.0.0.1:{self.port}/health"
+        waited = 0
+        while self._health(url) != 200:
+            if self._run(["docker", "inspect", "-f", "{{.State.Running}}", self.container],
+                         check=False).strip() == "false":
+                raise RuntimeError("candidate container died during startup")
+            if waited >= self.health_wait_s:
+                raise RuntimeError(f"candidate not healthy after {self.health_wait_s}s")
+            self._sleep(2)
+            waited += 2
+        text = self.logs()
+        m = re.findall(r"GPU KV cache size:\s*([\d,._]+)\s*tokens", text)
+        return {"container": self.container, "image": image, "startup_s": round(time.time() - t0, 1),
+                "kv_tokens": int(re.sub(r"[,._]", "", m[-1])) if m else None}
+
+    def logs(self, lines: int = 999_999) -> str:  # noqa: ARG002
+        return self._run(["docker", "logs", self.container], check=False)
+
+    def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
+        errors = []
+        if self._started or self._prod_stopped:
+            try:
+                self._run(["docker", "rm", "-f", self.container], check=False)
+            except Exception as exc:  # noqa: BLE001 - restoring prod must still happen
+                errors.append(str(exc))
+        if self._prod_stopped:
+            try:
+                self._run(["systemctl", "start", self.prod], timeout=600)
+                self._prod_stopped = False
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        self._started = False
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def release(self) -> dict:
+        err = None
+        try:
+            self.cleanup()
+        except Exception as exc:  # noqa: BLE001 - the helper's release (guard, health check) still runs
+            err = exc
+        res = super().release()
+        if err:
+            raise err
+        return res
 
 
 # --------------------------------------------------------------------------- #
@@ -848,8 +977,17 @@ def main() -> int:
     results: dict = {}
     failures: list[str] = []
     load_format = profile.get("load_format", "auto")
-    win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
-                    load_format=load_format)
+    if profile.get("window") == "local-docker":
+        # no service unit in the helper: the candidate is our own container on the GPU host (class docstring)
+        base_url = f"http://127.0.0.1:{profile.get('port', 8001)}"
+        win = LocalDockerWindow(
+            args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run, load_format,
+            prod_service=profile.get("prod_service", "docker-vllm7.service"), port=profile.get("port", 8001),
+            run=(lambda argv, **kw: log(f"DRY-RUN: {' '.join(argv[:4])}") or "") if args.dry_run else None,
+            health=(lambda url: 200) if args.dry_run else None, install_signals=not args.dry_run)
+    else:
+        win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
+                        load_format=load_format)
 
     def before(phase: str) -> None:
         if args.deadline and time.time() > args.deadline:
@@ -861,8 +999,8 @@ def main() -> int:
         results["acquire"] = _acquire_with_retry(win, args)
 
         before("start")
-        log(f"starting candidate {args.image} ({profile['service']})")
-        results["start"] = win.start(args.image, profile["service"])
+        log(f"starting candidate {args.image} ({profile.get('service') or 'own container'})")
+        results["start"] = win.start(args.image, profile.get("service", ""))
         log(f"candidate up: {json.dumps(results['start'])}")
 
         log("checking logs")

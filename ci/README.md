@@ -66,13 +66,27 @@ first recording window has run**. (`--record`, only on a known-good image, is th
 job (needs every leg) re-reads both statuses with `quick_bench.py release-check` and only then tags. `release.yml`
 (manual) checks the same two statuses; `skip_tier_check` is the audited override (the reason goes into the tag
 message). The night gate (`accept-night.yml`) still runs the old fast/full gate and passes `skip_tier_check=true`
-until it is moved to the release tier.
+until it is moved to the release tier (TODO in the workflow).
 
-**Blocker outside this repo:** `gpu-window` / `gpu-window-ssh` (homelab repo) only accept `docker-vllm7.service` and
-`docker-vllm5.service`. The `inkling` leg needs a `docker-vllm-inkling.service` unit (ExecStart of the ink-200
-release arm, see `ci/quick_backtest.sh` `start_inkling`) and a whitelist entry in `is_service` /
-`PROD_SERVICES`. Until then the `inkling` leg fails at `start` and releases fail closed (manual
-`release.yml` + `skip_tier_check` remains possible).
+**Inkling leg without a helper change.** `gpu-window` only knows the prod units, so the `inkling` profile
+(`"window": "local-docker"`) runs inside its own window like our hand chains: `acquire` (helper lock) ->
+`systemctl stop docker-vllm7.service` -> `docker run` of the release-arm container on :8001 (`inkling_docker_argv`
+in `accept.py`, hand-run twin `start_inkling` in `ci/quick_backtest.sh`, a unit test keeps them in step) -> health ->
+release tier -> `docker rm -f` -> `systemctl start docker-vllm7.service` -> helper `release` (checks `/health`).
+`LocalDockerWindow.cleanup()` is idempotent and runs from `release()`, an `atexit` hook and SIGTERM/SIGINT (a cancelled
+job); the order and every failure path are unit-tested against a mocked docker/systemctl
+(`ci/tests/test_local_window.py`). A SIGKILL is left to `gpu-window-guard.timer`. Because it starts docker itself, this
+leg runs on the GPU host runner (`rocm-build` label, LXC 2408); the runner user needs docker, permission to
+stop/start `docker-vllm7.service` and read access to the model dirs (repo variables `ACCEPT_INKLING_MODEL`,
+`ACCEPT_INKLING_DRAFTER`, `ACCEPT_INKLING_CACHE`, defaults `/root/inkling2-mini`, `/root/dflash2-ink/model`,
+`/root/accept-inkling-cache`). That is unverified until the first run. Each profile keeps its own window and its own
+`gpu-window` approval.
+
+**`skip_tier_check` (audited override).** `release.yml` refuses to tag unless both `release-tier/*` statuses are
+green on the commit; `skip_tier_check=true` overrides that, the mandatory `reason` goes into the tag message and the
+run summary says `release tier: skipped`. The night gate uses it today (TODO in `accept-night.yml`: move it to the
+release tier after the backtest passed, then drop the flag). Do not use it to get past a red release tier without
+writing why.
 
 ### Backtest and recording (one GPU window each, not run yet)
 
