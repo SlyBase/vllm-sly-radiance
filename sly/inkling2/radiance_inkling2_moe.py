@@ -248,9 +248,18 @@ def _fp4_val(code, SAFE: tl.constexpr):
 
 
 @triton.jit
+def _to_bf16(x, TRUNC: tl.constexpr):
+    """fp32 -> bf16. TRUNC: keep the top 16 bits (a shift instead of the rounding sequence); exact for the
+    decoded e2m1 x e4m3 values (<= 5 significant bits)."""
+    if TRUNC:
+        return (x.to(tl.int32, bitcast=True) >> 16).to(tl.int16).to(tl.bfloat16, bitcast=True)
+    return x.to(tl.bfloat16)
+
+
+@triton.jit
 def _dequant_act(Act, ActScale, Tiles, Out, MAX_CTAS: tl.constexpr, K: tl.constexpr,
                  TILE: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr, DT: tl.constexpr,
-                 SAFE: tl.constexpr):
+                 SAFE: tl.constexpr, TRUNC: tl.constexpr):
     """Routed activation rows -> DT `[rows, K]`, each BK block stored as [even k | odd k], once per
     row instead of once per output column block."""
     tile = tl.program_id(0)
@@ -267,8 +276,13 @@ def _dequant_act(Act, ActScale, Tiles, Out, MAX_CTAS: tl.constexpr, K: tl.conste
         s = tl.load(ActScale + _scale_offsets(rows[:, None], (k * (BK // 16) + j // 8)[None, :], K // 16, TILE),
                     valid[:, None], other=0.0).to(tl.float32)
         out = Out + rows[:, None].to(tl.int64) * K + k * BK + j[None, :]
-        tl.store(out, (_fp4_val(p & 15, SAFE) * s).to(DT), valid[:, None])
-        tl.store(out + half, (_fp4_val(p >> 4, SAFE) * s).to(DT), valid[:, None])
+        lo, hi = _fp4_val(p & 15, SAFE) * s, _fp4_val(p >> 4, SAFE) * s
+        if TRUNC:
+            tl.store(out, _to_bf16(lo, True), valid[:, None])
+            tl.store(out + half, _to_bf16(hi, True), valid[:, None])
+        else:
+            tl.store(out, lo.to(DT), valid[:, None])
+            tl.store(out + half, hi.to(DT), valid[:, None])
 
 
 @triton.jit
@@ -276,7 +290,7 @@ def _expert_gemm_v2(
     ActDQ, RowScale, Weight, WeightScale, ExpertScale, Out, Tiles,
     MAX_CTAS: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE: tl.constexpr,
     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, DT: tl.constexpr, SAFE: tl.constexpr,
-    GS: tl.constexpr,
+    GS: tl.constexpr, TRUNC: tl.constexpr,
 ):
     """`_expert_gemm` with the activation already dequantised (`_dequant_act`) and the weight nibbles
     kept apart: even-k and odd-k halves are two dots (a sum over k does not care about the order), so no
@@ -304,14 +318,20 @@ def _expert_gemm_v2(
                         cmask[:, None, None], other=0).to(tl.int32)
             s = tl.load(WeightScale + w_row * (K // 16) + k * (BK // 16) + g[None, :],
                         cmask[:, None], other=0.0).to(tl.float32)[:, :, None]
-            w_lo = tl.reshape((_fp4_val(w & 15, SAFE) * s).to(DT), (BN, half))
-            w_hi = tl.reshape((_fp4_val(w >> 4, SAFE) * s).to(DT), (BN, half))
+            lo, hi = _fp4_val(w & 15, SAFE) * s, _fp4_val(w >> 4, SAFE) * s
+            if TRUNC:
+                w_lo, w_hi = tl.reshape(_to_bf16(lo, True), (BN, half)), tl.reshape(_to_bf16(hi, True), (BN, half))
+            else:
+                w_lo, w_hi = tl.reshape(lo.to(DT), (BN, half)), tl.reshape(hi.to(DT), (BN, half))
         else:
             w = tl.load(Weight + w_row * (K // 2) + k * half + j[None, :], cmask[:, None], other=0).to(tl.int32)
             s = tl.load(WeightScale + w_row * (K // 16) + k * (BK // 16) + (j // 8)[None, :],
                         cmask[:, None], other=0.0).to(tl.float32)
-            w_lo = (_fp4_val(w & 15, SAFE) * s).to(DT)
-            w_hi = (_fp4_val(w >> 4, SAFE) * s).to(DT)
+            lo, hi = _fp4_val(w & 15, SAFE) * s, _fp4_val(w >> 4, SAFE) * s
+            if TRUNC:
+                w_lo, w_hi = _to_bf16(lo, True), _to_bf16(hi, True)
+            else:
+                w_lo, w_hi = lo.to(DT), hi.to(DT)
         acc = tl.dot(a_lo, tl.trans(w_lo), acc)
         acc = tl.dot(a_hi, tl.trans(w_hi), acc)
     acc *= tl.load(ExpertScale + expert)
@@ -328,7 +348,7 @@ def prefill_v2(tile=None):
 
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
                       block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16,
-                      v2=None, v2_safe=False, v2_gs=True, **launch):
+                      v2=None, v2_safe=False, v2_gs=True, v2_trunc=False, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
@@ -355,13 +375,14 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
         dq = torch.empty((plan.rows, k), dtype=torch.float32 if dot_dtype == tl.float32 else torch.bfloat16,
                          device=act.device)
         br = min(16, bm)
+        trunc = bool(v2_trunc) and dot_dtype == tl.bfloat16  # a shift instead of the rounding sequence, exact here
         _dequant_act[(plan.max_ctas, triton.cdiv(plan.tile, br))](
             act, act_scale, tiles, dq, MAX_CTAS=plan.max_ctas, K=k, TILE=plan.tile, BK=bk, BR=br,
-            DT=dot_dtype, SAFE=v2_safe)
+            DT=dot_dtype, SAFE=v2_safe, TRUNC=trunc)
         _expert_gemm_v2[(triton.cdiv(n, bn), triton.cdiv(plan.tile, bm), plan.max_ctas)](
             dq, row_scale, weight, weight_scale, expert_scale, out, tiles,
             MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype,
-            SAFE=v2_safe, GS=v2_gs, **launch)
+            SAFE=v2_safe, GS=v2_gs, TRUNC=trunc, **launch)
         return out
     _expert_gemm[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
         act, act_scale, row_scale, weight, weight_scale, expert_scale, out, tiles,

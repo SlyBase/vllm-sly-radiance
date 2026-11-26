@@ -160,3 +160,23 @@ def test_default_tile_128_launches_v2_with_the_measured_config(monkeypatch):
                         z(1, dt=torch.float32), z(9, dt=torch.int32), plan)
     kw = spy.kw
     assert (kw["BM"], kw["BN"], kw["BK"], kw["num_warps"], kw["num_stages"], kw["GS"]) == (128, 128, 32, 4, 2, True)
+
+
+@triton.jit
+def _convert(X, Out, TRUNC: tl.constexpr, N: tl.constexpr):
+    from radiance_inkling2_moe import _to_bf16
+
+    i = tl.arange(0, N)
+    tl.store(Out + i, _to_bf16(tl.load(X + i), TRUNC))
+
+
+@pytest.mark.parametrize("trunc", [False, True])
+def test_to_bf16_is_exact_for_values_with_at_most_8_significant_bits(trunc):
+    """Every e2m1 x e4m3-scale product has <= 5 significant bits: truncation == rounding."""
+    codes = torch.tensor(E2M1 + [-v for v in E2M1])
+    scales = torch.tensor([0.015625, 0.25, 1.0, 1.875, 3.5, 13.0, 448.0]).to(torch.float8_e4m3fn).float()
+    x = torch.zeros(128)
+    x[:112] = (codes[:, None] * scales[None, :]).reshape(-1)  # 16 codes x 7 scales, padded to a power of two
+    out = torch.empty(128, dtype=torch.bfloat16)
+    _convert[(1,)](x, out, TRUNC=trunc, N=128)
+    assert torch.equal(out.float(), x)
