@@ -304,10 +304,10 @@ def run_dq_estimate(r, experts, dev, clock, reps):
         act = torch.randint(0, 256, (experts * per, k // 2), dtype=torch.uint8, device=dev)
         asc = (torch.rand(experts * per, k // 16, device=dev) + 0.5).to(torch.float8_e4m3fn)
         aout = torch.empty(experts * per, k, dtype=torch.bfloat16, device=dev)
-        dq_w = clock.us(lambda: _dq_kernel[(experts * n // 16,)](w, ws, out, K=k, BR=16), reps)
-        dq_a = clock.us(lambda: _dq_kernel[(experts * per // 16,)](act, asc, aout, K=k, BR=16), reps)
+        dq_w = clock.us(lambda: _dq_kernel[(experts * n // 16,)](w, ws, out, K=k, BR=16), reps)  # noqa: F821 (locals of the enclosing loop; ruff 0.17 reads them as globals after `global`)
+        dq_a = clock.us(lambda: _dq_kernel[(experts * per // 16,)](act, asc, aout, K=k, BR=16), reps)  # noqa: F821 (locals of the enclosing loop; ruff 0.17 reads them as globals after `global`)
         a3, w3 = aout.view(experts, per, k), out.view(experts, n, k)
-        bmm = clock.us(lambda: torch.bmm(a3, w3.transpose(1, 2)), reps)
+        bmm = clock.us(lambda: torch.bmm(a3, w3.transpose(1, 2)), reps)  # noqa: F821 (locals of the enclosing loop; ruff 0.17 reads them as globals after `global`)
         total += dq_w + dq_a + bmm
         print(json.dumps(dict(dq_estimate=dict(n=n, k=k, dq_weights_us=round(dq_w), dq_act_us=round(dq_a),
                                                bmm_us=round(bmm), bmm_tflops=round(flops(per * experts, n, k) / bmm / 1e6, 1)))),

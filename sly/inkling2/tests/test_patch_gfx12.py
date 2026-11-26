@@ -564,7 +564,7 @@ def test_fp8_kv_unpack_reads_the_e4m3_values(tree):
     def probe(Src, Offsets, Out, N: tl.constexpr, D: tl.constexpr):
         i = tl.arange(0, N)
         off = tl.load(Offsets + i)
-        x = _patched_sm90._load_fp8_kv(Src, off, i < N - 1, tl.float32, D)   # the last row is masked out
+        x = _patched_sm90._load_fp8_kv(Src, off, i < N - 1, tl.float32, D)   # the last row is masked out  # noqa: F821
         tl.store(Out + i[:, None] * D + tl.arange(0, D)[None, :], x)
 
     D, N = 16, 4
