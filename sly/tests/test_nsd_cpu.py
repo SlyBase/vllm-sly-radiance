@@ -172,11 +172,13 @@ def test_patch_structure_and_idempotence():
         r1 = _run_patch(site)
         assert r1.returncode == 0 and r1.stdout.count("OK ") >= 6, f"pass 1:\n{r1.stdout}\n{r1.stderr}"
         r2 = _run_patch(site)
-        assert r2.returncode == 0 and "OK " not in r2.stdout and r2.stdout.count("NOOP") == r1.stdout.count("OK "), r2.stdout
+        assert r2.returncode == 0 and "OK " not in r2.stdout and r2.stdout.count("NOOP") == r1.stdout.count("OK ") + 2, r2.stdout   # +2: the upgrade hunks (nsd fix) are NOOP on a fresh tree
         s = target.read_text()
         ast.parse(s)
         assert s.count('"RADIANCE_NSD"') == 1 and s.count('"RADIANCE_NSD_THETA"') == 1, "env reads must be module-level, once"
         assert "USE_NSD: tl.constexpr" in s and "if USE_NSD:" in s, "knob-off path must be a constexpr branch"
+        assert "(nsd_mass <= nsd_theta) & is_valid_draft & (temp != 0.0)" in s, "greedy rows / -1 slots must not take the NSD OR"
+        assert "new_full(" in s and "nsd_partial = target_logits.new_empty" not in s, "nsd buffer must be initialised"
         assert "tl.where(logits > token_logit" in s, "strictly-greater mask missing"
         assert "sort" not in s.split("_nsd_nucleus_mass_kernel")[1].split("_rejection_kernel")[0], "no sort allowed"
 
@@ -217,6 +219,24 @@ def test_patched_kernel_in_triton_interpreter():
         assert r.returncode == 0 and "nsd kernel check OK" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
 
 
+def test_greedy_and_masked_slots_never_take_the_nsd_or():
+    """Greedy rows are exactly the argmax rule, -1 slots end verification, the mass buffer starts above theta."""
+    src = _pinned_source()
+    try:
+        import triton  # noqa: F401
+    except ImportError:
+        return _skip("triton not installed (the interpreter check runs where it is)")
+    if src is None:
+        return _skip("pinned vLLM source not available")
+    td, site, target = _scratch_site(src)
+    with td:
+        assert _run_patch(site).returncode == 0
+        env = dict(os.environ, TRITON_INTERPRET="1")
+        r = subprocess.run([sys.executable, str(ROOT / "sly" / "tests" / "nsd_garbage_check.py"), str(target)],
+                           env=env, capture_output=True, text=True, timeout=1200)
+        assert r.returncode == 0 and "nsd garbage check OK" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
         _ARGV_SOURCE = Path(sys.argv[1])
@@ -226,4 +246,5 @@ if __name__ == "__main__":
     test_patch_structure_and_idempotence()
     test_patch_order_independent_of_cactus()
     test_patched_kernel_in_triton_interpreter()
+    test_greedy_and_masked_slots_never_take_the_nsd_or()
     print("nsd CPU tests OK")

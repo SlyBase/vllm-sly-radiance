@@ -27,7 +27,12 @@ from _patchlib import apply, apply_any
 
 V = Path(sysconfig.get_paths()["purelib"]) / "vllm"
 NEXT = V / "model_executor/models/qwen3_next.py"
+# vLLM main@1bdc437 deleted qwen2_moe.py (Qwen2MoeForCausalLM now rides the Transformers backend)
+# and Qwen3NextMLP became `Qwen3MoeMLP` in qwen3_moe.py -- same forward body, same act_fn call.
+# The hook follows the class the model actually uses; on an older tree qwen2_moe.py still wins.
 MOE = V / "model_executor/models/qwen2_moe.py"
+if not MOE.is_file():
+    MOE = V / "model_executor/models/qwen3_moe.py"
 GDN = V / "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
 ENVS = V / "envs.py"
 
@@ -43,8 +48,11 @@ IMPORT = (
 IMPORT_SENTINEL = "    import radiance_fused_norm as _rfn\n"
 
 # ---- qwen3_next.py ------------------------------------------------------------------------------
-A = "from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP\n"
-apply(NEXT, A, A + IMPORT, IMPORT_SENTINEL, "qwen3_next: import radiance_fused_norm")
+# Re-anchored for vLLM main@1bdc437: the MLP import moved from qwen2_moe to qwen3_moe.
+A = "from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP\n"
+A_OLD = "from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP\n"
+apply_any(NEXT, [(A, A + IMPORT), (A_OLD, A_OLD + IMPORT)],
+          IMPORT_SENTINEL, "qwen3_next: import radiance_fused_norm")
 
 A = ("        else:\n"
      "            hidden_states, residual = self.input_layernorm(hidden_states, residual)\n")

@@ -398,3 +398,32 @@ radiance-benchmarks `avab-V0a/V1a/V1b/V0b` (metrics attached).
 Revisit when: (a) the production load profile shifts to sustained concurrency ≥4 so the budget binds most
 of the time; (b) upstream makes the non-trimming path free at low concurrency; (c) a concurrency-heavy
 deployment wants it opt-in — then measure a conc 2/4/8 A/B (the gate's full-sweep shape) first.
+
+## Inkling 2 Mini (2026-11)
+
+Measured entries: gfx1201, 210 W, arguments in [INKLING2-MINI.md](INKLING2-MINI.md). Two outside engines
+with an Inkling 2 path were read for ideas; only the two ideas marked "taken over" were tried, and no code
+was copied.
+
+**Strata** ([Niko1221/Strata](https://github.com/Niko1221/Strata), MIT, llama.cpp-based engine with an Inkling 2 HIP path):
+
+| Item | Why not |
+|---|---|
+| Beam-tree verify | Engine-specific, no ablation that isolates its gain, large effort. |
+| Its expert kernels | Not shown to be faster than ours (529-648 GB/s, 3.1-6.8x Triton); nothing to swap in. |
+| FP4 matrix instructions | gfx12 has no FP4 MMA unit; NVFP4 codes go through `v_dot4_f32_fp8_fp8` instead (exact). |
+| hipBLASLt for the dense GEMMs at M = 8 (idea taken over as a check) | Measured: not faster than our HIP GEMV. |
+| Drafter shortlist (idea taken over) | Implemented as `RADIANCE_INKLING2_DRAFT_SHORTLIST`, **off**: -1.7 ms per step, but acceptance on code 3.43 -> 2.97 tokens per step. |
+
+**Basalt** ([jesdga95/basalt](https://github.com/jesdga95/basalt), CUDA sm_120): numbers and design read
+only; the kernels are CUDA and do not run on gfx1201.
+
+**Own measurements:**
+
+| Item | Why not |
+|---|---|
+| int8 activations (W8A8) for the dense projections | Lossy beyond the weight-only Q8_0 path (`RADIANCE_INKLING2_W8=1`), which already reads 1.5-1.8x faster than bf16 (KLD mean 0.0081). |
+| `HSA_ENABLE_INTERRUPT=0`, `HIP_FORCE_DEV_KERNARG=1`, power profile `COMPUTE`, CPU pinning, `--max-model-len` | Tried against the slow start state (62 vs 31 ms per verify step): no effect. The state was caused by the cooperative launch of the fused route kernel and is gone since it was removed ([TECHNICAL.md](TECHNICAL.md#inkling-2-mini-on-gfx1201-unreleased)). |
+
+Revisit when: (a) gfx12 gets an FP4 matrix instruction; (b) Strata publishes an ablation of its beam-tree
+verify.

@@ -196,7 +196,10 @@ apply(TARGET,
       "                            ),\n"
       "                            axis=0,\n"
       "                        )\n"
-      "                        accepted = accepted | (nsd_mass <= nsd_theta)\n"
+      "                        # radiance nsd fix: only sampled rows and real drafts; greedy rows and -1 slots have no partial\n"
+      "                        accepted = accepted | (\n"
+      "                            (nsd_mass <= nsd_theta) & is_valid_draft & (temp != 0.0)\n"
+      "                        )\n"
       "                    verifying = accepted\n"
       "                    accepted_length += accepted\n"
       "                    tl.store(\n"
@@ -217,8 +220,9 @@ apply(TARGET,
       "    )\n"
       "    nsd_partial = None\n"
       "    if use_nsd:\n"
-      "        nsd_partial = target_logits.new_empty(\n"
-      "            num_logits, vocab_num_blocks, dtype=torch.float32\n"
+      "        # radiance nsd fix: +inf = never in the nucleus; the mass kernel skips greedy rows and -1 slots\n"
+      "        nsd_partial = target_logits.new_full(\n"
+      "            (num_logits, vocab_num_blocks), float(\"inf\"), dtype=torch.float32\n"
       "        )\n"
       "        _nsd_nucleus_mass_kernel[(num_reqs, vocab_num_blocks)](\n"
       "            nsd_partial,\n"
@@ -263,3 +267,26 @@ apply(TARGET,
       "        vocab_num_blocks,\n",
       "# radiance nsd: launch args",
       "nsd: kernel launch (rejection)")
+
+# 7./8. upgrade hunks for a tree patched by the pre-fix version of this file (e.g. the ink-k9 image):
+# hunks 4 and 5 are NOOP there (their sentinels are present), so the fix is applied over the old text.
+# On a fresh tree hunks 4/5 already emit the fixed text and these two are NOOP ("radiance nsd fix").
+apply(TARGET,
+      "                        accepted = accepted | (nsd_mass <= nsd_theta)\n",
+      "                        # radiance nsd fix: only sampled rows and real drafts; greedy rows and -1 slots have no partial\n"
+      "                        accepted = accepted | (\n"
+      "                            (nsd_mass <= nsd_theta) & is_valid_draft & (temp != 0.0)\n"
+      "                        )\n",
+      "# radiance nsd fix: only sampled rows",
+      "nsd fix: accept only sampled rows and real drafts")
+
+apply(TARGET,
+      "        nsd_partial = target_logits.new_empty(\n"
+      "            num_logits, vocab_num_blocks, dtype=torch.float32\n"
+      "        )\n",
+      "        # radiance nsd fix: +inf = never in the nucleus; the mass kernel skips greedy rows and -1 slots\n"
+      "        nsd_partial = target_logits.new_full(\n"
+      "            (num_logits, vocab_num_blocks), float(\"inf\"), dtype=torch.float32\n"
+      "        )\n",
+      "# radiance nsd fix: +inf = never",
+      "nsd fix: initialise the mass buffer")

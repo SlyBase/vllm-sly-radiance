@@ -34,7 +34,7 @@ fused-norm lines) and sly/patch_nvfp4_compile_key (the compile_factors line).
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(sysconfig.get_paths()["purelib"])
 IMPORT = ("try:  # --- radiance (sly/patch_w4a16_fuse.py): W4A16 fused call sites ---\n"
@@ -43,29 +43,40 @@ IMPORT = ("try:  # --- radiance (sly/patch_w4a16_fuse.py): W4A16 fused call site
           "    _radiance_w4a16 = None\n")
 
 # --- 1. post-load hook in the V2 model runner ---
-apply(SP / "vllm/v1/worker/gpu/model_runner.py",
-      "                    eplb_models_added = self.eplb.maybe_register_speculator(\n"
-      "                        self.speculator, self.speculative_config, load_dummy_weights\n"
-      "                    )\n"
-      "        time_after_load = time.perf_counter()\n",
-      "                    eplb_models_added = self.eplb.maybe_register_speculator(\n"
-      "                        self.speculator, self.speculative_config, load_dummy_weights\n"
-      "                    )\n"
-      "            # radiance (sly/patch_w4a16_fuse.py): W4A16 post-load fusions before profiling / capture\n"
-      "            try:\n"
-      "                from vllm.model_executor.kernels.linear.mixed_precision import (\n"
-      "                    rdna_hybrid_w4a16 as _rw4,\n"
-      "                )\n"
-      "\n"
-      "                _rw4.radiance_w4a16_postload(self.model, getattr(self.speculator, \"model\", None))\n"
-      "            except Exception as _rw4_exc:  # a speed transform never fails the load\n"
-      "                logger.warning(\"radiance w4a16 post-load skipped: %r\", _rw4_exc)\n"
-      "        time_after_load = time.perf_counter()\n",
-      "_rw4.radiance_w4a16_postload(self.model",
-      "gpu/model_runner: W4A16 post-load hook")
+# Re-anchored for vLLM main@1bdc437: the drafter block gained log_layer_backends(), a
+# prefill_context_kv_only guard around the eplb registration (one more indent level) and
+# free_unused_weights(). The hook keeps its original scope: after the whole drafter block,
+# inside the load memory profile, before time_after_load -- it runs with or without a drafter.
+_MR_TAIL = "        time_after_load = time.perf_counter()\n"
+_MR_EPLB = (
+    "                    eplb_models_added = self.eplb.maybe_register_speculator(\n"
+    "                        self.speculator, self.speculative_config, load_dummy_weights\n"
+    "                    )\n"
+)
+_MR_HOOK = (
+    "            # radiance (sly/patch_w4a16_fuse.py): W4A16 post-load fusions before profiling / capture\n"
+    "            try:\n"
+    "                from vllm.model_executor.kernels.linear.mixed_precision import (\n"
+    "                    rdna_hybrid_w4a16 as _rw4,\n"
+    "                )\n"
+    "\n"
+    "                _rw4.radiance_w4a16_postload(self.model, getattr(self.speculator, \"model\", None))\n"
+    "            except Exception as _rw4_exc:  # a speed transform never fails the load\n"
+    "                logger.warning(\"radiance w4a16 post-load skipped: %r\", _rw4_exc)\n"
+)
+_MR_FREE = "                    self.speculator.free_unused_weights(self.model)\n"
+apply_any(SP / "vllm/v1/worker/gpu/model_runner.py",
+          [(_MR_FREE + _MR_TAIL, _MR_FREE + _MR_HOOK + _MR_TAIL),
+           (_MR_EPLB + _MR_TAIL, _MR_EPLB + _MR_HOOK + _MR_TAIL)],
+          "_rw4.radiance_w4a16_postload(self.model",
+          "gpu/model_runner: W4A16 post-load hook")
 
 # --- 2a. dense MLP of Qwen3.5 / 3.8 ---
+# vLLM main@1bdc437 deleted qwen2_moe.py: Qwen3NextMLP is now Qwen3MoeMLP in qwen3_moe.py
+# (same forward body). The hook follows the class; an older tree still has qwen2_moe.py.
 F = SP / "vllm/model_executor/models/qwen2_moe.py"
+if not F.is_file():
+    F = SP / "vllm/model_executor/models/qwen3_moe.py"
 apply(F,
       "try:  # --- radiance (sly/patch_fused_norm_quant.py): RADIANCE_FUSED_NORM_QUANT ---\n",
       IMPORT + "_RADIANCE_W4_SILU = _radiance_w4a16 is not None\n"
@@ -89,13 +100,20 @@ apply(F,
       "gate_up GEMM + silu(gate) * up in one kernel\n            out = _radiance_w4a16.radiance_mlp_forward",
       "qwen2_moe: Qwen2MoeMLP fused W4A16 silu")
 
-# --- 2b. the drafter's MLP (qwen3.py: Qwen3MLP = Qwen2MLP) ---
+# --- 2b. the drafter's MLP (qwen3.py: Qwen3MLP) ---
+# vLLM main@1bdc437 deleted qwen2.py: Qwen3MLP is now defined in qwen3.py itself (it used to be
+# `from .qwen2 import Qwen2MLP as Qwen3MLP`), with the identical forward body. qwen3_dflash.py
+# still builds its mlp from .qwen3.Qwen3MLP, so the hook follows the class into qwen3.py.
 F = SP / "vllm/model_executor/models/qwen2.py"
-apply(F,
-      "class Qwen2MLP(nn.Module):\n",
-      IMPORT + "_RADIANCE_W4_SILU = _radiance_w4a16 is not None\n\n\nclass Qwen2MLP(nn.Module):\n",
-      "_RADIANCE_W4_SILU = _radiance_w4a16 is not None",
-      "qwen2: W4A16 fusion import")
+if not F.is_file():
+    F = SP / "vllm/model_executor/models/qwen3.py"
+apply_any(F,
+          [("class Qwen3MLP(nn.Module):\n",
+            IMPORT + "_RADIANCE_W4_SILU = _radiance_w4a16 is not None\n\n\nclass Qwen3MLP(nn.Module):\n"),
+           ("class Qwen2MLP(nn.Module):\n",
+            IMPORT + "_RADIANCE_W4_SILU = _radiance_w4a16 is not None\n\n\nclass Qwen2MLP(nn.Module):\n")],
+          "_RADIANCE_W4_SILU = _radiance_w4a16 is not None",
+          "qwen2: W4A16 fusion import")
 apply(F,
       "    def forward(self, x):\n"
       "        gate_up, _ = self.gate_up_proj(x)\n"

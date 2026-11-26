@@ -74,9 +74,23 @@ ARG TORCHVISION_VERSION=0.28.0
 # (aiter/ops/triton/__init__.py: "unified_attention": "attention.unified_attention", checked in
 # the v0.1.24.post1 tree). rocm_aiter_unified_attn stays usable, so nothing holds the pin here.
 # renovate: datasource=github-tags depName=ROCm/aiter versioning=pep440 extractVersion=^v(?<version>.+)$
-ARG AITER_VERSION=0.1.28.post1
+# main@1bdc437's sanctioned stand (docker/Dockerfile.rocm_base AITER_BRANCH v0.1.29.post1), derived
+# by ci/resolve_stack.py from the built ref. The trio (torch 2.13 / triton 3.8.0+git669b31ac /
+# torchvision 0.28) is unchanged at this base move.
+ARG AITER_VERSION=0.1.29.post1
 # renovate: datasource=github-releases depName=vllm-project/vllm extractVersion=^v(?<version>\d+\.\d+\.\d+)$
+# VLLM_VERSION is the last RELEASE the built commit descends from: it stamps the wheel
+# (VLLM_VERSION_OVERRIDE), the image labels and the aiter sanctioned-stand comparison. The tree
+# that is actually built is VLLM_REF below.
 ARG VLLM_VERSION=0.34.0
+# The official vLLM build base: a commit on main, not a release tag. Inkling 2 Mini needs
+# KVCacheLayerConfig / MambaManager.layer_config (v1/kv_cache_interface.py), which no release up to
+# v0.34.0 carries, so the image builds main@1bdc437 (the merged Inkling 2 Mini PR #69028). Every CI
+# consumer resolves this ref through ci/read_pins.py:vllm_source_ref(), so the dry run, the
+# constraints replay and the stack resolver all read the same tree. Empty = build v$VLLM_VERSION.
+# renovate: datasource=git-refs depName=https://github.com/vllm-project/vllm.git branch=main (digest pin; keep VLLM_REPO below in sync)
+ARG VLLM_REF=1bdc437402d6eee29d3ca543c91574f8acc72c8d
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # transformers is pinned here because vLLM does not pin it: requirements/common.txt asks only for
 # `transformers >= 5.5.3`, so an unpinned rebuild silently picks up whatever is newest and the
 # stack changes underneath the build. 5.15.0 made Gemma-4's head_dim a per-layer attribute and
@@ -339,8 +353,19 @@ RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
 # ARG at the point of use, not at the top of the stage: an ARG line is a cache-key instruction, so
 # declaring it up there would make a vLLM bump rebuild torch, triton, torchvision and aiter too.
 ARG VLLM_VERSION
+# VLLM_REF (a commit SHA) builds that commit of VLLM_REPO instead of the v${VLLM_VERSION} tag.
+# It is the OFFICIAL base pin (top of this file): main@1bdc437 for Inkling 2 Mini. Bare ARG here so
+# the stage inherits that default -- a value here would override the pin. A build-arg override
+# (build.yml's vllm_ref input) still spikes a different commit; that image gets a -vllm<sha9> tag.
+ARG VLLM_REF
+ARG VLLM_REPO
 RUN --mount=type=cache,id=radiance-ccache,target=/root/.cache/ccache \
-    git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm \
+    if [ -n "${VLLM_REF}" ]; then \
+      git init -q /src/vllm && git -C /src/vllm fetch -q --depth 1 "${VLLM_REPO}" "${VLLM_REF}" \
+      && git -C /src/vllm checkout -q FETCH_HEAD; \
+    else \
+      git clone --depth 1 -b v${VLLM_VERSION} https://github.com/vllm-project/vllm.git /src/vllm; \
+    fi \
     && cd /src/vllm && python $([ -f tools/use_existing_torch.py ] && echo tools/use_existing_torch.py || echo use_existing_torch.py) \
     && pip install "setuptools-rust>=1.9.0" \
     && VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
@@ -575,6 +600,36 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/kernels/radiance_gdn_decode.hip -o /out/radiance_gdn_decode_ext.so \
  && PYTHONPATH=/out python -c "import torch, radiance_gdn_decode_ext as m; print('radiance_gdn_decode_ext built:', m.__file__)"
 
+# sly/inkling2/radiance_inkling2_moe.hip: Inkling-2-Mini decode / spec-verify expert GEMV (NVFP4 + MXFP8,
+# tile 8). Same single-file pybind11 build as above; imported as `radiance_inkling2_moe_hip` by
+# sly/inkling2/radiance_inkling2_moe.py (RADIANCE_INKLING2_HIP_MOE=0 = Triton).
+COPY sly/inkling2/radiance_inkling2_moe.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_inkling2_moe.hip -o /out/radiance_inkling2_moe_hip.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_inkling2_moe_hip as m; print('radiance_inkling2_moe_hip built:', m.__file__, m.geometry())"
+
+# sly/inkling2/radiance_inkling2_gemv.hip: hand-written low-M GEMV for Inkling-2-Mini on gfx1201:
+# bf16 weights through the wmma unit (default route, RADIANCE_INKLING2_HIP_GEMV=0 = Triton) and an
+# int8 (Q8_0) copy (opt-in RADIANCE_INKLING2_W8=1). Same single-file pybind11 build as mxfp4/gdn
+# above; imported as radiance_inkling2_gemv by radiance_inkling2_gemv_hip.py. Built here because it
+# links against the same ROCm toolchain the venv loads.
+COPY sly/inkling2/radiance_inkling2_gemv.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_inkling2_gemv.hip -o /out/radiance_inkling2_gemv.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_inkling2_gemv as m; print('radiance_inkling2_gemv built:', m.__file__)"
+
+# sly/inkling2/radiance_inkling2_mx4.hip: MXFP4 (e2m1 + E8M0) W4A16 low-M GEMV + prefill dequant for the
+# opt-in RADIANCE_INKLING2_MXFP4_DENSE=1 dense route (MODE=gemv, the default of that knob; MODE=w4a8 keeps the
+# radiance_mxfp4_fp8 route). Same single-file pybind11 build; imported as radiance_inkling2_mx4 by
+# radiance_inkling2_mxfp4dense.py.
+COPY sly/inkling2/radiance_inkling2_mx4.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_inkling2_mx4.hip -o /out/radiance_inkling2_mx4.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_inkling2_mx4 as m; print('radiance_inkling2_mx4 built:', m.__file__)"
+
 # ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
 # above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
 # paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
@@ -620,7 +675,18 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/radiance_adaptive_width.py sly/radiance_dflash_skip.py \
      radiance_tp3pad.py radiance_nvfp4.py radiance_nvfp4_diag.py radiance_autoround.py radiance_escha.py \
      paroquant/radiance_paroquant.py paroquant/radiance_paroquant_mxfp4.py \
-     sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth ${SP}/
+     sly/quant/radiance_quant_plugins.py sly/quant/radiance_quant_plugins.pth \
+     sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py \
+     sly/inkling2/radiance_inkling2_mxfp4dense.py sly/inkling2/radiance_inkling2_adaptive_k.py ${SP}/
+COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
+# launch folding of the DSpark draft (hooks: sly/patch_inkling2_gfx12.py)
+COPY sly/inkling2/radiance_inkling2_draft.py ${SP}/
+# native DFlash2 drafter on the Inkling target (opt-in by serving flag; hooks: sly/patch_inkling2_dflash2.py)
+COPY sly/inkling2/radiance_inkling2_dflash2.py ${SP}/
+# LoopCD-Hidden contrastive decoding (opt-in RADIANCE_INKLING2_LOOPCD=1; hooks: sly/patch_inkling2_loopcd.py)
+COPY sly/inkling2/radiance_inkling2_loopcd.py ${SP}/
+# coda experts MXFP8 -> NVFP4 at load (opt-in RADIANCE_INKLING2_CODA_FP4; hooks: sly/patch_inkling2_coda_fp4.py)
+COPY sly/inkling2/radiance_inkling2_coda_fp4.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -746,6 +812,9 @@ COPY sly/ /opt/patches/sly/
 # (/opt/patches/sly), not cwd, at sys.path[0] -- without this, the sly/ entries' `from _patchlib
 # import apply` would not find /opt/patches/_patchlib.py. The top-level entries already have
 # /opt/patches as their own script directory, so this is a no-op for them.
+# Spike hook: PATCH_SKIP = space-separated loop names to leave out (patches anchored to a vLLM that
+# is not the one built). Empty for every release build.
+ARG PATCH_SKIP=""
 RUN set -eu; cd /opt/patches; \
     for p in patch_gfx1201 patch_radiance_dispatch patch_skinny_gemm patch_unified_attention_lds \
              patch_gdn_wmma patch_preshuffle install_radiance_hooks \
@@ -755,13 +824,16 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_quark_mxfp4 \
              sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
              sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
-             sly/patch_fused_norm_quant \
+             sly/patch_fused_norm_quant sly/patch_linear_carrier sly/patch_qwen35_legacy \
              sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_embed_host sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
              patch_tp3_pad sly/patch_ar_knobs patch_autoround patch_escha sly/patch_cactus sly/patch_nsd \
              sly/patch_dflash_prefill_skip \
              sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
-             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm; do \
+             sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm sly/patch_inkling2_gfx12 \
+             sly/patch_inkling2_mxfp4dense sly/patch_inkling2_adaptive sly/patch_inkling2_dflash2 \
+             sly/patch_inkling2_loopcd sly/patch_inkling2_coda_fp4; do \
+      case " ${PATCH_SKIP} " in *" $p "*) echo "== SKIP $p =="; continue;; esac; \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \
     done; \

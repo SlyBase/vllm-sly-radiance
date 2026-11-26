@@ -66,6 +66,18 @@ on:
         description: compile torch from source (via the ghcr.io torch image) instead of AMD's wheel
         type: boolean
         default: false
+      vllm_ref:
+        description: "spike: build this vLLM commit SHA instead of the pinned ARG VLLM_REF (empty = the pin)"
+        type: string
+        default: ""
+      vllm_repo:
+        description: "spike: repo holding vllm_ref (a fork for an open PR)"
+        type: string
+        default: https://github.com/vllm-project/vllm.git
+      patch_skip:
+        description: "spike: space-separated patch loop names to skip"
+        type: string
+        default: ""
       push_zstd:
         description: push zstd-compressed layers (smaller download, needs a reader with the containerd image store)
         type: boolean
@@ -106,6 +118,7 @@ jobs:
         id: meta
         env:
           ROCM_BASE_INPUT: ${{ inputs.rocm_base }}
+          VLLM_REF_INPUT: ${{ inputs.vllm_ref }}
         run: |
           VER=$(tr -d '[:space:]' < VERSION)
           eval "$(python3 ci/read_pins.py --shell)"
@@ -113,10 +126,18 @@ jobs:
           # rocm/dev-ubuntu-24.04:10.1.0-full@sha256:... -> rocm10.1
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           TAG="vllm-sly-radiance:${VER}-rocm${ROCM_MM}"
+          # VLLM_REF is the official base pin (Dockerfile). Only an OVERRIDE of it is a spike and
+          # gets the -vllm<sha9> suffix, so a spike image never takes a release tag; a build of the
+          # pin itself -- dispatch input empty or equal -- keeps the plain release tag.
+          SUFFIX=""
+          if [ -n "$VLLM_REF_INPUT" ] && [ "$VLLM_REF_INPUT" != "$VLLM_REF" ]; then
+            SUFFIX="-vllm${VLLM_REF_INPUT:0:9}"
+          fi
+          TAG="${TAG}${SUFFIX}"
           TORCH_REMOTE="${REGISTRY_IMAGE}-torch:$(python3 ci/torch_key.py --rocm-base "$ROCM_BASE")"
           {
             echo "version=$VER"; echo "rocm_base=$ROCM_BASE"; echo "tag=$TAG"
-            echo "remote_tag=${REGISTRY_IMAGE}:${VER}-rocm${ROCM_MM}"
+            echo "remote_tag=${REGISTRY_IMAGE}:${VER}-rocm${ROCM_MM}${SUFFIX}"
             echo "torch_remote=$TORCH_REMOTE"
           } >> "$GITHUB_OUTPUT"
           echo "building $TAG from $ROCM_BASE, torch wheel $TORCH_REMOTE"
@@ -174,6 +195,9 @@ jobs:
           ROCM_BASE: ${{ steps.meta.outputs.rocm_base }}
           VER: ${{ steps.meta.outputs.version }}
           TORCH_FROM: ${{ steps.torch.outputs.from }}
+          VLLM_REF: ${{ inputs.vllm_ref }}
+          VLLM_REPO: ${{ inputs.vllm_repo }}
+          PATCH_SKIP: ${{ inputs.patch_skip }}
         run: |
           set -o pipefail
           # MAX_JOBS=2: 4 OOM-killed the vllm-wheel stage on 2026-10-17 (24 GB
@@ -185,6 +209,8 @@ jobs:
             --build-arg "ROCM_BASE=${ROCM_BASE}" \
             ${TORCH_FROM:+--build-arg "TORCH_FROM=${TORCH_FROM}"} \
             --build-arg "MAX_JOBS=2" \
+            ${VLLM_REF:+--build-arg "VLLM_REF=${VLLM_REF}" --build-arg "VLLM_REPO=${VLLM_REPO}"} \
+            ${PATCH_SKIP:+--build-arg "PATCH_SKIP=${PATCH_SKIP}"} \
             --build-arg "RADIANCE_VERSION=${VER}" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

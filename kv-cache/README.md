@@ -8,6 +8,15 @@ This is **opt-in and off by default.** With `KVCACHE` unset (or `off`), `serve-m
 generates a serve command that is byte-identical to the unmodified script — nothing is
 mounted, patched, or passed to the engine.
 
+> **UNSUPPORTED on the vLLM main@1bdc437 base (Inkling 2 Mini).** Upstream rewrote the offloading
+> connector scheduler (the per-group `SchedulerOffloadConfig` / `GroupOffloadConfig` /
+> `RequestGroupState` classes are gone) and removed the eagle-group annotation from
+> `kv_cache_utils.py`. 9 of the 14 launcher patches below need a **port**, not a re-anchor; they are
+> listed in `ci/kv_dryrun_skip.txt` and the CI dry run reports them as SKIP. `KVCACHE=ram` / `disk`
+> still tries to apply them fatally at container start, so a tiering launch on this base fails there
+> with the patch's anchor error instead of running half-patched. Production (`KVCACHE=off`) is
+> unaffected. The port is open work; until it lands, use a 0.34-based image for KV tiering.
+
 ## The knob
 
 `serve-mxfp4.sh` reads one variable (and two sizing options):

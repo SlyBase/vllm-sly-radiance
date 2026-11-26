@@ -123,15 +123,17 @@ apply(SCHED,
       "canonical chunks: hand the grid to the KV cache manager")
 
 KVCM = Path(sysconfig.get_paths()["purelib"]) / "vllm/v1/core/kv_cache_manager.py"
+# Re-anchored for vLLM main@1bdc437: find_longest_cache_hit gained a third argument
+# (request.num_tokens). The re-ask below shortens only the max hit length, exactly as before.
 apply(KVCM,
       "        computed_blocks, num_new_computed_tokens, num_uncached = (\n"
       "            self.coordinator.find_longest_cache_hit(\n"
-      "                request.block_hashes, max_cache_hit_length\n"
+      "                request.block_hashes, max_cache_hit_length, request.num_tokens\n"
       "            )\n"
       "        )\n",
       "        computed_blocks, num_new_computed_tokens, num_uncached = (\n"
       "            self.coordinator.find_longest_cache_hit(\n"
-      "                request.block_hashes, max_cache_hit_length\n"
+      "                request.block_hashes, max_cache_hit_length, request.num_tokens\n"
       "            )\n"
       "        )\n"
       "        # radiance (patch_sched_canonical_chunks.py): resume only on the cold chunk grid.\n"
@@ -141,6 +143,7 @@ apply(KVCM,
       "                self.coordinator.find_longest_cache_hit(\n"
       "                    request.block_hashes,\n"
       "                    num_new_computed_tokens // _rad_grid * _rad_grid,\n"
+      "                    request.num_tokens,\n"
       "                )\n"
       "            )\n",
       "_rad_grid = getattr(self, \"_radiance_grid\", 0)\n        while",

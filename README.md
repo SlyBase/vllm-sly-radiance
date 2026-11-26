@@ -361,7 +361,7 @@ the drafter): `RADIANCE_W4A16_TILES` (tile table), `RADIANCE_W4A16_SPLITK` (spli
 table; `RADIANCE_W4A16_SPLITK_TABLE=<json>` replaces it), `RADIANCE_W4A16_TILED` (weights in 1 KB 16-row
 blocks), `RADIANCE_LMHEAD_INT4_TILED` (the int4 lm_head too), `RADIANCE_W4A16_SILU` (gate_up + silu in one
 GEMM), `RADIANCE_DFLASH_KV_W4` (drafter context-KV on its int4 rows instead of a 105 MB bf16 copy),
-`RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4). Set any to `0` only for an A/B.
+`RADIANCE_DFLASH_CONV_W4` (drafter conv projection int4; unset = only for a W4A16 drafter, a bf16 drafter such as Inkling-2-Mini-DFlash2 keeps it bf16). Set any to `0` only for an A/B.
 `RADIANCE_GDN_BA_W4=1` (GDN in_proj_ba as int4 rows of in_proj_qkvz, one GEMM) stays off: measured slower.
 
 ### vLLM arguments and trade-offs
@@ -577,6 +577,25 @@ quality gate, i.e. GSM8K-200 (baseline 0.855 ± 0.025) and a perplexity comparis
 serve, plus an unchanged step time and KV pool at concurrency 1 and 8. Until that gate is run, keep
 `RADIANCE_NSD=0` for chat/production and enable it only in a measured arm.
 
+### Inkling 2 Mini (branch `feat/inkling2-mini`, not yet in a release)
+
+`thinkingmachines/Inkling-2-Mini` + DSpark k = 7 on a vLLM `main@1bdc437` base: 126.7 tok/s weighted
+single-stream decode at 210 W (code 125.6), step ~30 ms. Arguments, measurements and what is pending:
+[docs/INKLING2-MINI.md](docs/INKLING2-MINI.md). The defaults need no knob; these are the switches:
+
+| Variable | Default | Why |
+|---|---|---|
+| `GPU_MAX_HW_QUEUES` | `1` for Inkling (Qwen: `2`) | the recipe value for this model |
+| `RADIANCE_INKLING2_HIP_MOE` | on (`0` = Triton) | HIP expert GEMV for decode / verify tiles, 3.1-6.8x the Triton kernels, NVFP4 bit-identical |
+| `RADIANCE_INKLING2_HIP_GEMV` | on (`0` = Triton) | lossless HIP bf16 GEMV for the dense projections at M 1..16 |
+| `RADIANCE_INKLING2_W8` + `..._W8_HEAD` | off (`..._W8_HEAD` `1`) | opt-in int8 (Q8_0) dense weights: 1.5-1.8x the bf16 GEMV, KLD mean 0.0081, top-1 97.3 %. `_W8_HEAD=0` keeps the LM head bf16. BetterBench code 151.1 / 145.9 vs 127.3 / 124.4 default (two starts each) |
+| `RADIANCE_INKLING2_CODA_FP4` (`1` or a layer list `20,22-23`) | **1** by the entrypoint for Inkling (`0` = off) | the MXFP8 coda expert layers (20-23) are requantized to NVFP4 at load, -0.44 GB per decode step, +3.9 % tok/s; lossy, MEASURED KLD 0.0033 nats (gate <= 0.010), dPPL +0.26 % |
+| `RADIANCE_INKLING2_MXFP4_DENSE` (+ `..._MODE=gemv\|w4a8\|w4a16`, `..._CLIP=rtn\|mse`) | off | opt-in 4-bit dense projections + LM head on the HIP W4A16 GEMV (`gemv`, default: one launch, bf16 activations), dense bytes 4.77 -> 1.27 GB per step; not lossless. GEMV 4.5-22 us per call (1.3-2.7x the W4A8 kernel, 1.3-1.8x int8), KLD mean 0.018 (int8: 0.008). BetterBench code 162.4 / 161.6 vs 151.1 / 145.9 int8 and 127.3 / 124.4 default (two starts each) |
+| `RADIANCE_INKLING2_DRAFT_SHORTLIST` | off | drafter shortlist: -1.7 ms per step but acceptance on code 3.43 -> 2.97; do not enable |
+| `RADIANCE_INKLING2_HIP_CTRL` | off | opt-in: the loop message controllers' two `torch.bmm` (hipBLASLt, 0.92 ms per verify step, 96 launches) as two launches of the batched HIP bf16 GEMV; same bf16 weights, fp32 accumulate (summation order only). Not yet measured end to end |
+| `RADIANCE_INKLING2_FOLD_INT8` | off | opt-in, lossy, drafter only: the DSpark Markov fold weight (103 MB, read 7x per verify step) as int8 + one fp32 scale per vocabulary row (51 MB); the target still verifies every token. Not yet measured end to end |
+| `RADIANCE_INKLING2_HIP_DEBUG` | off | `1` = host-side launch checks of the expert kernel |
+
 ### Other checkpoints and GPUs
 
 | Switch | For |
@@ -587,6 +606,7 @@ serve, plus an unchanged step time and KV pool at concurrency 1 and 8. Until tha
 | `QUANT=mxfp6 ./serve.sh` / `./setup.sh --mxfp6` | ParoQuant MXFP6 (W6A8); needs TP>=2 (upstream-validated), one R9700 is TP=1 |
 | `--tensor-parallel-size 2/3/4/8`, `RADIANCE_TP_PAD=3`, `RADIANCE_AR_*` | several cards — see [docs/MULTI-GPU.md](docs/MULTI-GPU.md) |
 | `RADIANCE_MINICPMV4_7=1` + `--attention-backend ROCM_AITER_UNIFIED_ATTN` | MiniCPM-V 4.7 35B-A3B with its DSpark drafter: 169.4 tok/s decode at 210 W (Qwen3.8 production 132.4) — full arguments in [docs/MINICPM-V47.md](docs/MINICPM-V47.md) |
+| `--speculative-config '{"method":"dspark",...}'` + `--reasoning-parser inkling` + `GPU_MAX_HW_QUEUES=1` | Inkling 2 Mini (vLLM main base, branch `feat/inkling2-mini`): 126.7 tok/s weighted decode at 210 W — [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md) |
 
 ## Repository and contributing
 

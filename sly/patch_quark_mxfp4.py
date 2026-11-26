@@ -67,6 +67,9 @@ from _patchlib import apply, apply_any
 SP = Path(sysconfig.get_paths()["purelib"])
 KL = SP / "vllm/model_executor/kernels/linear/__init__.py"
 KA = SP / "vllm/model_executor/kernels/linear/mxfp4/aiter.py"
+# vLLM main@1bdc437 moved the dynamic-quant MXFP4 op out of KA into vllm/_aiter_ops.py
+# (_rocm_aiter_mxfp4_gemm_dynamic_quant_impl, op name rocm_aiter_mxfp4_gemm_dynamic_quant).
+AO = SP / "vllm/_aiter_ops.py"
 
 
 # --- 1. register the radiance W4A8 plugin at the head of the ROCm MXFP4 list ----------------
@@ -116,6 +119,25 @@ REGISTER_ANCHOR_030 = (
     "    )\n"
 )
 REGISTER_NEW_030 = REGISTER_ANCHOR_030 + REGISTER_NEW[len(REGISTER_ANCHOR):]
+
+# vLLM main@1bdc437: a CUDA batch-invariance filter now sits between the platform list and the
+# --linear-backend filtering. Same insertion point (after all filtering, before kernel selection),
+# so the radiance kernel is still first in `possible` and still declines via is_supported().
+REGISTER_ANCHOR_MAIN = (
+    "    platform = current_platform._enum\n"
+    "    possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))\n"
+    "\n"
+    "    if envs.VLLM_BATCH_INVARIANT and platform is PlatformEnum.CUDA:\n"
+    "        possible = [k for k in possible if k.supports_batch_invariance()]\n"
+    "\n"
+    '    # Apply --linear-backend filtering when set.\n'
+    "    possible = _resolve_backend_kernels(\n"
+    "        possible,\n"
+    '        "MXFP4",\n'
+    '        quantization="mxfp4",\n'
+    "    )\n"
+)
+REGISTER_NEW_MAIN = REGISTER_ANCHOR_MAIN + REGISTER_NEW[len(REGISTER_ANCHOR):]
 
 # --- 2. relax aiter's CDNA4 gate so the Triton fp4 GEMM is reachable on gfx1201 -------------
 # Verbatim vs. ggz14/0.27.1 -- this exact two-line block is unchanged at 0.29.0.
@@ -173,7 +195,10 @@ IMPORT_NEW = (
 
 # --- 4. NEW at 0.29.0: the gemm_with_dynamic_quant custom op (which apply_weights() calls) is
 #        only DEFINED -- let alone registered -- behind a module-scope CDNA-only gate. Hunks 2+3
-#        alone make is_supported() return True on gfx1201, but the op itself would not exist. ---
+#        alone make is_supported() return True on gfx1201, but the op itself would not exist.
+#        OBSOLETE at vLLM main@1bdc437: the op moved to _aiter_ops.py, whose register_ops_once()
+#        already gates on `is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()`
+#        -- exactly the relaxation this hunk added, now native upstream. Kept for older trees. ---
 MODULE_GATE_ANCHOR = (
     "# where HIP initialization is expected.\n"
     "if is_aiter_found_and_supported():\n"
@@ -190,6 +215,30 @@ MODULE_GATE_NEW = (
     "\n"
     "if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna():\n"
     "    from vllm.utils.torch_utils import direct_register_custom_op\n"
+)
+
+# main@1bdc437: the same import inside _rocm_aiter_mxfp4_gemm_dynamic_quant_impl (_aiter_ops.py),
+# one indent level less. Same explicit gemm.basic path, same gfx1201 fp4-allowlist relaxation.
+IMPORT_ANCHOR_MAIN = (
+    "    from aiter.ops.triton.gemm_afp4wfp4 import (\n"
+    "        gemm_afp4wfp4,\n"
+    "        gemm_afp4wfp4_preshuffle,\n"
+    "    )\n"
+)
+IMPORT_NEW_MAIN = (
+    "    # --- radiance (patch_quark_mxfp4.py): aiter's fp4 GEMM lives under gemm.basic (the\n"
+    "    # top-level name is a backward-compat alias); keep the explicit path. aiter allowlists\n"
+    "    # gfx950/gfx1250 for fp4, but gfx1201 lowers tl.dot_scaled correctly (verified\n"
+    "    # bit-identical against the emulated path), so relax the assert here, lazily.\n"
+    "    from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (\n"
+    "        gemm_afp4wfp4,\n"
+    "        gemm_afp4wfp4_preshuffle,\n"
+    "    )\n"
+    "\n"
+    "    import aiter.ops.triton.utils._triton.arch_info as _radiance_arch\n"
+    "\n"
+    "    if not _radiance_arch.is_fp4_avail():\n"
+    "        _radiance_arch.is_fp4_avail = lambda: True\n"
 )
 
 # --- 5. NEW at 0.29.0: is_supported()'s final aiter-library check, same CDNA-only gate, same fix.
@@ -210,18 +259,31 @@ FINAL_GATE_NEW = (
 
 
 def main():
-    apply_any(KL, [(REGISTER_ANCHOR, REGISTER_NEW), (REGISTER_ANCHOR_030, REGISTER_NEW_030)],
+    apply_any(KL, [(REGISTER_ANCHOR_MAIN, REGISTER_NEW_MAIN),
+                   (REGISTER_ANCHOR, REGISTER_NEW), (REGISTER_ANCHOR_030, REGISTER_NEW_030)],
               "[radiance] MXFP4 W4A8 kernel unavailable",
               "mxfp4: register the radiance W4A8 kernel")
     apply(KA, SUPPORTS_ANCHOR, SUPPORTS_NEW,
           "[radiance] native MXFP4 enabled on gfx12x",
           "mxfp4: relax aiter's CDNA4 gate")
-    apply(KA, IMPORT_ANCHOR, IMPORT_NEW,
-          "aiter.ops.triton.gemm.basic.gemm_afp4wfp4",
-          "mxfp4: aiter moved-module + fp4 arch allowlist")
-    apply(KA, MODULE_GATE_ANCHOR, MODULE_GATE_NEW,
-          "is_aiter_found_and_supported_on_rdna\n",
-          "mxfp4: register gemm_with_dynamic_quant op on RDNA4")
+    # The op's aiter import: in mxfp4/aiter.py up to 0.34, in _aiter_ops.py from main@1bdc437.
+    if IMPORT_ANCHOR in KA.read_text():
+        apply(KA, IMPORT_ANCHOR, IMPORT_NEW,
+              "aiter.ops.triton.gemm.basic.gemm_afp4wfp4",
+              "mxfp4: aiter moved-module + fp4 arch allowlist")
+    else:
+        apply(AO, IMPORT_ANCHOR_MAIN, IMPORT_NEW_MAIN,
+              "aiter.ops.triton.gemm.basic.gemm_afp4wfp4",
+              "mxfp4: aiter moved-module + fp4 arch allowlist")
+    # Native upstream from main@1bdc437 (register_ops_once gates on CDNA or RDNA); older trees
+    # still carry the CDNA-only module gate in mxfp4/aiter.py and need the relaxation.
+    if MODULE_GATE_ANCHOR in KA.read_text():
+        apply(KA, MODULE_GATE_ANCHOR, MODULE_GATE_NEW,
+              "is_aiter_found_and_supported_on_rdna\n",
+              "mxfp4: register gemm_with_dynamic_quant op on RDNA4")
+    else:
+        print("  SKIP  mxfp4: register gemm_with_dynamic_quant op on RDNA4: native upstream "
+              "(_aiter_ops.register_ops_once gates on CDNA or RDNA)")
     apply(KA, FINAL_GATE_ANCHOR, FINAL_GATE_NEW,
           "OR in the RDNA4 analog, same reasoning as",
           "mxfp4: AiterMxfp4LinearKernel.is_supported() accepts RDNA4")

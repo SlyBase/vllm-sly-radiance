@@ -807,13 +807,18 @@ def radiance_w4a16_postload(model, drafter=None):
     # GDN qkvz + ba merge: off by default -- the 96 extra rows add a 129th tile (a nearly empty third wave on
     # 64 CUs): 93.9 us merged vs 79.2 + 3.6 us separate at M = 8 (window E sweep, 2026-09-29)
     ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "0") == "1"
-    conv_on = os.environ.get("RADIANCE_DFLASH_CONV_W4", "1") == "1"
+    # conv projection int4: explicit env wins; unset = only for a drafter that is itself W4A16 (Qwen
+    # DFlash2-W4A16). A bf16 drafter (Inkling-2-Mini-DFlash2) keeps its bf16 conv: requantizing cut
+    # acceptance 5.13 -> 3.65 tokens/update (224 -> 160 tok/s, MEASURED 2026-11-25, R9700 210 W).
+    conv_env = os.environ.get("RADIANCE_DFLASH_CONV_W4")
     # RADIANCE_DFLASH_BF16: the drafter runs plain GEMMs on load-expanded bf16 weights, so skip
     # its silu / conv int4 transforms and keep every row set in its natural order
     bf16_on = os.environ.get("RADIANCE_DFLASH_BF16", "0") == "1"
     for root in (model, drafter):
         if root is None:
             continue
+        conv_on = (conv_env == "1" if conv_env is not None
+                   else any(_radiance_w4_parts(m) is not None for m in root.modules()))
         if bf16_on and root is drafter and model is not drafter:
             for name, mod in list(root.named_modules()):
                 try:
@@ -1128,8 +1133,26 @@ apply_any(F,
 # see _pad_activation_rows); was LDS_CAPACITY_ELEMENTS. `w_q.dim() == 2` keeps the HIP
 # skinny path off the tiled layout regardless of the constant.
 # vLLM 0.34.0: the skinny condition is now parenthesized and OR'd with _on_gfx115x().
+# vLLM main@1bdc437: the constant became a call, `_max_skinny_batch_size() >= M` (gfx1151 keeps its
+# own limit). Same condition, same guard: the HIP skinny path stays off the tiled layout.
 apply_any(F,
       [
+      (
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0]\n'
+      '\n'
+      '    if _max_skinny_batch_size() >= M and (\n'
+      '        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()\n'
+      '    ):\n',
+      '    M = x_2d.shape[0]\n'
+      '    K = x_2d.shape[1]\n'
+      '    N = w_q.shape[0] * 16 if w_q.dim() == 4 else w_q.shape[0]  # radiance: tiled\n'
+      '\n'
+      '    if _max_skinny_batch_size() >= M and (\n'
+      '        (K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()) and w_q.dim() == 2\n'
+      '    ):\n'
+      ),
       (
       '    M = x_2d.shape[0]\n'
       '    K = x_2d.shape[1]\n'
@@ -1216,23 +1239,35 @@ apply(F,
       '        out_shape = x.shape[:-1] + (N,)\n',
       'no per-call nibble unpack / scale fold',
       'rdna_hybrid_w4a16: apply_weights handles tiled weights + a load-time bf16 expansion')
-apply(F,
-      '            cu_count,\n'
-      '            c.group_size,\n'
-      '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
-      '        )\n'
-      '        return output.reshape(out_shape)\n',
-      '            cu_count,\n'
-      '            c.group_size,\n'
-      '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
-      '        )\n'
-      '        if getattr(layer, "_radiance_silu", False):\n'
-      '            # radiance: rows interleaved for the fused MLP; a plain caller gets [gate | up] back\n'
-      '            output = output.view(-1, N // 2, 2).transpose(1, 2).reshape(-1, N)\n'
-      '        elif getattr(layer, "_radiance_ba", 0):\n'
-      '            # radiance: GDN qkvz + ba merged; a plain caller gets the qkvz columns only\n'
-      '            output = output[:, : layer._radiance_ba].contiguous()\n'
-      '            out_shape = x.shape[:-1] + (layer._radiance_ba,)\n'
-      '        return output.reshape(out_shape)\n',
-      'rows interleaved for the fused MLP; a plain caller',
-      'rdna_hybrid_w4a16: plain calls into fused layers stay correct')
+# Re-anchored for vLLM main@1bdc437: the apply op gained a scale/zp carrier argument after the
+# dequant weight. Same call, same post-call fixups for the fused (interleaved / merged) layers.
+_CALL_TAIL_OLD = (
+    '            cu_count,\n'
+    '            c.group_size,\n'
+    '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
+    '        )\n'
+    '        return output.reshape(out_shape)\n'
+)
+_CALL_TAIL_MAIN = (
+    '            cu_count,\n'
+    '            c.group_size,\n'
+    '            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),\n'
+    '            getattr(layer, "_hybrid_w_scale_zp_carrier", None),\n'
+    '        )\n'
+    '        return output.reshape(out_shape)\n'
+)
+_CALL_FIXUP = (
+    '        if getattr(layer, "_radiance_silu", False):\n'
+    '            # radiance: rows interleaved for the fused MLP; a plain caller gets [gate | up] back\n'
+    '            output = output.view(-1, N // 2, 2).transpose(1, 2).reshape(-1, N)\n'
+    '        elif getattr(layer, "_radiance_ba", 0):\n'
+    '            # radiance: GDN qkvz + ba merged; a plain caller gets the qkvz columns only\n'
+    '            output = output[:, : layer._radiance_ba].contiguous()\n'
+    '            out_shape = x.shape[:-1] + (layer._radiance_ba,)\n'
+    '        return output.reshape(out_shape)\n'
+)
+apply_any(F,
+          [(_CALL_TAIL_MAIN, _CALL_TAIL_MAIN.replace('        return output.reshape(out_shape)\n', _CALL_FIXUP)),
+           (_CALL_TAIL_OLD, _CALL_TAIL_OLD.replace('        return output.reshape(out_shape)\n', _CALL_FIXUP))],
+          'rows interleaved for the fused MLP; a plain caller',
+          'rdna_hybrid_w4a16: plain calls into fused layers stay correct')

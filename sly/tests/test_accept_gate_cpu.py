@@ -197,3 +197,25 @@ def test_profile_declares_the_new_thresholds_and_chat_block():
     assert replay["depths"] == sorted(replay["depths"])
     assert replay["depths"][0] >= 4000
     assert replay["fast_levels"] >= 1
+
+
+TORCHCODEC_WARNING = """\
+Module torchcodec.decoders was found but failed to import
+Traceback (most recent call last):
+  File "/opt/vllm/lib/python3.12/site-packages/vllm/utils/import_utils.py", line 413, in _has_module
+    if importlib.util.find_spec(module_name) is None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib.util>", line 92, in find_spec
+ModuleNotFoundError: No module named 'torchcodec'
+[radiance.gemm] skinny GEMM kernel ENABLED for M in [6,64]: 256x2048
+"""
+
+
+def test_main_torchcodec_probe_traceback_is_a_known_warning():
+    """vLLM main's `_has_module` logs the probe of the absent optional `torchcodec` with exc_info, twice per
+    start (API server + engine core). Image run on ink-k8 (Qwen prod config): healthy engine, but the
+    `python traceback` pattern flagged it. The warning is benign; any other traceback still fails."""
+    profile = json.loads((ACCEPT_DIR / "profiles" / "vllm7-mxfp4.json").read_text())
+    assert accept.check_logs(TORCHCODEC_WARNING, profile)["forbidden"] == []
+    other = TORCHCODEC_WARNING.replace("torchcodec", "somethingelse")
+    assert [f["name"] for f in accept.check_logs(other, profile)["forbidden"]] == ["python traceback"]

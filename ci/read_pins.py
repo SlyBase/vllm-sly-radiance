@@ -28,9 +28,19 @@ def read_pins(dockerfile=ROOT / "Dockerfile"):
     return pins
 
 
+def vllm_source_ref(pins=None):
+    """The vLLM git ref every CI consumer reads: the pinned commit (ARG VLLM_REF) when set, else
+    the release tag v<VLLM_VERSION>. One rule, so the patch dry run, the constraints replay and
+    the stack resolver all see the tree the image actually builds."""
+    pins = read_pins() if pins is None else pins
+    return pins.get("VLLM_REF") or f"v{pins['VLLM_VERSION']}"
+
+
 def main(argv):
     pins = read_pins()
-    if "--json" in argv:
+    if "--vllm-ref" in argv:
+        print(vllm_source_ref(pins))
+    elif "--json" in argv:
         print(json.dumps(pins, indent=2))
     elif "--shell" in argv:
         for k, v in pins.items():

@@ -553,3 +553,29 @@ sampling temperature 0.7 / top_p 0.95 / top_k 20. Two power settings, no other t
 
 What that means: code, JSON, math and edits decode at 140–175 tok/s (the drafter lands 5–6 tokens per step),
 free prose at ~85; long contexts stay fast (99k tokens of context cost ~7 ms per step instead of 83).
+
+## Inkling 2 Mini on gfx1201 (2026-11)
+
+`thinkingmachines/Inkling-2-Mini` + DSpark k = 7, branch `feat/inkling2-mini` (vLLM `main@1bdc437`), arguments and
+knobs in [INKLING2-MINI.md](INKLING2-MINI.md). BetterBench single-stream decode, 65,536 context, prefix caching
+off, no async scheduling, CUDA graphs, seed 42, 210 W, two container starts per arm, tok/s.
+
+| Category | `ink-k3` default, start 1 | start 2 | `ink-k5` default (x2) | `ink-k5` `RADIANCE_INKLING2_W8=1` (x2) |
+|---|---:|---:|---|---|
+| chat | 90.3 | 90.1 | 97.9 / 102.0 | 111.5 / 108.8 |
+| code | 125.6 | 125.3 | 127.3 / 124.4 | 151.1 / 145.9 |
+| file_edit | 154.5 | 154.4 | 165.7 / 164.5 | 192.3 / 188.8 |
+| json | 152.6 | 152.3 | 151.5 / 156.8 | 177.1 / 173.5 |
+| math | 140.5 | 140.2 | 143.6 / 141.1 | 162.1 / 163.3 |
+| prose | 91.3 | 91.3 | 92.7 / 92.9 | 104.8 / 105.2 |
+| reasoning | 110.7 | 110.7 | 107.2 / 107.2 | 123.2 / 120.4 |
+| summarization | 148.8 | 148.8 | 153.0 / 139.9 | 170.6 / 171.0 |
+| **weighted** | **126.7** | **126.6** | **128.1** / **126.6** | **148.5** / **145.7** |
+
+Step about 30 ms in every category; code 3.74 tokens per update. Before the cooperative-launch fix
+(`ink-k2`): code 62.9, weighted 62.0 (the bimodal step, see
+[TECHNICAL.md](TECHNICAL.md#inkling-2-mini-on-gfx1201-unreleased)). The production Qwen
+(Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ, fully 4-bit dense) decodes code at 155; Inkling's dense weights are bf16
+(four times the bytes), see [INKLING2-MINI.md](INKLING2-MINI.md#why-inkling-decodes-code-at-1256-and-qwen-at-155).
+
+MXFP4 dense (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `MODE=gemv`, the HIP W4A16 GEMV), code category: 162.4 / 161.6 (two starts, ink-k5 + overlay, graphs + DSpark k=7); weighted 157.2 / 156.8. The earlier `MODE=w4a8` arm (radiance fp8-WMMA kernel, one start) measured code 143.5, weighted 142.3. KLD mean 0.018 vs int8 0.008; per-shape kernel us/call in [INKLING2-MINI.md](INKLING2-MINI.md).

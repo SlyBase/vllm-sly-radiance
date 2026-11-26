@@ -207,3 +207,24 @@ if __name__ == "__main__":
             fn()
             print("ok", name)
     print("dflash prefill skip tests OK")
+
+
+def _new_api(spec):
+    """vLLM 0.34 KVCacheGroup: block_size on the group, specs in kv_cache_specs (no kv_cache_spec)."""
+    spec.kv_cache_config.kv_cache_groups = [
+        NS(layer_names=g.layer_names, block_size=g.kv_cache_spec.block_size,
+           kv_cache_specs={n: g.kv_cache_spec for n in g.layer_names})
+        for g in spec.kv_cache_config.kv_cache_groups]
+    return spec
+
+
+def test_margin_reads_the_vllm_034_group_api():
+    cfg = _with_knob("1", lambda: skip._config(_new_api(_spec(block=1024))))
+    assert cfg == (2048, 2048), cfg
+
+
+def test_unidentified_drafter_group_reads_the_vllm_034_group_api():
+    s = _new_api(_spec(block=16))
+    s.draft_attn_layer_names = {"x"}
+    s.kv_cache_config.kv_cache_groups[0].kv_cache_specs["d0"].sliding_window = 2048
+    assert _with_knob("1", lambda: skip._config(s)) == (2048, 512)

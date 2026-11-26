@@ -10,7 +10,287 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [Unreleased]
+## [1.14.0] - 2026-11-26
+
+### Changed
+- **Inkling-2-Mini with 2-8 streams: aggregate 107/140/191 -> 214/257/333 tok/s at 2/4/8 streams (1 stream unchanged, 230 tok/s per stream).**
+  *Cause, MEASURED* (rocprofv3 kernel trace, 1/2/4 streams): (1) from 2 streams the spec-verify step has 16-64 rows, the plan picks MoE
+  token tile 16..64 and the HIP GEMV (tile 8 only) was skipped for the Triton prefill GEMM: `_expert_gemm` 7.8 ms/token against
+  3.8 ms/token of `moe_gemv` at one stream. (2) The recipe `cudagraph_capture_sizes [1..8]` captured ONE decode graph (vLLM derives
+  the request counts from the token sizes: `ceil(size / (1 + k))`), so every 2+ stream step ran eager. Fix: `hip_tile_view` runs a tile-T
+  launch (T = 16, 24 ... 64) as T/8 tile-8 CTAs of the same expert (same rows, one device op each, graph safe; `RADIANCE_INKLING2_HIP_MOE_SPLIT=0` = old route),
+  and the entrypoint defaults the decode graph sizes to `1..8,16,24,...,64` (`RADIANCE_INKLING2_CUDAGRAPH_SIZES`; `0`/empty = vLLM's own; an explicit
+  `--compilation-config` wins; +0.4 GiB, KV 54 643 -> 53 608 tokens). Greedy gate 4/4 identical to before, single stream unchanged.
+  Tests `sly/inkling2/tests/test_moe_hip_host.py`, `test_moe_hip.py` (GPU), `test_entrypoint_defaults.py`.
+- **Inkling-2-Mini prefill 2.8-3.1x faster (P0 1192/1298/1288/1245 -> 3584-3713 / 4217-4366 / 4007-4113 / 3828-3900 pp/s at 1.6k/6.3k/12.6k/25k tokens, two runs).**
+  *MEASURED* 2026-11-26, R9700 210 W, BetterBench `--prefill`, DFlash2, cold prefix cache, max-model-len 32768, image `ink-200c` as control.
+  Four steps, each with its own arm: (1) the launch table of the NVFP4 expert GEMM is the default (`RADIANCE_INKLING2_MOE_PREFILL_CFG`,
+  +64..71 %, dNLL +0.0000); (2) prefill chunk 4096 from the entrypoint for an explicit `--max-model-len` <= 131072 (`RADIANCE_INKLING2_CHUNK`, +14..16 %,
+  0.8 GiB less KV; **at `--max-model-len 202752` and utilisation 0.92 chunk 4096 no longer starts**, so longer contexts keep 2048; `=0` restores 2048); (3) new expert GEMM `_expert_gemm_v2` for token tiles >= 128
+  (`RADIANCE_INKLING2_MOE_PREFILL_V2`; expert GEMMs 19.7 -> 8.5 ms per layer visit; greedy gate 4/4 identical, rep 0/4);
+  (4) rel-attention BLOCK_N 32 on ROCm (+7..13 %; greedy gate 2/4 identical because the summation order changed, both texts coherent,
+  dNLL -0.0001, GSM8K-50 T=0 0.88 vs 0.84 control). Decode is unchanged: code tok/s over four seeds 225.2 (control) vs 227.0 (mean of
+  per-run values), step 22.69 ms both. Tests `sly/inkling2/tests/test_nvfp4_expert_gemm_v2.py`, `test_prefill_cfg.py`,
+  `test_entrypoint_defaults.py`, `test_patch_gfx12.py`.
+- **Inkling entrypoint defaults key on the target model only, not the whole argv.** `radiance_entrypoint.sh` looked for
+  `*inkling*` in every argument, so a Qwen target with an `inkling` drafter path got `RADIANCE_INKLING2_CODA_FP4=1` (and SLAK +
+  adaptive k without DFlash). Now `--model X` / `--model=X` / a first positional decides; the drafter path, `--tokenizer` and
+  `--served-model-name` are ignored; a local target is also Inkling when its `config.json` `model_type`/`architectures` say so (the `/model` mount) and `--reasoning-parser inkling` is a fallback signal. DFlash2 drafter pinned in [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)
+  (`incoai/Inkling-2-Mini-DFlash2` @ `4f9088ea`, Apache-2.0, sha256 `217980ab...`). Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
+- **Inkling default: coda experts NVFP4 (`RADIANCE_INKLING2_CODA_FP4=1`) from `radiance_entrypoint.sh`, for every drafter.**
+  Lossy, user-approved on a measured gate (<= 0.010 nats): *MEASURED* 2026-11-25, R9700 210 W, vs the exact MXFP8 run,
+  KLD mean 0.0033 nats (CI 0.0026-0.0042), median 0.00025, p99 0.053, top-1 98.46 %, dPPL +0.26 %; DFlash2 code decode
+  224.4 -> 233.0 tok/s (+3.9 %), step 23.26 -> 22.70 ms, greedy text diverges after ~110-220 characters.
+  An explicit `RADIANCE_INKLING2_CODA_FP4=0` (or empty) restores the exact experts; other models are untouched; the
+  `--entrypoint vllm` override of a harness bypasses it. Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
+- **The Inkling entrypoint defaults (SLAK 4096 + adaptive k 3,5,7) are drafter-aware: not set with the DFlash2 drafter.**
+  `radiance_entrypoint.sh` skips them when `--speculative-config` contains `"method":"dflash"` (JSON with or without
+  spaces); DSpark and no speculative config keep them, explicit env still wins. *Why, MEASURED* 2026-11-25 (image
+  `ink-200`, R9700 210 W, BetterBench code): DFlash2 without the knobs 223.97 / 223.95 tok/s (5.13 tokens per update), via the
+  entrypoint with them 221.46 (4.86, -1 %); with DSpark they help (173.57 vs 161.8, +7.3 %, gate 4/4). Docs: recommended
+  table in [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7). Test
+  `sly/inkling2/tests/test_entrypoint_defaults.py`.
+- **Recommended Inkling 2 Mini decode config: the DFlash2 drafter at k = 7** (arguments in
+  [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md#recommended-decode-config-dflash2-drafter-k--7)): +38 % code decode
+  over DSpark, *MEASURED* 2026-11-25 on one R9700 at 210 W (BetterBench code, T 0.7, seed 42): 224.16 vs 161.96 tok/s,
+  5.13 vs 3.90 tokens per update, weighted 210.70 vs 157.01, greedy gate 4/4 byte-identical. DSpark stays the fallback when
+  the DFlash2 model directory is not present; the image defaults are unchanged (the drafter is a serving flag).
+- **A bf16 DFlash drafter keeps its conv projections bf16 (`radiance_w4a16_postload`).** The hook requantized the 10
+  `DFlashGroupedConv.kernel_projection` weights to int4 g128 whenever `RADIANCE_DFLASH_CONV_W4` was unset; the bf16
+  Inkling-2-Mini-DFlash2 lost acceptance for it (5.13 -> 3.65 tokens per update, 224.16 -> 159.76 tok/s, MEASURED).
+  Unset now means "only if the drafter has W4A16 layers" (the Qwen DFlash2-W4A16 drafter is unchanged); `=1` / `=0`
+  still win. Check: `sly/check_w4a16_fuse.py`. This also corrects the earlier reading that DFlash2 does not win on
+  Inkling: that was the int4-requantized arm.
+- **Inkling 2 Mini decodes with the shortlisted drafter + adaptive k by default; NSD is opt-in again.**
+  `radiance_entrypoint.sh` exports `RADIANCE_INKLING2_DRAFT_SHORTLIST=4096` and `RADIANCE_INKLING2_ADAPTIVE_K=3,5,7`
+  when a serve argument names an Inkling model; explicit values (an empty one too) win, other models are untouched.
+  It no longer exports `RADIANCE_NSD`, `RADIANCE_NSD_THETA`, `RADIANCE_CACTUS_DELTA`. *Why:* the earlier five-knob
+  default (+5.1 %, 170.49 vs 162.2 tok/s, W2) **degrades output quality**: W3 2026-11-25, greedy gate on 4 code
+  prompts, control 4/4 identical across starts, NSD profile 2/4 with visibly broken text ("binary binary in Python
+  and Python and..."). Probable cause: NSD is OR-ed into the acceptance of greedy and masked draft slots whose nucleus-mass buffer
+  is never written (`sly/patch_nsd.py`), so its speed gain may be partly bogus (code reading, not yet proven). Which knob costs what is measured by
+  the NQ chain (not yet run). Test `sly/inkling2/tests/test_entrypoint_defaults.py`.
+
+### Added
+- **`RADIANCE_INKLING2_CODA_FP4` (opt-in, lossy): Inkling-2-Mini coda experts MXFP8 -> NVFP4 at load.** Layers 20-23 are the only
+  MXFP8 tensors in the checkpoint (experts; attention and router stay bf16 / MXFP4-dense). Serving them as NVFP4 cuts 0.44 GB
+  per decode step (29.6 unique experts x 4 layers x 3.73 MB; RECHNUNG ~0.7-0.8 ms of a 19.7 ms step). Quality gate
+  (KLD <= 0.010 nats) and tok/s not yet measured on GPU.
+- `RADIANCE_INKLING2_HIP_CTRL` / `RADIANCE_INKLING2_FOLD_INT8` log a proof line on first use (and once why they
+  fall back); `FOLD_INT8` with a drafter shortlist is logged as inert. A silent knob could not be told from a dead one.
+- **Inkling 2 Mini with vLLM's native DFlash2 drafter (`incoai/Inkling-2-Mini-DFlash2`), opt-in by serving flag.**
+  `sly/patch_inkling2_dflash2.py` carries the four Inkling points of the vendor's SGLang patch into vLLM's own
+  `dflash2` speculator: capture ids are the target's layer visits ending at the final-norm visit (no DFlash `+1`),
+  `selector_softcap_mode: after_correction` caps unary + edge score, and the candidate logits run through
+  Inkling's logits processor (MXFP4 dense head) with the target's `embed_norm` on the draft input
+  (`RADIANCE_INKLING2_DFLASH2_EMBED_NORM=0` = raw embedding). Serve with `method: dflash`, the draft dir
+  (its name must contain `dflash2`), `attention_backend: TRITON_ATTN`, `kv_cache_dtype: auto`. The DSpark default
+  is untouched. *Measured* (R9700 210 W, code, k = 7): 224.16 tok/s vs DSpark 161.96, see Recommended above; vendor card (H200, SGLang): acceptance length 4.80 vs 3.66 on HumanEval.
+- **Inkling 2 Mini step-time knobs, both opt-in (default off, not yet measured end to end).**
+  `RADIANCE_INKLING2_HIP_CTRL=1`: the loop message controllers' two `torch.bmm` per sublayer visit (hipBLASLt,
+  0.92 ms per verify step in the 2026-11-23 kernel trace) run on a new batched variant of the HIP bf16 GEMV
+  (`gemv_bf16_batched`, stream = grid.y); same weights, fp32 accumulation. `RADIANCE_INKLING2_FOLD_INT8=1`:
+  the DSpark Markov fold weight is read as int8 + a fp32 row scale (103 -> 51 MB per Markov step, 7 per verify
+  step); lossy for the draft only, the target verifies every token. Micro-benchmarks `bench_ctrl.py`,
+  `bench_fold.py`. *Measured*: CPU tests only so far; projected -0.4..-0.5 ms and -0.6 ms of the 23.1 ms step.
+- **Inkling 2 Mini (`thinkingmachines/Inkling-2-Mini`) on gfx1201.** `sly/patch_inkling2_gfx12.py` runs
+  the model's sm120 (Triton) path on ROCm: capability gates, PDL removed, hot-path PTX rewritten to
+  Triton math, hip libdevice gaps, 64 KB LDS tiles, flashinfer-free DSpark drafter (torch RMSNorm,
+  Triton KV scatter). NOOP on a vLLM without `models/inkling2`.
+  Recipe (DSpark k=7 `--speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'`,
+  `--reasoning-parser inkling`, `--no-async-scheduling`, graph sizes 1-8, `GPU_MAX_HW_QUEUES=1`), knobs and numbers:
+  [docs/INKLING2-MINI.md](docs/INKLING2-MINI.md). The model is in no vLLM release (see *Changed*).
+- **HIP expert GEMV for decode / spec-verify tiles** (`sly/inkling2/radiance_inkling2_moe.hip`, tile 8 =
+  up to 8 tokens): one pass over each routed expert's weights for all its rows, NVFP4 codes as e4m3
+  through `v_dot4_f32_fp8_fp8` (exact), MXFP8 unchanged. Micro-bench (rotated >300 MB pool):
+  529-648 GB/s, NVFP4 3.1-3.4x and MXFP8 6.0-6.8x faster than the Triton dequant kernels; NVFP4 output
+  bit-identical. `RADIANCE_INKLING2_HIP_MOE=0` = Triton.
+- **HIP bf16 GEMV for the dense low-M projections, default on** (`RADIANCE_INKLING2_HIP_GEMV=0` = Triton;
+  `gemv_bf16` in `sly/inkling2/radiance_inkling2_gemv.hip`): lossless (bf16 weights, fp32 accumulate), M 1..16
+  alike (one `v_wmma_f32_16x16x16_bf16` per 16 weight rows x 16 K, activation rows as columns), weights
+  streamed as whole cache lines through LDS with non-temporal loads, no scratch, graph-capture safe.
+  Rotated-pool micro-bench at M=8: 558-596 GB/s on the big projections (Triton 547-595), 502-529 on
+  wo/down/kv_ctx (Triton 482-484), 1.5x on the rnn_proj; the unembed ties (570 vs 572).
+- **Inkling 2 Mini: no cooperative launch for the fused route kernel on ROCm.** A cooperative launch
+  gets its own HIP hardware queue; the route kernel then alternated with the main queue 48x per step
+  and on ~2/3 of the container starts every small kernel of the step hit a ~17 us duration floor
+  (62 vs 31 ms per DSpark verify step, ~67 vs ~135 tok/s). The grid (<= 28 programs) is co-resident
+  on any idle gfx12, which is all its spin-wait needs; asserted before the launch. Measured 4/4 fast
+  starts (128-153 tok/s on a 2000-token code request) vs 4/12 before.
+- **Inkling 2 Mini DSpark: launch folding, same math in fewer launches** (`sly/inkling2/radiance_inkling2_draft.py`,
+  patch hooks 4j in `sly/patch_inkling2_gfx12.py`): draft RMSNorm 10 torch
+  launches -> 1 (27.8 -> 3.3 us, bit exact), Markov step (cat + embedding + addmm + gate) and fold GEMM +
+  softcap each in one kernel (draft Markov tail 200 -> 177 us per step), dynamic sconv taps on the low-M GEMV
+  (7.8 -> 5.1 us). Verify step 30.3 -> 29.55 ms (2 starts per arm,
+  gfx1201, graphs, k=7).
+- **Optional drafter shortlist for Inkling 2 Mini** (`RADIANCE_INKLING2_DRAFT_SHORTLIST=<k>`, default off): Markov correction on
+  the top-k base logits of each draft row only (-inf elsewhere, target output unchanged); measured -1.7 ms
+  per step but fewer accepted tokens on code (acc/step 3.43 -> 2.97 at k=4096), so not enabled.
+- **Opt-in int8 (Q8_0) weight GEMV for the dense projections** (`RADIANCE_INKLING2_W8=1`,
+  `sly/inkling2/radiance_inkling2_gemv.hip`): lazy per-32 int8 copy of attention / output / LM-head /
+  drafter projections, bf16 activations, fp32 accumulation, **M 1..16 (a DSpark k=7 verify step is M=8)**.
+  The K sum runs on the matrix unit like the bf16 kernel (the old ALU kernel lost beyond M=4): the int8
+  codes are widened to bf16 exactly, a wave reads a pre-tiled copy (16 rows x 64 K, one 512 B coalesced
+  load per wave, no LDS) and applies each block's fp32 scale to the exact K=32 partial sum. Rotated-pool
+  micro-bench at M=8: 533-585 GB/s of int8 bytes on the big projections (wo 479, kv_ctx 440: launch
+  bound), 1.56-1.73x faster than the bf16 HIP GEMV for every routed shape and every M 1..16, 1.5x on the
+  rnn_proj. `RADIANCE_INKLING2_W8_HEAD=0` keeps the 201024-row LM head on bf16. Default behaviour is unchanged.
+  Model level (eager, no drafter, greedy top-20 logprobs, 32 prompts x 256 tokens, KLD on the reference's top-20
+  up to the first token divergence): mean 0.0081, median 0.0007, p99 0.080, top-1 97.3 % for both Q8 variants
+  (the lossless bf16 HIP kernels vs Triton measure 0.0148 / 0.0006 / 0.218 / 96.5 % on the 8-prompt set, so Q8
+  costs no more than switching bf16 kernels); the LM head in Q8 changes nothing measurable (top-1 identical,
+  KLD 3.4e-6 vs the head-in-bf16 arm). Graphs + DSpark k=7, 2000-token code request, 2 requests per start:
+  109.8 tok/s at W8=1 on 3/3 starts vs 97.6 and 90.4 at W8=0 (acceptance 1.91 tokens/draft in both arms).
+  Decode A/B on the final image (BetterBench, two starts each): code 151.1 / 145.9 vs 127.3 / 124.4 default, weighted 148.5 / 145.7 vs 128.1 / 126.6. One of four W8 starts died with `ILLEGAL_INSTRUCTION` at graph capture
+  (a foreign 512-thread kernel, cause unexplained), hence opt-in.
+- **Opt-in MXFP4 (4-bit) dense projections + lm_head for Inkling 2 Mini**
+  (`RADIANCE_INKLING2_MXFP4_DENSE=1`, `sly/inkling2/radiance_inkling2_mxfp4dense.py` +
+  `sly/patch_inkling2_mxfp4dense.py`). Default stays lossless bf16. Inkling keeps its dense
+  projections + lm_head in bf16 (only the MoE experts are 4-bit), streaming ~4x the dense weight
+  bytes of the fully-4-bit prod Qwen; this quantizes them at load time to the compressed-tensors
+  MXFP4 grid (group-32 E2M1 + E8M0, RTN or a small MSE exponent search) and routes the matmul to the
+  hand-written HIP W4A16 GEMV `sly/inkling2/radiance_inkling2_mx4.hip` (`RADIANCE_INKLING2_MXFP4_DENSE_MODE=gemv`,
+  the default): e2m1 codes widened exactly to bf16 (byte-LUT `v_perm`), the E8M0 scale on the exact K=32 fp32
+  partial sum, a pre-tiled copy read in whole 512 B wave loads, K split over waves, one launch per call, bf16
+  activations (no fp8 activation quantization), no scratch, graph safe; M > 16 (prefill) dequantizes the tiles
+  to bf16 per call. Only the tiles are kept (no [N, K/2] copy). `_MODE=w4a8` keeps the radiance MXFP4 W4A8
+  fp8-WMMA kernel (`radiance_mxfp4_fp8.so`), `_MODE=w4a16` the fake-quant quality arm. Memory: the weights are
+  quantized in `process_weights_after_loading` and the bf16 originals are released right there, before
+  vLLM sizes the KV cache (2.74 GB bf16 of the attention, draft and head projections become 751 MiB of MXFP4
+  tiles, the load-time proof line counts them, including the unaligned k/v slices' own tile copies; only the lm_head stays bf16 until the DSpark draft has folded it, then it is freed too).
+  `RADIANCE_INKLING2_MXFP4_DENSE_MODE=w4a16` dequantizes the codes back to bf16 to isolate the
+  weight-quantization quality cost. The MoE router and tiny projections (N < 256) stay bf16; the loop
+  message controllers (~4% of dense bytes, batched bmm) stay bf16. A quality trade-off like Qwen's own
+  4-bit, NOT lossless. Load-time quantizer on the real weights (`sly/inkling2/check_mxfp4dense_cpu.py`,
+  CPU-only): 0.115 relRMS RTN / 0.112 MSE, dequant bit-exact against the format grid; the quantizable
+  dense reads drop from 4.77 to 1.27 GB per step (3.76x fewer weight bytes).
+  Measured (R9700 gfx1201, 210 W, graphs + DSpark k=7): kernel per call at M = 8 in a replayed CUDA graph
+  (rotated > 300 MB pool) 4.5 / 6.0 / 10.3 / 10.6 / 18.6 / 22.4 us at N = 384 / 1024 / 3072 / 2304 (K 3072) /
+  6552 / 8600 (105-469 GB/s of codes + scales; 1.4-2.7x the W4A8 kernel, 1.3-1.8x the int8 GEMV), lm_head
+  (N = 201024) 394-452 us (544-624 GB/s, 3.0-3.5x W4A8, 2.1-2.4x int8). The old W4A8 route's flat ~29 us per call was host time
+  in the eager micro-bench; in a graph it is 12.5-31.7 us. Model KLD mean 0.0176 / p99 0.179 / top-1 95.7 %
+  (W4A8 0.026 / 0.34 / 96.6 %, int8 0.008): 4-bit dense stays opt-in. BetterBench code 162.4 / 161.6 tok/s (weighted 157.2 / 156.8, two starts each) vs int8 151.1 / 145.9, default 127.3 / 124.4, prod Qwen 155.
+- **Opt-in adaptive DSpark verify window for Inkling 2 Mini**
+  (`RADIANCE_INKLING2_ADAPTIVE_K`, `sly/inkling2/radiance_inkling2_adaptive_k.py` +
+  `sly/patch_inkling2_adaptive.py`). The DSpark checkpoint's block size fixes the MAX verify window at
+  k = 7 (a verify step is M = 8 rows); a shorter window (k in {3, 5}) verifies exactly the same way —
+  rejection sampling is exact for any k — and reads fewer distinct MoE experts + less dense attention per
+  step, so the step is cheaper (the MoE part scales with rows, the dense GEMV is weight-bound). The
+  scheduler picks k per step from a running acceptance EMA (accepted tokens per step) with hysteresis +
+  cooldown (no oscillation), through the native per-step `num_spec_tokens_to_schedule` seam; the override
+  runs after the batch-size `dynamic_sd_lookup`, so it wins. The target's FULL decode cudagraph is captured
+  only for the config verify width (q=8); the patch also captures the adaptive widths (q=4/6) so a shorter
+  window replays a FULL graph instead of falling to the ~2x slower PIECEWISE route. The knob is a comma list
+  of k's, each in {3, 5, 7}, at most three entries (`"3,5,7"` adaptive, `"5"` fixed); default off = k = 7
+  unchanged. NOOP on a vLLM without `models/inkling2`.
+
+### Changed
+- **vLLM base moved to main@1bdc437 for Inkling 2 Mini support.** No release up to v0.34.0 carries
+  `KVCacheLayerConfig` / `MambaManager.layer_config` (`v1/kv_cache_interface.py`), which Inkling 2 Mini
+  needs, so the image builds that commit (merged upstream PR #69028) instead of a tag. `ARG VLLM_REF`
+  is the official pin (Renovate `git-refs` digest); `VLLM_VERSION=0.34.0` stays as the last release the
+  commit descends from and still stamps the wheel and the image labels. Every CI consumer (patch dry
+  run, constraints replay, stack resolver, aiter contract) reads the same ref through
+  `ci/read_pins.py --vllm-ref`. A release image keeps the plain `<version>-rocm10.1` tag; only a
+  `vllm_ref` dispatch override of the pin gets the `-vllm<sha9>` spike suffix.
+- **aiter 0.1.28.post1 -> 0.1.29.post1** (the new base's sanctioned stand, derived by
+  `ci/resolve_stack.py`), flydsl 0.4.2 -> 0.5.0 with it. The torch/triton/torchvision trio is unchanged
+  (2.13.0 / 3.8.0+git669b31ac / 0.28.0). `constraints.txt` resolves against main's requirements and the
+  generated Renovate caps follow (compressed-tensors 0.20.1, tensorizer 2.12.1,
+  mooncake-transfer-engine-rocm 0.3.14 now exact-pinned). vLLM's own ROCm base builds on python 3.14;
+  this image stays on 3.12, which main's `requires-python = ">=3.11,<3.15"` allows — the resolver now
+  gates on that instead of on the base image's interpreter (warning, not a red check).
+- **Eight production patches re-anchored to main@1bdc437, behaviour unchanged** (dry run: 191 hunks
+  apply, pass 2 all NOOP, no loop patch skipped; three more apply again as a cascade, last bullet):
+  - `patch_skinny_gemm`: the ROCm platform import gained `on_rdna4`; the hook keeps its place ahead of
+    upstream's skinny branches (which now include an M 5..8 swmmac path on RDNA4).
+  - `patch_gdn_lazy`: `get_kv_cache_spec` became `get_kv_cache_config` + `MambaManager.layer_config`;
+    the lazy stash count hooks the same argument. The GDN builder now passes `num_speculative_blocks`
+    to `mamba_get_block_table_tensor` explicitly (0.34 read it off the KV spec), so it follows the lazy
+    count too — otherwise the block table is sliced 1+k wide while the cache reserves 1+1 and column 1
+    is no longer the stash. Inert unless `RADIANCE_GDN_LAZY=1`. The mamba_utils kernel anchors only
+    changed a comment / docstring wording.
+  - `sly/patch_quark_mxfp4`: the MXFP4 kernel list gained a CUDA batch-invariance filter; the aiter fp4
+    GEMM import moved from `kernels/linear/mxfp4/aiter.py` into `_aiter_ops.py`. The op-registration
+    gate hunk is native upstream now (`register_ops_once` gates on CDNA **or** RDNA) and reports SKIP.
+  - `sly/patch_w4a16_tiles`: the skinny limit became `_max_skinny_batch_size()`; the apply op gained a
+    scale/zp carrier argument.
+  - `sly/patch_fused_norm_quant` / `sly/patch_w4a16_fuse`: upstream deleted `qwen2_moe.py` and
+    `qwen2.py` — `Qwen3NextMLP` is now `Qwen3MoeMLP` (qwen3_moe.py) and the drafter's `Qwen3MLP` lives in
+    qwen3.py; the hooks follow the classes (same forward bodies). The V2 runner's drafter block gained
+    `free_unused_weights()`; the post-load hook keeps its original scope.
+  - `sly/patch_embed_host`: the loader's weight-processing tail is wrapped in a try/except now; the
+    offload still runs after it, before `gc.collect()` / `model.eval()`.
+  - `sly/patch_adaptive_width`: the scheduler inlined `num_draft_tokens` into `num_rejected`; the
+    observe hook reads the same locals. **Not dropped**: `RADIANCE_ADAPTIVE_WIDTH=perseq` is in the
+    production launch. The NOT-ADOPTED entry of 2026-11-20 (avab) rejects vLLM's *native*
+    `enable_adaptive_verification`, a different mechanism.
+  - `sly/patch_embed_int8`, `sly/patch_nvfp4_compile_key`, `sly/patch_graph_knob_keys` apply again once
+    the two patches above install their `compile_factors` lines (they were cascade failures).
+
+### Fixed
+- **NSD (`RADIANCE_NSD=1`) no longer accepts wrong tokens on greedy rows and masked draft slots (all models).** The
+  nucleus-mass kernel never writes the buffer entries of greedy rows and `-1` placeholder slots (`new_empty`), but the
+  rejection kernel OR-ed `mass <= theta` into `accepted` for them anyway, so uninitialised memory could accept a
+  token that is not the target argmax (greedy) or sit behind a placeholder. Fix in `sly/patch_nsd.py`: the OR only
+  applies to sampled rows with a real draft (`& is_valid_draft & (temp != 0.0)`), and the buffer starts at `+inf` (never in the
+  nucleus). The patch upgrades a tree that carries the old NSD hunks. Tests: `sly/tests/nsd_garbage_check.py` (Triton
+  interpreter; fails on the old code, 4 mutants checked). Any earlier NSD measurement (tok/s, acceptance, output text) is
+  suspect and needs a re-run; NSD stays opt-in.
+- **Qwen production profile crashed at KV-cache init on the vLLM main base** (`AttributeError:
+  'MambaSpecDecodeGPUContext' object has no attribute '_radiance_kv_cfg'`, `mamba_utils.py
+  initialize_from_forward_context`): main declares the context with `@dataclass(slots=True)`, so the lazy-GDN
+  glue (`patch_gdn_lazy.py`, runs on every start, not only with `RADIANCE_GDN_LAZY=1`) could not store its five
+  attributes. They are now declared as dataclass fields (idempotent hunk). Found by the acceptance gate of PR #259
+  (run 45237859572, ink-k8) right after the `apply_flattened` crash below; CPU test
+  `sly/tests/test_gdn_lazy_ctx_slots_cpu.py` runs the patch on verbatim copies of the three upstream files.
+- **Qwen production profile crashed in `profile_run` on the vLLM main base** (`AttributeError: 'tuple' object
+  has no attribute 'ndim'`, `Qwen3MoeMLP.down_proj`): main routes every linear layer through
+  `apply_flattened(fn, x)`, which reads `x.ndim` before the quant method runs, and the
+  `RADIANCE_FUSED_NORM_QUANT=1` hooks hand the W4A8 GEMMs a `(q, scale)` tuple. New
+  `sly/patch_linear_carrier.py` passes the tuple (always a 2D token batch) straight to the kernel; NOOP on a
+  vLLM without `apply_flattened`. Found by the acceptance gate of PR #259 (run 45225663768, ink-k7); the
+  patch dry run only checks anchors and could not see it. Tensor inputs are unchanged.
+- **Qwen on the vLLM main base: decode -3..-5 % (four categories) and prefill -6 % (8k/16k) against 1.13.4, fixed** (`sly/patch_qwen35_legacy.py`).
+  *Cause, MEASURED* (1.14.0 release check; same-window control `1.13.4` twice: noise <= 0.3 %): vLLM main@1bdc437 routes Qwen3.5 on ROCm to a new
+  eager model (`vllm/models/qwen3_5/amd`, own decoder `forward` and `Qwen3_5RMSNorm`) and lists the architecture in
+  `default_breakable_cudagraph_architectures()`, which turns `torch.compile` off (engine `mode NONE`). Every radiance hook sits in the legacy
+  `qwen3_next.py` layer, so `radiance::add_rms_quant` never ran and the A-tiled prefill GEMMs lost their tiled inputs; the greedy gate was
+  0/4 identical to 1.13.4. The patch keeps the legacy model and `torch.compile` for Qwen3.5 on ROCm (`RADIANCE_QWEN35_AMD=1` = upstream model).
+  With the patch (overlay on the same image, one change): decode per category -0.1..+0.3 %, prefill 2k/8k/16k +6.2/+0.3/+0.5 %, greedy gate 4/4
+  identical to 1.13.4, GSM8K-50 49/50 = prod. NOOP on a vLLM without `vllm/models/qwen3_5`. Tests `sly/tests/test_qwen35_legacy_patch_cpu.py`.
+- **The MXFP4 aiter fallback op name** (`sly/mxfp4/radiance_mxfp4.py`): main renamed
+  `torch.ops.vllm.gemm_with_dynamic_quant` to `rocm_aiter_mxfp4_gemm_dynamic_quant`. The dispatch
+  resolves whichever name the installed vLLM registers, so the sub-MIN_M / non-W4A8-layer fallback
+  keeps working on both bases instead of raising inside the custom op. TDD:
+  `sly/tests/test_mxfp4_aiter_op_name_cpu.py` (RED against the old name only, GREEN here).
+
+- **`patch_adaptive_width`: graph start no longer dies with `NameError: max_decode_tokens`** on the
+  main base. The re-anchored hunk still passed the old `_init_candidates` local, which main removed;
+  every start with CUDA graphs and `RADIANCE_ADAPTIVE_WIDTH` (production) failed at engine init. The
+  cap is now `max_num_reqs * decode_query_len`. New gate in the patch dry run,
+  `ci/check_new_names.py`: a patched file may not read a name its scope cannot resolve (stdlib
+  `symtable`; only names a patch introduced are reported).
+
+### Removed
+- **KVCACHE=ram/disk (KV tiering) is unsupported on this base until ported.** main@1bdc437 rewrote the
+  offloading connector scheduler (the per-group `SchedulerOffloadConfig` / `RequestGroupState` classes
+  are gone, 2671 -> 1748 lines) and removed the eagle-group annotation from `kv_cache_utils.py`; 9 of
+  the 14 launcher patches need a port, not a re-anchor. They are listed in `ci/kv_dryrun_skip.txt` and
+  the dry run reports them as SKIP. Production is unaffected: `KVCACHE` defaults to `off` and the
+  docker-vllm7 launch does not set it. A tiering launch fails loudly at container start (those patches
+  are fatal there) instead of running half-patched.
+
+*Measured, Inkling 2 Mini (one R9700, 210 W, vLLM main@1bdc437, BetterBench single-stream decode, 65,536 context, prefix caching
+off, graphs, k=7, seed 42, image `ink-k3`, two container starts): weighted 126.7 / 126.6 tok/s; chat 90.3 / 90.1, code 125.6 / 125.3,
+file_edit 154.5 / 154.4, json 152.6 / 152.3, math 140.5 / 140.2, prose 91.3 / 91.3, reasoning 110.7 / 110.7, summarization 148.8 / 148.8;
+step ~30 ms in every category, code 3.74 tokens per update. Before the cooperative-launch fix (`ink-k2`): code 62.9, weighted 62.0.
+Per-category table (default and W8 on `ink-k5`) and the pending MXFP4 dense run: [docs/BENCHMARKS.md](docs/BENCHMARKS.md#inkling-2-mini-on-gfx1201-2026-11).*
+
+*Measured, production Qwen on this base: not yet — CPU CI only (patch dry run 191 hunks / pass 2 all NOOP, constraints 212 packages
+resolved, CPU suite 246 passed / 595 skipped, aiter + attention-metadata contracts green, resolve green). No GPU window has run the
+Qwen production launch on main@1bdc437, so no throughput / tokens-per-update / per-category numbers exist for it; the accept gate is
+the next step before a release.*
 
 ## [1.13.4] - 2026-11-19
 
