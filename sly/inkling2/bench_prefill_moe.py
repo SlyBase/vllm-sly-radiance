@@ -129,10 +129,10 @@ def nvfp4_candidates(tile, cpu):
         return
     if V2:  # v2 kernels: full grid; v2_safe=True avoids the denormal operand of the bit-trick decode
         yield dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2), "A"  # v1 as tuned by the table
-        for fp16, bm, bn, bk, nw, ns in itertools.product((False, True), (64, 128), (64, 128), (32, 64), (4, 8), (2, 3)):
-            if bm <= max(tile, 64):  # fp16 operands (native cvt) against bf16 + truncating cvt
-                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=nw, num_stages=ns, v2=True, v2_trunc=True,
-                           fp16=fp16), "A"
+        base = dict(num_warps=4, num_stages=2, v2=True, v2_trunc=True)
+        for bm, bn, bk, wpe in itertools.product((64, 128), (128, 256), (32, 64), (0, 1, 2, 3, 4)):
+            if bm <= max(tile, 64):  # waves_per_eu = 0 is the compiler default
+                yield {**base, "block_m": bm, "block_n": bn, "block_k": bk, **({"waves_per_eu": wpe} if wpe else {})}, "A"
         return
     stage_a = [dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2)
                for bm, bn, bk in itertools.product((32, 64, 128), (64, 128), (64, 128, 256)) if bm <= tile]
