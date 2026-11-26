@@ -67,7 +67,9 @@ def rocm_archs(tree, platform="rocm", amd_env=None):
 
 def which_model(tree, platform, amd_env=None, tmp=None):
     """Import the patched vllm.models.qwen3_5 package against stub submodules; return the origin tag."""
-    stub = Path(tmp) / "stub"
+    # one dir per call: the stub platform files of two calls differ only in True/False (same size), and a
+    # shared dir with a same-second rewrite is served from the stale .pyc
+    stub = Path(tmp) / f"stub-{platform}-{amd_env}"
     names = ["Qwen3_5ForCausalLM", "Qwen3_5ForCausalLMBase", "Qwen3_5ForConditionalGeneration", "Qwen3_5Model",
              "Qwen3_5MoeForCausalLM", "Qwen3_5MoeForConditionalGeneration"]
     mtp = ["Qwen3_5MoeMTP", "Qwen3_5MTP"]
@@ -96,6 +98,7 @@ def which_model(tree, platform, amd_env=None, tmp=None):
     """))
     env = {k: v for k, v in os.environ.items() if k != "RADIANCE_QWEN35_AMD"}
     env["PYTHONPATH"] = str(stub)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     if amd_env is not None:
         env["RADIANCE_QWEN35_AMD"] = amd_env
     r = subprocess.run([sys.executable, "-c",
