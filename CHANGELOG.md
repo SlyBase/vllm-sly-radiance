@@ -13,6 +13,16 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
+- **Inkling-2-Mini prefill 2.8-3.1x faster (P0 1192/1298/1288/1245 -> 3584-3713 / 4217-4366 / 4007-4113 / 3828-3900 pp/s at 1.6k/6.3k/12.6k/25k tokens, two runs).**
+  *MEASURED* 2026-11-26, R9700 210 W, BetterBench `--prefill`, DFlash2, cold prefix cache, max-model-len 32768, image `ink-200c` as control.
+  Four steps, each with its own arm: (1) the launch table of the NVFP4 expert GEMM is the default (`RADIANCE_INKLING2_MOE_PREFILL_CFG`,
+  +64..71 %, dNLL +0.0000); (2) prefill chunk 4096 from the entrypoint (`RADIANCE_INKLING2_CHUNK`, +14..16 %, **the KV pool reports
+  53 815 instead of 94 849 tokens at the same memory**, `=0` restores 2048); (3) new expert GEMM `_expert_gemm_v2` for token tiles >= 128
+  (`RADIANCE_INKLING2_MOE_PREFILL_V2`; expert GEMMs 19.7 -> 8.5 ms per layer visit; greedy gate 4/4 identical, rep 0/4);
+  (4) rel-attention BLOCK_N 32 on ROCm (+7..13 %; greedy gate 2/4 identical because the summation order changed, both texts coherent,
+  dNLL -0.0001, GSM8K-50 T=0 0.88 vs 0.84 control). Decode is unchanged: code tok/s over four seeds 225.2 (control) vs 227.0 (mean of
+  per-run values), step 22.69 ms both. Tests `sly/inkling2/tests/test_nvfp4_expert_gemm_v2.py`, `test_prefill_cfg.py`,
+  `test_entrypoint_defaults.py`, `test_patch_gfx12.py`.
 - **Inkling entrypoint defaults key on the target model only, not the whole argv.** `radiance_entrypoint.sh` looked for
   `*inkling*` in every argument, so a Qwen target with an `inkling` drafter path got `RADIANCE_INKLING2_CODA_FP4=1` (and SLAK +
   adaptive k without DFlash). Now `--model X` / `--model=X` / a first positional decides; the drafter path, `--tokenizer` and
