@@ -32,6 +32,7 @@ import triton  # noqa: E402
 import triton.language as tl  # noqa: E402
 
 EXPERTS, TOPK = 128, 8
+V2 = "--v2" in sys.argv  # sweep the v2 kernels instead of v1
 SHAPES = {"w13": (2304, 2304), "w2": (2304, 1152)}  # (N, K) of the two projections
 PEAK_TF = 101.0  # bf16 WMMA dense, 64 CU x 1024 FLOP/clk x 1.546 GHz (the clock the card holds under load)
 _TILES = ((8, 8), (128, 16), (384, 32), (768, 64), (4096, 128), (1 << 31, 256))  # vLLM trtllm_bmm._TILES
@@ -125,6 +126,12 @@ def nvfp4_candidates(tile, cpu):
     if cpu:
         yield dict(block_m=16, block_n=32, block_k=64), None
         yield dict(block_m=16, block_n=64, block_k=64), None
+        return
+    if V2:  # v2 kernels: fast decode (v2_safe=False/True), dequantised activations, nibble-split dots
+        yield dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2), "A"  # v1 as tuned by the table
+        for safe, (bm, bn, bk) in itertools.product((False, True), itertools.product((64, 128), (64, 128), (64, 128))):
+            if bm <= tile and (safe is False or (bm, bn, bk) == (128, 128, 64)):
+                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2, v2=True, v2_safe=safe), "A"
         return
     stage_a = [dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2)
                for bm, bn, bk in itertools.product((32, 64, 128), (64, 128), (64, 128, 256)) if bm <= tile]
@@ -298,6 +305,7 @@ def main(argv=None):
     ap.add_argument("--table-out")
     ap.add_argument("--dq-estimate", action="store_true")
     ap.add_argument("--cpu-smoke", action="store_true")
+    ap.add_argument("--v2", action="store_true", help="sweep the v2 prefill kernels")
     a = ap.parse_args(argv)
     import radiance_inkling2_moe as m
 
