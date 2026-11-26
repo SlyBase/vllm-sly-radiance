@@ -42,12 +42,29 @@ def launch_nvfp4(monkeypatch, tile, n=2304, k=2304, experts=1):
     return spy.calls[0]
 
 
-def test_default_is_the_old_hardcoded_tile(monkeypatch):
+def test_default_is_the_tuned_table_for_tile_128(monkeypatch):
+    """No env: the built-in table (PT arm, BM128/BN128/BK64, +64..71 % prefill, dNLL 0.0000)."""
     monkeypatch.delenv(ENV, raising=False)
+    grid, kw = launch_nvfp4(monkeypatch, tile=128)
+    assert (kw["BM"], kw["BN"], kw["BK"], kw["num_warps"], kw["num_stages"]) == (128, 128, 64, 4, 2)
+    assert grid == (4, 1, 18)  # max_ctas, cdiv(128, 128), cdiv(2304, 128)
+
+
+@pytest.mark.parametrize("off", ["0", "off", ""])
+def test_env_off_is_the_old_hardcoded_tile(monkeypatch, off):
+    monkeypatch.setenv(ENV, off)
     grid, kw = launch_nvfp4(monkeypatch, tile=128)
     assert (kw["BM"], kw["BN"], kw["BK"]) == (32, 64, 128)
     assert "num_warps" not in kw and "num_stages" not in kw
     assert grid == (4, 4, 36)  # max_ctas, cdiv(128, 32), cdiv(2304, 64)
+
+
+def test_builtin_table_passes_the_validator(monkeypatch, tmp_path):
+    import radiance_inkling2_moe as m
+
+    cfg = tmp_path / "t.json"
+    cfg.write_text(json.dumps(m._DEFAULT_TABLE))
+    assert m._cfg_table(str(cfg)) == m._DEFAULT_TABLE
 
 
 def test_json_table_overrides_the_tile_it_names(monkeypatch, tmp_path):
@@ -58,7 +75,7 @@ def test_json_table_overrides_the_tile_it_names(monkeypatch, tmp_path):
     grid, kw = launch_nvfp4(monkeypatch, tile=128)
     assert (kw["BM"], kw["BN"], kw["BK"], kw["num_warps"], kw["num_stages"]) == (64, 128, 64, 8, 2)
     assert grid == (4, 2, 18)
-    _, other = launch_nvfp4(monkeypatch, tile=64)  # a tile the table does not name keeps the default
+    _, other = launch_nvfp4(monkeypatch, tile=64)  # a tile the file does not name keeps the default
     assert (other["BM"], other["BN"], other["BK"]) == (32, 64, 128)
 
 
@@ -99,7 +116,7 @@ def test_override_does_not_change_the_result(monkeypatch, tmp_path):
 def test_mxfp8_default_launch_is_the_historical_one(monkeypatch, tile, hip, expect):
     import radiance_inkling2_moe as m
 
-    monkeypatch.delenv(ENV, raising=False)
+    monkeypatch.setenv(ENV, "0")
     got = m.mxfp8_launch(tile, hip)
     assert {k: got[k] for k in expect} == expect
     assert (got["block_k"], got["num_stages"]) == (128, 3)

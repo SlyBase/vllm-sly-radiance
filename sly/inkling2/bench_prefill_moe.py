@@ -309,7 +309,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import radiance_inkling2_moe as m
 
-    os.environ.pop(m._CFG_ENV, None)  # the default column must be the default
+    os.environ[m._CFG_ENV] = "0"  # the default column must be the historical launch, not the built-in table
     if a.cpu_smoke:
         dev, experts, clock = "cpu", 4, Clock(True)
         r = make_routing(24, 2, experts, 16, seed=0)

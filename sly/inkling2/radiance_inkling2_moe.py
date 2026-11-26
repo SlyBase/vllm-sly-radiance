@@ -37,7 +37,8 @@ GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304)
 
 # Prefill / extend tiles (plan.tile > 8) run the Triton kernels below. Inkling does not read vLLM's
 # fused_moe config files; this table is their equivalent: {"nvfp4"|"mxfp8": {"<tile>": {key: value}}},
-# a JSON file named by RADIANCE_INKLING2_MOE_PREFILL_CFG (written by bench_prefill_moe.py --table-out).
+# a JSON file named by RADIANCE_INKLING2_MOE_PREFILL_CFG (written by bench_prefill_moe.py --table-out); a built-in
+# copy of the measured table (`_DEFAULT_TABLE`) applies when the env is unset.
 # Without an entry the launch is the historical one.
 _CFG_ENV = "RADIANCE_INKLING2_MOE_PREFILL_CFG"
 _V2_ENV = "RADIANCE_INKLING2_MOE_PREFILL_V2"
@@ -66,9 +67,20 @@ def _cfg_table(path):
     return table
 
 
+# Built-in table (arm PT, 2026-11-26, 210 W, DFlash2, chunk 2048): prefill 1192/1298/1288/1245 -> 2042/2128/2109/1983
+# pp/s at 1.6k/6.3k/12.6k/25k tokens, prompt-logprob dNLL +0.0000. Token tile 128 only (chunks of 385..4096 rows).
+_DEFAULT_TABLE = {
+    "nvfp4": {"128": dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2)},
+    "mxfp8": {"128": dict(block_n=32, block_t=32, block_k=128, num_warps=4, num_stages=2)},
+}
+
+
 def prefill_cfg(fmt, tile):
-    """Table entry for (format, token tile), {} = launch defaults."""
-    return _cfg_table(os.environ.get(_CFG_ENV, "")).get(fmt, {}).get(str(tile), {})
+    """Table entry for (format, token tile), {} = launch defaults. Env unset = the built-in table;
+    RADIANCE_INKLING2_MOE_PREFILL_CFG=<json path> replaces it, `0` / `off` / empty = the historical launch."""
+    path = os.environ.get(_CFG_ENV)
+    table = _DEFAULT_TABLE if path is None else {} if path in ("0", "off") else _cfg_table(path)
+    return table.get(fmt, {}).get(str(tile), {})
 
 
 def _stream():
