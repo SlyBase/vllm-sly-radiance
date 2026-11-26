@@ -9,11 +9,12 @@
 #   ARMS="Q-GOOD I-INT4" ci/quick_backtest.sh   # a subset
 #
 # Arm          image                          expected   what it proves
-#   Q-GOOD     1.13.4-rocm10.1 (Qwen)         PASS       reference arm (QP2)
+#   Q-GOOD     1.13.4-rocm10.1 (Qwen)         PASS       reference arm (last release with Qwen args, QP2)
+#   Q-GOOD2    1.14.0-rocm10.1 (Qwen)         PASS       new release must pass against the 1.13.4 reference
 #   Q-EAGER    ci-262-ff1aff1 (Qwen)          FAIL hook  eager model (compilation mode NONE, no add_rms_quant)
-#   I-GOOD     ci-262-ff1aff1 (Inkling)       PASS       reference arm (ON)
+#   I-GOOD     1.14.0-rocm10.1 (Inkling)      PASS       reference arm (released image)
 #   I-CONC     ci-262-032eabe (Inkling)       FAIL       2-/4-stream collapse (c2/c1, c4/c1)
-#   I-INT4     ci-262-ff1aff1 + CONV_W4=1     FAIL       int4 drafter (hook "conv projections int4 0", tok/update)
+#   I-INT4     1.14.0 + CONV_W4=1             FAIL       int4 drafter (hook "conv projections int4 0", tok/update)
 # Exit 0 only when every arm gave its expected verdict.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,13 +22,13 @@ OUT="${OUT:-/root/quick-bt/out}"
 CACHE="${CACHE:-/root/quick-bt/cache}"
 PORT=8001
 C=quick-bt
-ARMS="${ARMS:-Q-GOOD Q-EAGER I-GOOD I-CONC I-INT4}"
+ARMS="${ARMS:-Q-GOOD Q-GOOD2 Q-EAGER I-GOOD I-CONC I-INT4}"
 mkdir -p "$OUT" "$CACHE"/{qwen,inkling}/{triton,torch_compile,aiter}
 
-declare -A IMAGE=([Q-GOOD]=vllm-sly-radiance:1.13.4-rocm10.1 [Q-EAGER]=vllm-sly-radiance:ci-262-ff1aff1
-                  [I-GOOD]=vllm-sly-radiance:ci-262-ff1aff1 [I-CONC]=vllm-sly-radiance:ci-262-032eabe
-                  [I-INT4]=vllm-sly-radiance:ci-262-ff1aff1)
-declare -A EXPECT=([Q-GOOD]=PASS [Q-EAGER]=FAIL [I-GOOD]=PASS [I-CONC]=FAIL [I-INT4]=FAIL)
+declare -A IMAGE=([Q-GOOD]=vllm-sly-radiance:1.13.4-rocm10.1 [Q-GOOD2]=vllm-sly-radiance:1.14.0-rocm10.1 [Q-EAGER]=vllm-sly-radiance:ci-262-ff1aff1
+                  [I-GOOD]=vllm-sly-radiance:1.14.0-rocm10.1 [I-CONC]=vllm-sly-radiance:ci-262-032eabe
+                  [I-INT4]=vllm-sly-radiance:1.14.0-rocm10.1)
+declare -A EXPECT=([Q-GOOD]=PASS [Q-GOOD2]=PASS [Q-EAGER]=FAIL [I-GOOD]=PASS [I-CONC]=FAIL [I-INT4]=FAIL)
 
 start_qwen() {  # production unit args of 1.13.4 (QP2/docker_cmd.txt); one -e per variable
   docker run -d --name "$C" --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 993 \
@@ -83,15 +84,17 @@ wait_health() {
   return 1
 }
 
-declare -A GOT
+declare -A GOT SECS
 for arm in $ARMS; do
   profile=qwen; model=qwen-quick; [[ $arm == I-* ]] && { profile=inkling; model=inkling2-mini; }
-  echo "=== $arm  image=${IMAGE[$arm]}  expect=${EXPECT[$arm]}"
+  echo "=== $arm  image=${IMAGE[$arm]}  expect=${EXPECT[$arm]}"; T0=$SECONDS
   docker rm -f "$C" >/dev/null 2>&1
   if [ "$profile" = qwen ]; then start_qwen "${IMAGE[$arm]}"
   elif [ "$arm" = I-INT4 ]; then start_inkling "${IMAGE[$arm]}" RADIANCE_DFLASH_CONV_W4=1
   else start_inkling "${IMAGE[$arm]}"; fi
   if wait_health; then
+    T1=$SECONDS
+    [ "$arm" = I-INT4 ] && { docker exec "$C" env | grep -qx RADIANCE_DFLASH_CONV_W4=1 || echo "::error::env proof failed: RADIANCE_DFLASH_CONV_W4=1 not in container"; }
     docker logs "$C" > "$OUT/$arm.server.log" 2>&1
     rec=(); [ "${RECORD:-0}" = 1 ] && [ "${EXPECT[$arm]}" = PASS ] && rec=(--record)
     python3 "$HERE/quick_bench.py" run --release --profile "$profile" --base "http://127.0.0.1:$PORT" --model "$model" \
@@ -104,12 +107,15 @@ for arm in $ARMS; do
     GOT[$arm]=NOSTART   # a start failure is never the expected verdict, not even for a bad arm
   fi
   docker rm -f "$C" >/dev/null 2>&1
+  SECS[$arm]="start $((${T1:-$SECONDS} - T0))s + tier $((SECONDS - ${T1:-$SECONDS}))s"
+  echo "--- $arm ${SECS[$arm]}"
 done
 
 echo; echo "arm       expected  got"
 bad=0
 for arm in $ARMS; do
   mark=ok; [ "${GOT[$arm]}" = "${EXPECT[$arm]}" ] || { mark="WRONG"; bad=1; }
-  printf '%-9s %-9s %-8s %s\n' "$arm" "${EXPECT[$arm]}" "${GOT[$arm]}" "$mark"
+  printf '%-9s %-9s %-8s %-6s %s\n' "$arm" "${EXPECT[$arm]}" "${GOT[$arm]}" "$mark" "${SECS[$arm]}"
+  grep -E '^(FAIL|::error::)' "$OUT/$arm.txt" 2>/dev/null | sed 's/^/            /' | head -8
 done
 exit $bad

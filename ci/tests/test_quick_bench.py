@@ -81,6 +81,12 @@ class Concurrency(unittest.TestCase):
         a[2] = a[1] * 1.1
         self.assertTrue(qb.concurrency_problems(a))
 
+    def test_quick_probe_floor_separates_measured_good_from_collapse(self):
+        # host 51 backtest, 8 x 128 token probe: good Inkling c2/c1 1.14-1.20, collapsed image 0.68
+        for ratio, ok in ((1.14, True), (1.20, True), (0.68, False)):
+            got = qb.concurrency_problems({1: 100.0, 2: 100.0 * ratio}, two_stream_min=qb.QUICK_TWO_STREAM_MIN)
+            self.assertEqual(not got, ok, ratio)
+
     def test_non_monotonic_fails(self):
         a = self.agg()
         a[4] = a[2] * 0.9

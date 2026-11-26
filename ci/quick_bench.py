@@ -35,6 +35,7 @@ from pathlib import Path
 REFS = Path(__file__).resolve().parent / "accept" / "references"
 # accept profiles (ci/accept/profiles/<name>.json) that a release has to pass, one GPU window each
 RELEASE_PROFILES = ("vllm7-mxfp4", "inkling")
+QUICK_TWO_STREAM_MIN = 1.05
 GSM8K_SLACK = 2  # items below the stored reference that still pass (50 items: 4 %)
 RECORD_HINT = "references not recorded, run ci/quick_backtest.sh RECORD=1"
 
@@ -310,8 +311,9 @@ def prefill_probe(base, model, n=8192, reps=2):
 
 
 def concurrency_probe(base, model, levels=(1, 2, 4), requests=8, tokens=128):
-    agg = {}
-    for level in levels:
+    """aggregate tok/s per stream count. Every level runs twice and only the second round counts: the first
+    round meets a batch size the engine has never run (Inkling: cold kernels, read as a 2-stream collapse)."""
+    def one_round(level):
         left, done, lock = list(range(requests)), [], threading.Lock()
 
         def worker():
@@ -328,7 +330,12 @@ def concurrency_probe(base, model, levels=(1, 2, 4), requests=8, tokens=128):
         ts = [threading.Thread(target=worker) for _ in range(level)]
         [t.start() for t in ts]
         [t.join() for t in ts]
-        agg[level] = round(sum(done) / (time.perf_counter() - t0), 2)
+        return round(sum(done) / (time.perf_counter() - t0), 2)
+
+    agg = {}
+    for level in levels:
+        one_round(level)  # warm-up, discarded
+        agg[level] = one_round(level)
     return agg
 
 
@@ -394,7 +401,8 @@ def run_quick(profile, base, model, log_text, ref_dir=REFS, release=False, gsm8k
     rows = verdict(m, ref, thr)
     fails += [f"{n}: {d}" for n, ok, d in rows if not ok]
     if release:  # gate 3: aggregate tok/s rises with the streams (the c2/c4/c8 floors above are the ratios)
-        fails += [f"concurrency: {p}" for p in concurrency_problems(m["concurrency"])]
+        # floor 1.05, not the BetterBench 1.2: this probe (8 x 128 tokens) measured 1.14 / 1.20 on the good Inkling image, 0.68 on the collapsed one
+        fails += [f"concurrency: {p}" for p in concurrency_problems(m["concurrency"], two_stream_min=QUICK_TWO_STREAM_MIN)]
     allow_p = ref_dir / "greedy_allow.json"
     allow = (json.loads(allow_p.read_text()) if allow_p.exists() else {}).get(profile, {})
     if g_ref.exists():
