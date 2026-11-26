@@ -23,6 +23,7 @@ ROCm path, with four kinds of edits:
   4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
   4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   4e. rel_attention num_stages 2 -> 1 on ROCm.
+  4m. rel_attention BLOCK_N 64 -> 32 for the 128-row prefill tile on ROCm (2x faster at 4096-token chunks).
   4l. fp8 KV (--kv-cache-dtype fp8): `_load_fp8_kv` unpacked E4M3 pairs with NVIDIA PTX
       (`cvt.rn.f16x2.e4m3x2`); on ROCm it loads the fp8 pointer natively and converts (gfx12 has the
       OCP e4m3 conversion). Without this hunk an fp8-KV start fails in the first attention compile.
@@ -231,6 +232,13 @@ def main():
         "        num_warps=8 if block_m >= 128 else 4,\n        num_stages=1 if torch.version.hip else 2,\n",
         "num_stages=1 if torch.version.hip else 2,",
         "inkling2 rel_attention: 1 stage on ROCm (LDS)",
+    )
+    apply(
+        ROOT / "nvidia/ops/attention_sm90.py",
+        "        BLOCK_N=64 if block_m >= 128 else 128 if block_m <= 32 else 64,\n",
+        "        BLOCK_N=(32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64,\n",
+        "BLOCK_N=(32 if torch.version.hip else 64) if block_m >= 128",
+        "inkling2 rel_attention: 32-key blocks for the prefill tile on ROCm",
     )
     apply(
         ROOT / "nvidia/ops/attention_sm90.py",

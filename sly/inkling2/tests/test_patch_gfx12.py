@@ -207,6 +207,16 @@ def test_rel_attention_uses_one_stage_on_rocm(tree):
     assert "num_stages=1 if torch.version.hip else 2," in s
 
 
+def test_rel_attention_prefill_tile_uses_32_keys_on_rocm(tree):
+    """Measured (mb6/mb7, 4096-token chunk, 210 W): BLOCK_N 64 -> 32 halves `_rel_attention_kernel` for BLOCK_M 128,
+    local layer 2.17 -> 1.18 ms (past 0), 2.42 -> 1.12 ms (past 4096), global layer 11.9 -> 5.7 ms."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
+    assert "BLOCK_N=(32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64," in s
+    run(tree)  # idempotent
+    assert (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text() == s
+
+
 def test_flashinfer_is_never_touched_on_rocm(tree):
     """Seventh finding: `is_flashinfer_autotuning()` imports flashinfer (absent on ROCm) before the
     `not use_sm100_kernels()` short-circuit gets a chance."""
