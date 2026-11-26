@@ -23,6 +23,7 @@ ROCm path, with four kinds of edits:
   4c. launch kwarg `maxnreg` dropped; `if not _HW_E2M1:` functions keep only the software path.
   4d. MXFP8 expert tiles shrunk on ROCm (gfx12 LDS is 64 KB).
   4e. rel_attention num_stages 2 -> 1 on ROCm.
+  4n. MoE.plan(): token tile for 17..64-token decode batches from radiance_inkling2_moe.decode_tile (env, default off).
   4m. rel_attention BLOCK_N 64 -> 32 for the 128-row prefill tile on ROCm (2x faster at 4096-token chunks).
   4l. fp8 KV (--kv-cache-dtype fp8): `_load_fp8_kv` unpacked E4M3 pairs with NVIDIA PTX
       (`cvt.rn.f16x2.e4m3x2`); on ROCm it loads the fp8 pointer natively and converts (gfx12 has the
@@ -300,6 +301,19 @@ def main():
         "        kv_scatter(self.attn.kv_cache, k, v, slot_mapping)\n",
         "from radiance_inkling2_kv import kv_scatter",
         "inkling2 dspark draft: Triton KV scatter instead of the CUDA cache op",
+    )
+    # --- 4n. expert plan tile: radiance_inkling2_moe.decode_tile (None = vLLM's tile) widens 17..64-token decode
+    # batches to one CTA per expert (RADIANCE_INKLING2_HIP_MOE_TILE, default off) ---
+    apply(
+        ROOT / "nvidia/moe.py",
+        "        return expert_plan(tokens, self.topk, self.num_experts, self.nvfp4, self.shapes)\n",
+        "        tile = None\n"
+        "        if torch.version.hip:\n"
+        "            from radiance_inkling2_moe import decode_tile\n\n"
+        "            tile = decode_tile(tokens)\n"
+        "        return expert_plan(tokens, self.topk, self.num_experts, self.nvfp4, self.shapes, tile)\n",
+        "from radiance_inkling2_moe import decode_tile",
+        "inkling2 moe plan: decode tile from the HIP expert kernel (RADIANCE_INKLING2_HIP_MOE_TILE)",
     )
     # --- low-M GEMV: hand-written HIP bf16 kernel (default), int8 copy opt-in; Triton otherwise ---
     # One self-contained hunk; the dispatch lives in radiance_inkling2_gemv_hip.py (falls back to the
