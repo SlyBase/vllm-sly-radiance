@@ -111,7 +111,14 @@ case "${_target,,} ${_cfg,,} ${_parser,,}" in
     export RADIANCE_INKLING2_CODA_FP4="${RADIANCE_INKLING2_CODA_FP4-1}"
     [[ "${*,,}" =~ $_dflash ]] || \
     export RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
-      RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}" ;;
+      RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}"
+    # Prefill chunk 4096 (vLLM's spec-decode default is 2048): +14..16 % prefill pp/s at 8k-32k (PTM4 vs PT, 210 W).
+    # Cost: the hybrid KV pool shrinks (53815 instead of 94849 tokens at max-model-len 32768, same memory), so a
+    # unit with a very long --max-model-len may stop starting: RADIANCE_INKLING2_CHUNK=0 (or empty) = vLLM default,
+    # =<N> another size; an explicit --max-num-batched-tokens always wins.
+    _chunk="${RADIANCE_INKLING2_CHUNK-4096}"
+    case " $* " in *" --max-num-batched-tokens"*) ;; *)
+      { [ -z "$_chunk" ] || [ "$_chunk" = 0 ]; } || set -- "$@" --max-num-batched-tokens "$_chunk" ;; esac ;;
 esac
 
 # Topology + bandwidth sweep, kicked off in the BACKGROUND so it never delays startup.

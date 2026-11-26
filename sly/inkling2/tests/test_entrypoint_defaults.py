@@ -21,7 +21,7 @@ KNOBS = {
 def serve(tmp_path):
     fake = tmp_path / "bin" / "vllm"
     fake.parent.mkdir()
-    fake.write_text("#!/bin/sh\npython3 -c 'import json,os;print(json.dumps(dict(os.environ)))'\n")
+    fake.write_text("#!/bin/sh\npython3 -c 'import json,os,sys;print(json.dumps(dict(os.environ, _ARGS=sys.argv[1:])))' \"$@\"\n")
     fake.chmod(0o755)
 
     def run(args, **env):
@@ -182,3 +182,33 @@ def test_reasoning_parser_inkling_is_a_fallback_signal(serve, extra):
 
 def test_other_reasoning_parser_is_no_signal(serve):
     assert CODA not in serve(["/nonexistent/model", "--reasoning-parser", "qwen3"])
+
+
+CHUNK = "--max-num-batched-tokens"
+
+
+def test_inkling_gets_the_4096_prefill_chunk(serve):
+    # MEASURED (PTM4 vs PT, 210 W): +16/+14/+15 % pp/s at 8k/16k/32k. Cost: 53815 instead of 94849 KV tokens.
+    args = serve(MODEL)["_ARGS"]
+    assert args[args.index(CHUNK) + 1] == "4096" and args.count(CHUNK) == 1
+
+
+@pytest.mark.parametrize("given", [[CHUNK, "2048"], [f"{CHUNK}=8192"]])
+def test_explicit_chunk_flag_wins(serve, given):
+    args = serve(MODEL + given)["_ARGS"]
+    assert sum(a.startswith(CHUNK) for a in args) == 1
+    assert "4096" not in args
+
+
+@pytest.mark.parametrize("val", ["0", ""])
+def test_chunk_env_off_leaves_the_vllm_default(serve, val):
+    assert CHUNK not in serve(MODEL, RADIANCE_INKLING2_CHUNK=val)["_ARGS"]
+
+
+def test_chunk_env_sets_the_size(serve):
+    args = serve(MODEL, RADIANCE_INKLING2_CHUNK="8192")["_ARGS"]
+    assert args[args.index(CHUNK) + 1] == "8192"
+
+
+def test_other_models_get_no_chunk_flag(serve):
+    assert CHUNK not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])["_ARGS"]
