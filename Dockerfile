@@ -621,7 +621,7 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
  && PYTHONPATH=/out python -c "import torch, radiance_inkling2_gemv as m; print('radiance_inkling2_gemv built:', m.__file__)"
 
 # sly/inkling2/radiance_inkling2_mx4.hip: MXFP4 (e2m1 + E8M0) W4A16 low-M GEMV + prefill dequant for the
-# opt-in RADIANCE_INKLING2_MXFP4_DENSE=1 dense route (MODE=gemv, the default of that knob; MODE=w4a8 keeps the
+# RADIANCE_INKLING2_MXFP4_DENSE=1 dense route (the entrypoint default for Inkling; MODE=gemv, the default of that knob; MODE=w4a8 keeps the
 # radiance_mxfp4_fp8 route). Same single-file pybind11 build; imported as radiance_inkling2_mx4 by
 # radiance_inkling2_mxfp4dense.py.
 COPY sly/inkling2/radiance_inkling2_mx4.hip /opt/kernels/

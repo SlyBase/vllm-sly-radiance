@@ -58,18 +58,18 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 | Prefill attention tile | – (always on ROCm, hunk 4m of `patch_inkling2_gfx12.py`) | `_rel_attention_kernel` BLOCK_N 64 -> 32 for the 128-row tile: local layer 2.2 -> 1.2 ms, global layer 11.9 -> 5.7 ms per 4096-token chunk. Changes the summation order: greedy text of 2 of 4 gate prompts diverges after 113-185 characters (coherent), dNLL -0.0001 |
 | int8 (Q8_0) dense weights | `RADIANCE_INKLING2_W8=1` (off) | opt-in, M 1..16: 533-585 GB/s of int8 bytes at M = 8, 1.5-1.8x the bf16 GEMV |
 | | `RADIANCE_INKLING2_W8_HEAD` (`1`; read only with `W8=1`) | `=0` keeps the 201,024-row LM head on bf16 |
-| MXFP4 dense weights (`patch_inkling2_mxfp4dense.py`) | `RADIANCE_INKLING2_MXFP4_DENSE=1` (off) | opt-in 4-bit dense projections + LM head on the HIP W4A16 GEMV (`radiance_inkling2_mx4.hip`); dense bytes 4.77 -> 1.27 GB per step. Quality trade-off, not lossless |
+| MXFP4 dense weights (`patch_inkling2_mxfp4dense.py`) | `RADIANCE_INKLING2_MXFP4_DENSE` (**1** by the image entrypoint for Inkling, `0` or empty = off) | **lossy default.** 4-bit dense projections + LM head on the HIP W4A16 GEMV (`radiance_inkling2_mx4.hip`); dense bytes 4.77 -> 1.27 GB per step. *MEASURED* 2026-11-26 (paired A/B, 1.14.0 prod config): GSM8K-150 -1.3 pp, HumanEval+ -1.2 pp (both within noise), dNLL +0.0091; see "MXFP4 dense default" |
 | | `RADIANCE_INKLING2_MXFP4_DENSE_MODE` (`gemv`; `w4a8`; `w4a16`) | `gemv`: bf16 activations, one launch per call, only a pre-tiled code copy (M > 16 dequantizes per call); `w4a8`: the radiance fp8-WMMA kernel (slower, fp8 activation error); `w4a16` dequantizes back to bf16: isolates the weight-quantization cost |
 | | `RADIANCE_INKLING2_MXFP4_DENSE_CLIP` (`rtn`; `mse`) | exponent choice per group: round-to-nearest or a small MSE search |
 | | `RADIANCE_INKLING2_MXFP4_DENSE_MIN_N` (`256`) | projections with fewer output rows stay bf16 |
 
-With every knob at its default the dense path is lossless bf16; the experts run the exact NVFP4 / MXFP8
-arithmetic of the model except the coda layers 20-23, which the entrypoint default requantizes to NVFP4
-(`RADIANCE_INKLING2_CODA_FP4=1`, KLD 0.0033 nats, dPPL +0.26 %; `=0` = exact).
+With the entrypoint defaults the dense projections and the LM head are MXFP4 (`RADIANCE_INKLING2_MXFP4_DENSE=1`, lossy, see
+"MXFP4 dense default"; `=0` = lossless bf16), and the experts run the exact NVFP4 / MXFP8 arithmetic of the model except the
+coda layers 20-23, which the entrypoint default requantizes to NVFP4 (`RADIANCE_INKLING2_CODA_FP4=1`, KLD 0.0033 nats, dPPL +0.26 %; `=0` = exact).
 
 ## Default decode profile (SLAK + adaptive k, lossless subset)
 
-`radiance_entrypoint.sh` exports `RADIANCE_INKLING2_CODA_FP4=1` for every Inkling model (any drafter; lossy, see the
+`radiance_entrypoint.sh` exports `RADIANCE_INKLING2_CODA_FP4=1` and `RADIANCE_INKLING2_MXFP4_DENSE=1` for every Inkling model (any drafter; both lossy, see the
 table above) and two lossless knobs when the **target model** is Inkling: `--model X`, `--model=X` or a first positional whose name
 contains `inkling` (case-insensitive), **or** a local dir whose `config.json` `model_type`/`architectures` contain
 `inkling` (the `/model` mount; real value `inkling2_loop` / `Inkling2LoopForConditionalGeneration`), **or**
@@ -81,6 +81,7 @@ under "Recommended decode config"); every explicit value, an empty one included,
 | Knob | Default |
 |---|---|
 | `RADIANCE_INKLING2_CODA_FP4` (all drafters) | `1` |
+| `RADIANCE_INKLING2_MXFP4_DENSE` (all drafters; `0` = lossless bf16 dense) | `1` |
 | `RADIANCE_INKLING2_DRAFT_SHORTLIST` | `4096` |
 | `RADIANCE_INKLING2_ADAPTIVE_K` | `3,5,7` |
 
@@ -133,7 +134,25 @@ top-1 97.3 %. The lossless bf16 HIP kernels against Triton measure 0.0148 / 0.00
 `sly/inkling2/check_mxfp4dense_cpu.py`. Model KLD (graphs + DSpark k=7, vs the bf16 default): mean 0.0176,
 median 0.00011, p99 0.179, top-1 95.7 % on 186 positions before the first divergence stops the comparison
 (`w4a8` 0.026 / 0.34 / 96.6 % on 234, `w4a16` 0.022 / 0.19 / 95.6 % on 181; int8 0.008). 4-bit dense costs about
-twice the int8 KLD, so it stays opt-in.
+twice the int8 KLD; since 1.14.1 it is nevertheless the entrypoint default for Inkling (paired A/B below).
+
+### MXFP4 dense default (1.14.1)
+
+Every 1.14.0 campaign measurement ran with `RADIANCE_INKLING2_MXFP4_DENSE=1`; the image default was `0`. Prod (1.14.0, 307200 ctx, fp8 KV,
+DFlash2 k=7) without the knob: Mia decode prose / code **140 / 191 tok/s**; with it **186 / 261** (tokens per update, code 5.71 -> 6.03;
+prod re-run after the rollout 178 / 241, 4.14 / 5.74). The KV pool grows 387,121 -> 414,824 tokens (the bf16 dense weights are freed).
+
+Paired quality A/B, 2026-11-26, same image and prod args, one GPU window, R9700 210 W, D0 = `DENSE` unset (bf16), D1 = `DENSE=1`:
+
+| Metric | D0 (bf16) | D1 (MXFP4) | D1 - D0 | paired 95 % CI | McNemar p |
+|---|---|---|---|---|---|
+| GSM8K-150, greedy, thinking, 8192 tok | 146 (97.3 %) | 144 (96.0 %) | -1.3 pp | -3.2..+0.5 | 0.500 |
+| HumanEval+ (164), thinking, 8192 tok | 153 (93.3 %) | 151 (92.1 %) | -1.2 pp | -5.0..+2.6 | 0.754 |
+| NLL, 6525 code tokens | 0.7515 | 0.7606 | dNLL +0.0091 +-0.0064 | | |
+
+Rule: no significant drop and a point delta >= -2 pp on both tasks: **PASS**. Limits: n = 150 / 164 and one run per arm, so a loss of a
+few points is not excluded by the CI; the greedy gate is not byte-identical (0/4, coherent text). `RADIANCE_INKLING2_MXFP4_DENSE=0` restores
+the lossless bf16 dense weights.
 
 **Kernel micro-bench** (`sly/inkling2/bench_mx4.py`, rotated > 300 MB weight pool, M = 8, us per call inside ONE
 replayed CUDA graph; GB/s of the arm's weight bytes: MXFP4 codes + E8M0 scales, int8 codes + fp32 scales, bf16):
