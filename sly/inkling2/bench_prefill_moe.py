@@ -127,11 +127,12 @@ def nvfp4_candidates(tile, cpu):
         yield dict(block_m=16, block_n=32, block_k=64), None
         yield dict(block_m=16, block_n=64, block_k=64), None
         return
-    if V2:  # v2 kernels: fast decode (v2_safe=False/True), dequantised activations, nibble-split dots
+    if V2:  # v2 kernels: full grid; v2_safe=True avoids the denormal operand of the bit-trick decode
         yield dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2), "A"  # v1 as tuned by the table
-        for safe, (bm, bn, bk) in itertools.product((False, True), itertools.product((64, 128), (64, 128), (64, 128))):
-            if bm <= tile and (safe is False or (bm, bn, bk) == (128, 128, 64)):
-                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2, v2=True, v2_safe=safe), "A"
+        for safe, bm, bn, bk, nw, ns in itertools.product((False, True), (64, 128, 256), (64, 128), (32, 64, 128),
+                                                          (4, 8), (1, 2, 3)):
+            if bm <= max(tile, 64):
+                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=nw, num_stages=ns, v2=True, v2_safe=safe), "A"
         return
     stage_a = [dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2)
                for bm, bn, bk in itertools.product((32, 64, 128), (64, 128), (64, 128, 256)) if bm <= tile]
@@ -261,8 +262,6 @@ def run_mxfp8(r, experts, dev, clock, reps, budget_end):
 
 @triton.jit
 def _dq_kernel(Packed, Scale, Out, K: tl.constexpr, BR: tl.constexpr):
-    from radiance_inkling2_moe import _dequant_rows
-
     rows = tl.program_id(0) * BR + tl.arange(0, BR)
     p = tl.load(Packed + rows[:, None].to(tl.int64) * (K // 2) + tl.arange(0, K // 2)[None, :])
     s = tl.load(Scale + rows[:, None].to(tl.int64) * (K // 16) + tl.arange(0, K // 16)[None, :])
@@ -272,6 +271,8 @@ def _dq_kernel(Packed, Scale, Out, K: tl.constexpr, BR: tl.constexpr):
 
 def run_dq_estimate(r, experts, dev, clock, reps):
     """us of dequant(all experts' weights + the routed activation rows) + one bf16 bmm, per projection."""
+    global _dequant_rows
+    from radiance_inkling2_moe import _dequant_rows  # a jit function resolves it as a module global
     total = 0.0
     for n, k in SHAPES.values():
         w = torch.randint(0, 256, (experts * n, k // 2), dtype=torch.uint8, device=dev)
