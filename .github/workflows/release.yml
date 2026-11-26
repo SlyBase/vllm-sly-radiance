@@ -1,4 +1,8 @@
-# Manual release: cut the v<VERSION> tag without a green acceptance gate.
+# Manual release: cut the v<VERSION> tag. The release tier (ci/README.md, "GPU tiers") must be green for BOTH
+# profiles on that commit (commit statuses release-tier/vllm7-mxfp4 and release-tier/inkling, set by accept.yml);
+# `skip_tier_check` is the explicit, audited override (the reason lands in the tag message).
+#
+# Original purpose: cut the tag without a green acceptance gate.
 #
 # accept.yml tags a commit by itself when its gate is green. When the gate is red (or was never run for
 # that commit) and a human decides that the image is good anyway -- a stale baseline, a check that does
@@ -28,6 +32,10 @@ on:
         description: "commit to tag (empty = the tip of main)"
         type: string
         default: ""
+      skip_tier_check:
+        description: "tag even though the release tier (both profiles) is not green on that commit; the reason says why"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +49,9 @@ jobs:
     # Only from main: a branch must not be able to run its own copy of the script with the App token.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      statuses: read
     steps:
       - uses: actions/create-github-app-token@v3
         id: app_token
@@ -53,6 +64,25 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app_token.outputs.token }}
 
+      - name: both release-tier statuses are green on this commit
+        id: tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha || github.sha }}
+          SKIP: ${{ inputs.skip_tier_check }}
+        run: |
+          # release-tier/vllm7-mxfp4 + release-tier/inkling, set by accept.yml (ci/README.md, "GPU tiers")
+          STATUSES=$(gh api "repos/${{ github.repository }}/commits/$SHA/status" \
+            --jq '[.statuses[] | {(.context): .state}] | add // {}')
+          if echo "$STATUSES" | python3 ci/quick_bench.py release-check; then
+            echo "tier=green" >> "$GITHUB_OUTPUT"
+          elif [ "$SKIP" = "true" ]; then
+            echo "::warning::release tier not green, tagging anyway (skip_tier_check)"
+            echo "tier=skipped" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
       - name: tag
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
@@ -60,6 +90,7 @@ jobs:
           VERSION_INPUT: ${{ inputs.version }}
           SHA_INPUT: ${{ inputs.sha }}
           ACTOR: ${{ github.actor }}
+          TIER: ${{ steps.tier.outputs.tier }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_NOTIFY: ${{ vars.RELEASE_NOTIFY || '@slydlake' }}
         run: |
@@ -69,9 +100,9 @@ jobs:
           SHA=${SHA_INPUT:-$(git rev-parse HEAD)}
           VER=${VERSION_INPUT:-$(git show "${SHA}:VERSION" | tr -d '[:space:]')}
           ci/release_tag.sh "$VER" "$SHA" \
-            "released manually by ${ACTOR} without a green acceptance gate: ${REASON}" "$RUN_URL"
+            "released manually by ${ACTOR}, release tier ${TIER}: ${REASON}" "$RUN_URL"
           {
-            echo "### Released v${VER} without a green gate"
+            echo "### Released v${VER} (release tier: ${TIER})"
             echo ""
             echo "- commit: \`${SHA}\`"
             echo "- by: ${ACTOR}"

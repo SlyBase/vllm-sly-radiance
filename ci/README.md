@@ -10,10 +10,10 @@ QC2 = eager Qwen (bad), QCL = the fix, `inkling-good` = the Inkling release arm.
 
 | # | Gate | Fails when | Where it runs |
 |---|------|-----------|---------------|
-| 1 | **Hook proof** (`hook_problems`) | a required log line is missing or a forbidden one is present. Qwen: `[radiance.fused_norm] add_rms_quant active`, compilation mode not `NONE`. Inkling: `RADIANCE_CODA_FP4_PROOF n=1 mxfp8->nvfp4`, `Capturing model for DFlash2 speculator`, `drafter conv projections int4 0`, `cudagraph_capture_sizes` covering 16..64 | accept gate (all modes) + quick tier |
-| 2 | **Greedy vs last release** (`greedy_problems`) | one of 4 greedy prompts (T0, seed 1, 192 tokens) differs from `ci/accept/references/quick-<profile>-greedy.json`, unless `ci/accept/references/greedy_allow.json` lists that prompt index with a reason | accept gate `fast`/`full`, quick tier |
-| 3 | **Concurrency shape** (`concurrency_problems`) | aggregate tok/s is not rising 1 -> 2 -> 4 -> 8, or 2 streams < 1.2x one stream (today 1.31x; tighten later) | accept gate `fast`/`full` (levels present in the BetterBench result) |
-| 4 | **Drafter floor** (`floor_problems`) | median tok/update (code) of the BetterBench decode result < floor. Qwen 5.2 (`profiles/vllm7-mxfp4.json: tok_per_update_floor`; QP2 measured 5.5), Inkling 4.8 (`quick-inkling.json`; D4 5.13, the int4 drafter 3.65) | accept gate `fast`/`full`, quick tier |
+| 1 | **Hook proof** (`hook_problems`) | a required log line is missing or a forbidden one is present. Qwen: `[radiance.fused_norm] add_rms_quant active`, compilation mode not `NONE`. Inkling: `RADIANCE_CODA_FP4_PROOF n=1 mxfp8->nvfp4`, `Capturing model for DFlash2 speculator`, `drafter conv projections int4 0`, `cudagraph_capture_sizes` covering 16..64 | every tier (accept gate, quick, release) |
+| 2 | **Greedy vs last release** (`greedy_problems`) | one of 4 greedy prompts (T0, seed 1, 192 tokens) differs from `ci/accept/references/quick-<profile>-greedy.json`, unless `ci/accept/references/greedy_allow.json` lists that prompt index with a reason | release tier (`greedy_allow.json`), `fast`/`full`, quick |
+| 3 | **Concurrency shape** (`concurrency_problems`) | aggregate tok/s is not rising 1 -> 2 -> 4 -> 8, or 2 streams < 1.2x one stream (today 1.31x; tighten later) | release tier (1/2/4/8 probe), `fast`/`full` (levels in the BetterBench result) |
+| 4 | **Drafter floor** (`floor_problems`) | median tok/update (code) of the BetterBench decode result < floor. Qwen 5.2 (`profiles/vllm7-mxfp4.json: tok_per_update_floor`; QP2 measured 5.5), Inkling 4.8 (`quick-inkling.json`; D4 5.13, the int4 drafter 3.65) | release tier (`greedy_allow.json`), `fast`/`full`, quick |
 | 5 | **`sly/inkling2/tests` on CPU** | any test fails | `ci.yml` job `inkling2-tests` (Triton interpreter, torch-cpu, the pinned vLLM source). GPU-only tests skip themselves; two files that need triton / a dev tree are named in the pytest header by `sly/inkling2/tests/conftest.py`. The job prints `N passed, M skipped` |
 | 6 | **Harness lint** | a script passes several `KEY=VAL` in one `-e` (`docker run -e "A=1 B=2"` sets ONE variable) | `ci/check_consistency.py` (`consistency` job, all tracked `*.sh`) |
 | 7 | **Runner hygiene** | -- | `clean workspace` step before `actions/checkout` on every self-hosted job (`build.yml`, `accept.yml`, `accept-night.yml`): deletes the workspace, with a root `docker run ... find -delete` fallback for root-owned `__pycache__` |
@@ -41,24 +41,43 @@ python3 ci/quick_bench.py floor bb-decode.json --floor 4.8
 
 ## GPU tiers
 
-| Tier | What | Time | When |
+| Tier | What | Time (after health) | Runs |
 |------|------|------|------|
-| **quick** | `accept.py --mode quick` (or `quick_bench.py run` on any live server): hook proof on the server log, greedy gate, decode (Mia method: prose + code, 400 tokens, `ignore_eos`, thinking on, T0.7 top_k 20, 5 reps, median) with tok/update from `/metrics` deltas, prefill 8k x 2 (token-id prompts, TTFT -> pp/s), concurrency 1/2/4 streams (8 short requests each) | ~5 min after health | PR builds (label `build`), by hand: Actions -> accept -> mode `quick` with the PR image |
-| **release** | `accept.py --mode fast` / `full`: smoke, chat replay, BetterBench sweep, spec counters, GSM8K (full), plus gates 1-4 | 22-30 min | main builds / accept-night / manual |
+| **quick** | `accept.py --mode quick` (or `quick_bench.py run` on any live server): hook proof on the server log, greedy gate, decode (Mia method: prose + code, 400 tokens, `ignore_eos`, thinking on, T0.7 top_k 20, 5 reps, median) with tok/update from `/metrics` deltas, prefill 8k x 2 (token-id prompts, TTFT -> pp/s), concurrency 1/2/4 streams (8 short requests each). A `null` reference entry is skipped. | ~5 min | PR images, by hand: Actions -> accept -> mode `quick`. Never tags |
+| **release** | `accept.py --mode release` = quick + 8 streams + **GSM8K-50** (first 50 items of `references/gsm8k50.jsonl`, greedy T=0, thinking on, 4096 max tokens; floor = reference correct - 2 items) + the drafter floor. **A `null` reference FAILS the tier** | ~10 min per profile | every main build; gates the tag; **both profiles**: `vllm7-mxfp4` (Qwen) and `inkling` |
+| **full** | `accept.py --mode full` (and the legacy `fast`): smoke, chat replay, full BetterBench sweep, spec counters, lm-eval GSM8K, baselines in `ci/accept/baselines`; prefill sweep / HumanEval belong here too | 22-30 min | optional, manual (`accept.yml` mode `full`) and the legacy night gate; **not required for tagging** |
 
-Verdict of the quick tier against `ci/accept/references/quick-<profile>.json`: decode -2 %, prefill -3 %
-(measured noise of the Mia method <= 0.2 %), tok/update >= floor, c2/c1 and c4/c1 >= floor. A `null` reference is
-skipped. Hook proof fails first -- a dead hook makes the numbers meaningless. In `accept.py` the quick mode never
-releases (`release` job: `inputs.mode != 'quick'`).
+Verdict against `ci/accept/references/quick-<profile>.json`: decode -2 %, prefill -3 % (measured noise of the Mia
+method <= 0.2 %), tok/update >= floor, c2/c4/c8-over-c1 >= floor, GSM8K >= reference - 2. Hook proof comes first:
+a dead hook makes the numbers meaningless.
 
-Not wired yet: the automatic start on a PR build. `accept.yml` only plans for builds of `main` (the PR image is a
-local tag on host 51 and the gate waits for an approval in `gpu-window`). Until that is decided the quick tier is
-a manual dispatch with `image=vllm-sly-radiance:ci-<pr>-<sha>`.
+### Fail closed until the references are recorded
 
-### Backtest (one GPU window, not run yet)
+In release mode `unrecorded_problems` checks the reference before any probe runs: every decode value, `prefill_pps`,
+`tok_per_update`, `c2/c4/c8_over_c1_min`, `gsm8k_correct` and the greedy reference must be set, otherwise the tier
+fails with `references not recorded, run ci/quick_backtest.sh RECORD=1 (missing: ...)` and the report row
+`references recorded` is red. The committed seed files are deliberately incomplete, so **no release passes until the
+first recording window has run**. (`--record`, only on a known-good image, is the one way past the guard.)
 
-`ci/quick_backtest.sh` starts known images one after the other, runs the quick tier and compares the verdict
-with what we know:
+### Release chain
+
+`build` green on main -> `accept.yml` (`plan` -> `gate` matrix over **vllm7-mxfp4, inkling**, one GPU window and one
+`gpu-window` approval each, sequential) -> each leg sets the commit status `release-tier/<profile>` -> the `release`
+job (needs every leg) re-reads both statuses with `quick_bench.py release-check` and only then tags. `release.yml`
+(manual) checks the same two statuses; `skip_tier_check` is the audited override (the reason goes into the tag
+message). The night gate (`accept-night.yml`) still runs the old fast/full gate and passes `skip_tier_check=true`
+until it is moved to the release tier.
+
+**Blocker outside this repo:** `gpu-window` / `gpu-window-ssh` (homelab repo) only accept `docker-vllm7.service` and
+`docker-vllm5.service`. The `inkling` leg needs a `docker-vllm-inkling.service` unit (ExecStart of the ink-200
+release arm, see `ci/quick_backtest.sh` `start_inkling`) and a whitelist entry in `is_service` /
+`PROD_SERVICES`. Until then the `inkling` leg fails at `start` and releases fail closed (manual
+`release.yml` + `skip_tier_check` remains possible).
+
+### Backtest and recording (one GPU window each, not run yet)
+
+`ci/quick_backtest.sh` runs the release tier on known images, one after the other, and compares the verdict with
+what we know:
 
 | Arm | Image | Expected |
 |-----|-------|----------|
@@ -70,9 +89,11 @@ with what we know:
 
 ```bash
 # on host 51 with the gpu-window held and docker-vllm7 stopped, repo checkout at ci/regression-gates:
-RECORD=1 ARMS="Q-GOOD I-GOOD" ci/quick_backtest.sh   # records the two references (~15 min)
-ci/quick_backtest.sh                                  # all five arms against them (~30 min)
+RECORD=1 ARMS="Q-GOOD I-GOOD" ci/quick_backtest.sh   # 1. record the references (~25 min); commit them
+ci/quick_backtest.sh                                  # 2. all five arms against them (~60 min)
 ```
 
-Exit 0 only if every arm gave the expected verdict; a start failure counts as wrong. If `I-CONC` passes, the c2/c4
-floors are too low: raise them in `quick-inkling.json` and repeat that arm. Commit the recorded references.
+Exit 0 only if every arm gave the expected verdict; a start failure counts as wrong, and so does a bad arm that
+failed only because a reference is still unrecorded (`UNRECORDED`). If `I-CONC` passes, the c2/c4 floors are too
+low: raise them in `quick-inkling.json` and repeat that arm. Greedy reference = output of the last *released*
+image; re-record after each release.

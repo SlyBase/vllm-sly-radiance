@@ -9,6 +9,10 @@ Pure checkers (unit tests: ci/tests/test_quick_bench.py) that the accept gate an
   multi_env_problems    harness lint: one `-e KEY=VAL` per -e
   verdict               quick-tier measurements vs a reference JSON
 
+  unrecorded_problems   release tier: fail closed while a reference is not recorded
+  release_gate_problems both profiles must have a green `release-tier/<profile>` commit status
+  gsm8k_correct         scoring of the GSM8K-50 quality check (floor: reference - 2 items)
+
 Live part (`run`): against a server that is already up --
   decode (Mia method, prose+code, 400 tok, ignore_eos, thinking on, T0.7 top_k 20, 5 reps, median)
   + tok/update from /metrics deltas, prefill 8k x2, concurrency 1 vs 4 streams, greedy, hook proof.
@@ -29,6 +33,10 @@ import urllib.request
 from pathlib import Path
 
 REFS = Path(__file__).resolve().parent / "accept" / "references"
+# accept profiles (ci/accept/profiles/<name>.json) that a release has to pass, one GPU window each
+RELEASE_PROFILES = ("vllm7-mxfp4", "inkling")
+GSM8K_SLACK = 2  # items below the stored reference that still pass (50 items: 4 %)
+RECORD_HINT = "references not recorded, run ci/quick_backtest.sh RECORD=1"
 
 # ---------------------------------------------------------------------------------------------
 # hook proof
@@ -138,12 +146,56 @@ def verdict(m: dict, ref: dict, thr: dict) -> list[tuple]:
     for cat, floor in (ref.get("tok_per_update") or {}).items():
         v = (m.get("tok_per_update") or {}).get(cat)
         rows.append((f"tok/update {cat}", v is not None and v >= floor, f"{v} vs floor {floor}"))
-    for k in ("c2", "c4"):
+    if ref.get("gsm8k_correct") is not None:
+        v = m.get("gsm8k_correct")
+        floor = ref["gsm8k_correct"] - GSM8K_SLACK
+        rows.append(("gsm8k", v is not None and v >= floor, f"{v}/50 vs floor {floor} (reference {ref['gsm8k_correct']})"))
+    for k in ("c2", "c4", "c8"):
         floor = ref.get(f"{k}_over_c1_min")
         if floor is not None:
             v = m.get(f"{k}_over_c1")
             rows.append((f"{k}/c1", v is not None and v >= floor, f"{v} vs floor {floor}"))
     return rows
+
+
+def unrecorded_problems(ref: dict, greedy_present: bool) -> list[str]:
+    """Release mode never skips an uncalibrated (null) reference entry: it fails closed instead."""
+    missing = []
+    d = ref.get("decode_tps") or {}
+    if not d or any(v is None for v in d.values()):
+        missing.append("decode_tps")
+    if ref.get("prefill_pps") is None:
+        missing.append("prefill_pps")
+    t = ref.get("tok_per_update") or {}
+    if not t or any(v is None for v in t.values()):
+        missing.append("tok_per_update")
+    missing += [k for k in ("c2_over_c1_min", "c4_over_c1_min", "c8_over_c1_min", "gsm8k_correct")
+                if ref.get(k) is None]
+    if not greedy_present:
+        missing.append("greedy reference")
+    return [f"{RECORD_HINT} (missing: {', '.join(missing)})"] if missing else []
+
+
+def release_gate_problems(statuses: dict) -> list[str]:
+    """statuses: {context: state} of the commit being tagged."""
+    return [f"release tier for profile {p} is not green (release-tier/{p}: {statuses.get(f'release-tier/{p}', 'missing')})"
+            for p in RELEASE_PROFILES if statuses.get(f"release-tier/{p}") != "success"]
+
+
+def gsm8k_correct(content: str, gold: str) -> bool:
+    m = re.findall(r"####\s*\$?\s*(-?[\d,]*\.?\d+)", content)
+    if not m:  # fallback: last number of the visible answer
+        m = re.findall(r"-?\d[\d,]*\.?\d*", content[-200:])
+    if not m:
+        return False
+    try:
+        return abs(float(m[-1].replace(",", "").rstrip(".")) - float(gold)) < 1e-6
+    except ValueError:
+        return False
+
+
+def load_gsm8k(n: int = 50) -> list:
+    return [json.loads(line) for line in (REFS / "gsm8k50.jsonl").read_text().splitlines() if line.strip()][:n]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -280,6 +332,26 @@ def concurrency_probe(base, model, levels=(1, 2, 4), requests=8, tokens=128):
     return agg
 
 
+def gsm8k_probe(base, model, n=50, conc=8, max_tokens=4096):
+    """GSM8K-n at T=0 (production chat template, thinking on): number of correct answers. A truncated
+    or failed request counts as wrong -- the reference was recorded the same way."""
+    from concurrent.futures import ThreadPoolExecutor
+    suffix = "\n\nThink step by step. End your reply with the final numeric answer on its own line as: #### <number>"
+
+    def one(it):
+        try:
+            body = {"model": model, "messages": [{"role": "user", "content": it["question"] + suffix}],
+                    "temperature": 0, "top_p": 1, "max_tokens": max_tokens, "seed": 1000 + it["id"],
+                    "chat_template_kwargs": THINK}
+            r = post(base + "/v1/chat/completions", body, timeout=1500)
+            return gsm8k_correct(r["choices"][0]["message"].get("content") or "", it["gold"])
+        except Exception:  # noqa: BLE001
+            return False
+
+    with ThreadPoolExecutor(conc) as ex:
+        return sum(ex.map(one, load_gsm8k(n)))
+
+
 def greedy_run(base, model):
     out = []
     for p in GREEDY_PROMPTS:
@@ -292,43 +364,57 @@ def greedy_run(base, model):
     return out
 
 
-def measure(base, model, quick=True):
+def measure(base, model, release=False, gsm8k_n=50):
     m = {}
     m["decode_tps"], m["tok_per_update"] = decode_probe(base, model)
     m["prefill_pps"] = prefill_probe(base, model)
-    m["concurrency"] = concurrency_probe(base, model)
-    m["c2_over_c1"] = round(m["concurrency"][2] / m["concurrency"][1], 3)
-    m["c4_over_c1"] = round(m["concurrency"][4] / m["concurrency"][1], 3)
+    m["concurrency"] = concurrency_probe(base, model, levels=(1, 2, 4, 8) if release else (1, 2, 4))
+    for k in m["concurrency"]:
+        if k > 1:
+            m[f"c{k}_over_c1"] = round(m["concurrency"][k] / m["concurrency"][1], 3)
     m["greedy"] = greedy_run(base, model)
+    if release:
+        m["gsm8k_correct"] = gsm8k_probe(base, model, gsm8k_n)
     return m
 
 
-def run_quick(profile, base, model, log_text, ref_dir=REFS):
-    """-> (report dict, list of failure strings). Hook proof first: a dead hook makes the numbers moot."""
+def run_quick(profile, base, model, log_text, ref_dir=REFS, release=False, gsm8k_n=50, recording=False):
+    """-> (report dict, list of failure strings). Hook proof first: a dead hook makes the numbers moot.
+    release=True: concurrency up to 8 streams + GSM8K-50, and an unrecorded reference FAILS (no skip);
+    recording=True (the backtest's RECORD=1 on a known-good image) is the only way to get past that."""
     ref_p = ref_dir / f"quick-{profile}.json"
     ref = json.loads(ref_p.read_text()) if ref_p.exists() else {}
     thr = ref.get("thresholds") or {"decode_pct": 2.0, "prefill_pct": 3.0}
     fails = [f"hook proof: {p}" for p in hook_problems(log_text, profile)]
-    m = measure(base, model)
+    g_ref = ref_dir / f"quick-{profile}-greedy.json"
+    unrec = unrecorded_problems(ref, g_ref.exists()) if release and not recording else []
+    if unrec:  # nothing to compare against: do not spend GPU time on probes
+        return {"profile": profile, "measured": {}, "rows": [], "unrecorded": unrec, "failures": fails + unrec}, fails + unrec
+    m = measure(base, model, release, gsm8k_n)
     rows = verdict(m, ref, thr)
     fails += [f"{n}: {d}" for n, ok, d in rows if not ok]
-    g_ref = ref_dir / f"quick-{profile}-greedy.json"
+    if release:  # gate 3: aggregate tok/s rises with the streams (the c2/c4/c8 floors above are the ratios)
+        fails += [f"concurrency: {p}" for p in concurrency_problems(m["concurrency"])]
     allow_p = ref_dir / "greedy_allow.json"
     allow = (json.loads(allow_p.read_text()) if allow_p.exists() else {}).get(profile, {})
     if g_ref.exists():
         fails += [f"greedy: {p}" for p in greedy_problems(m["greedy"], json.loads(g_ref.read_text()), allow)]
     else:
         print(f"note: no greedy reference {g_ref.name} yet -- run with --record", file=sys.stderr)
-    return {"profile": profile, "measured": m, "rows": rows, "failures": fails}, fails
+    return {"profile": profile, "measured": m, "rows": rows, "unrecorded": [], "failures": fails}, fails
 
 
 def record(profile, report, ref_dir=REFS):
     m = report["measured"]
+    old_p = ref_dir / f"quick-{profile}.json"
+    old = json.loads(old_p.read_text()) if old_p.exists() else {}
     ref = {"decode_tps": m["decode_tps"], "prefill_pps": m["prefill_pps"],
            "tok_per_update": {"code": round(m["tok_per_update"]["code"] * 0.95, 2)},
-           "c2_over_c1_min": round(m["c2_over_c1"] * 0.9, 2),
-           "c4_over_c1_min": round(m["c4_over_c1"] * 0.9, 2),
            "thresholds": {"decode_pct": 2.0, "prefill_pct": 3.0}}
+    for k in ("c2", "c4", "c8"):  # ratio floors at 90 % of the measurement; unmeasured ones keep the seed
+        key = f"{k}_over_c1"
+        ref[f"{key}_min"] = round(m[key] * 0.9, 2) if key in m else old.get(f"{key}_min")
+    ref["gsm8k_correct"] = m.get("gsm8k_correct", old.get("gsm8k_correct"))
     (ref_dir / f"quick-{profile}.json").write_text(json.dumps(ref, indent=2) + "\n")
     (ref_dir / f"quick-{profile}-greedy.json").write_text(json.dumps(m["greedy"], indent=1) + "\n")
 
@@ -344,6 +430,9 @@ def main(argv=None) -> int:
     r.add_argument("--log", required=True, help="full server log of this start")
     r.add_argument("--out")
     r.add_argument("--record", action="store_true", help="write the measurements as the new reference")
+    r.add_argument("--release", action="store_true", help="release tier: + 8 streams, GSM8K-50, fails closed on null references")
+    r.add_argument("--gsm8k-n", type=int, default=50)
+    s_ = sub.add_parser("release-check", help="both release-tier statuses of a commit are green (stdin: JSON {context: state})")
     h = sub.add_parser("hooks", help="hook proof on a log file")
     h.add_argument("log")
     h.add_argument("--profile", choices=sorted(HOOKS), required=True)
@@ -355,7 +444,9 @@ def main(argv=None) -> int:
     f.add_argument("--category", default="code")
     a = ap.parse_args(argv)
 
-    if a.cmd == "hooks":
+    if a.cmd == "release-check":
+        probs = release_gate_problems(json.load(sys.stdin))
+    elif a.cmd == "hooks":
         probs = hook_problems(Path(a.log).read_text(errors="replace"), a.profile)
     elif a.cmd == "conc":
         agg = {int(e["level"]): e["aggregate_tps"] for p in a.json for e in json.loads(Path(p).read_text()).get("concurrency", [])}
@@ -363,7 +454,8 @@ def main(argv=None) -> int:
     elif a.cmd == "floor":
         probs = floor_problems(category_tok_per_update(json.loads(Path(a.json).read_text())), a.floor, a.category)
     else:
-        report, probs = run_quick(a.profile, a.base.rstrip("/"), a.model, Path(a.log).read_text(errors="replace"))
+        report, probs = run_quick(a.profile, a.base.rstrip("/"), a.model, Path(a.log).read_text(errors="replace"),
+                                  release=a.release, gsm8k_n=a.gsm8k_n, recording=a.record)
         for n, ok, d in report["rows"]:
             print(f"{'ok  ' if ok else 'FAIL'} {n}: {d}")
         if a.out:

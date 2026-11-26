@@ -542,6 +542,8 @@ def gate_checks(results: dict, profile: dict, add) -> None:
         add("hook proof", not results["hooks"], results["hooks"] or "all present", "every required hook line")
     q = results.get("quick")
     if q:
+        add("references recorded", not q.get("unrecorded"), q.get("unrecorded") or "yes",
+            "every quick-tier reference recorded (release mode never skips a null)")
         for name, ok, detail in q["rows"]:
             add(f"quick {name}", ok, detail, "reference JSON")
         probs = [f for f in q["failures"] if f.startswith("greedy")]
@@ -793,7 +795,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", required=True)
     ap.add_argument("--image", required=True, help="candidate image tag, e.g. vllm-sly-radiance:0.2.5-rocm10.0")
-    ap.add_argument("--mode", choices=["quick", "fast", "full"], default="fast")
+    ap.add_argument("--mode", choices=["quick", "release", "fast", "full"], default="fast")
     ap.add_argument("--baseline", help="defaults to ci/accept/baselines/<profile name>.json")
     ap.add_argument("--out", default="out/accept", help="result directory")
     ap.add_argument("--host", default=os.environ.get("ACCEPT_HOST", "192.168.178.51"))
@@ -876,20 +878,22 @@ def main() -> int:
         model = profile["model"]
         before("smoke")
         log("smoke tests")
-        if args.mode == "quick":
-            # ~5 min tier for PR builds: hooks + greedy + decode/prefill/concurrency probes vs the
-            # reference JSON (ci/README.md, "GPU tiers"); no smoke, chat replay, BetterBench or GSM8K
+        if args.mode in ("quick", "release"):
+            # quick (~5 min, PR builds): hooks + greedy + decode/prefill/concurrency 1/2/4 vs the reference
+            # JSON. release (~10 min, tagging): + 8 streams + GSM8K-50, an unrecorded reference fails closed.
+            # No smoke, chat replay, BetterBench or lm-eval GSM8K here (ci/README.md, "GPU tiers")
             if args.dry_run:
                 log("DRY-RUN: skipping the quick probes")
             else:
                 before("quick")
-                results["quick"], _ = quick_bench.run_quick(profile["quick_profile"], base_url, model, log_text)
+                results["quick"], _ = quick_bench.run_quick(
+                    profile["quick_profile"], base_url, model, log_text, release=args.mode == "release")
         else:
             results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
             if not results["smoke"]["ok"]:
                 failures.append("smoke")
 
-        if args.dry_run or args.mode == "quick":
+        if args.dry_run or args.mode in ("quick", "release"):
             log("skipping greedy, betterbench and gsm8k")
         else:
             before("greedy")

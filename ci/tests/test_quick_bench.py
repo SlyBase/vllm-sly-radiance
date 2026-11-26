@@ -142,6 +142,70 @@ class Metrics(unittest.TestCase):
         self.assertEqual(qb.parse_prom(txt), {"vllm:spec_decode_num_drafts_total": 12.0})
 
 
+class Gsm8k(unittest.TestCase):
+    def test_is_correct(self):
+        self.assertTrue(qb.gsm8k_correct("so\n#### 1,366", "1366"))
+        self.assertTrue(qb.gsm8k_correct("the answer is 18.", "18"))  # fallback: last number
+        self.assertFalse(qb.gsm8k_correct("#### 17", "18"))
+        self.assertFalse(qb.gsm8k_correct("no number here", "18"))
+
+    def test_items_file_has_50(self):
+        self.assertEqual(len(qb.load_gsm8k()), 50)
+
+    def test_floor_is_two_items_below_the_reference(self):
+        ref = {"gsm8k_correct": 40}
+        ok = lambda n: [x for x in qb.verdict({"gsm8k_correct": n}, ref, {"decode_pct": 2, "prefill_pct": 3}) if not x[1]]  # noqa: E731
+        self.assertEqual(ok(38), [])
+        self.assertEqual([n for n, *_ in ok(37)], ["gsm8k"])
+
+
+class ReleaseGuard(unittest.TestCase):
+    full = {"decode_tps": {"prose": 1.0, "code": 2.0}, "prefill_pps": 3000.0, "tok_per_update": {"code": 5.0},
+            "c2_over_c1_min": 1.2, "c4_over_c1_min": 1.4, "c8_over_c1_min": 1.6, "gsm8k_correct": 40}
+
+    def test_complete_reference_passes(self):
+        self.assertEqual(qb.unrecorded_problems(self.full, greedy_present=True), [])
+
+    def test_each_missing_piece_is_named_and_the_hint_is_there(self):
+        for key in ("decode_tps", "prefill_pps", "gsm8k_correct", "c8_over_c1_min", "tok_per_update"):
+            ref = {k: v for k, v in self.full.items() if k != key}
+            msg = " ".join(qb.unrecorded_problems(ref, greedy_present=True))
+            self.assertIn(key, msg)
+            self.assertIn("references not recorded, run ci/quick_backtest.sh RECORD=1", msg)
+        ref = {**self.full, "decode_tps": {"prose": 1.0, "code": None}}
+        self.assertTrue(qb.unrecorded_problems(ref, greedy_present=True))
+        self.assertIn("greedy", " ".join(qb.unrecorded_problems(self.full, greedy_present=False)))
+
+    def test_committed_seed_references_fail_closed(self):
+        for prof in ("qwen", "inkling"):
+            ref = json.loads((REF / f"quick-{prof}.json").read_text())
+            self.assertTrue(qb.unrecorded_problems(ref, greedy_present=True), prof)
+
+
+class ReleaseTierProfiles(unittest.TestCase):
+    def test_both_profiles_and_their_files(self):
+        self.assertEqual(qb.RELEASE_PROFILES, ("vllm7-mxfp4", "inkling"))
+        for p in qb.RELEASE_PROFILES:
+            prof = json.loads((CI / "accept" / "profiles" / f"{p}.json").read_text())
+            self.assertIn(prof["quick_profile"], qb.HOOKS)
+            self.assertTrue(prof["service"].endswith(".service"))
+
+
+class ReleaseGate(unittest.TestCase):
+    ctx = ["release-tier/vllm7-mxfp4", "release-tier/inkling"]
+
+    def test_both_green(self):
+        st = {c: "success" for c in self.ctx}
+        self.assertEqual(qb.release_gate_problems(st), [])
+
+    def test_missing_or_red_blocks(self):
+        self.assertEqual(len(qb.release_gate_problems({"release-tier/vllm7-mxfp4": "success"})), 1)
+        self.assertEqual(len(qb.release_gate_problems({self.ctx[0]: "success", self.ctx[1]: "failure"})), 1)
+        self.assertEqual(len(qb.release_gate_problems({})), 2)
+        # an unrelated green status is not a release tier
+        self.assertEqual(len(qb.release_gate_problems({"ci": "success"})), 2)
+
+
 class AcceptWiring(unittest.TestCase):
     """accept.compare() turns the gates into hard checks."""
 
@@ -161,6 +225,14 @@ class AcceptWiring(unittest.TestCase):
         c = self.checks(hooks=["missing: x"], greedy=json.loads(fx("greedy-eager.json")),
                         betterbench={"aggregate_tps": {"1": 100, "2": 110}, "categories_tokens_per_update": {"code": 3.6}})
         self.assertFalse(any(c.values()), c)
+
+
+class AcceptReleaseMode(AcceptWiring):
+    def test_unrecorded_reference_is_a_hard_failure_in_the_report(self):
+        q = {"rows": [], "unrecorded": [qb.RECORD_HINT + " (missing: decode_tps)"], "failures": ["x"]}
+        c = self.checks(quick=q)
+        self.assertFalse(c["references recorded"])
+        self.assertTrue(self.checks(quick={"rows": [("decode code", True, "ok")], "unrecorded": [], "failures": []})["references recorded"])
 
 
 class HarnessLint(unittest.TestCase):
@@ -207,7 +279,7 @@ class FakeServer(unittest.TestCase):
                     u = {"usage": {"completion_tokens": n}, "choices": []}
                     self.wfile.write(b"data: " + json.dumps(u).encode() + b"\n\ndata: [DONE]\n\n")
                 else:
-                    r = {"choices": [{"finish_reason": "stop", "message": {"content": "answer " + req["messages"][0]["content"][:5]}}],
+                    r = {"choices": [{"finish_reason": "stop", "message": {"content": "answer " + req["messages"][0]["content"][:5] + "\\n#### 7"}}],
                          "usage": {"completion_tokens": n}}
                     self.wfile.write(json.dumps(r).encode())
 
@@ -240,6 +312,33 @@ class FakeServer(unittest.TestCase):
             self.assertEqual([f for f in fails if f.startswith("greedy")], [])
             _, fails = qb.run_quick("qwen", self.base, "m", fx("qwen-eager-bad.log"), ref_dir)
             self.assertTrue(any(f.startswith("hook proof") for f in fails))
+
+
+class FakeRelease(FakeServer):
+    """release tier against the fake server"""
+    test_probes_measure_something_sane = None
+    test_run_quick_record_then_pass_then_hook_failure = None
+
+    def test_release_fails_closed_on_unrecorded_references_without_probing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            before = dict(self.state)
+            report, fails = qb.run_quick("qwen", self.base, "m", fx("qwen-good-1.13.4.log"), Path(d), release=True)
+            self.assertIn("references not recorded, run ci/quick_backtest.sh RECORD=1", " ".join(fails))
+            self.assertEqual(self.state, before)  # no probe was sent
+            self.assertTrue(report["unrecorded"])
+
+    def test_release_record_then_pass_with_gsm8k_and_c8(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ref_dir = Path(d)
+            log = fx("qwen-good-1.13.4.log")
+            report, _ = qb.run_quick("qwen", self.base, "m", log, ref_dir, release=True, gsm8k_n=3, recording=True)
+            self.assertEqual(sorted(report["measured"]["concurrency"]), [1, 2, 4, 8])
+            self.assertIn(report["measured"]["gsm8k_correct"], range(4))  # the fake answers "#### 7" to everything
+            qb.record("qwen", report, ref_dir)
+            ref = json.loads((ref_dir / "quick-qwen.json").read_text())
+            self.assertEqual(qb.unrecorded_problems(ref, greedy_present=True), [])
 
 
 if __name__ == "__main__":

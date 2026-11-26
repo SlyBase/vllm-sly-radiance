@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Backtest of the quick tier (ci/quick_bench.py) against images that are already on host 51 and whose
+# Backtest of the RELEASE tier (ci/quick_bench.py run --release: quick tier + 8 streams + GSM8K-50) against images that are already on host 51 and whose
 # behaviour is KNOWN. Proves the tier flags every regression we have actually met. NOT run by CI:
 # it needs the GPU. The caller holds the gpu-window and has stopped docker-vllm7 (same contract as the
 # ink-200 arm scripts); this script starts and removes only its own container on :8001.
 #
-#   RECORD=1 ci/quick_backtest.sh   # window 1: also write the references from the two good arms
+#   RECORD=1 ARMS="Q-GOOD I-GOOD" ci/quick_backtest.sh   # window 1: write the references from the two good arms
 #   ci/quick_backtest.sh            # compare every arm against the committed references
 #   ARMS="Q-GOOD I-INT4" ci/quick_backtest.sh   # a subset
 #
@@ -94,9 +94,11 @@ for arm in $ARMS; do
   if wait_health; then
     docker logs "$C" > "$OUT/$arm.server.log" 2>&1
     rec=(); [ "${RECORD:-0}" = 1 ] && [ "${EXPECT[$arm]}" = PASS ] && rec=(--record)
-    python3 "$HERE/quick_bench.py" run --profile "$profile" --base "http://127.0.0.1:$PORT" --model "$model" \
+    python3 "$HERE/quick_bench.py" run --release --profile "$profile" --base "http://127.0.0.1:$PORT" --model "$model" \
       --log "$OUT/$arm.server.log" --out "$OUT/$arm.json" "${rec[@]}" | tee "$OUT/$arm.txt"
     if [ "${PIPESTATUS[0]}" -eq 0 ]; then GOT[$arm]=PASS; else GOT[$arm]=FAIL; fi
+    # a bad arm that "fails" only because the references are not recorded proves nothing
+    grep -q "references not recorded" "$OUT/$arm.txt" && GOT[$arm]=UNRECORDED
   else
     docker logs "$C" > "$OUT/$arm.server.log" 2>&1
     GOT[$arm]=NOSTART   # a start failure is never the expected verdict, not even for a bad arm
