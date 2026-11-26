@@ -40,6 +40,7 @@ GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304)
 # a JSON file named by RADIANCE_INKLING2_MOE_PREFILL_CFG (written by bench_prefill_moe.py --table-out).
 # Without an entry the launch is the historical one.
 _CFG_ENV = "RADIANCE_INKLING2_MOE_PREFILL_CFG"
+_V2_ENV = "RADIANCE_INKLING2_MOE_PREFILL_V2"
 _CFG_KEYS = dict(nvfp4=("block_m", "block_n", "block_k", "num_warps", "num_stages"),
                  mxfp8=("block_n", "block_t", "block_k", "num_warps", "num_stages"))
 _POW2 = ("block_m", "block_n", "block_t", "block_k", "num_warps")
@@ -213,8 +214,89 @@ def _expert_gemm(
              valid[:, None] & (cols[None, :] < N))
 
 
+@triton.jit
+def _fp4_val(code, SAFE: tl.constexpr):
+    """e2m1 code (int32, sign in bit 3) -> fp32, bit tricks instead of exp2. The 3 magnitude bits
+    placed at the fp32 exponent/mantissa-MSB position read as (denormal) 0, 0.5 * 2^-126 and
+    (1 + m/2) * 2^(e-127); times 2^126 that is the e2m1 value. SAFE avoids the denormal operand
+    (a flush-to-zero multiply would lose 0.5)."""
+    mag = code & 7
+    if SAFE:
+        v = tl.where(mag >= 2, ((mag << 22) + 0x3F000000).to(tl.float32, bitcast=True),
+                     mag.to(tl.float32) * 0.5)
+        return tl.where((code & 8) != 0, -v, v)
+    bits = (mag << 22) | ((code & 8) << 28)
+    return bits.to(tl.float32, bitcast=True) * 8.507059173023462e37  # 2^126
+
+
+@triton.jit
+def _dequant_act(Act, ActScale, Tiles, Out, MAX_CTAS: tl.constexpr, K: tl.constexpr,
+                 TILE: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr, DT: tl.constexpr,
+                 SAFE: tl.constexpr):
+    """Routed activation rows -> DT `[rows, K]`, each BK block stored as [even k | odd k], once per
+    row instead of once per output column block."""
+    tile = tl.program_id(0)
+    if tile >= tl.load(Tiles + 2 * MAX_CTAS):
+        return
+    row_end = tl.load(Tiles + MAX_CTAS + tile)
+    rows = tile * TILE + tl.program_id(1) * BR + tl.arange(0, BR)
+    valid = rows < tl.minimum(row_end, (tile + 1) * TILE)
+    half: tl.constexpr = BK // 2
+    j = tl.arange(0, half)
+    for k in range(K // BK):
+        p = tl.load(Act + rows[:, None].to(tl.int64) * (K // 2) + k * half + j[None, :],
+                    valid[:, None], other=0).to(tl.int32)
+        s = tl.load(ActScale + _scale_offsets(rows[:, None], (k * (BK // 16) + j // 8)[None, :], K // 16, TILE),
+                    valid[:, None], other=0.0).to(tl.float32)
+        out = Out + rows[:, None].to(tl.int64) * K + k * BK + j[None, :]
+        tl.store(out, (_fp4_val(p & 15, SAFE) * s).to(DT), valid[:, None])
+        tl.store(out + half, (_fp4_val(p >> 4, SAFE) * s).to(DT), valid[:, None])
+
+
+@triton.jit
+def _expert_gemm_v2(
+    ActDQ, RowScale, Weight, WeightScale, ExpertScale, Out, Tiles,
+    MAX_CTAS: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, DT: tl.constexpr, SAFE: tl.constexpr,
+):
+    """`_expert_gemm` with the activation already dequantised (`_dequant_act`) and the weight nibbles
+    kept apart: even-k and odd-k halves are two dots (a sum over k does not care about the order), so no
+    interleave/shuffle. K % BK == 0."""
+    tile = tl.program_id(0)
+    if tile >= tl.load(Tiles + 2 * MAX_CTAS):
+        return
+    expert = tl.load(Tiles + tile).to(tl.int64)
+    row_end = tl.load(Tiles + MAX_CTAS + tile)
+    rows = tile * TILE + tl.program_id(1) * BM + tl.arange(0, BM)
+    valid = rows < tl.minimum(row_end, (tile + 1) * TILE)
+    cols = tl.program_id(2) * BN + tl.arange(0, BN)
+    cmask = cols < N
+    half: tl.constexpr = BK // 2
+    j = tl.arange(0, half)
+    acc = tl.zeros((BM, BN), tl.float32)
+    a_ptr = ActDQ + rows[:, None].to(tl.int64) * K + j[None, :]
+    w_row = (expert * N + cols)[:, None]
+    for k in range(K // BK):
+        a_lo = tl.load(a_ptr + k * BK, valid[:, None], other=0.0)
+        a_hi = tl.load(a_ptr + k * BK + half, valid[:, None], other=0.0)
+        w = tl.load(Weight + w_row * (K // 2) + k * half + j[None, :], cmask[:, None], other=0).to(tl.int32)
+        s = tl.load(WeightScale + w_row * (K // 16) + k * (BK // 16) + (j // 8)[None, :],
+                    cmask[:, None], other=0.0).to(tl.float32)
+        acc = tl.dot(a_lo, tl.trans((_fp4_val(w & 15, SAFE) * s).to(DT)), acc)
+        acc = tl.dot(a_hi, tl.trans((_fp4_val(w >> 4, SAFE) * s).to(DT)), acc)
+    acc *= tl.load(ExpertScale + expert)
+    acc *= tl.load(RowScale + rows, valid, other=0)[:, None]
+    tl.store(Out + rows[:, None].to(tl.int64) * N + cols[None, :], acc, valid[:, None] & cmask[None, :])
+
+
+def prefill_v2():
+    """RADIANCE_INKLING2_MOE_PREFILL_V2=1: the v2 prefill kernels (see `_expert_gemm_v2`)."""
+    return os.environ.get(_V2_ENV, "0") == "1"
+
+
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
-                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16, **launch):
+                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16,
+                      v2=None, v2_safe=False, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
@@ -236,6 +318,18 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     bk = block_k or cfg.get("block_k") or min(128, triton.next_power_of_2(k))         # masks cover the overhang
     launch = {**{key: cfg[key] for key in ("num_warps", "num_stages") if key in cfg}, **launch}
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+    if (prefill_v2() if v2 is None else v2) and k % bk == 0 and bk >= 32:
+        dq = torch.empty((plan.rows, k), dtype=torch.float32 if dot_dtype == tl.float32 else torch.bfloat16,
+                         device=act.device)
+        br = min(16, bm)
+        _dequant_act[(plan.max_ctas, triton.cdiv(plan.tile, br))](
+            act, act_scale, tiles, dq, MAX_CTAS=plan.max_ctas, K=k, TILE=plan.tile, BK=bk, BR=br,
+            DT=dot_dtype, SAFE=v2_safe)
+        _expert_gemm_v2[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
+            dq, row_scale, weight, weight_scale, expert_scale, out, tiles,
+            MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype,
+            SAFE=v2_safe, **launch)
+        return out
     _expert_gemm[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
         act, act_scale, row_scale, weight, weight_scale, expert_scale, out, tiles,
         MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype, **launch)
