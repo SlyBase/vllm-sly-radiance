@@ -47,6 +47,9 @@ CLIP = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_CLIP", "rtn")
 MIN_N = int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MIN_N", "256"))
 DECODE_MAX_M = int(os.environ.get("RADIANCE_MXFP4_DECODE_MAX_M", "0"))
 MX_MAX_M = 16  # rows per gemv_mx4 launch (the kernel's range; a DSpark verify step is k + 1 <= 16)
+# M <= GEMV_MAX_M (default 16 = one launch) runs the GEMV in 16-row launches; above it the bf16 dequant + GEMM of the
+# prefill. RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M=64 puts 2-8 streams of spec-verify rows (17..64) on the GEMV.
+GEMV_MAX_M = max(MX_MAX_M, int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M", "16")))
 HEAD_MIN_N = int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_HEAD_MIN_N", str(1 << 17)))  # the 201024-row unembed
 CHUNK_ROWS = 8192  # bounds the fp32 transient (lm_head 201024 x 2304 fp32 = 1.85 GB at once)
 
@@ -408,7 +411,7 @@ def mxfp4_dense_linear(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor 
     if not x2.shape[0]:  # the kernel has no empty launch
         return _finish(x2.new_empty((0, n)), x, n, out, bias)
     if "qt" in ent:  # gemv mode
-        if x2.shape[0] <= MX_MAX_M or n >= HEAD_MIN_N:
+        if x2.shape[0] <= GEMV_MAX_M or n >= HEAD_MIN_N:
             y = _gemv(x2, ent, n, torch.float32 if dtype == torch.float32 else torch.bfloat16)
         else:  # prefill: dequantize the tiles to bf16 once per call and run the bf16 GEMM
             dq = torch.empty((n, k), dtype=torch.bfloat16, device=x2.device)

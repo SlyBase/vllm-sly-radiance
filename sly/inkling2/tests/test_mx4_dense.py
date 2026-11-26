@@ -164,6 +164,28 @@ def test_prefill_rows_dequantize_to_a_bf16_gemm_not_a_launch_per_16_rows():
     torch.testing.assert_close(y.float(), exp.float(), rtol=2**-7, atol=1e-2)
 
 
+def test_multi_stream_decode_rows_chunk_through_the_gemv_up_to_the_knob():
+    """RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M=64: 2-8 streams of spec-verify rows (17..64) take 16-row GEMV launches
+    instead of a bf16 dequant + GEMM per call; rows above the knob keep the prefill route."""
+    m = mx4(RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M="64")
+    torch.manual_seed(7)
+    w = torch.randn(200, K, dtype=torch.bfloat16)
+    p = reg(m, w)
+    x = torch.randn(40, K, dtype=torch.bfloat16)
+    y = m.mxfp4_dense_linear(x, p)
+    assert [c["M"] for c in m._mx.gemv_calls] == [16, 16, 8] and not m._mx.dq_calls
+    torch.testing.assert_close(y.float(), expected(m, x, w).float(), rtol=2**-7, atol=1e-2)
+    m._mx.gemv_calls.clear()
+    m.mxfp4_dense_linear(torch.randn(65, K, dtype=torch.bfloat16), p)
+    assert not m._mx.gemv_calls and len(m._mx.dq_calls) == 1
+
+
+def test_gemv_max_m_defaults_to_16_and_is_clamped_to_a_multiple_of_the_launch_range():
+    assert mx4().GEMV_MAX_M == 16
+    assert mx4(RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M="64").GEMV_MAX_M == 64
+    assert mx4(RADIANCE_INKLING2_MXFP4_DENSE_GEMV_MAX_M="5").GEMV_MAX_M == 16   # below the launch range: default
+
+
 def test_head_class_weights_chunk_every_m_through_the_gemv_and_can_return_fp32():
     m = mx4(RADIANCE_INKLING2_MXFP4_DENSE_HEAD_MIN_N="256")
     torch.manual_seed(5)
