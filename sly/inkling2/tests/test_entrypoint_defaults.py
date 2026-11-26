@@ -125,6 +125,28 @@ def test_other_models_get_no_coda_knob(serve):
     assert CODA not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
 
 
+DENSE = "RADIANCE_INKLING2_MXFP4_DENSE"
+
+
+@pytest.mark.parametrize("extra", [
+    [],                                                                  # DSpark default
+    ["--speculative-config", json.dumps(_spec("dspark"))],
+    ["--speculative-config", json.dumps(_spec("dflash"))],               # DFlash2 (the measured prod config)
+])
+def test_inkling_gets_mxfp4_dense_by_default(serve, extra):
+    # MEASURED (1.14.0, R9700 210 W): Mia prose/code 140/191 -> 186/261 tok/s; quality A/B docs/INKLING2-MINI.md
+    assert serve(MODEL + extra)[DENSE] == "1"
+
+
+@pytest.mark.parametrize("val", ["0", ""])
+def test_explicit_env_restores_lossless_dense(serve, val):
+    assert serve(MODEL, **{DENSE: val})[DENSE] == val  # `=0` / empty = bf16 dense weights
+
+
+def test_other_models_get_no_dense_knob(serve):
+    assert DENSE not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
+
+
 QWEN = "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"
 DRAFT = {"method": "dflash", "model": "/models/inkling-2-mini-dflash2", "num_speculative_tokens": 7}
 
