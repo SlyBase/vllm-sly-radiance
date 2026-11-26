@@ -38,6 +38,23 @@ _SPLIT = os.environ.get("RADIANCE_INKLING2_HIP_MOE_SPLIT") != "0"
 # `lds_rows` with the weights kept in registers, so an expert's weights are streamed once however many rows it has.
 # RADIANCE_INKLING2_HIP_MOE_PASSES=0 = the tile-8 split above (`hip_tile_view`: one weight stream per 8 rows).
 _PASSES = os.environ.get("RADIANCE_INKLING2_HIP_MOE_PASSES") != "0"
+# RADIANCE_INKLING2_HIP_MOE_TILE=<T> (multiple of 8, <= 64; default 0 = vLLM's tile 16): plan 17..64-token decode
+# batches (2-8 streams of spec-verify rows) with token tile T, so each expert is ONE CTA (one weight stream) up to
+# T rows. Needs the passes kernel; the plan is made in vLLM's `MoE.plan` (patch_inkling2_gfx12.py hunk 4n).
+def _env_tile():
+    v = os.environ.get("RADIANCE_INKLING2_HIP_MOE_TILE", "0")
+    return int(v) if v.isdigit() and int(v) % _HIP_TILE == 0 and int(v) <= _HIP_SPLIT_MAX else 0
+
+
+_DECODE_TILE = _env_tile()
+_FUSED_ROUTE_MAX = 16   # vLLM's fused routing (tokens <= 16) keeps its own tile
+
+
+def decode_tile(tokens):
+    """Token tile for `expert_plan` of a `tokens`-row step, None = vLLM's own choice."""
+    if _hip is None or not _PASSES or not _DECODE_TILE or not _FUSED_ROUTE_MAX < tokens <= _HIP_SPLIT_MAX:
+        return None
+    return _DECODE_TILE
 _TOPK = 8      # experts per token: an expert (= one CTA) gets at most one row per token
 # Geometry of radiance_inkling2_moe.hip (test_moe_hip.py asserts it equals hip.geometry()):
 # BN weight rows per block, LPR lanes per row, a lane streams `quantum` k-values per step and at

@@ -365,3 +365,40 @@ def test_wrapper_refuses_a_wider_item_type_even_if_the_bytes_suffice(m, field, d
     with pytest.raises(ValueError, match=field):
         mod.nvfp4_expert_gemm(*nvfp4_args(c))
     assert fake.calls == []
+
+
+# ---- decode tile: one weight stream per expert for 17..64 tokens ------------------------------------
+
+@pytest.mark.parametrize("tokens,want", [(1, None), (8, None), (16, None), (17, 64), (32, 64), (64, 64), (65, None), (4096, None)])
+def test_decode_tile_widens_only_the_multi_stream_decode_batches(m, monkeypatch, tokens, want):
+    mod, _ = m
+    monkeypatch.setattr(mod, "_DECODE_TILE", 64)
+    assert mod.decode_tile(tokens) == want
+
+
+def test_decode_tile_is_off_by_default_and_without_the_hip_module(m, monkeypatch):
+    mod, _ = m
+    monkeypatch.setattr(mod, "_DECODE_TILE", 0)
+    assert mod.decode_tile(32) is None
+    monkeypatch.setattr(mod, "_DECODE_TILE", 64)
+    monkeypatch.setattr(mod, "_hip", None)
+    assert mod.decode_tile(32) is None
+    monkeypatch.setattr(mod, "_hip", object())
+    monkeypatch.setattr(mod, "_PASSES", False)          # the tile-8 split has no use for a wide tile
+    assert mod.decode_tile(32) is None
+
+
+def test_decode_tile_env_knob(monkeypatch):
+    fake = types.ModuleType("radiance_inkling2_moe_hip")
+    monkeypatch.setitem(sys.modules, "radiance_inkling2_moe_hip", fake)
+    import radiance_inkling2_moe as mod
+    try:
+        monkeypatch.delenv("RADIANCE_INKLING2_HIP_MOE_TILE", raising=False)
+        assert importlib.reload(mod)._DECODE_TILE == 0
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_TILE", "64")
+        assert importlib.reload(mod)._DECODE_TILE == 64
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_TILE", "20")      # not a multiple of 8: refused
+        assert importlib.reload(mod)._DECODE_TILE == 0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(mod)
