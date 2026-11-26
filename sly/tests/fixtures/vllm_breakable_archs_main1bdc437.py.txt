@@ -1,0 +1,87 @@
+_QWEN3_5_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MTP",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeMTP",
+    }
+)
+
+DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {
+        "AliceAIForCausalLM",
+        "BeamForCausalLM",
+        "DeepseekV32MTPModel",
+        "DeepseekV32ForCausalLM",
+        "DeepseekV4ForCausalLM",
+        "DeepseekV4ForConditionalGeneration",
+        "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
+        "Dots3NoteForCausalLM",
+        "Dots3NoteMTPModel",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextMTPModel",
+        "GlmMoeDsaForCausalLM",
+        "HYV4ForCausalLM",
+        "HYV4MTPModel",
+        "HYV4DFlyModel",
+        "InklingForCausalLM",
+        "InklingForConditionalGeneration",
+        "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
+        "KimiK3MTPModel",
+        "KimiK31ForConditionalGeneration",
+        "KimiLinearForCausalLM",
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+        "MistralLarge4ForCausalLM",
+        "MuseSparkForCausalLM",
+        "MuseSparkForConditionalGeneration",
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
+    }
+)
+
+
+@lru_cache
+def default_breakable_cudagraph_architectures() -> frozenset[str]:
+    """Architectures defaulting to breakable CUDA graphs on this platform."""
+    if current_platform.is_rocm():
+        # Breakable CUDA graphs currently regress performance on ROCm for
+        # models that can use torch.compile piecewise graphs instead. Do not
+        # opt those in by default. Users can still force them with
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+        #
+        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
+        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
+        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
+        # graphs are on. Enable this architecture so the published AMD
+        # recipe can start.
+        # HYV4 also runs without torch.compile, preserving runtime-shape
+        # kernel selection during graph capture.
+        # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        return (
+            frozenset(
+                {
+                    "DeepseekV41ForCausalLM",
+                    "HYV4ForCausalLM",
+                    "HYV4VLForConditionalGeneration",
+                    "HYV4MTPModel",
+                }
+            )
+            | _QWEN3_5_ARCHITECTURES
+        )
+    if current_platform.is_cuda():
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA and ROCm;
+        # other platforms keep the torch.compile path.
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
+    if current_platform.is_xpu():
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
+    return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES

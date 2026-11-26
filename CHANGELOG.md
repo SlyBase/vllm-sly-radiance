@@ -251,6 +251,14 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
   `sly/patch_linear_carrier.py` passes the tuple (always a 2D token batch) straight to the kernel; NOOP on a
   vLLM without `apply_flattened`. Found by the acceptance gate of PR #259 (run 45225663768, ink-k7); the
   patch dry run only checks anchors and could not see it. Tensor inputs are unchanged.
+- **Qwen on the vLLM main base: decode -3..-5 % (four categories) and prefill -6 % (8k/16k) against 1.13.4, fixed** (`sly/patch_qwen35_legacy.py`).
+  *Cause, MEASURED* (1.14.0 release check; same-window control `1.13.4` twice: noise <= 0.3 %): vLLM main@1bdc437 routes Qwen3.5 on ROCm to a new
+  eager model (`vllm/models/qwen3_5/amd`, own decoder `forward` and `Qwen3_5RMSNorm`) and lists the architecture in
+  `default_breakable_cudagraph_architectures()`, which turns `torch.compile` off (engine `mode NONE`). Every radiance hook sits in the legacy
+  `qwen3_next.py` layer, so `radiance::add_rms_quant` never ran and the A-tiled prefill GEMMs lost their tiled inputs; the greedy gate was
+  0/4 identical to 1.13.4. The patch keeps the legacy model and `torch.compile` for Qwen3.5 on ROCm (`RADIANCE_QWEN35_AMD=1` = upstream model).
+  With the patch (overlay on the same image, one change): decode per category -0.1..+0.3 %, prefill 2k/8k/16k +6.2/+0.3/+0.5 %, greedy gate 4/4
+  identical to 1.13.4, GSM8K-50 49/50 = prod. NOOP on a vLLM without `vllm/models/qwen3_5`. Tests `sly/tests/test_qwen35_legacy_patch_cpu.py`.
 - **The MXFP4 aiter fallback op name** (`sly/mxfp4/radiance_mxfp4.py`): main renamed
   `torch.ops.vllm.gemm_with_dynamic_quant` to `rocm_aiter_mxfp4_gemm_dynamic_quant`. The dispatch
   resolves whichever name the installed vLLM registers, so the sub-MIN_M / non-W4A8-layer fallback
