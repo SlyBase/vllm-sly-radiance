@@ -160,6 +160,7 @@ def test_default_tile_128_launches_v2_with_the_measured_config(monkeypatch):
                         z(1, dt=torch.float32), z(9, dt=torch.int32), plan)
     kw = spy.kw
     assert (kw["BM"], kw["BN"], kw["BK"], kw["num_warps"], kw["num_stages"], kw["GS"]) == (128, 128, 32, 4, 2, True)
+    assert kw["TRUNC"] is True  # truncating bf16 convert (mb4: 8.53 vs 9.02 ms)
 
 
 @triton.jit
@@ -180,3 +181,14 @@ def test_to_bf16_is_exact_for_values_with_at_most_8_significant_bits(trunc):
     out = torch.empty(128, dtype=torch.bfloat16)
     _convert[(1,)](x, out, TRUNC=trunc, N=128)
     assert torch.equal(out.float(), x)
+
+
+def test_v2_runs_with_fp16_operands():
+    """fp16 holds every decoded value exactly (e2m1 x e4m3 scale <= 2688, >= 2^-10) and converts from fp32 natively."""
+    from radiance_inkling2_moe import nvfp4_expert_gemm
+
+    c = base.make_case(experts=2, n=48, k=192, tile=16, seed=13)
+    out = nvfp4_expert_gemm(c["act"], c["act_scale"], c["row_scale"], c["weight"], c["weight_scale"],
+                            c["expert_scale"], c["tiles"], c["plan"], dot_dtype=tl.float16, v2=True,
+                            block_m=16, block_n=32, block_k=64)
+    compare(c, out)

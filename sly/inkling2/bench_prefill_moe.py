@@ -129,9 +129,10 @@ def nvfp4_candidates(tile, cpu):
         return
     if V2:  # v2 kernels: full grid; v2_safe=True avoids the denormal operand of the bit-trick decode
         yield dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2), "A"  # v1 as tuned by the table
-        for tr, bm, bn, bk, nw, ns in itertools.product((False, True), (64, 128), (64, 128), (32, 64), (4, 8), (2, 3)):
-            if bm <= max(tile, 64):
-                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=nw, num_stages=ns, v2=True, v2_trunc=tr), "A"
+        for fp16, bm, bn, bk, nw, ns in itertools.product((False, True), (64, 128), (64, 128), (32, 64), (4, 8), (2, 3)):
+            if bm <= max(tile, 64):  # fp16 operands (native cvt) against bf16 + truncating cvt
+                yield dict(block_m=bm, block_n=bn, block_k=bk, num_warps=nw, num_stages=ns, v2=True, v2_trunc=True,
+                           fp16=fp16), "A"
         return
     stage_a = [dict(block_m=bm, block_n=bn, block_k=bk, num_warps=4, num_stages=2)
                for bm, bn, bk in itertools.product((32, 64, 128), (64, 128), (64, 128, 256)) if bm <= tile]
@@ -164,9 +165,15 @@ def run_nvfp4(r, experts, dev, clock, reps, budget_end, cpu):
     for t in range(r.count):
         valid[t * r.tile: r.tiles[r.max_ctas + t]] = True
 
+    def call(d, cfg):
+        c = dict(cfg)
+        if c.pop("fp16", False):
+            c["dot_dtype"] = tl.float16
+        return m.nvfp4_expert_gemm(*d, **c, **kw)
+
     def time_cfg(cfg):
         try:
-            return [clock.us(lambda d=d: m.nvfp4_expert_gemm(*d, **cfg, **kw), reps) for d in data]
+            return [clock.us(lambda d=d: call(d, cfg), reps) for d in data]
         except Exception as e:  # OutOfResources, LDS overflow ...
             print(json.dumps(dict(fmt="nvfp4", cfg=cfg, error=f"{type(e).__name__}: {str(e)[:120]}")), flush=True)
             return [None] * len(data)
@@ -194,7 +201,7 @@ def run_nvfp4(r, experts, dev, clock, reps, budget_end, cpu):
     if V2 and best and not cpu:
         split_v2_time(m, r, data, best, clock, reps)
     ref = m.nvfp4_expert_gemm(*data[0], **kw)[valid].float()
-    out = m.nvfp4_expert_gemm(*data[0], **best, **kw)[valid].float() if best else ref
+    out = call(data[0], best)[valid].float() if best else ref
     rel = float(((out - ref).abs().max() / ref.abs().max().clamp_min(1e-30)).item())
     rows_real = r.rows_real
     tf = sum(flops(rows_real, n, k) for n, k in shapes) / (best_us * 1e6) if best else 0.0

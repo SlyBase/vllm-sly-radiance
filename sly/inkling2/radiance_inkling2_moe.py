@@ -348,7 +348,7 @@ def prefill_v2(tile=None):
 
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
                       block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16,
-                      v2=None, v2_safe=False, v2_gs=True, v2_trunc=False, **launch):
+                      v2=None, v2_safe=False, v2_gs=True, v2_trunc=True, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
@@ -372,8 +372,8 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     launch = {**{key: cfg[key] for key in ("num_warps", "num_stages") if key in cfg}, **launch}
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
     if use_v2 and k % bk == 0 and bk >= 32:
-        dq = torch.empty((plan.rows, k), dtype=torch.float32 if dot_dtype == tl.float32 else torch.bfloat16,
-                         device=act.device)
+        dq = torch.empty((plan.rows, k), dtype={tl.float32: torch.float32, tl.float16: torch.float16}.get(
+            dot_dtype, torch.bfloat16), device=act.device)
         br = min(16, bm)
         trunc = bool(v2_trunc) and dot_dtype == tl.bfloat16  # a shift instead of the rounding sequence, exact here
         _dequant_act[(plan.max_ctas, triton.cdiv(plan.tile, br))](
