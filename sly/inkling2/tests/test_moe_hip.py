@@ -259,7 +259,7 @@ def test_nvfp4_k_limits(hip):
 
 def test_hip_rejects_what_it_cannot_run(hip):
     base = dict(experts=2, n=64, rows_per=[1, 1])
-    for bad in (dict(tile=16, k=256), dict(tile=8, k=2368)):
+    for bad in (dict(tile=12, k=256), dict(tile=72, k=256), dict(tile=8, k=2368)):
         with pytest.raises((ValueError, RuntimeError, TypeError)):
             run_hip(hip, make_case("nvfp4", **base, **bad))
     for lds_rows in (0, 9):
@@ -407,6 +407,7 @@ def test_wrapper_debug_mode_on_the_gpu(hip, monkeypatch):
 def test_wrapper_dispatch_by_tile(hip, monkeypatch):
     """tile 8 -> HIP; every other tile stays on Triton.  Count calls through the real module."""
     import radiance_inkling2_moe as m
+    monkeypatch.setattr(m, "_SPLIT", False)   # the split (tile 16..64 on HIP) has its own tests
     calls = []
     real = m._hip.nvfp4_gemm
 
@@ -574,3 +575,28 @@ def test_split_big_tile_matches_the_big_tile_reference(hip, fmt, tile):
     assert ref[valid].abs().max() > 0
     torch.testing.assert_close(out[valid].float(), ref[valid], rtol=1e-2, atol=1e-2)
     assert torch.isnan(out[~valid]).all()
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("tile", [16, 24, 32, 64])
+@pytest.mark.parametrize("lds_rows", [8, 3])
+def test_big_tile_cta_streams_its_expert_once_and_matches_the_reference(hip, fmt, tile, lds_rows):
+    """Plan tile 16..64 launched as is (rows 8..tile per CTA, extra passes over the register-resident
+    weights): the result is the big tile's reference, rows past a row end stay unwritten."""
+    rows_per = [1, 5, tile, 3, tile - 1, 2, 9, 8, tile // 2 + 1][:8]
+    n = 2304 if tile == 16 else 256
+    c = make_case(fmt, experts=8, n=n, k=n, tile=tile, rows_per=rows_per, count=7, seed=61 + tile)
+    check(hip, c, lds_rows=lds_rows)
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_big_tile_equals_the_tile8_split_bit_for_bit(hip, fmt):
+    """Same expert weights, same per-row summation order: the single-stream launch and the old tile-8
+    split give identical bf16."""
+    import radiance_inkling2_moe as mod
+    c = make_case(fmt, experts=8, n=256, k=512, tile=64, rows_per=[64, 17, 9, 1, 33, 8, 40, 2], seed=71)
+    split_plan, split_tiles = mod.hip_tile_view(c["plan"], c["tiles"])
+    a = run_hip(hip, c)
+    b = run_hip(hip, dict(c, plan=split_plan, tiles=split_tiles))
+    valid = valid_mask(c)
+    assert torch.equal(a[valid], b[valid])
