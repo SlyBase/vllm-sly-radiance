@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [Unreleased]
+## [1.14.0] - 2026-11-26
 
 ### Changed
 - **Inkling-2-Mini with 2-8 streams: aggregate 107/140/191 -> 214/257/333 tok/s at 2/4/8 streams (1 stream unchanged, 230 tok/s per stream).**
