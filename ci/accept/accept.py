@@ -564,7 +564,7 @@ def gate_checks(results: dict, profile: dict, add) -> None:
         add("drafter floor", not probs, probs or "ok", f"tok/update (code) >= {floor}")
 
 
-def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[dict]:
+def compare(results: dict, baseline: dict, thresholds: dict, mode: str, profile: dict | None = None) -> list[dict]:
     checks: list[dict] = []
 
     def add(name, ok, actual, expected, hard=True):
@@ -596,7 +596,7 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
             f"{s_now:.0f}s", f"<= {thresholds['startup_s_max_ratio']:.1f}x of {s_base:.0f}s",
             hard=False)
 
-    gate_checks(results, profile, add)
+    gate_checks(results, profile or {}, add)
 
     smoke = results.get("smoke", {})
     if not smoke:
@@ -933,7 +933,7 @@ def main() -> int:
                 failures.append("release")
                 log(f"RELEASE FAILED: {exc} -- production may be down, check LXC 2408")
 
-    checks = compare(results, baseline, thresholds, args.mode)
+    checks = compare(results, baseline, thresholds, args.mode, profile)
     hard_fail = [c["name"] for c in checks if not c["ok"] and c["hard"]]
     # `failures` carries the aborts that happen outside the check table -- the
     # run raised before it finished measuring, or the release failed. It was
