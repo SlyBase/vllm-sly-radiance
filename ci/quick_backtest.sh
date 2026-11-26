@@ -62,11 +62,10 @@ start_qwen() {  # production unit args of 1.13.4 (QP2/docker_cmd.txt); one -e pe
     --no-enable-extensible-kv-cache --kv-cache-memory-bytes 15569256448 >/dev/null
 }
 
-start_inkling() {  # release arm of the ink-200 week (rel/out5/ON/args.json); $2 = optional extra "-e" pair
+start_inkling() {  # release arm of the ink-200 week, NO model env: the image defaults (DENSE, HIP_MOE) are under test; $2 = optional extra "-e" pair
   docker run -d --name "$C" --device=/dev/kfd --device=/dev/dri --group-add video \
     --security-opt label=disable --ipc=host \
-    -e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=1 -e RADIANCE_INKLING2_HIP_MOE=1 \
-    -e RADIANCE_INKLING2_MXFP4_DENSE=1 -e HF_HUB_OFFLINE=1 ${2:+-e "$2"} \
+    -e HIP_VISIBLE_DEVICES=0 -e GPU_MAX_HW_QUEUES=1 -e HF_HUB_OFFLINE=1 ${2:+-e "$2"} \
     -p "$PORT:8000" -v /root/inkling2-mini:/model:ro -v /root/dflash2-ink/model:/models/dflash2:ro \
     -v "$CACHE/inkling/triton:/root/.triton" "$1" /model \
     --served-model-name inkling2-mini --gpu-memory-utilization 0.92 --limit-mm-per-prompt '{"image":0}' \

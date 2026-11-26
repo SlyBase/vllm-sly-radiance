@@ -182,10 +182,10 @@ class ReleaseGuard(unittest.TestCase):
         self.assertTrue(qb.unrecorded_problems(ref, greedy_present=True))
         self.assertIn("greedy", " ".join(qb.unrecorded_problems(self.full, greedy_present=False)))
 
-    def test_committed_seed_references_fail_closed(self):
+    def test_committed_references_are_recorded(self):
         for prof in ("qwen", "inkling"):
             ref = json.loads((REF / f"quick-{prof}.json").read_text())
-            self.assertTrue(qb.unrecorded_problems(ref, greedy_present=True), prof)
+            self.assertEqual(qb.unrecorded_problems(ref, greedy_present=True), [], prof)
 
 
 class ReleaseTierProfiles(unittest.TestCase):

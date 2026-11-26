@@ -140,8 +140,10 @@ class Argv(unittest.TestCase):
         j = " ".join(self.argv())
         for needle in ("--served-model-name inkling2-mini", "--max-model-len 32768", "--max-num-seqs 8",
                        "--reasoning-parser inkling", "--tool-call-parser inkling", "--no-async-scheduling",
-                       "-p 8001:8000", "-v /m:/model:ro", "-v /d:/models/dflash2:ro", "RADIANCE_INKLING2_HIP_MOE=1"):
+                       "-p 8001:8000", "-v /m:/model:ro", "-v /d:/models/dflash2:ro"):
             self.assertIn(needle, j)
+        # the gate must test the image default: no model env is forced
+        self.assertNotIn("RADIANCE_INKLING2", j)
 
     def test_matches_the_backtest_script(self):
         """quick_backtest.sh start_inkling is the hand-run twin: its flags must not drift from the CI leg"""

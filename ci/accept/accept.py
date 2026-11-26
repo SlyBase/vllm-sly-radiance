@@ -139,10 +139,9 @@ class GpuWindow:
 
 def inkling_docker_argv(image: str, name: str, port: int, model_dir: str, drafter_dir: str,
                         cache_dir: str, extra_env: list[str] | None = None) -> list[str]:
-    """`docker run` of the Inkling release arm (ink-200 rel/out5/ON/args.json); the hand-run twin is
+    """`docker run` of the Inkling release arm with NO model env (the image defaults are under test); the hand-run twin is
     start_inkling() in ci/quick_backtest.sh. One `-e` per variable."""
-    env = ["HIP_VISIBLE_DEVICES=0", "GPU_MAX_HW_QUEUES=1", "RADIANCE_INKLING2_HIP_MOE=1",
-           "RADIANCE_INKLING2_MXFP4_DENSE=1", "HF_HUB_OFFLINE=1", *(extra_env or [])]
+    env = ["HIP_VISIBLE_DEVICES=0", "GPU_MAX_HW_QUEUES=1", "HF_HUB_OFFLINE=1", *(extra_env or [])]
     argv = ["docker", "run", "-d", "--name", name, "--device=/dev/kfd", "--device=/dev/dri",
             "--group-add", "video", "--security-opt", "label=disable", "--ipc=host"]
     for kv in env:
