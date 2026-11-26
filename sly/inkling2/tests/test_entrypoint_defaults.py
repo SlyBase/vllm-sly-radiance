@@ -185,30 +185,46 @@ def test_other_reasoning_parser_is_no_signal(serve):
 
 
 CHUNK = "--max-num-batched-tokens"
+CTX = ["--max-model-len", "32768"]
 
 
-def test_inkling_gets_the_4096_prefill_chunk(serve):
-    # MEASURED (PTM4 vs PT, 210 W): +16/+14/+15 % pp/s at 8k/16k/32k. Cost: 53815 instead of 94849 KV tokens.
-    args = serve(MODEL)["_ARGS"]
-    assert args[args.index(CHUNK) + 1] == "4096" and args.count(CHUNK) == 1
+def test_inkling_gets_the_4096_prefill_chunk_up_to_131072_context(serve):
+    # MEASURED (PTM4 vs PT, 210 W): +16/+14/+15 % pp/s at 8k/16k/32k. Cost: 0.8 GiB less KV (4640 -> 4216 blocks) and a
+    # larger KV need per request: at max-model-len 202752 and 0.92 utilisation the engine refuses to start (10.13 GiB
+    # needed, 8.23 available; chunk 2048 starts). Estimated limit with chunk 4096: 140416 tokens.
+    for ctx in ("32768", "131072"):
+        args = serve(MODEL + ["--max-model-len", ctx])["_ARGS"]
+        assert args[args.index(CHUNK) + 1] == "4096" and args.count(CHUNK) == 1
+
+
+def test_chunk_default_skips_long_or_unknown_context(serve):
+    assert CHUNK not in serve(MODEL + ["--max-model-len", "202752"])["_ARGS"]
+    assert CHUNK not in serve(MODEL + ["--max-model-len=262144"])["_ARGS"]
+    assert CHUNK not in serve(MODEL)["_ARGS"]  # no --max-model-len: the model's own (long) default
+
+
+def test_chunk_default_reads_the_equals_form(serve):
+    args = serve(MODEL + ["--max-model-len=32768"])["_ARGS"]
+    assert args[args.index(CHUNK) + 1] == "4096"
 
 
 @pytest.mark.parametrize("given", [[CHUNK, "2048"], [f"{CHUNK}=8192"]])
 def test_explicit_chunk_flag_wins(serve, given):
-    args = serve(MODEL + given)["_ARGS"]
+    args = serve(MODEL + CTX + given)["_ARGS"]
     assert sum(a.startswith(CHUNK) for a in args) == 1
     assert "4096" not in args
 
 
 @pytest.mark.parametrize("val", ["0", ""])
 def test_chunk_env_off_leaves_the_vllm_default(serve, val):
-    assert CHUNK not in serve(MODEL, RADIANCE_INKLING2_CHUNK=val)["_ARGS"]
+    assert CHUNK not in serve(MODEL + CTX, RADIANCE_INKLING2_CHUNK=val)["_ARGS"]
 
 
-def test_chunk_env_sets_the_size(serve):
-    args = serve(MODEL, RADIANCE_INKLING2_CHUNK="8192")["_ARGS"]
-    assert args[args.index(CHUNK) + 1] == "8192"
+def test_chunk_env_sets_the_size_whatever_the_context(serve):
+    for extra in (CTX, ["--max-model-len", "202752"], []):
+        args = serve(MODEL + extra, RADIANCE_INKLING2_CHUNK="8192")["_ARGS"]
+        assert args[args.index(CHUNK) + 1] == "8192"
 
 
 def test_other_models_get_no_chunk_flag(serve):
-    assert CHUNK not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])["_ARGS"]
+    assert CHUNK not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"] + CTX)["_ARGS"]

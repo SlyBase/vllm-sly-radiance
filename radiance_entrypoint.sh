@@ -95,13 +95,15 @@ _dflash='"method"[[:space:]]*:[[:space:]]*"dflash"'
 # Inkling if (a) the target name says so, (b) a local target's config.json model_type/architectures says so (the
 # documented `/model` mount; real value `inkling2_loop`), or (c) `--reasoning-parser inkling` (Inkling-only parser).
 _target=""; [ "${1:-}" != "" ] && [ "${1:0:1}" != "-" ] && _target="$1"
-_parser=""
+_parser=""; _ctx=""
 for ((_i=1; _i<=$#; _i++)); do
   case "${!_i}" in
     --model=*) _target="${!_i#--model=}" ;;
     --model) _j=$((_i+1)); _target="${!_j-}" ;;
     --reasoning-parser=*) _parser="${!_i#--reasoning-parser=}" ;;
     --reasoning-parser) _j=$((_i+1)); _parser="${!_j-}" ;;
+    --max-model-len=*) _ctx="${!_i#--max-model-len=}" ;;
+    --max-model-len) _j=$((_i+1)); _ctx="${!_j-}" ;;
   esac
 done
 _cfg=""
@@ -113,10 +115,14 @@ case "${_target,,} ${_cfg,,} ${_parser,,}" in
     export RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
       RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}"
     # Prefill chunk 4096 (vLLM's spec-decode default is 2048): +14..16 % prefill pp/s at 8k-32k (PTM4 vs PT, 210 W).
-    # Cost: the hybrid KV pool shrinks (53815 instead of 94849 tokens at max-model-len 32768, same memory), so a
-    # unit with a very long --max-model-len may stop starting: RADIANCE_INKLING2_CHUNK=0 (or empty) = vLLM default,
-    # =<N> another size; an explicit --max-num-batched-tokens always wins.
-    _chunk="${RADIANCE_INKLING2_CHUNK-4096}"
+    # Cost: 0.8 GiB less KV (4640 -> 4216 blocks) and a larger KV need per max-length request (the sliding-window
+    # groups need window + chunk): max-model-len 202752 at 0.92 utilisation then fails to start (10.13 GiB needed,
+    # 8.23 available; the engine estimates 140416 as the limit). So the default applies only to an explicit
+    # --max-model-len <= 131072; RADIANCE_INKLING2_CHUNK=<N> sets N for any context, `0` / empty = vLLM's 2048;
+    # an explicit --max-num-batched-tokens always wins.
+    if [ "${RADIANCE_INKLING2_CHUNK+set}" = set ]; then _chunk="$RADIANCE_INKLING2_CHUNK"
+    elif [[ "$_ctx" =~ ^[0-9]+$ ]] && [ "$_ctx" -le 131072 ]; then _chunk=4096
+    else _chunk=""; fi
     case " $* " in *" --max-num-batched-tokens"*) ;; *)
       { [ -z "$_chunk" ] || [ "$_chunk" = 0 ]; } || set -- "$@" --max-num-batched-tokens "$_chunk" ;; esac ;;
 esac
