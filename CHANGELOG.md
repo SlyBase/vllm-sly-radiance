@@ -12,6 +12,8 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-26
+
 ### Changed
 - **Inkling-2-Mini: `RADIANCE_INKLING2_MXFP4_DENSE=1` is now the entrypoint default (any drafter, Inkling targets only).** The 1.14.0 default was
   `0` (lossless bf16 dense weights), but every campaign measurement ran with `1`. *MEASURED* 2026-11-26, R9700 210 W, 1.14.0 prod config:
