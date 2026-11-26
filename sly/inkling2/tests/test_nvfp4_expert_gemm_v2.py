@@ -33,7 +33,7 @@ def test_fp4_val_decodes_all_16_codes(safe):
     assert torch.equal(out, want)
 
 
-def run_v2(c, safe=False, **launch):
+def run_v2(c, safe=False, **launch):  # launch may carry v2_gs=True (scale loaded once per 16-k group)
     from radiance_inkling2_moe import nvfp4_expert_gemm
 
     return nvfp4_expert_gemm(c["act"], c["act_scale"], c["row_scale"], c["weight"], c["weight_scale"],
@@ -54,6 +54,11 @@ def compare(c, out):
 def test_v2_matches_reference(safe):
     c = base.make_case(experts=2, n=48, k=192, tile=16, seed=3)  # N ragged vs BN, K = 3 x BK 64
     compare(c, run_v2(c, safe, block_m=16, block_n=32, block_k=64))
+
+
+def test_v2_group_scale_variant_matches_reference():
+    c = base.make_case(experts=2, n=48, k=192, tile=16, seed=11)
+    compare(c, run_v2(c, False, block_m=16, block_n=32, block_k=64, v2_gs=True))
 
 
 def test_v2_two_row_blocks_per_tile():
@@ -112,3 +117,24 @@ def test_v2_not_requested_stays_on_v1(monkeypatch):
     monkeypatch.setattr(m, "_expert_gemm_v2", Boom())
     c = base.make_case(experts=2, n=32, k=128, tile=16, seed=5)
     base.run_and_compare(c)
+
+
+class Spy:
+    def __init__(self):
+        self.kw = None
+
+    def __getitem__(self, grid):
+        def launch(*args, **kw):
+            self.kw = kw
+        return launch
+
+
+@pytest.mark.parametrize("gs", [False, True])
+def test_group_scale_flag_reaches_the_kernel(monkeypatch, gs):
+    import radiance_inkling2_moe as m
+
+    spy = Spy()
+    monkeypatch.setattr(m, "_expert_gemm_v2", spy)
+    c = base.make_case(experts=2, n=32, k=128, tile=16, seed=5)
+    run_v2(c, False, block_m=16, block_n=32, block_k=64, v2_gs=gs)
+    assert spy.kw["GS"] is gs
