@@ -111,6 +111,9 @@ _cfg=""
 case "${_target,,} ${_cfg,,} ${_parser,,}" in
   *inkling*)
     export RADIANCE_INKLING2_CODA_FP4="${RADIANCE_INKLING2_CODA_FP4-1}"
+    # MXFP4 dense projections + LM head (HIP W4A16 GEMV) are a LOSSY default, user-approved on a measured paired A/B
+    # (docs/INKLING2-MINI.md): Mia prose/code 140/191 -> 186/261 tok/s. `=0` or empty restores the lossless bf16 weights.
+    export RADIANCE_INKLING2_MXFP4_DENSE="${RADIANCE_INKLING2_MXFP4_DENSE-1}"
     [[ "${*,,}" =~ $_dflash ]] || \
     export RADIANCE_INKLING2_DRAFT_SHORTLIST="${RADIANCE_INKLING2_DRAFT_SHORTLIST-4096}" \
       RADIANCE_INKLING2_ADAPTIVE_K="${RADIANCE_INKLING2_ADAPTIVE_K-3,5,7}"

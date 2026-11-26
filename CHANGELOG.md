@@ -10,6 +10,16 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Changed
+- **Inkling-2-Mini: `RADIANCE_INKLING2_MXFP4_DENSE=1` is now the entrypoint default (any drafter, Inkling targets only).** The 1.14.0 default was
+  `0` (lossless bf16 dense weights), but every campaign measurement ran with `1`. *MEASURED* 2026-11-26, R9700 210 W, 1.14.0 prod config:
+  Mia decode prose / code 140 / 191 -> 186 / 261 tok/s (prod re-run 178 / 241), KV pool 387,121 -> 414,824 tokens. Paired quality A/B
+  (D1 = DENSE=1 vs D0 = bf16): GSM8K-150 -1.3 pp (p 0.50), HumanEval+ 164 -1.2 pp (p 0.75), dNLL +0.0091 +-0.0064; pass rule (no significant
+  drop, >= -2 pp on both) met, CI not narrow (n = 150 / 164, one run per arm). `RADIANCE_INKLING2_MXFP4_DENSE=0` (or empty) restores the
+  lossless dense weights; an explicit value always wins. Tests `sly/inkling2/tests/test_entrypoint_defaults.py`, docs `docs/INKLING2-MINI.md`.
+
 ## [1.14.0] - 2026-11-26
 
 ### Changed
