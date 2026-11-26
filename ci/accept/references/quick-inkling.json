@@ -1,0 +1,18 @@
+{
+  "decode_tps": {
+    "prose": 179.78,
+    "code": 248.89
+  },
+  "prefill_pps": 9460.6,
+  "tok_per_update": {
+    "code": 5.28
+  },
+  "thresholds": {
+    "decode_pct": 2.0,
+    "prefill_pct": 3.0
+  },
+  "c2_over_c1_min": 1.02,
+  "c4_over_c1_min": 1.11,
+  "c8_over_c1_min": 1.61,
+  "gsm8k_correct": 47
+}

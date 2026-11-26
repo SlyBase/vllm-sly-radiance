@@ -1,0 +1,4 @@
+[radiance.fused_norm] armed: add_rms_quant=1 silu_mul_quant=1 gdn_norm_quant=1 a_tiled_min_m=513
+(EngineCore pid=424) INFO core.py:153] Initializing a V1 LLM engine (v0.34.0) with config: ... compilation_config={'mode': <CompilationMode.NONE: 0> ...
+[radiance.fused_norm] armed: add_rms_quant=1 silu_mul_quant=1 gdn_norm_quant=1 a_tiled_min_m=513
+[radiance.fused_norm] silu_mul_quant active: M=4096 N=17408

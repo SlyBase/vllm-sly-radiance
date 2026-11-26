@@ -22,6 +22,12 @@
 # gpu-window enforces the same on its side: owner `accept-night` is refused outside 04:00-06:00 and its TTL
 # is clamped (homelab repo; interface assumptions in docs/MAINTENANCE.md).
 #
+# TODO: switch this night gate to the release tier (accept.py --mode release, both profiles) once the
+# backtest (ci/quick_backtest.sh) has passed and the references are recorded; then drop skip_tier_check below.
+# NOTE: this night gate still runs the old fast/full BetterBench gate (baselines), not the release tier;
+# its release.yml dispatch therefore passes skip_tier_check=true until the night path is moved to the release
+# tier (see ci/README.md, "GPU tiers").
+#
 # Pause switch: repository variable AUTO_MAINTAIN=off skips this workflow (and Renovate's stack PRs).
 # The manual gate stays accept.yml (approval-gated environment `gpu-window`); the two share one
 # concurrency group, so they can never hold the GPU at the same time.
@@ -220,6 +226,12 @@ jobs:
       verdict: ${{ steps.verdict.outputs.verdict }}
       prod_ok: ${{ steps.health.outputs.prod_ok }}
     steps:
+      - name: clean workspace (root-owned files of an earlier job break the checkout)
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -delete 2>/dev/null \
+            || docker run --rm -v "$GITHUB_WORKSPACE:/w" busybox find /w -mindepth 1 -delete \
+            || echo "::warning::could not clean $GITHUB_WORKSPACE"
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -375,7 +387,7 @@ jobs:
           MERGE_SHA=$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)
           echo "merged as $MERGE_SHA"
           GH_TOKEN="$DISPATCH_TOKEN" gh workflow run release.yml --repo "$REPO" --ref main \
-            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$MERGE_SHA"
+            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$MERGE_SHA" -f skip_tier_check=true
           {
             echo "### Released v${VERSION_} via the night gate"
             echo "- PR #${PR} merged as \`${MERGE_SHA}\`"
@@ -463,7 +475,7 @@ jobs:
             fi
           fi
           GH_TOKEN="$DISPATCH_TOKEN" gh workflow run release.yml --repo "$REPO" --ref main \
-            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$REL_SHA"
+            -f reason="night gate green: $RUN_URL" -f version="$VERSION_" -f sha="$REL_SHA" -f skip_tier_check=true
           {
             echo "### Released v${VERSION_} via the night gate (unreleased main)"
             echo "- gated: \`${GATED_SHA}\`, tagged: \`${REL_SHA}\`"

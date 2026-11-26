@@ -17,9 +17,11 @@
 #     gated; an old tag can even predate ci/accept/ and would fail at the checkout)
 #   - workflow_dispatch                                 -> choose image, profile, mode by hand
 #
-# Mode: `fast` (~22 min: startup, log markers, smoke, BetterBench conc 1+8, spec counters) runs
-# for every build; `full` (~27 min: the whole conc sweep plus GSM8K) is selected automatically
-# when the major or minor part of VERSION changed, i.e. for a release, and can be forced by hand.
+# Mode: `release` (~10 min per profile after health: hooks, greedy vs the last release, decode, prefill,
+# concurrency 1/2/4/8, drafter floor, GSM8K-50) runs for every build and gates the tag, for BOTH profiles
+# (vllm7-mxfp4 = Qwen, inkling), one GPU window each, one approval each. `quick` is the same without 8 streams
+# and GSM8K (~5 min, PR images, never tags). `full` is the long BetterBench/GSM8K gate, optional and manual
+# only. See ci/README.md ("GPU tiers").
 #
 # After the gate
 #   green  -> the `release` job tags the gated commit v<VERSION> by itself (build.yml then publishes
@@ -41,13 +43,13 @@ on:
       profile:
         description: profile
         type: choice
-        options: [vllm7-mxfp4, vllm5-int4, vllm7-kv4]
-        default: vllm7-mxfp4
+        options: [both, vllm7-mxfp4, inkling, vllm5-int4, vllm7-kv4]
+        default: both
       mode:
         description: gate scope
         type: choice
-        options: [fast, full]
-        default: fast
+        options: [release, quick, full]
+        default: release
       force:
         description: take the GPU even if production saw recent traffic
         type: boolean
@@ -82,7 +84,7 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
       version: ${{ steps.meta.outputs.version }}
       mode: ${{ steps.meta.outputs.mode }}
-      profile: ${{ steps.meta.outputs.profile }}
+      profiles: ${{ steps.meta.outputs.profiles }}
       sha: ${{ steps.meta.outputs.sha }}
       skip: ${{ steps.meta.outputs.skip }}
     steps:
@@ -106,16 +108,16 @@ jobs:
           ROCM_MM=$(echo "$ROCM_BASE" | sed -E 's/^[^:]+:([0-9]+\.[0-9]+)\..*/\1/')
           IMAGE=${IMAGE_INPUT:-vllm-sly-radiance:${VER}-rocm${ROCM_MM}}
 
-          MODE=${MODE_INPUT:-fast}
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            # full gate only when major or minor moved (0.2.4 -> 0.3.0 yes, 0.2.4 -> 0.2.5 no)
-            PREV=$(git log -2 --format=%H -- VERSION | tail -1)
-            OLD=$(git show "${PREV}:VERSION" 2>/dev/null | tr -d '[:space:]' || echo "")
-            NEW_MM=$(echo "$VER" | cut -d. -f1,2)
-            OLD_MM=$(echo "$OLD" | cut -d. -f1,2)
-            if [ -z "$OLD" ] || [ "$NEW_MM" != "$OLD_MM" ]; then MODE=full; else MODE=fast; fi
-            echo "VERSION $OLD -> $VER, mode=$MODE"
+          MODE=${MODE_INPUT:-release}
+          # the release tier gates the tag for both profiles; every other run takes one
+          P=${PROFILE_INPUT:-both}
+          if [ "$MODE" = release ] && [ "$P" = both ]; then
+            PROFILES='["vllm7-mxfp4","inkling"]'
+          else
+            [ "$P" = both ] && P=vllm7-mxfp4
+            PROFILES="[\"$P\"]"
           fi
+          echo "mode=$MODE profiles=$PROFILES"
 
           # accept-night.yml already gated and merged this commit (and dispatches the release): a
           # second, approval-gated gate for the same VERSION would only wait for a click forever
@@ -129,7 +131,7 @@ jobs:
           {
             echo "skip=$SKIP"
             echo "image=$IMAGE"; echo "version=$VER"; echo "mode=$MODE"
-            echo "profile=${PROFILE_INPUT:-vllm7-mxfp4}"; echo "sha=$SHA"
+            echo "profiles=$PROFILES"; echo "sha=$SHA"
           } >> "$GITHUB_OUTPUT"
 
       - name: summary
@@ -138,7 +140,7 @@ jobs:
             echo "### Acceptance gate queued"
             echo ""
             echo "- image: \`${{ steps.meta.outputs.image }}\`"
-            echo "- profile: \`${{ steps.meta.outputs.profile }}\` · mode: \`${{ steps.meta.outputs.mode }}\`"
+            echo "- profiles: \`${{ steps.meta.outputs.profiles }}\` · mode: \`${{ steps.meta.outputs.mode }}\`"
             echo "- commit: \`${{ steps.meta.outputs.sha }}\`"
             echo ""
             echo "Waiting for approval of the **gpu-window** environment — production vllm7"
@@ -148,11 +150,28 @@ jobs:
   gate:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
-    runs-on: [self-hosted, linux, gpu-accept]
+    # The inkling leg starts its own container and stops/starts the prod unit (LocalDockerWindow), so it
+    # runs on the GPU host (LXC 2408: docker, the model dirs); the Qwen leg drives the helper over SSH.
+    runs-on: ${{ matrix.profile == 'inkling' && fromJSON('["self-hosted","linux","x64","rocm-build"]') || fromJSON('["self-hosted","linux","gpu-accept"]') }}
     # Protected: a reviewer has to approve before production is touched.
     environment: gpu-window
     timeout-minutes: 180
+    permissions:
+      contents: read
+      statuses: write
+    # one GPU: the legs run one after the other (a leg that fails does not stop the other one's report)
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
     steps:
+      - name: clean workspace (root-owned files of an earlier job break the checkout)
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -delete 2>/dev/null \
+            || docker run --rm -v "$GITHUB_WORKSPACE:/w" busybox find /w -mindepth 1 -delete \
+            || echo "::warning::could not clean $GITHUB_WORKSPACE"
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -170,14 +189,18 @@ jobs:
           ACCEPT_BB_PYTHON: /opt/accept/venv/bin/python
           ACCEPT_BB_DIR: /opt/accept/betterbench
           ACCEPT_EVAL_PYTHON: /opt/accept/venv/bin/python
+          # inkling leg only (local container): host paths of the checkpoint, the drafter and the compile cache
+          ACCEPT_INKLING_MODEL: ${{ vars.ACCEPT_INKLING_MODEL || '/root/inkling2-mini' }}
+          ACCEPT_INKLING_DRAFTER: ${{ vars.ACCEPT_INKLING_DRAFTER || '/root/dflash2-ink/model' }}
+          ACCEPT_INKLING_CACHE: ${{ vars.ACCEPT_INKLING_CACHE || '/root/accept-inkling-cache' }}
         run: |
           set -o pipefail
           python3 ci/accept/accept.py \
-            --profile "ci/accept/profiles/${{ needs.plan.outputs.profile }}.json" \
+            --profile "ci/accept/profiles/${{ matrix.profile }}.json" \
             --image "${{ needs.plan.outputs.image }}" \
             --mode "${{ needs.plan.outputs.mode }}" \
             --owner "gh-${{ github.run_id }}" \
-            --out "out/accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}" \
+            --out "out/accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}-${{ matrix.profile }}" \
             ${{ inputs.force && '--force' || '' }} \
             ${{ inputs.record_baseline && '--record-baseline' || '' }}
 
@@ -185,9 +208,24 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}
+          name: accept-${{ needs.plan.outputs.version }}-${{ needs.plan.outputs.mode }}-${{ matrix.profile }}
           path: out/accept-*/
           retention-days: 30
+
+      - name: release-tier status on the gated commit
+        # release.yml and the release job read these two contexts (ci/quick_bench.py release-check)
+        if: always() && needs.plan.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          GATE: ${{ steps.gate.outcome }}
+          PROFILE: ${{ matrix.profile }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          STATE=failure; [ "$GATE" = success ] && STATE=success
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state="$STATE" \
+            -f context="release-tier/$PROFILE" -f target_url="$RUN_URL" \
+            -f description="release tier: image ${{ needs.plan.outputs.image }}"
 
       - name: production health (independent of the gate result)
         if: always()
@@ -212,9 +250,12 @@ jobs:
     needs: [plan, gate]
     if: >-
       github.event_name == 'workflow_run' ||
-      (github.ref == 'refs/heads/main' && inputs.image == '' && inputs.profile == 'vllm7-mxfp4' &&
-       !inputs.record_baseline)
+      (github.ref == 'refs/heads/main' && inputs.image == '' && inputs.profile == 'both' &&
+       !inputs.record_baseline && inputs.mode == 'release')
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      statuses: read
     steps:
       # The App token, not GITHUB_TOKEN: a tag pushed with the latter does not start build.yml.
       - uses: actions/create-github-app-token@v3
@@ -229,6 +270,25 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app_token.outputs.token }}
 
+      - name: both release-tier statuses are green on this commit
+        id: tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          SKIP: 'false'
+        run: |
+          # release-tier/vllm7-mxfp4 + release-tier/inkling, set by accept.yml (ci/README.md, "GPU tiers")
+          STATUSES=$(gh api "repos/${{ github.repository }}/commits/$SHA/status" \
+            --jq '[.statuses[] | {(.context): .state}] | add // {}')
+          if echo "$STATUSES" | python3 ci/quick_bench.py release-check; then
+            echo "tier=green" >> "$GITHUB_OUTPUT"
+          elif [ "$SKIP" = "true" ]; then
+            echo "::warning::release tier not green, tagging anyway (skip_tier_check)"
+            echo "tier=skipped" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
       - name: tag the gated commit
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
@@ -236,7 +296,7 @@ jobs:
           SHA: ${{ needs.plan.outputs.sha }}
           IMAGE: ${{ needs.plan.outputs.image }}
           MODE: ${{ needs.plan.outputs.mode }}
-          PROFILE: ${{ needs.plan.outputs.profile }}
+          PROFILE: ${{ needs.plan.outputs.profiles }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_NOTIFY: ${{ vars.RELEASE_NOTIFY || '@slydlake' }}
         run: |

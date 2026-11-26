@@ -7,6 +7,7 @@ tree* (env INKLING_VLLM_SRC, the `vllm/` directory of a checkout that has `model
 Tests are skipped when the tree or triton is missing.
 """
 import importlib
+import importlib.util
 import os
 import sys
 import types
@@ -16,6 +17,33 @@ import pytest
 
 os.environ.setdefault("TRITON_INTERPRET", "1")  # before triton is imported anywhere
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the module under test
+
+
+# Test modules that import triton (directly, or through the bench module they test) at module level:
+# without triton they cannot even be collected. The CPU job (ci.yml `inkling2-tests`) has no triton, so
+# they are left out of the run and named in the header; with triton (GPU host / Triton interpreter) they run.
+NEEDS_TRITON = {"test_bench_prefill_moe.py", "test_nvfp4_expert_gemm_v2.py"}
+_HAS_TRITON = importlib.util.find_spec("triton") is not None
+
+
+# test_patch_loopcd.py reads vllm/models/inkling2/nvidia/loop.py from a developer scratch tree (LoopCD is not
+# in the pinned vLLM); on any other machine it cannot run, so it is left out there.
+_LOOP_SRC = Path("/opt/data/profiles/daidalos/cache/scratch/ink-k9-src/vllm/models/inkling2/nvidia/loop.py")
+NEEDS_LOCAL_TREE = {"test_patch_loopcd.py"}
+
+
+def _left_out():
+    out = set() if _HAS_TRITON else set(NEEDS_TRITON)
+    return out if _LOOP_SRC.exists() else out | NEEDS_LOCAL_TREE
+
+
+def pytest_ignore_collect(collection_path, config):
+    return collection_path.name in _left_out()
+
+
+def pytest_report_header(config):
+    left = sorted(_left_out())
+    return f"not collected here (triton / dev tree missing): {', '.join(left)}" if left else None
 
 
 @pytest.fixture(scope="session", autouse=True)

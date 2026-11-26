@@ -29,7 +29,7 @@ NO_BUMP_SUFFIXES = (".md",)
 # Offline measurement / check tools under sly/: COPYed into the assemble stage with the rest of
 # sly/, but never executed by a build step and not part of the final image (only /opt/vllm is).
 NO_BUMP_GLOBS = ("sly/bench_*.py", "sly/check_*.py", "sly/mxfp4/bench_*.py", "sly/mxfp4/check_*.py",
-                "sly/tests/*.py", "sly/kvq/*.py")   # kvq: CPU reference of the KV-cache roadmap, offline only
+                "sly/tests/*.py", "sly/inkling2/tests/*", "sly/kvq/*.py")   # kvq: CPU reference of the KV-cache roadmap, offline only
 
 failures = []
 
@@ -151,12 +151,22 @@ def check_changelog():
         print(f"changelog: section for {ver} present")
 
 
+def check_harness_env():
+    """one KEY=VAL per `-e` (docker takes `-e "A=1 B=2"` as ONE variable named A with the value "1 B=2")"""
+    from quick_bench import multi_env_problems
+    files = subprocess.run(["git", "ls-files", "*.sh"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    for f in files:
+        for line in multi_env_problems((ROOT / f).read_text(errors="replace")):
+            fail(f"{f}: several KEY=VAL after one -e: {line[:120]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", help="git ref of the PR base; enables the VERSION-bump check")
     args = ap.parse_args()
     check_patches()
     check_changelog()
+    check_harness_env()
     if args.base:
         check_version_bump(args.base)
     if failures:

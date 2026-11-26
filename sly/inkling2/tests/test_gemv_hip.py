@@ -695,7 +695,9 @@ def test_patch_gemv_hook_idempotent(tree):
 def _mutated_module(tmp_path, old, new):
     src = (HERE.parent / "radiance_inkling2_gemv_hip.py").read_text()
     assert src.count(old) == 1, f"mutation anchor not unique: {old!r}"
-    mut = tmp_path / "mutant.py"
+    # one file per mutation: a rewritten mutant.py of the same size inside the same second would load the
+    # previous mutant's cached .pyc (source mtime + size are the cache key) and "survive"
+    mut = tmp_path / f"mutant_{abs(hash((old, new)))}.py"
     mut.write_text(src.replace(old, new, 1))
     spec = importlib.util.spec_from_file_location("mutant_gemv_disp", mut)
     m = importlib.util.module_from_spec(spec)

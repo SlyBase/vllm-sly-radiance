@@ -32,10 +32,12 @@ the first hard failure but still runs the release phase.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -46,6 +48,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
+sys.path.insert(0, str(REPO / "ci"))
+import quick_bench  # noqa: E402  (regression gates shared with the quick tier)
 
 # The needle prompt is generated, not stored: ~100k tokens of filler with one
 # marker sentence, so the long-prefill path (and the mamba-align fix) is exercised.
@@ -131,6 +135,132 @@ class GpuWindow:
             return self._json("release", timeout=1800)
         finally:
             self.held = False
+
+
+def inkling_docker_argv(image: str, name: str, port: int, model_dir: str, drafter_dir: str,
+                        cache_dir: str, extra_env: list[str] | None = None) -> list[str]:
+    """`docker run` of the Inkling release arm with NO model env (the image defaults are under test); the hand-run twin is
+    start_inkling() in ci/quick_backtest.sh. One `-e` per variable."""
+    env = ["HIP_VISIBLE_DEVICES=0", "GPU_MAX_HW_QUEUES=1", "HF_HUB_OFFLINE=1", *(extra_env or [])]
+    argv = ["docker", "run", "-d", "--name", name, "--device=/dev/kfd", "--device=/dev/dri",
+            "--group-add", "video", "--security-opt", "label=disable", "--ipc=host"]
+    for kv in env:
+        argv += ["-e", kv]
+    argv += ["-p", f"{port}:8000", "-v", f"{model_dir}:/model:ro", "-v", f"{drafter_dir}:/models/dflash2:ro",
+             "-v", f"{cache_dir}/triton:/root/.triton", image, "/model",
+             "--served-model-name", "inkling2-mini", "--gpu-memory-utilization", "0.92",
+             "--limit-mm-per-prompt", '{"image":0}', "--reasoning-parser", "inkling",
+             "--enable-auto-tool-choice", "--tool-call-parser", "inkling", "--max-model-len", "32768",
+             "--max-num-seqs", "8", "--no-enable-prefix-caching", "--no-async-scheduling",
+             "--speculative-config",
+             '{"method":"dflash","model":"/models/dflash2","num_speculative_tokens":7,'
+             '"draft_sample_method":"probabilistic","attention_backend":"TRITON_ATTN","kv_cache_dtype":"auto"}']
+    return argv
+
+
+class LocalDockerWindow(GpuWindow):
+    """A gpu-window whose candidate is a container we start ourselves (no service unit in the helper).
+
+    Runs on the GPU host (the runner needs docker and may stop/start the prod unit). Contract:
+        acquire (lock, via the helper) -> systemctl stop <prod> -> docker run -> health ...
+        docker rm -f -> systemctl start <prod> -> release (helper: verifies /health)
+    `cleanup()` is idempotent and runs from release(), from the atexit hook and from SIGTERM/SIGINT (a
+    cancelled GitHub job), so the container is removed and prod is restored on every exit path we control.
+    A SIGKILL is covered by gpu-window-guard.timer (restores prod when the TTL runs out).
+    """
+
+    def __init__(self, target, key, owner, ttl, dry_run=False, load_format="auto", *, run=None, ssh=None,
+                 health=None, sleep=time.sleep, prod_service="docker-vllm7.service", port=8001,
+                 container="vllm-accept-inkling", model_dir=None, drafter_dir=None, cache_dir=None,
+                 health_wait_s=1200, install_signals=True, extra_env=None):
+        super().__init__(target, key, owner, ttl, dry_run, load_format)
+        self._run = run or self._subprocess_run
+        if ssh:
+            self._ssh = lambda *a, timeout=900: ssh(*a)
+        self._health = health or (lambda url: http_get(url, timeout=10)[0])
+        self._sleep, self.prod, self.port, self.container = sleep, prod_service, port, container
+        self.model_dir = model_dir or os.environ.get("ACCEPT_INKLING_MODEL", "/root/inkling2-mini")
+        self.drafter_dir = drafter_dir or os.environ.get("ACCEPT_INKLING_DRAFTER", "/root/dflash2-ink/model")
+        self.cache_dir = cache_dir or os.environ.get("ACCEPT_INKLING_CACHE", "/root/accept-inkling-cache")
+        self.health_wait_s, self.extra_env = health_wait_s, extra_env
+        self._prod_stopped = self._started = self._cleaned = False
+        if install_signals:
+            self.install_signal_handlers()
+            atexit.register(self.cleanup)
+
+    @staticmethod
+    def install_signal_handlers() -> None:
+        def bye(signum, frame):  # noqa: ARG001 - raise so every `finally` / atexit runs
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, bye)
+        signal.signal(signal.SIGINT, bye)
+
+    @staticmethod
+    def _subprocess_run(argv, check=True, timeout=300, **kw):  # noqa: ARG004
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"{' '.join(argv[:3])} failed (rc={proc.returncode}): "
+                               f"{(proc.stderr or proc.stdout).strip()[:400]}")
+        return proc.stdout
+
+    def start(self, image: str, service: str) -> dict:  # noqa: ARG002 - `service` is the profile's, unused
+        t0 = time.time()
+        self._cleaned = False
+        # flag first: a stop that fails half way must still be answered by a start in cleanup()
+        self._prod_stopped = True
+        self._run(["systemctl", "stop", self.prod], timeout=600)
+        self._run(["docker", "rm", "-f", self.container], check=False)
+        self._started = True
+        self._run(inkling_docker_argv(image, self.container, self.port, self.model_dir, self.drafter_dir,
+                                      self.cache_dir, self.extra_env))
+        url = f"http://127.0.0.1:{self.port}/health"
+        waited = 0
+        while self._health(url) != 200:
+            if self._run(["docker", "inspect", "-f", "{{.State.Running}}", self.container],
+                         check=False).strip() == "false":
+                raise RuntimeError("candidate container died during startup")
+            if waited >= self.health_wait_s:
+                raise RuntimeError(f"candidate not healthy after {self.health_wait_s}s")
+            self._sleep(2)
+            waited += 2
+        text = self.logs()
+        m = re.findall(r"GPU KV cache size:\s*([\d,._]+)\s*tokens", text)
+        return {"container": self.container, "image": image, "startup_s": round(time.time() - t0, 1),
+                "kv_tokens": int(re.sub(r"[,._]", "", m[-1])) if m else None}
+
+    def logs(self, lines: int = 999_999) -> str:  # noqa: ARG002
+        return self._run(["docker", "logs", self.container], check=False)
+
+    def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
+        errors = []
+        if self._started or self._prod_stopped:
+            try:
+                self._run(["docker", "rm", "-f", self.container], check=False)
+            except Exception as exc:  # noqa: BLE001 - restoring prod must still happen
+                errors.append(str(exc))
+        if self._prod_stopped:
+            try:
+                self._run(["systemctl", "start", self.prod], timeout=600)
+                self._prod_stopped = False
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        self._started = False
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def release(self) -> dict:
+        err = None
+        try:
+            self.cleanup()
+        except Exception as exc:  # noqa: BLE001 - the helper's release (guard, health check) still runs
+            err = exc
+        res = super().release()
+        if err:
+            raise err
+        return res
 
 
 # --------------------------------------------------------------------------- #
@@ -532,7 +662,39 @@ def run_gsm8k(python: str, base_url: str, model: str, limit: int, out_dir: Path)
 # --------------------------------------------------------------------------- #
 # Verdict
 # --------------------------------------------------------------------------- #
-def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[dict]:
+def gate_checks(results: dict, profile: dict, add) -> None:
+    """Regression gates of ci/quick_bench.py as hard checks: hook proof, greedy vs the last release,
+    concurrency shape and drafter floor (the last two from the BetterBench result of fast/full)."""
+    qp = profile.get("quick_profile")
+    if "hooks" in results:
+        add("hook proof", not results["hooks"], results["hooks"] or "all present", "every required hook line")
+    q = results.get("quick")
+    if q:
+        add("references recorded", not q.get("unrecorded"), q.get("unrecorded") or "yes",
+            "every quick-tier reference recorded (release mode never skips a null)")
+        for name, ok, detail in q["rows"]:
+            add(f"quick {name}", ok, detail, "reference JSON")
+        probs = [f for f in q["failures"] if f.startswith("greedy")]
+        add("quick greedy", not probs, probs or "ok", "matches the last release")
+    if results.get("greedy") is not None and qp:
+        ref_dir = ROOT / "references"
+        ref = json.loads((ref_dir / f"quick-{qp}-greedy.json").read_text())
+        allow = json.loads((ref_dir / "greedy_allow.json").read_text()).get(qp, {})
+        probs = quick_bench.greedy_problems(results["greedy"], ref, allow)
+        add("greedy vs last release", not probs, probs or "4/4 identical",
+            "identical, or allow-listed with a reason")
+    bb = results.get("betterbench") or {}
+    agg = {int(k): v for k, v in (bb.get("aggregate_tps") or {}).items()}
+    if len(agg) > 1:
+        probs = quick_bench.concurrency_problems(agg)
+        add("concurrency shape", not probs, probs or agg, "rising 1>2>4>8, 2 streams >= 1.2x")
+    floor = profile.get("tok_per_update_floor")
+    if floor and bb:
+        probs = quick_bench.floor_problems(bb.get("categories_tokens_per_update") or {}, floor)
+        add("drafter floor", not probs, probs or "ok", f"tok/update (code) >= {floor}")
+
+
+def compare(results: dict, baseline: dict, thresholds: dict, mode: str, profile: dict | None = None) -> list[dict]:
     checks: list[dict] = []
 
     def add(name, ok, actual, expected, hard=True):
@@ -564,8 +726,12 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
             f"{s_now:.0f}s", f"<= {thresholds['startup_s_max_ratio']:.1f}x of {s_base:.0f}s",
             hard=False)
 
+    gate_checks(results, profile or {}, add)
+
     smoke = results.get("smoke", {})
-    if smoke.get("skipped"):
+    if not smoke:
+        pass  # quick tier: no smoke phase
+    elif smoke.get("skipped"):
         # A dry run never sends a request; reporting "all pass" here would claim
         # a result nobody measured.
         add("smoke", None, f"skipped ({smoke['skipped']})", "4/4 pass", hard=False)
@@ -757,7 +923,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", required=True)
     ap.add_argument("--image", required=True, help="candidate image tag, e.g. vllm-sly-radiance:0.2.5-rocm10.0")
-    ap.add_argument("--mode", choices=["fast", "full"], default="fast")
+    ap.add_argument("--mode", choices=["quick", "release", "fast", "full"], default="fast")
     ap.add_argument("--baseline", help="defaults to ci/accept/baselines/<profile name>.json")
     ap.add_argument("--out", default="out/accept", help="result directory")
     ap.add_argument("--host", default=os.environ.get("ACCEPT_HOST", "192.168.178.51"))
@@ -810,8 +976,17 @@ def main() -> int:
     results: dict = {}
     failures: list[str] = []
     load_format = profile.get("load_format", "auto")
-    win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
-                    load_format=load_format)
+    if profile.get("window") == "local-docker":
+        # no service unit in the helper: the candidate is our own container on the GPU host (class docstring)
+        base_url = f"http://127.0.0.1:{profile.get('port', 8001)}"
+        win = LocalDockerWindow(
+            args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run, load_format,
+            prod_service=profile.get("prod_service", "docker-vllm7.service"), port=profile.get("port", 8001),
+            run=(lambda argv, **kw: log(f"DRY-RUN: {' '.join(argv[:4])}") or "") if args.dry_run else None,
+            health=(lambda url: 200) if args.dry_run else None, install_signals=not args.dry_run)
+    else:
+        win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
+                        load_format=load_format)
 
     def before(phase: str) -> None:
         if args.deadline and time.time() > args.deadline:
@@ -823,12 +998,15 @@ def main() -> int:
         results["acquire"] = _acquire_with_retry(win, args)
 
         before("start")
-        log(f"starting candidate {args.image} ({profile['service']})")
-        results["start"] = win.start(args.image, profile["service"])
+        log(f"starting candidate {args.image} ({profile.get('service') or 'own container'})")
+        results["start"] = win.start(args.image, profile.get("service", ""))
         log(f"candidate up: {json.dumps(results['start'])}")
 
         log("checking logs")
-        results["logs"] = check_logs(win.logs(), profile)
+        log_text = win.logs()
+        results["logs"] = check_logs(log_text, profile)
+        if profile.get("quick_profile"):
+            results["hooks"] = quick_bench.hook_problems(log_text, profile["quick_profile"])
         if not results["logs"]["ok"]:
             failures.append("logs")
             log(f"log check failed: missing={results['logs']['missing']} "
@@ -837,13 +1015,26 @@ def main() -> int:
         model = profile["model"]
         before("smoke")
         log("smoke tests")
-        results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
-        if not results["smoke"]["ok"]:
-            failures.append("smoke")
-
-        if args.dry_run:
-            log("DRY-RUN: skipping betterbench and gsm8k")
+        if args.mode in ("quick", "release"):
+            # quick (~5 min, PR builds): hooks + greedy + decode/prefill/concurrency 1/2/4 vs the reference
+            # JSON. release (~10 min, tagging): + 8 streams + GSM8K-50, an unrecorded reference fails closed.
+            # No smoke, chat replay, BetterBench or lm-eval GSM8K here (ci/README.md, "GPU tiers")
+            if args.dry_run:
+                log("DRY-RUN: skipping the quick probes")
+            else:
+                before("quick")
+                results["quick"], _ = quick_bench.run_quick(
+                    profile["quick_profile"], base_url, model, log_text, release=args.mode == "release")
         else:
+            results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
+            if not results["smoke"]["ok"]:
+                failures.append("smoke")
+
+        if args.dry_run or args.mode in ("quick", "release"):
+            log("skipping greedy, betterbench and gsm8k")
+        else:
+            before("greedy")
+            results["greedy"] = quick_bench.greedy_run(base_url, model)
             before("chat")
             log(f"chat replay (multi-turn, growing context, {args.mode})")
             results["chat"] = run_chat_replay(base_url, model, profile, args.mode)
@@ -883,7 +1074,7 @@ def main() -> int:
                 failures.append("release")
                 log(f"RELEASE FAILED: {exc} -- production may be down, check LXC 2408")
 
-    checks = compare(results, baseline, thresholds, args.mode)
+    checks = compare(results, baseline, thresholds, args.mode, profile)
     hard_fail = [c["name"] for c in checks if not c["ok"] and c["hard"]]
     # `failures` carries the aborts that happen outside the check table -- the
     # run raised before it finished measuring, or the release failed. It was

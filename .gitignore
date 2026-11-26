@@ -4,6 +4,7 @@ __pycache__/
 # local deploy state (mounted into the container; not source)
 .env
 models/
+!sly/inkling2/tests/fixtures/**/models/
 vllm-cache/
 # build outputs: the kernel library is cloned and compiled by the image build, and
 # rocm-bandwidth-test is built in the Dockerfile. A stale local copy must never be
