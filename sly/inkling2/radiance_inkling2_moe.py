@@ -75,11 +75,17 @@ _DEFAULT_TABLE = {
 }
 
 
-def prefill_cfg(fmt, tile):
-    """Table entry for (format, token tile), {} = launch defaults. Env unset = the built-in table;
-    RADIANCE_INKLING2_MOE_PREFILL_CFG=<json path> replaces it, `0` / `off` / empty = the historical launch."""
+# The same for the v2 kernels (mb3, 4096 tokens, 210 W: 9.14 ms per visit vs 19.7 ms for v1 with the table above).
+_DEFAULT_TABLE_V2 = {"nvfp4": {"128": dict(block_m=128, block_n=128, block_k=32, num_warps=4, num_stages=2)}}
+
+
+def prefill_cfg(fmt, tile, v2=False):
+    """Table entry for (format, token tile), {} = launch defaults. Env unset = the built-in table (v2's when
+    the v2 kernels run); RADIANCE_INKLING2_MOE_PREFILL_CFG=<json path> replaces it, `0` / `off` = the
+    historical launch."""
     path = os.environ.get(_CFG_ENV)
-    table = _DEFAULT_TABLE if path is None else {} if path in ("0", "off") else _cfg_table(path)
+    default = _DEFAULT_TABLE_V2 if v2 else _DEFAULT_TABLE
+    table = default if path is None else {} if path in ("0", "off") else _cfg_table(path)
     return table.get(fmt, {}).get(str(tile), {})
 
 
@@ -313,14 +319,16 @@ def _expert_gemm_v2(
     tl.store(Out + rows[:, None].to(tl.int64) * N + cols[None, :], acc, valid[:, None] & cmask[None, :])
 
 
-def prefill_v2():
-    """RADIANCE_INKLING2_MOE_PREFILL_V2=1: the v2 prefill kernels (see `_expert_gemm_v2`)."""
-    return os.environ.get(_V2_ENV, "0") == "1"
+def prefill_v2(tile=None):
+    """RADIANCE_INKLING2_MOE_PREFILL_V2: unset = the v2 kernels for prefill tiles (>= 128 rows per expert);
+    `0` = never, `1` = every tile (the extra dequant launch costs decode batches, tile < 128, ~4 %)."""
+    mode = os.environ.get(_V2_ENV)
+    return mode == "1" if mode in ("0", "1") else tile is not None and tile >= 128
 
 
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
                       block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16,
-                      v2=None, v2_safe=False, v2_gs=False, **launch):
+                      v2=None, v2_safe=False, v2_gs=True, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
@@ -336,13 +344,14 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
             out.data_ptr(), tiles.data_ptr(),
             plan.max_ctas, weight.shape[0], n, k, plan.tile, _lds_rows(plan.max_ctas), _stream())
         return out
-    cfg = prefill_cfg("nvfp4", plan.tile)
+    use_v2 = prefill_v2(plan.tile) if v2 is None else v2
+    cfg = prefill_cfg("nvfp4", plan.tile, use_v2)
     bm = block_m or cfg.get("block_m") or min(32, triton.next_power_of_2(plan.tile))  # arange needs a
     bn = block_n or cfg.get("block_n") or min(64, triton.next_power_of_2(n))          # power of 2; the
     bk = block_k or cfg.get("block_k") or min(128, triton.next_power_of_2(k))         # masks cover the overhang
     launch = {**{key: cfg[key] for key in ("num_warps", "num_stages") if key in cfg}, **launch}
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
-    if (prefill_v2() if v2 is None else v2) and k % bk == 0 and bk >= 32:
+    if use_v2 and k % bk == 0 and bk >= 32:
         dq = torch.empty((plan.rows, k), dtype=torch.float32 if dot_dtype == tl.float32 else torch.bfloat16,
                          device=act.device)
         br = min(16, bm)

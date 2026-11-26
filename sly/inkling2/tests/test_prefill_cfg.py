@@ -33,6 +33,7 @@ def launch_nvfp4(monkeypatch, tile, n=2304, k=2304, experts=1):
     spy = Spy()
     monkeypatch.setattr(m, "_expert_gemm", spy)
     monkeypatch.setattr(m, "_hip", None)
+    monkeypatch.setenv("RADIANCE_INKLING2_MOE_PREFILL_V2", "0")  # these tests are about the v1 launch table
     plan = types.SimpleNamespace(tile=tile, max_ctas=4, rows=tile * 4)
     z = lambda *s, dt=torch.uint8: torch.zeros(*s, dtype=dt)
     m.nvfp4_expert_gemm(z(plan.rows, k // 2), z(1), z(plan.rows, dt=torch.float32),

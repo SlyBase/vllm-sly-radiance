@@ -326,6 +326,7 @@ def main(argv=None):
     import radiance_inkling2_moe as m
 
     os.environ[m._CFG_ENV] = "0"  # the default column must be the historical launch, not the built-in table
+    os.environ[m._V2_ENV] = "0"  # explicit v2=True entries opt in; a bare launch must stay v1
     if a.cpu_smoke:
         dev, experts, clock = "cpu", 4, Clock(True)
         r = make_routing(24, 2, experts, 16, seed=0)

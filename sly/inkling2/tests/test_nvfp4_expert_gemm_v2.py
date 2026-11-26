@@ -86,13 +86,16 @@ def test_v2_falls_back_when_k_is_not_a_multiple_of_bk():
     compare(c, run_v2(c, False, block_m=16, block_n=32, block_k=128))
 
 
-def test_env_switch_selects_v2(monkeypatch):
+def test_v2_default_is_on_for_prefill_tiles_only(monkeypatch):
     import radiance_inkling2_moe as m
 
     monkeypatch.delenv(ENV, raising=False)
-    assert not m.prefill_v2()
+    assert m.prefill_v2(128) and m.prefill_v2(256)
+    assert not m.prefill_v2(64) and not m.prefill_v2(16)  # decode batches (tile < 128) skip the extra launch
+    monkeypatch.setenv(ENV, "0")
+    assert not m.prefill_v2(128)
     monkeypatch.setenv(ENV, "1")
-    assert m.prefill_v2()
+    assert m.prefill_v2(16)
 
 
 class Boom:
@@ -110,10 +113,10 @@ def test_v2_path_never_launches_v1(monkeypatch):
     compare(c, run_v2(c, False, block_m=16, block_n=32, block_k=64))
 
 
-def test_v2_not_requested_stays_on_v1(monkeypatch):
+def test_v2_off_stays_on_v1(monkeypatch):
     import radiance_inkling2_moe as m
 
-    monkeypatch.delenv(ENV, raising=False)
+    monkeypatch.setenv(ENV, "0")
     monkeypatch.setattr(m, "_expert_gemm_v2", Boom())
     c = base.make_case(experts=2, n=32, k=128, tile=16, seed=5)
     base.run_and_compare(c)
@@ -138,3 +141,22 @@ def test_group_scale_flag_reaches_the_kernel(monkeypatch, gs):
     c = base.make_case(experts=2, n=32, k=128, tile=16, seed=5)
     run_v2(c, False, block_m=16, block_n=32, block_k=64, v2_gs=gs)
     assert spy.kw["GS"] is gs
+
+
+def test_default_tile_128_launches_v2_with_the_measured_config(monkeypatch):
+    """No env, tile 128: v2 with 128x128x32, 4 warps, 2 stages, per-group scale (mb3: 9.14 ms vs 19.7 ms v1 table)."""
+    import radiance_inkling2_moe as m
+
+    monkeypatch.delenv(ENV, raising=False)
+    monkeypatch.delenv("RADIANCE_INKLING2_MOE_PREFILL_CFG", raising=False)
+    monkeypatch.setattr(m, "_hip", None)
+    spy, boom = Spy(), Boom()
+    monkeypatch.setattr(m, "_expert_gemm_v2", spy)
+    monkeypatch.setattr(m, "_dequant_act", Spy())
+    monkeypatch.setattr(m, "_expert_gemm", boom)
+    plan = types.SimpleNamespace(tile=128, max_ctas=4, rows=512)
+    z = lambda *sh, dt=torch.uint8: torch.zeros(*sh, dtype=dt)
+    m.nvfp4_expert_gemm(z(512, 1152), z(1), z(512, dt=torch.float32), z(1, 2304, 1152), z(1, 2304, 144),
+                        z(1, dt=torch.float32), z(9, dt=torch.int32), plan)
+    kw = spy.kw
+    assert (kw["BM"], kw["BN"], kw["BK"], kw["num_warps"], kw["num_stages"], kw["GS"]) == (128, 128, 32, 4, 2, True)
