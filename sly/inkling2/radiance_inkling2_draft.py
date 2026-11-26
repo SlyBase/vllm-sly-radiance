@@ -29,6 +29,29 @@ _BM = 32       # shortlist entries per program of fold_softcap_gather
 # the Markov correction, the rest are -inf (0 = off, dense). Measured on code / prose / json draft rows:
 # the correction moves the draft's argmax out of the base top-4096 in ~0.3 % of the rows.
 SHORTLIST_K = int(os.environ.get("RADIANCE_INKLING2_DRAFT_SHORTLIST", "0"))
+# Opt-in, lossy, drafter-only (default 0): fold_softcap reads the (vocab, rank) fold weight as int8 with one fp32
+# scale per vocabulary row (scale = row amax / 127): 51 MB instead of 103 MB per Markov step, 7 steps per verify
+# step. The draft distribution moves by the int8 rounding (below the bf16 rounding of its own bias); the target
+# verifies every token, so its output distribution is untouched.
+FOLD_INT8 = os.environ.get("RADIANCE_INKLING2_FOLD_INT8", "0") == "1"
+_FOLD_Q8: dict = {}  # (data_ptr, shape) -> (weight, int8 weight, fp32 row scale); the ref pins the address
+_Q8_CHUNK = 16384  # rows per conversion step: bounds the fp32 transient
+_LOGGED: set = set()
+
+
+def _log_once(msg: str) -> None:
+    if msg not in _LOGGED:
+        _LOGGED.add(msg)
+        print(f"[radiance.inkling2] {msg}", flush=True)
+
+
+def log_knobs() -> None:
+    """Startup note for knobs that cancel each other out."""
+    if FOLD_INT8 and SHORTLIST_K:
+        _log_once("FOLD_INT8=1 has no effect with DRAFT_SHORTLIST>0: the shortlist path reads only k fold rows")
+
+
+log_knobs()
 
 
 @triton.jit
@@ -145,9 +168,9 @@ def markov_step(state, prev_tokens, context, w1, w_rec):
 
 
 @triton.jit
-def _fold_softcap_kernel(Base, FW, FB, Lat, Out, stride_base, rows, V, softcap,
+def _fold_softcap_kernel(Base, FW, Scale, FB, Lat, Out, stride_base, rows, V, softcap,
                          R: tl.constexpr, TP: tl.constexpr, BV: tl.constexpr, DOT: tl.constexpr,
-                         LIB: tl.constexpr):
+                         LIB: tl.constexpr, Q8: tl.constexpr):
     v = tl.program_id(0) * BV + tl.arange(0, BV)
     vm = v < V
     r = tl.arange(0, TP)
@@ -156,12 +179,38 @@ def _fold_softcap_kernel(Base, FW, FB, Lat, Out, stride_base, rows, V, softcap,
     lat = tl.load(Lat + r[:, None] * R + k[None, :], rm[:, None], other=0).to(DOT)
     fw = tl.load(FW + v[None, :].to(tl.int64) * R + k[:, None], vm[None, :], other=0).to(DOT)
     acc = tl.dot(lat, fw, input_precision="ieee")
+    if Q8:  # int8 codes are exact in bf16; the row scale applies to the fp32 sum
+        acc = acc * tl.load(Scale + v, vm, other=0)[None, :]
     bias = _bf16_round(acc + tl.load(FB + v, vm, other=0).to(tl.float32)[None, :])
     m2 = rm[:, None] & vm[None, :]
     a = tl.load(Base + r[:, None].to(tl.int64) * stride_base + v[None, :], m2, other=0)
     x = _bf16_round(a.to(tl.float32) + bias) / softcap
     x = _tanh(x, LIB) * softcap
     tl.store(Out + r[:, None].to(tl.int64) * V + v[None, :], x.to(tl.bfloat16), m2)
+
+
+def _capturing():
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
+def _fold_q8(fw):
+    """(int8 [V, r], fp32 [V]) of the fold weight, converted once on the first eager call; None while a CUDA
+    graph is being captured and the copy does not exist yet (the bf16 kernel runs)."""
+    key = (fw.data_ptr(), tuple(fw.shape))
+    ent = _FOLD_Q8.get(key)
+    if ent is None:
+        if _capturing():
+            return None
+        q = torch.empty(fw.shape, dtype=torch.int8, device=fw.device)
+        sc = torch.empty(fw.shape[0], dtype=torch.float32, device=fw.device)
+        for i in range(0, fw.shape[0], _Q8_CHUNK):
+            w = fw[i:i + _Q8_CHUNK].float()
+            s = w.abs().amax(1) / 127.0
+            q[i:i + _Q8_CHUNK] = torch.where(s[:, None] > 0, w / s[:, None], 0.0).round().clamp(-127, 127).to(torch.int8)
+            sc[i:i + _Q8_CHUNK] = s
+        ent = _FOLD_Q8[key] = (fw, q, sc)
+        _log_once("FOLD_INT8 active: int8 fold weight + fp32 row scale in use")
+    return ent[1], ent[2]
 
 
 def fold_softcap(base, fold_weight, fold_bias, latent, softcap):
@@ -177,9 +226,10 @@ def fold_softcap(base, fold_weight, fold_bias, latent, softcap):
     assert latent.is_contiguous()
     out = torch.empty((rows, V), dtype=torch.bfloat16, device=base.device)
     dot = tl.bfloat16 if fold_weight.dtype == torch.bfloat16 else tl.float32
+    q8 = _fold_q8(fold_weight) if FOLD_INT8 else None
     _fold_softcap_kernel[(triton.cdiv(V, _BV),)](
-        base, fold_weight, fold_bias, latent, out, base.stride(0), rows, V, softcap, r,
-        MAX_ROWS, _BV, dot, _LIB, num_warps=4)
+        base, fold_weight if q8 is None else q8[0], fold_bias if q8 is None else q8[1], fold_bias, latent, out,
+        base.stride(0), rows, V, softcap, r, MAX_ROWS, _BV, dot, _LIB, q8 is not None, num_warps=4)
     return out
 
 

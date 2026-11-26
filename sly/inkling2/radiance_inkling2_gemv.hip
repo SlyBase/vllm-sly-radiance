@@ -59,8 +59,15 @@ static const int BF_W[BF_NCFG] = {2, 4, 8};  // K-splitting waves per block
 template <int T, int W>
 __global__ __launch_bounds__(W * 32) void gemv_bf16_kernel(
     const uint16_t* __restrict__ x, const uint16_t* __restrict__ w, const uint16_t* __restrict__ bias,
-    void* __restrict__ y, int M, int N, int K, int SX, int SW, int SY, int out32, int ngroups, int nt) {
+    void* __restrict__ y, int M, int N, int K, int SX, int SW, int SY, int out32, int ngroups, int nt,
+    int64_t BX, int64_t BW, int64_t BY) {
   extern __shared__ u32x4 tileb[];  // [W][T][16 rows][8 chunks]; reused for the cross-wave reduction
+  // grid.y = batch (loop controllers: one weight / x / y per stream, element strides BX / BW / BY); 0 / 0 / 0 and
+  // grid.y = 1 for the plain call
+  const int64_t bz = blockIdx.y;
+  x += bz * BX;
+  w += bz * BW;
+  y = out32 ? (void*)((float*)y + bz * BY) : (void*)((uint16_t*)y + bz * BY);
   const int tid = threadIdx.x;
   const int lane = tid & 31, wv = tid >> 5;
   const int r = lane & 15, h = lane >> 4;
@@ -152,15 +159,18 @@ __global__ __launch_bounds__(W * 32) void gemv_bf16_kernel(
 struct ArgsB {
   uintptr_t x, w, bias, y, stream;
   int M, N, K, SX, SW, SY, out32;
+  int nb = 1;
+  int64_t BX = 0, BW = 0, BY = 0;
 };
 
 template <int T, int W>
 static void run_bf16(const ArgsB& a) {
   const int ngroups = (a.K + BF_GROUP - 1) / BF_GROUP;
   const int blocks = (a.N + 16 * T - 1) / (16 * T);
-  hipLaunchKernelGGL((gemv_bf16_kernel<T, W>), dim3(blocks), dim3(W * 32), (size_t)W * T * 2048,
+  hipLaunchKernelGGL((gemv_bf16_kernel<T, W>), dim3(blocks, a.nb), dim3(W * 32), (size_t)W * T * 2048,
                      (hipStream_t)a.stream, (const uint16_t*)a.x, (const uint16_t*)a.w,
-                     (const uint16_t*)a.bias, (void*)a.y, a.M, a.N, a.K, a.SX, a.SW, a.SY, a.out32, ngroups, 1);
+                     (const uint16_t*)a.bias, (void*)a.y, a.M, a.N, a.K, a.SX, a.SW, a.SY, a.out32, ngroups, 1,
+                     a.BX, a.BW, a.BY);
 }
 
 static void run_bf16_cfg(int cfg, const ArgsB& a) {
@@ -381,6 +391,24 @@ PYBIND11_MODULE(radiance_inkling2_gemv, m) {
      py::arg("x"), py::arg("w"), py::arg("bias"), py::arg("y"), py::arg("M"), py::arg("N"),
      py::arg("K"), py::arg("SX"), py::arg("SW"), py::arg("SY"), py::arg("out32"), py::arg("stream"),
      py::arg("cfg") = -1);
+  m.def("gemv_bf16_batched", [](uintptr_t x, uintptr_t w, uintptr_t y, int64_t nb, int64_t M, int64_t N,
+                                int64_t K, int64_t SX, int64_t SW, int64_t SY, int64_t BX, int64_t BW,
+                                int64_t BY, int64_t out32, uintptr_t stream, int64_t cfg) {
+    if (nb < 1 || nb > 64) throw std::invalid_argument("nb must be 1..64");
+    if (M < 1 || M > MAX_M) throw std::invalid_argument("M must be 1..16");
+    if (N < 1 || K < 8 || K % 8 || SW % 8 || SW < K || SX % 8 || SX < K || SY < N)
+      throw std::invalid_argument("need N >= 1, K % 8 == 0, SW % 8 == 0, SW >= K, SX % 8 == 0, SX >= K, SY >= N");
+    if (BX < 0 || BW < 0 || BY < 0 || BX % 8 || BW % 8)
+      throw std::invalid_argument("batch strides must be >= 0, BX % 8 == 0, BW % 8 == 0");
+    if (x % 16 || w % 16) throw std::invalid_argument("x and w must be 16 B aligned");
+    if (cfg < -1 || cfg >= BF_NCFG) throw std::invalid_argument("cfg out of range");
+    if (cfg < 0) cfg = pick_cfg_bf16((int)N, (int)K);
+    run_bf16_cfg((int)cfg, ArgsB{x, w, 0, y, stream, (int)M, (int)N, (int)K, (int)SX, (int)SW, (int)SY,
+                                 (int)(out32 != 0), (int)nb, BX, BW, BY});
+  }, "gemv_bf16 over nb independent (x, W, y) triples at element strides BX / BW / BY (grid.y), no bias",
+     py::arg("x"), py::arg("w"), py::arg("y"), py::arg("nb"), py::arg("M"), py::arg("N"), py::arg("K"),
+     py::arg("SX"), py::arg("SW"), py::arg("SY"), py::arg("BX"), py::arg("BW"), py::arg("BY"),
+     py::arg("out32"), py::arg("stream"), py::arg("cfg") = -1);
   m.def("auto_cfg_q8", [](int64_t M, int64_t N, int64_t K) { return pick_cfg_q8((int)M, (int)N, (int)K); },
         "launch config gemv_q8 picks for cfg -1", py::arg("M"), py::arg("N"), py::arg("K"));
   m.attr("NCFG") = Q_NCFG;

@@ -85,14 +85,73 @@ def test_lds_rows_follow_the_token_bound(m, max_ctas, lds_rows):
     assert mod._lds_rows(max_ctas) == lds_rows
 
 
+def covered(tiles, max_ctas, tile):
+    """(expert, row) pairs a launch computes: CTA c holds rows tile*c .. min(row_end, tile*c + tile)."""
+    out = set()
+    for c in range(int(tiles[2 * max_ctas])):
+        lo = c * tile
+        out |= {(int(tiles[c]), r) for r in range(lo, min(int(tiles[max_ctas + c]), lo + tile))}
+    return out
+
+
+@pytest.mark.parametrize("tile", [16, 24, 32, 64])
+def test_tile_view_splits_a_multi_stream_tile_into_tile8_ctas(m, tile):
+    """2-8 streams of spec-verify rows plan tile 16..64: the same rows, as tile-8 CTAs of the same expert."""
+    mod, _ = m
+    rows_per = [1, 5, tile, 3, tile - 1, 2]
+    c = make_case("nvfp4", experts=6, n=64, k=128, tile=tile, rows_per=rows_per, count=5, seed=3)
+    plan8, tiles8 = mod.hip_tile_view(c["plan"], c["tiles"])
+    f = tile // 8
+    assert (plan8.tile, plan8.max_ctas, plan8.rows) == (8, len(rows_per) * f, c["plan"].rows)
+    assert tiles8.dtype == torch.int32 and tiles8.numel() == c["tiles"].numel() + 2 * len(rows_per) * (f - 1)
+    assert covered(tiles8, plan8.max_ctas, 8) == covered(c["tiles"], c["plan"].max_ctas, tile)
+    assert tiles8[2 * plan8.max_ctas + 1:].tolist() == c["tiles"][2 * len(rows_per) + 1:].tolist()  # padded rows (+ total): unchanged
+
+
+def test_tile8_view_is_the_identity(m):
+    mod, _ = m
+    c = make_case("nvfp4", experts=2, n=64, k=128, tile=8, rows_per=[1, 5], seed=3)
+    plan8, tiles8 = mod.hip_tile_view(c["plan"], c["tiles"])
+    assert plan8 is c["plan"] and tiles8 is c["tiles"]
+
+
 @pytest.mark.parametrize("tile", [16, 32])
-def test_other_tiles_stay_on_triton(m, tile):
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_multi_stream_tiles_launch_the_hip_kernel_as_tile8(m, tile, fmt):
     mod, fake = m
-    c = make_case("nvfp4", experts=2, n=64, k=128, tile=tile, rows_per=[1, 5], seed=3)
+    c = make_case(fmt, experts=2, n=64, k=256, tile=tile, rows_per=[1, 5], seed=3)
+    out = (mod.nvfp4_expert_gemm if fmt == "nvfp4" else mod.mxfp8_expert_gemm)(
+        *(nvfp4_args(c) if fmt == "nvfp4" else mxfp8_args(c)))
+    (kind, a), = fake.calls
+    f = tile // 8
+    # ..., tiles ptr, max_ctas, experts, N, K, tile, lds rows, stream
+    assert kind == fmt and a[-7:-3] == (2 * f, 2, 64, 256) and a[-3] == 8
+    assert out.shape == (c["plan"].rows, 64)
+
+
+def test_tiles_from_128_up_and_the_off_switch_stay_on_triton(m, monkeypatch):
+    mod, fake = m
+    assert not mod._hip_fits(types.SimpleNamespace(tile=128, max_ctas=8, rows=1024), 256, True)
+    monkeypatch.setattr(mod, "_SPLIT", False)
+    c = make_case("nvfp4", experts=2, n=64, k=128, tile=16, rows_per=[1, 5], seed=3)
     out = mod.nvfp4_expert_gemm(*nvfp4_args(c), dot_dtype=mod.tl.float32)
     assert fake.calls == []
     ref, valid = gpu_tests.reference(c), gpu_tests.valid_mask(c)
     torch.testing.assert_close(out[valid].float(), ref[valid], rtol=1e-2, atol=1e-2)  # bf16 output
+
+
+def test_split_env_knob(monkeypatch):
+    fake = types.ModuleType("radiance_inkling2_moe_hip")
+    monkeypatch.setitem(sys.modules, "radiance_inkling2_moe_hip", fake)
+    import radiance_inkling2_moe as mod
+    try:
+        monkeypatch.delenv("RADIANCE_INKLING2_HIP_MOE_SPLIT", raising=False)
+        assert importlib.reload(mod)._SPLIT is True                    # default on
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_SPLIT", "0")
+        assert importlib.reload(mod)._SPLIT is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(mod)
 
 
 def test_k_beyond_the_kernel_register_budget_stays_on_triton(m):
@@ -252,7 +311,9 @@ def test_hip_needs_k_multiples_the_scale_layout_allows(m):
     assert mod._hip_fits(plan, 64, True) and not mod._hip_fits(plan, 32, True)      # K % 64 (R8c4)
     assert mod._hip_fits(plan, 128, False) and not mod._hip_fits(plan, 192, False)  # K % 128
     assert not mod._hip_fits(plan, 2368, True)                                       # K <= 2304
-    assert not mod._hip_fits(types.SimpleNamespace(tile=16, max_ctas=8, rows=128), 256, True)
+    assert mod._hip_fits(types.SimpleNamespace(tile=16, max_ctas=8, rows=128), 256, True)   # split into tile 8
+    assert not mod._hip_fits(types.SimpleNamespace(tile=20, max_ctas=8, rows=160), 256, True)  # not a multiple of 8
+    assert not mod._hip_fits(types.SimpleNamespace(tile=128, max_ctas=8, rows=1024), 256, True)  # prefill
 
 
 def test_wrapper_refuses_a_misaligned_activation(m):

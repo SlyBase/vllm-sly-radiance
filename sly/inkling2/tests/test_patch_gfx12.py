@@ -68,8 +68,8 @@ def test_only_the_deliberate_ptx_is_left(tree):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                     and n.func.attr == "inline_asm_elementwise" and n.func.value.id == "tl":
                 left.add(p.name)
-    # fp8-KV unpack (only compiled with --kv-cache-dtype fp8) and the dead e2m1 hardware branches
-    assert left <= {"attention_sm90.py", "nvfp4.py"}, left
+    # only the dead e2m1 hardware branches (the fp8-KV unpack is rewritten, see below)
+    assert left <= {"nvfp4.py"}, left
 
 
 @pytest.mark.parametrize("asm,args,expect", [
@@ -205,6 +205,16 @@ def test_rel_attention_uses_one_stage_on_rocm(tree):
     run(tree)
     s = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
     assert "num_stages=1 if torch.version.hip else 2," in s
+
+
+def test_rel_attention_prefill_tile_uses_32_keys_on_rocm(tree):
+    """Measured (mb6/mb7, 4096-token chunk, 210 W): BLOCK_N 64 -> 32 halves `_rel_attention_kernel` for BLOCK_M 128,
+    local layer 2.17 -> 1.18 ms (past 0), 2.42 -> 1.12 ms (past 4096), global layer 11.9 -> 5.7 ms."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
+    assert "BLOCK_N=(32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64," in s
+    run(tree)  # idempotent
+    assert (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text() == s
 
 
 def test_flashinfer_is_never_touched_on_rocm(tree):
@@ -463,3 +473,105 @@ def test_shortlist_path_matches_dense_on_members_and_masks_the_rest(tree, monkey
     assert torch.isneginf(short[~member].float()).all()
     torch.testing.assert_close(short[member].float(), dense[member].float(), atol=0.25, rtol=2e-2)
     assert int(member.sum()) >= rows * 20 - rows * 3   # at most 3 members per row are sliced off
+
+
+# ---------------------------------------------------------------- loop controllers (RADIANCE_INKLING2_HIP_CTRL)
+
+
+def _blend(tree, hip, controller_gemms, calls):
+    """The patched Inkling2LoopDecoderLayer.blend, exec'd with stub kernels: pair_rms_norm / blend_rms_norm
+    record, torch.bmm is the real one (counted), radiance_inkling2_gemv_hip is `controller_gemms`."""
+    src = (tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    cls = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == "Inkling2LoopDecoderLayer")
+    fn = ast.get_source_segment(src, next(n for n in cls.body if getattr(n, "name", "") == "blend"))
+    mod = types.ModuleType("radiance_inkling2_gemv_hip")
+    mod.controller_gemms = controller_gemms
+    sys.modules["radiance_inkling2_gemv_hip"] = mod
+
+    class T(_Torch):
+        def bmm(self, a, b, out_dtype=None):
+            calls.append("bmm")
+            return (a.float() @ b.float()).to(out_dtype or a.dtype)
+
+    ns = {"torch": T(hip), "pair_rms_norm": lambda d, m: m.bfloat16().repeat(1, 1, 2),
+          "blend_rms_norm": lambda d, m, gf, w, e: gf}
+    exec("from __future__ import annotations\n" + fn.replace("    def blend", "def blend", 1).replace("\n    ", "\n"), ns)
+    return ns["blend"]
+
+
+def _layer():
+    return types.SimpleNamespace(controller_down=torch.randn(4, 64, 8).bfloat16(),
+                                 controller_gain_forget=torch.randn(4, 8, 64).bfloat16())
+
+
+@pytest.mark.parametrize("hip", [True, False])
+def test_loop_blend_uses_the_batched_controller_gemms_on_rocm_only(tree, hip):
+    assert run(tree).returncode == 0
+    calls, seen = [], []
+    sentinel = torch.full((3, 2, 8), 7.0)
+
+    def cg(pair, down, gf):
+        seen.append((tuple(pair.shape), tuple(down.shape), tuple(gf.shape)))
+        return sentinel
+
+    blend = _blend(tree, hip, cg, calls)
+    out = blend(_layer(), slice(0, 3), torch.randn(3, 2, 4), torch.randn(3, 2, 4), torch.ones(3, 4), 1e-6)
+    if hip:  # the kernels' result goes straight into blend_rms_norm, torch.bmm never runs
+        assert out is sentinel and calls == [] and seen == [((3, 2, 8), (3, 64, 8), (3, 8, 64))]
+    else:
+        assert seen == [] and calls == ["bmm", "bmm"]
+
+
+def test_loop_blend_falls_back_to_bmm_when_the_kernels_decline(tree):
+    assert run(tree).returncode == 0
+    calls = []
+    blend = _blend(tree, True, lambda p, d, g: None, calls)
+    blend(_layer(), slice(3, 4), torch.randn(1, 2, 4), torch.randn(1, 2, 4), torch.ones(1, 4), 1e-6)
+    assert calls == ["bmm", "bmm"]
+
+
+def test_loop_blend_hook_is_idempotent(tree):
+    run(tree)
+    first = (tree / "vllm/models/inkling2/nvidia/loop.py").read_text()
+    assert first.count("controller_gemms") >= 2
+    run(tree)
+    assert (tree / "vllm/models/inkling2/nvidia/loop.py").read_text() == first
+
+
+def test_fp8_kv_unpack_has_no_ptx_on_rocm(tree):
+    """--kv-cache-dtype fp8 compiled `cvt.rn.f16x2.e4m3x2` (NVIDIA PTX) into the attention kernel."""
+    run(tree)
+    src = (tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py").read_text()
+    assert "e4m3x2" not in src and "inline_asm_elementwise" not in src
+    assert "_load_fp8_kv(K, kv_ptrs" in src and "_load_fp8_kv(V, kv_ptrs" in src  # callers untouched
+
+
+def test_fp8_kv_unpack_reads_the_e4m3_values(tree):
+    """The patched helper, run in the Triton interpreter, returns each e4m3 byte as its value."""
+    import importlib.util
+
+    import triton
+    import triton.language as tl
+
+    run(tree)
+    path = tree / "vllm/models/inkling2/nvidia/ops/attention_sm90.py"
+    spec = importlib.util.spec_from_file_location("attn_sm90_patched", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    globals()["_patched_sm90"] = mod                              # a jit function resolves module globals
+
+    @triton.jit
+    def probe(Src, Offsets, Out, N: tl.constexpr, D: tl.constexpr):
+        i = tl.arange(0, N)
+        off = tl.load(Offsets + i)
+        x = _patched_sm90._load_fp8_kv(Src, off, i < N - 1, tl.float32, D)   # the last row is masked out  # noqa: F821
+        tl.store(Out + i[:, None] * D + tl.arange(0, D)[None, :], x)
+
+    D, N = 16, 4
+    src = (torch.arange(0, 256, dtype=torch.float32)[:8 * D].view(8, D) / 8 - 8).to(torch.float8_e4m3fn)
+    offsets = torch.tensor([3 * D, 0, 7 * D, 5 * D], dtype=torch.int64)
+    out = torch.full((N, D), -99.0)
+    probe[(1,)](src, offsets, out, N=N, D=D)
+    want = src.view(-1, D)[offsets // D].float()
+    want[N - 1] = 0.0                                             # masked row: other=0
+    assert torch.equal(out, want)

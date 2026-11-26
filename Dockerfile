@@ -681,6 +681,12 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
 COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
 # launch folding of the DSpark draft (hooks: sly/patch_inkling2_gfx12.py)
 COPY sly/inkling2/radiance_inkling2_draft.py ${SP}/
+# native DFlash2 drafter on the Inkling target (opt-in by serving flag; hooks: sly/patch_inkling2_dflash2.py)
+COPY sly/inkling2/radiance_inkling2_dflash2.py ${SP}/
+# LoopCD-Hidden contrastive decoding (opt-in RADIANCE_INKLING2_LOOPCD=1; hooks: sly/patch_inkling2_loopcd.py)
+COPY sly/inkling2/radiance_inkling2_loopcd.py ${SP}/
+# coda experts MXFP8 -> NVFP4 at load (opt-in RADIANCE_INKLING2_CODA_FP4; hooks: sly/patch_inkling2_coda_fp4.py)
+COPY sly/inkling2/radiance_inkling2_coda_fp4.py ${SP}/
 COPY fp8-configs/ ${SP}/vllm/model_executor/layers/quantization/utils/configs/
 COPY moe-configs/ ${SP}/vllm/model_executor/layers/fused_moe/configs/
 # aiter's Triton GEMM-AFP4WFP4 (patch_quark_mxfp4.py's relaxed CDNA gate makes this reachable on
@@ -825,7 +831,8 @@ RUN set -eu; cd /opt/patches; \
              sly/patch_dflash_prefill_skip \
              sly/patch_attn_gate_view sly/patch_dflash_aux_residual patch_gdn_glue sly/patch_graph_knob_keys \
              sly/kv4/install_kv4 sly/kv4/patch_int4_pth_rocm sly/patch_inkling2_gfx12 \
-             sly/patch_inkling2_mxfp4dense sly/patch_inkling2_adaptive; do \
+             sly/patch_inkling2_mxfp4dense sly/patch_inkling2_adaptive sly/patch_inkling2_dflash2 \
+             sly/patch_inkling2_loopcd sly/patch_inkling2_coda_fp4; do \
       case " ${PATCH_SKIP} " in *" $p "*) echo "== SKIP $p =="; continue;; esac; \
       echo "== applying $p =="; \
       PYTHONPATH=/opt/patches python "$p.py"; \

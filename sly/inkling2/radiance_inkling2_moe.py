@@ -13,7 +13,9 @@ RADIANCE_INKLING2_HIP_DEBUG=1 also reads the tile table back (host sync, never w
 captured) and rejects ids the kernel would index out of the weight pool.
 """
 import functools
+import json
 import os
+import types
 
 import torch
 from vllm.models.inkling2.nvidia.ops.block_scales import _scale_offsets
@@ -26,12 +28,71 @@ except ImportError:
 if os.environ.get("RADIANCE_INKLING2_HIP_MOE") == "0":
     _hip = None
 
-_HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens); bigger prefill tiles stay on Triton
+_HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens)
+# 2-8 streams of spec-verify rows plan tile 16..64: the HIP kernel runs them as tile-8 CTAs (`hip_tile_view`),
+# MEASURED: the Triton prefill GEMM at those tiles cost 7.8 ms/token vs 3.8 ms/token for the GEMV at one stream.
+# Bigger (prefill) tiles stay on Triton. RADIANCE_INKLING2_HIP_MOE_SPLIT=0 = the old route (Triton above tile 8).
+_HIP_SPLIT_MAX = 64
+_SPLIT = os.environ.get("RADIANCE_INKLING2_HIP_MOE_SPLIT") != "0"
 _TOPK = 8      # experts per token: an expert (= one CTA) gets at most one row per token
 # Geometry of radiance_inkling2_moe.hip (test_moe_hip.py asserts it equals hip.geometry()):
 # BN weight rows per block, LPR lanes per row, a lane streams `quantum` k-values per step and at
 # most NJ_MAX steps (K <= K_MAX), a CTA holds at most MAX_ROWS rows.
 GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304)
+
+
+# Prefill / extend tiles (plan.tile > 8) run the Triton kernels below. Inkling does not read vLLM's
+# fused_moe config files; this table is their equivalent: {"nvfp4"|"mxfp8": {"<tile>": {key: value}}},
+# a JSON file named by RADIANCE_INKLING2_MOE_PREFILL_CFG (written by bench_prefill_moe.py --table-out); a built-in
+# copy of the measured table (`_DEFAULT_TABLE`) applies when the env is unset.
+# Without an entry the launch is the historical one.
+_CFG_ENV = "RADIANCE_INKLING2_MOE_PREFILL_CFG"
+_V2_ENV = "RADIANCE_INKLING2_MOE_PREFILL_V2"
+_CFG_KEYS = dict(nvfp4=("block_m", "block_n", "block_k", "num_warps", "num_stages"),
+                 mxfp8=("block_n", "block_t", "block_k", "num_warps", "num_stages"))
+_POW2 = ("block_m", "block_n", "block_t", "block_k", "num_warps")
+
+
+@functools.lru_cache(maxsize=None)
+def _cfg_table(path):
+    if not path:
+        return {}
+    with open(path) as f:
+        table = json.load(f)
+    for fmt, tiles in table.items():
+        if fmt not in _CFG_KEYS:
+            raise ValueError(f"{path}: unknown format {fmt!r}")
+        for tile, cfg in tiles.items():
+            if set(cfg) - set(_CFG_KEYS[fmt]):
+                raise ValueError(f"{path}: {fmt}/{tile}: unknown keys {sorted(set(cfg) - set(_CFG_KEYS[fmt]))}")
+            for key, v in cfg.items():
+                if not isinstance(v, int) or v < 1 or (key in _POW2 and v & (v - 1)):
+                    raise ValueError(f"{path}: {fmt}/{tile}: {key}={v!r} (power of 2 / positive int)")
+            if cfg.get("block_k", 128) < 32:
+                raise ValueError(f"{path}: {fmt}/{tile}: block_k < 32")
+    return table
+
+
+# Built-in table (arm PT, 2026-11-26, 210 W, DFlash2, chunk 2048): prefill 1192/1298/1288/1245 -> 2042/2128/2109/1983
+# pp/s at 1.6k/6.3k/12.6k/25k tokens, prompt-logprob dNLL +0.0000. Token tile 128 only (chunks of 385..4096 rows).
+_DEFAULT_TABLE = {
+    "nvfp4": {"128": dict(block_m=128, block_n=128, block_k=64, num_warps=4, num_stages=2)},
+    "mxfp8": {"128": dict(block_n=32, block_t=32, block_k=128, num_warps=4, num_stages=2)},
+}
+
+
+# The same for the v2 kernels (mb3, 4096 tokens, 210 W: 9.14 ms per visit vs 19.7 ms for v1 with the table above).
+_DEFAULT_TABLE_V2 = {"nvfp4": {"128": dict(block_m=128, block_n=128, block_k=32, num_warps=4, num_stages=2)}}
+
+
+def prefill_cfg(fmt, tile, v2=False):
+    """Table entry for (format, token tile), {} = launch defaults. Env unset = the built-in table (v2's when
+    the v2 kernels run); RADIANCE_INKLING2_MOE_PREFILL_CFG=<json path> replaces it, `0` / `off` = the
+    historical launch."""
+    path = os.environ.get(_CFG_ENV)
+    default = _DEFAULT_TABLE_V2 if v2 else _DEFAULT_TABLE
+    table = default if path is None else {} if path in ("0", "off") else _cfg_table(path)
+    return table.get(fmt, {}).get(str(tile), {})
 
 
 def _stream():
@@ -44,8 +105,25 @@ def _lds_rows(max_ctas):
 
 
 def _hip_fits(plan, k, nvfp4):
-    return (_hip is not None and plan.tile == _HIP_TILE and k <= GEOMETRY["k_max"]
+    tile_ok = plan.tile == _HIP_TILE or (_SPLIT and plan.tile % _HIP_TILE == 0 and plan.tile <= _HIP_SPLIT_MAX)
+    return (_hip is not None and tile_ok and k <= GEOMETRY["k_max"]
             and k % (64 if nvfp4 else 128) == 0)
+
+
+def hip_tile_view(plan, tiles):
+    """(plan, tiles) of a tile-T launch (T = 8 f) as f tile-8 CTAs per CTA: same expert, same rows (CTA c of
+    tile 8 holds rows 8c .. min(row_end, 8c + 8), CTAs past the row end do nothing). Device ops of fixed shape
+    only (graph safe). Tile 8 is returned unchanged."""
+    f = plan.tile // _HIP_TILE
+    if f == 1:
+        return plan, tiles
+    mc = plan.max_ctas
+    out = torch.empty(tiles.numel() + 2 * mc * (f - 1), dtype=tiles.dtype, device=tiles.device)
+    out[:mc * f] = tiles[:mc].repeat_interleave(f)
+    out[mc * f:2 * mc * f] = tiles[mc:2 * mc].repeat_interleave(f)
+    out[2 * mc * f] = tiles[2 * mc] * f
+    out[2 * mc * f + 1:] = tiles[2 * mc + 1:]
+    return types.SimpleNamespace(tile=_HIP_TILE, max_ctas=mc * f, rows=plan.rows), out
 
 
 @functools.lru_cache(maxsize=None)
@@ -177,13 +255,129 @@ def _expert_gemm(
              valid[:, None] & (cols[None, :] < N))
 
 
+@triton.jit
+def _fp4_val(code, SAFE: tl.constexpr):
+    """e2m1 code (int32, sign in bit 3) -> fp32, bit tricks instead of exp2. The 3 magnitude bits
+    placed at the fp32 exponent/mantissa-MSB position read as (denormal) 0, 0.5 * 2^-126 and
+    (1 + m/2) * 2^(e-127); times 2^126 that is the e2m1 value. SAFE avoids the denormal operand
+    (a flush-to-zero multiply would lose 0.5)."""
+    mag = code & 7
+    if SAFE:
+        v = tl.where(mag >= 2, ((mag << 22) + 0x3F000000).to(tl.float32, bitcast=True),
+                     mag.to(tl.float32) * 0.5)
+        return tl.where((code & 8) != 0, -v, v)
+    bits = (mag << 22) | ((code & 8) << 28)
+    return bits.to(tl.float32, bitcast=True) * 8.507059173023462e37  # 2^126
+
+
+@triton.jit
+def _to_bf16(x, TRUNC: tl.constexpr):
+    """fp32 -> bf16. TRUNC: keep the top 16 bits (a shift instead of the rounding sequence); exact for the
+    decoded e2m1 x e4m3 values (<= 5 significant bits)."""
+    if TRUNC:
+        return (x.to(tl.int32, bitcast=True) >> 16).to(tl.int16).to(tl.bfloat16, bitcast=True)
+    return x.to(tl.bfloat16)
+
+
+@triton.jit
+def _dequant_act(Act, ActScale, Tiles, Out, MAX_CTAS: tl.constexpr, K: tl.constexpr,
+                 TILE: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr, DT: tl.constexpr,
+                 SAFE: tl.constexpr, TRUNC: tl.constexpr):
+    """Routed activation rows -> DT `[rows, K]`, each BK block stored as [even k | odd k], once per
+    row instead of once per output column block."""
+    tile = tl.program_id(0)
+    if tile >= tl.load(Tiles + 2 * MAX_CTAS):
+        return
+    row_end = tl.load(Tiles + MAX_CTAS + tile)
+    rows = tile * TILE + tl.program_id(1) * BR + tl.arange(0, BR)
+    valid = rows < tl.minimum(row_end, (tile + 1) * TILE)
+    half: tl.constexpr = BK // 2
+    j = tl.arange(0, half)
+    for k in range(K // BK):
+        p = tl.load(Act + rows[:, None].to(tl.int64) * (K // 2) + k * half + j[None, :],
+                    valid[:, None], other=0).to(tl.int32)
+        s = tl.load(ActScale + _scale_offsets(rows[:, None], (k * (BK // 16) + j // 8)[None, :], K // 16, TILE),
+                    valid[:, None], other=0.0).to(tl.float32)
+        out = Out + rows[:, None].to(tl.int64) * K + k * BK + j[None, :]
+        lo, hi = _fp4_val(p & 15, SAFE) * s, _fp4_val(p >> 4, SAFE) * s
+        if TRUNC:
+            tl.store(out, _to_bf16(lo, True), valid[:, None])
+            tl.store(out + half, _to_bf16(hi, True), valid[:, None])
+        else:
+            tl.store(out, lo.to(DT), valid[:, None])
+            tl.store(out + half, hi.to(DT), valid[:, None])
+
+
+@triton.jit
+def _expert_gemm_v2(
+    ActDQ, RowScale, Weight, WeightScale, ExpertScale, Out, Tiles,
+    MAX_CTAS: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, DT: tl.constexpr, SAFE: tl.constexpr,
+    GS: tl.constexpr, TRUNC: tl.constexpr,
+):
+    """`_expert_gemm` with the activation already dequantised (`_dequant_act`) and the weight nibbles
+    kept apart: even-k and odd-k halves are two dots (a sum over k does not care about the order), so no
+    interleave/shuffle. K % BK == 0."""
+    tile = tl.program_id(2)  # N blocks run fastest: the CTAs of one tile share its activation rows in L2
+    if tile >= tl.load(Tiles + 2 * MAX_CTAS):
+        return
+    expert = tl.load(Tiles + tile).to(tl.int64)
+    row_end = tl.load(Tiles + MAX_CTAS + tile)
+    rows = tile * TILE + tl.program_id(1) * BM + tl.arange(0, BM)
+    valid = rows < tl.minimum(row_end, (tile + 1) * TILE)
+    cols = tl.program_id(0) * BN + tl.arange(0, BN)
+    cmask = cols < N
+    half: tl.constexpr = BK // 2
+    j = tl.arange(0, half)
+    acc = tl.zeros((BM, BN), tl.float32)
+    a_ptr = ActDQ + rows[:, None].to(tl.int64) * K + j[None, :]
+    w_row = (expert * N + cols)[:, None]
+    for k in range(K // BK):
+        a_lo = tl.load(a_ptr + k * BK, valid[:, None], other=0.0)
+        a_hi = tl.load(a_ptr + k * BK + half, valid[:, None], other=0.0)
+        if GS:  # one scale load per 16-k group ([BN, G, 8] x [BN, G, 1]) instead of one per byte
+            g = tl.arange(0, BK // 16)
+            w = tl.load(Weight + w_row[:, :, None] * (K // 2) + k * half + g[None, :, None] * 8 + tl.arange(0, 8)[None, None, :],
+                        cmask[:, None, None], other=0).to(tl.int32)
+            s = tl.load(WeightScale + w_row * (K // 16) + k * (BK // 16) + g[None, :],
+                        cmask[:, None], other=0.0).to(tl.float32)[:, :, None]
+            lo, hi = _fp4_val(w & 15, SAFE) * s, _fp4_val(w >> 4, SAFE) * s
+            if TRUNC:
+                w_lo, w_hi = tl.reshape(_to_bf16(lo, True), (BN, half)), tl.reshape(_to_bf16(hi, True), (BN, half))
+            else:
+                w_lo, w_hi = tl.reshape(lo.to(DT), (BN, half)), tl.reshape(hi.to(DT), (BN, half))
+        else:
+            w = tl.load(Weight + w_row * (K // 2) + k * half + j[None, :], cmask[:, None], other=0).to(tl.int32)
+            s = tl.load(WeightScale + w_row * (K // 16) + k * (BK // 16) + (j // 8)[None, :],
+                        cmask[:, None], other=0.0).to(tl.float32)
+            lo, hi = _fp4_val(w & 15, SAFE) * s, _fp4_val(w >> 4, SAFE) * s
+            if TRUNC:
+                w_lo, w_hi = _to_bf16(lo, True), _to_bf16(hi, True)
+            else:
+                w_lo, w_hi = lo.to(DT), hi.to(DT)
+        acc = tl.dot(a_lo, tl.trans(w_lo), acc)
+        acc = tl.dot(a_hi, tl.trans(w_hi), acc)
+    acc *= tl.load(ExpertScale + expert)
+    acc *= tl.load(RowScale + rows, valid, other=0)[:, None]
+    tl.store(Out + rows[:, None].to(tl.int64) * N + cols[None, :], acc, valid[:, None] & cmask[None, :])
+
+
+def prefill_v2(tile=None):
+    """RADIANCE_INKLING2_MOE_PREFILL_V2: unset = the v2 kernels for prefill tiles (>= 128 rows per expert);
+    `0` = never, `1` = every tile (the extra dequant launch costs decode batches, tile < 128, ~4 %)."""
+    mode = os.environ.get(_V2_ENV)
+    return mode == "1" if mode in ("0", "1") else tile is not None and tile >= 128
+
+
 def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_scale, tiles, plan,
-                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16, **launch):
+                      block_m=None, block_n=None, block_k=None, dot_dtype=tl.bfloat16,
+                      v2=None, v2_safe=False, v2_gs=True, v2_trunc=True, **launch):
     """bf16 `[plan.rows, N]` = routed rows x NVFP4 expert weights `[E, N, K/2]` (rows past a tile's
     `row_end` are left unwritten).  `launch`: extra Triton launch args (num_warps, num_stages). `dot_dtype`: bf16 is exact for these products; the Triton CPU
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
     n, k = weight.shape[1], weight.shape[2] * 2
     if _hip_fits(plan, k, True):
+        plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(True, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       row_scale=row_scale, weight=weight, weight_scale=weight_scale,
                       expert_scale=expert_scale, tiles=tiles)
@@ -194,14 +388,46 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
             out.data_ptr(), tiles.data_ptr(),
             plan.max_ctas, weight.shape[0], n, k, plan.tile, _lds_rows(plan.max_ctas), _stream())
         return out
-    bm = block_m or min(32, triton.next_power_of_2(plan.tile))  # arange needs a power of 2;
-    bn = block_n or min(64, triton.next_power_of_2(n))          # the masks cover the overhang
-    bk = block_k or min(128, triton.next_power_of_2(k))
+    use_v2 = prefill_v2(plan.tile) if v2 is None else v2
+    cfg = prefill_cfg("nvfp4", plan.tile, use_v2)
+    bm = block_m or cfg.get("block_m") or min(32, triton.next_power_of_2(plan.tile))  # arange needs a
+    bn = block_n or cfg.get("block_n") or min(64, triton.next_power_of_2(n))          # power of 2; the
+    bk = block_k or cfg.get("block_k") or min(128, triton.next_power_of_2(k))         # masks cover the overhang
+    launch = {**{key: cfg[key] for key in ("num_warps", "num_stages") if key in cfg}, **launch}
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
+    if use_v2 and k % bk == 0 and bk >= 32:
+        dq = torch.empty((plan.rows, k), dtype={tl.float32: torch.float32, tl.float16: torch.float16}.get(
+            dot_dtype, torch.bfloat16), device=act.device)
+        br = min(16, bm)
+        trunc = bool(v2_trunc) and dot_dtype == tl.bfloat16  # a shift instead of the rounding sequence, exact here
+        _dequant_act[(plan.max_ctas, triton.cdiv(plan.tile, br))](
+            act, act_scale, tiles, dq, MAX_CTAS=plan.max_ctas, K=k, TILE=plan.tile, BK=bk, BR=br,
+            DT=dot_dtype, SAFE=v2_safe, TRUNC=trunc)
+        _expert_gemm_v2[(triton.cdiv(n, bn), triton.cdiv(plan.tile, bm), plan.max_ctas)](
+            dq, row_scale, weight, weight_scale, expert_scale, out, tiles,
+            MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype,
+            SAFE=v2_safe, GS=v2_gs, TRUNC=trunc, **launch)
+        return out
     _expert_gemm[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
         act, act_scale, row_scale, weight, weight_scale, expert_scale, out, tiles,
         MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype, **launch)
     return out
+
+
+def mxfp8_launch(tile, hip):
+    """Triton launch config of vLLM's `_mxfp8_gemm`: vLLM's sm120 tiles (shrunk to the 64 KB LDS of
+    gfx12 on ROCm), then the prefill table entry for this token tile."""
+    if tile <= 16:
+        block_n, block_t, num_warps = 128, 16, 4
+    elif tile <= 64:
+        block_n, block_t, num_warps = 128, 64, 4
+    else:
+        block_n, block_t, num_warps = 256, 128, 8
+    if hip:
+        block_n, block_t, num_warps = min(block_n, 64), min(block_t, 16), 4
+    c = dict(block_n=block_n, block_t=block_t, block_k=128, num_warps=num_warps, num_stages=3)
+    c.update(prefill_cfg("mxfp8", tile))
+    return c
 
 
 def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles, plan):
@@ -211,6 +437,7 @@ def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles,
     launches."""
     n, k = weight.shape[1], weight.shape[2]
     if _hip_fits(plan, k, False):
+        plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(False, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       weight=weight, weight_scale=weight_scale, expert_scale=expert_scale,
                       tiles=tiles)
@@ -221,20 +448,13 @@ def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles,
             plan.max_ctas, weight.shape[0], n, k, plan.tile, _lds_rows(plan.max_ctas), _stream())
         return out
     from vllm.models.inkling2.nvidia.ops.moe_sm120 import _mxfp8_gemm
-    if plan.tile <= 16:
-        block_n, block_t, num_warps = 128, 16, 4
-    elif plan.tile <= 64:
-        block_n, block_t, num_warps = 128, 64, 4
-    else:
-        block_n, block_t, num_warps = 256, 128, 8
-    if torch.version.hip:  # 64 KB LDS on gfx1201
-        block_n, block_t, num_warps = min(block_n, 64), min(block_t, 16), 4
+    c = mxfp8_launch(plan.tile, bool(torch.version.hip))
     out = torch.empty((plan.rows, n), dtype=torch.bfloat16, device=act.device)
     _mxfp8_gemm[
-        (triton.cdiv(n, block_n), plan.max_ctas * triton.cdiv(plan.tile, block_t))
+        (triton.cdiv(n, c["block_n"]), plan.max_ctas * triton.cdiv(plan.tile, c["block_t"]))
     ](
         act, act_scale, weight, weight_scale, expert_scale, out, tiles,
-        MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BN=block_n, BT=block_t, BK=128,
-        num_warps=num_warps, num_stages=3,
+        MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BN=c["block_n"], BT=c["block_t"],
+        BK=c["block_k"], num_warps=c["num_warps"], num_stages=c["num_stages"],
     )
     return out

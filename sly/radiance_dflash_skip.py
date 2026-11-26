@@ -26,16 +26,26 @@ import sys
 _SW = "sliding_attention"
 
 
+def _specs(group):
+    """Layer specs of a KV group: vLLM >= 0.34 `kv_cache_specs` (dict), older `kv_cache_spec`."""
+    many = getattr(group, "kv_cache_specs", None)
+    return list(many.values()) if many else [group.kv_cache_spec]
+
+
+def _block(group):
+    """Block size of a KV group: vLLM >= 0.34 on the group itself, older on its spec."""
+    return getattr(group, "block_size", None) or group.kv_cache_spec.block_size
+
+
 def _drafter_block(spec):
     """Block size of the KV group(s) holding the drafter's attention layers. The target's hybrid
     (mamba-aligned) group can have a 64k block and says nothing about the drafter's window. Without
     a reliable match: the smallest sliding-window group, else 0 (the env margin alone)."""
     groups = spec.kv_cache_config.kv_cache_groups
     mine = getattr(spec, "draft_attn_layer_names", None) or ()
-    sizes = [g.kv_cache_spec.block_size for g in groups if set(g.layer_names) & set(mine)]
+    sizes = [_block(g) for g in groups if set(g.layer_names) & set(mine)]
     if not sizes:
-        sizes = [g.kv_cache_spec.block_size for g in groups
-                 if getattr(g.kv_cache_spec, "sliding_window", None)]
+        sizes = [_block(g) for g in groups if any(getattr(sp, "sliding_window", None) for sp in _specs(g))]
         sys.stderr.write(f"[radiance.dflash_skip] drafter KV group not identified; sliding-group blocks {sizes}\n")
     return max(sizes, default=0)
 

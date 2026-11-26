@@ -807,13 +807,18 @@ def radiance_w4a16_postload(model, drafter=None):
     # GDN qkvz + ba merge: off by default -- the 96 extra rows add a 129th tile (a nearly empty third wave on
     # 64 CUs): 93.9 us merged vs 79.2 + 3.6 us separate at M = 8 (window E sweep, 2026-09-29)
     ba_on = os.environ.get("RADIANCE_GDN_BA_W4", "0") == "1"
-    conv_on = os.environ.get("RADIANCE_DFLASH_CONV_W4", "1") == "1"
+    # conv projection int4: explicit env wins; unset = only for a drafter that is itself W4A16 (Qwen
+    # DFlash2-W4A16). A bf16 drafter (Inkling-2-Mini-DFlash2) keeps its bf16 conv: requantizing cut
+    # acceptance 5.13 -> 3.65 tokens/update (224 -> 160 tok/s, MEASURED 2026-11-25, R9700 210 W).
+    conv_env = os.environ.get("RADIANCE_DFLASH_CONV_W4")
     # RADIANCE_DFLASH_BF16: the drafter runs plain GEMMs on load-expanded bf16 weights, so skip
     # its silu / conv int4 transforms and keep every row set in its natural order
     bf16_on = os.environ.get("RADIANCE_DFLASH_BF16", "0") == "1"
     for root in (model, drafter):
         if root is None:
             continue
+        conv_on = (conv_env == "1" if conv_env is not None
+                   else any(_radiance_w4_parts(m) is not None for m in root.modules()))
         if bf16_on and root is drafter and model is not drafter:
             for name, mod in list(root.named_modules()):
                 try:
