@@ -262,14 +262,14 @@ def _expert_gemm_v2(
     """`_expert_gemm` with the activation already dequantised (`_dequant_act`) and the weight nibbles
     kept apart: even-k and odd-k halves are two dots (a sum over k does not care about the order), so no
     interleave/shuffle. K % BK == 0."""
-    tile = tl.program_id(0)
+    tile = tl.program_id(2)  # N blocks run fastest: the CTAs of one tile share its activation rows in L2
     if tile >= tl.load(Tiles + 2 * MAX_CTAS):
         return
     expert = tl.load(Tiles + tile).to(tl.int64)
     row_end = tl.load(Tiles + MAX_CTAS + tile)
     rows = tile * TILE + tl.program_id(1) * BM + tl.arange(0, BM)
     valid = rows < tl.minimum(row_end, (tile + 1) * TILE)
-    cols = tl.program_id(2) * BN + tl.arange(0, BN)
+    cols = tl.program_id(0) * BN + tl.arange(0, BN)
     cmask = cols < N
     half: tl.constexpr = BK // 2
     j = tl.arange(0, half)
@@ -325,7 +325,7 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
         _dequant_act[(plan.max_ctas, triton.cdiv(plan.tile, br))](
             act, act_scale, tiles, dq, MAX_CTAS=plan.max_ctas, K=k, TILE=plan.tile, BK=bk, BR=br,
             DT=dot_dtype, SAFE=v2_safe)
-        _expert_gemm_v2[(plan.max_ctas, triton.cdiv(plan.tile, bm), triton.cdiv(n, bn))](
+        _expert_gemm_v2[(triton.cdiv(n, bn), triton.cdiv(plan.tile, bm), plan.max_ctas)](
             dq, row_scale, weight, weight_scale, expert_scale, out, tiles,
             MAX_CTAS=plan.max_ctas, N=n, K=k, TILE=plan.tile, BM=bm, BN=bn, BK=bk, DT=dot_dtype,
             SAFE=v2_safe, **launch)
