@@ -15,6 +15,7 @@ captured) and rejects ids the kernel would index out of the weight pool.
 import functools
 import json
 import os
+import types
 
 import torch
 from vllm.models.inkling2.nvidia.ops.block_scales import _scale_offsets
@@ -27,7 +28,12 @@ except ImportError:
 if os.environ.get("RADIANCE_INKLING2_HIP_MOE") == "0":
     _hip = None
 
-_HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens); bigger prefill tiles stay on Triton
+_HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens)
+# 2-8 streams of spec-verify rows plan tile 16..64: the HIP kernel runs them as tile-8 CTAs (`hip_tile_view`),
+# MEASURED: the Triton prefill GEMM at those tiles cost 7.8 ms/token vs 3.8 ms/token for the GEMV at one stream.
+# Bigger (prefill) tiles stay on Triton. RADIANCE_INKLING2_HIP_MOE_SPLIT=0 = the old route (Triton above tile 8).
+_HIP_SPLIT_MAX = 64
+_SPLIT = os.environ.get("RADIANCE_INKLING2_HIP_MOE_SPLIT") != "0"
 _TOPK = 8      # experts per token: an expert (= one CTA) gets at most one row per token
 # Geometry of radiance_inkling2_moe.hip (test_moe_hip.py asserts it equals hip.geometry()):
 # BN weight rows per block, LPR lanes per row, a lane streams `quantum` k-values per step and at
@@ -99,8 +105,25 @@ def _lds_rows(max_ctas):
 
 
 def _hip_fits(plan, k, nvfp4):
-    return (_hip is not None and plan.tile == _HIP_TILE and k <= GEOMETRY["k_max"]
+    tile_ok = plan.tile == _HIP_TILE or (_SPLIT and plan.tile % _HIP_TILE == 0 and plan.tile <= _HIP_SPLIT_MAX)
+    return (_hip is not None and tile_ok and k <= GEOMETRY["k_max"]
             and k % (64 if nvfp4 else 128) == 0)
+
+
+def hip_tile_view(plan, tiles):
+    """(plan, tiles) of a tile-T launch (T = 8 f) as f tile-8 CTAs per CTA: same expert, same rows (CTA c of
+    tile 8 holds rows 8c .. min(row_end, 8c + 8), CTAs past the row end do nothing). Device ops of fixed shape
+    only (graph safe). Tile 8 is returned unchanged."""
+    f = plan.tile // _HIP_TILE
+    if f == 1:
+        return plan, tiles
+    mc = plan.max_ctas
+    out = torch.empty(tiles.numel() + 2 * mc * (f - 1), dtype=tiles.dtype, device=tiles.device)
+    out[:mc * f] = tiles[:mc].repeat_interleave(f)
+    out[mc * f:2 * mc * f] = tiles[mc:2 * mc].repeat_interleave(f)
+    out[2 * mc * f] = tiles[2 * mc] * f
+    out[2 * mc * f + 1:] = tiles[2 * mc + 1:]
+    return types.SimpleNamespace(tile=_HIP_TILE, max_ctas=mc * f, rows=plan.rows), out
 
 
 @functools.lru_cache(maxsize=None)
@@ -354,6 +377,7 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
     n, k = weight.shape[1], weight.shape[2] * 2
     if _hip_fits(plan, k, True):
+        plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(True, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       row_scale=row_scale, weight=weight, weight_scale=weight_scale,
                       expert_scale=expert_scale, tiles=tiles)
@@ -413,6 +437,7 @@ def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles,
     launches."""
     n, k = weight.shape[1], weight.shape[2]
     if _hip_fits(plan, k, False):
+        plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(False, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       weight=weight, weight_scale=weight_scale, expert_scale=expert_scale,
                       tiles=tiles)

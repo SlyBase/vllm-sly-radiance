@@ -24,14 +24,14 @@ All of it is a NOOP on a vLLM without `models/inkling2`.
 --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}' \
 --reasoning-parser inkling \
 --no-async-scheduling \
---compilation-config '{"cudagraph_capture_sizes":[1,2,3,4,5,6,7,8]}'
+--compilation-config '{"cudagraph_capture_sizes":[1,2,3,4,5,6,7,8,16,24,32,40,48,56,64]}'   # the entrypoint adds this by default
 ```
 
 Device, group and cache-volume flags: as in the README [Quickstart](../README.md#quickstart). Use an image
 built from this branch (`build.yml`); no release image carries Inkling yet.
 
 - `GPU_MAX_HW_QUEUES=1` is the recipe value (the Qwen recipe uses 2).
-- `--no-async-scheduling` and graph sizes 1-8 match the step shape: one stream, k = 7, M <= 8.
+- `--no-async-scheduling`. Decode graph sizes `1..8,16,...,64` (entrypoint default) cover 1-8 streams of k = 7 steps (8 tokens each); sizes 1-8 alone capture one decode graph and run 2+ streams eager.
 - Startup shows `[radiance.draft] install failed ... llm_base_proposer`. It is harmless: only the
   dynamic-width draft hook (off here) is missing.
 - The measurements below use `--max-model-len 65536`, prefix caching off, one stream.
@@ -41,7 +41,7 @@ built from this branch (`build.yml`); no release image carries Inkling yet.
 | Component | Knob (default) | What it does |
 |---|---|---|
 | `sly/patch_inkling2_gfx12.py` | – (always, NOOP without `models/inkling2`) | the model's sm120 Triton path on ROCm: capability gates, no PDL, PTX replaced by Triton math, flashinfer-free drafter |
-| HIP expert GEMV (`inkling2/radiance_inkling2_moe.hip`) | `RADIANCE_INKLING2_HIP_MOE` (on; `=0` = Triton) | NVFP4 / MXFP8 experts, decode and verify tiles (<= 8 tokens): 529-648 GB/s, 3.1-3.4x (NVFP4) and 6.0-6.8x (MXFP8) the Triton kernels; NVFP4 output bit-identical. Prefill tiles stay on Triton (no FP4 matrix unit on gfx12) |
+| HIP expert GEMV (`inkling2/radiance_inkling2_moe.hip`) | `RADIANCE_INKLING2_HIP_MOE` (on; `=0` = Triton) | NVFP4 / MXFP8 experts, decode and verify tiles (<= 8 tokens): 529-648 GB/s, 3.1-3.4x (NVFP4) and 6.0-6.8x (MXFP8) the Triton kernels; NVFP4 output bit-identical. Tiles 16..64 (2-8 streams) run as tile-8 CTAs (`RADIANCE_INKLING2_HIP_MOE_SPLIT=0` = Triton); prefill tiles stay on Triton (no FP4 matrix unit on gfx12) |
 | | `RADIANCE_INKLING2_HIP_DEBUG` (off; `=1`) | host-side launch checks of the expert kernel |
 | HIP bf16 GEMV (`inkling2/radiance_inkling2_gemv.hip`) | `RADIANCE_INKLING2_HIP_GEMV` (on; `=0` = Triton) | dense projections at M 1..16, lossless; 558-596 GB/s at M = 8 on the big projections |
 | Loop controllers on the batched HIP GEMV (`inkling2/radiance_inkling2_gemv.hip` `gemv_bf16_batched`) | `RADIANCE_INKLING2_HIP_CTRL=1` (off) | the two `torch.bmm` of the loop blend (hipBLASLt, 12 / 6-8 us per call, 0.92 ms per step) as two batched launches (stream = grid.y); bf16 weights, fp32 accumulate. Micro-bench `inkling2/bench_ctrl.py`; end-to-end not yet measured |

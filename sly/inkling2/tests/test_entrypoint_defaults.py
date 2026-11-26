@@ -228,3 +228,35 @@ def test_chunk_env_sets_the_size_whatever_the_context(serve):
 
 def test_other_models_get_no_chunk_flag(serve):
     assert CHUNK not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"] + CTX)["_ARGS"]
+
+
+CG = "--compilation-config"
+CG_DEFAULT = [1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56, 64]
+
+
+def _cg(args):
+    return json.loads(args[args.index(CG) + 1])["cudagraph_capture_sizes"]
+
+
+def test_inkling_gets_decode_graphs_up_to_8_streams(serve):
+    # MEASURED: vLLM derives the decode graph request counts from the token sizes (cdiv(size, 1 + k)), so the old
+    # recipe [1..8] captured ONE decode graph (1 request); 2+ streams ran eager (2 streams: 61 -> 130 tok/s/stream).
+    for spec in ([], ["--speculative-config", json.dumps(_spec("dflash"))], ["--speculative-config", json.dumps(_spec("dspark"))]):
+        args = serve(MODEL + spec)["_ARGS"]
+        assert args.count(CG) == 1 and _cg(args) == CG_DEFAULT
+
+
+@pytest.mark.parametrize("given", [[CG, "{}"], [f"{CG}={{}}"], [f"{CG}.mode=0"], ["-cc", "{}"], ["-O3"]])
+def test_explicit_compilation_config_wins(serve, given):
+    args = serve(MODEL + given)["_ARGS"]
+    assert CG not in args[:args.index(given[0])] and sum(a.startswith((CG, "-cc", "-O")) for a in args) == 1
+
+
+def test_cudagraph_env_sets_or_switches_off(serve):
+    assert _cg(serve(MODEL, RADIANCE_INKLING2_CUDAGRAPH_SIZES="1,2,8")["_ARGS"]) == [1, 2, 8]
+    for off in ("0", ""):
+        assert CG not in serve(MODEL, RADIANCE_INKLING2_CUDAGRAPH_SIZES=off)["_ARGS"]
+
+
+def test_other_models_get_no_graph_sizes(serve):
+    assert CG not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])["_ARGS"]

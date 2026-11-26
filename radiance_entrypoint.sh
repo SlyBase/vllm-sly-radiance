@@ -124,7 +124,15 @@ case "${_target,,} ${_cfg,,} ${_parser,,}" in
     elif [[ "$_ctx" =~ ^[0-9]+$ ]] && [ "$_ctx" -le 131072 ]; then _chunk=4096
     else _chunk=""; fi
     case " $* " in *" --max-num-batched-tokens"*) ;; *)
-      { [ -z "$_chunk" ] || [ "$_chunk" = 0 ]; } || set -- "$@" --max-num-batched-tokens "$_chunk" ;; esac ;;
+      { [ -z "$_chunk" ] || [ "$_chunk" = 0 ]; } || set -- "$@" --max-num-batched-tokens "$_chunk" ;; esac
+    # Decode CUDA graphs for 1-8 streams. vLLM derives the decode graph request counts from the token sizes
+    # (ceil(size / (1 + k)) requests, k = 7 -> 8 tokens each), so the old recipe [1..8] captured ONE decode graph and every
+    # 2+ stream step ran eager (MEASURED, with the tile-16..64 MoE fix: 2 streams 82 -> 130 tok/s/stream, 8 streams 313 -> 333
+    # aggregate). 1-8 keep the one-request steps of the adaptive verify, 16..64 are 2..8 requests of 8 tokens (+0.4 GiB, KV -2 %).
+    # RADIANCE_INKLING2_CUDAGRAPH_SIZES=<comma list> sets the sizes, `0` / empty = vLLM's own; any --compilation-config / -cc / -O wins.
+    _cg="${RADIANCE_INKLING2_CUDAGRAPH_SIZES-1,2,3,4,5,6,7,8,16,24,32,40,48,56,64}"; _hascc=0
+    for _a in "$@"; do case "$_a" in --compilation-config*|-cc|-cc=*|-O*) _hascc=1 ;; esac; done
+    { [ -z "$_cg" ] || [ "$_cg" = 0 ] || [ "$_hascc" = 1 ]; } || set -- "$@" --compilation-config "{\"cudagraph_capture_sizes\":[$_cg]}" ;;
 esac
 
 # Topology + bandwidth sweep, kicked off in the BACKGROUND so it never delays startup.

@@ -13,6 +13,15 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 ## [Unreleased]
 
 ### Changed
+- **Inkling-2-Mini with 2-8 streams: aggregate 107/140/191 -> 214/257/333 tok/s at 2/4/8 streams (1 stream unchanged, 230 tok/s per stream).**
+  *Cause, MEASURED* (rocprofv3 kernel trace, 1/2/4 streams): (1) from 2 streams the spec-verify step has 16-64 rows, the plan picks MoE
+  token tile 16..64 and the HIP GEMV (tile 8 only) was skipped for the Triton prefill GEMM: `_expert_gemm` 7.8 ms/token against
+  3.8 ms/token of `moe_gemv` at one stream. (2) The recipe `cudagraph_capture_sizes [1..8]` captured ONE decode graph (vLLM derives
+  the request counts from the token sizes: `ceil(size / (1 + k))`), so every 2+ stream step ran eager. Fix: `hip_tile_view` runs a tile-T
+  launch (T = 16, 24 ... 64) as T/8 tile-8 CTAs of the same expert (same rows, one device op each, graph safe; `RADIANCE_INKLING2_HIP_MOE_SPLIT=0` = old route),
+  and the entrypoint defaults the decode graph sizes to `1..8,16,24,...,64` (`RADIANCE_INKLING2_CUDAGRAPH_SIZES`; `0`/empty = vLLM's own; an explicit
+  `--compilation-config` wins; +0.4 GiB, KV 54 643 -> 53 608 tokens). Greedy gate 4/4 identical to before, single stream unchanged.
+  Tests `sly/inkling2/tests/test_moe_hip_host.py`, `test_moe_hip.py` (GPU), `test_entrypoint_defaults.py`.
 - **Inkling-2-Mini prefill 2.8-3.1x faster (P0 1192/1298/1288/1245 -> 3584-3713 / 4217-4366 / 4007-4113 / 3828-3900 pp/s at 1.6k/6.3k/12.6k/25k tokens, two runs).**
   *MEASURED* 2026-11-26, R9700 210 W, BetterBench `--prefill`, DFlash2, cold prefix cache, max-model-len 32768, image `ink-200c` as control.
   Four steps, each with its own arm: (1) the launch table of the NVFP4 expert GEMM is the default (`RADIANCE_INKLING2_MOE_PREFILL_CFG`,

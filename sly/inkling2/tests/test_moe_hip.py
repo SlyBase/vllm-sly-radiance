@@ -557,3 +557,20 @@ def test_mxfp8_fallback_forwards_tensors_and_the_platform_tiles_cpu(tmp_path, mo
         torch.testing.assert_close(out[valid].float(), ref[valid], rtol=1e-2, atol=1e-2)
     finally:
         _restore(restored)
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("tile", [16, 32, 64])
+def test_split_big_tile_matches_the_big_tile_reference(hip, fmt, tile):
+    """2-8 streams plan tile 16..64: the kernel runs them as tile-8 CTAs (`hip_tile_view`); the result is the
+    big tile's reference, rows past a row end stay unwritten."""
+    import radiance_inkling2_moe as mod
+    rows_per = [1, 5, tile, 3, tile - 1, 2, 9, 8][:8]
+    c = make_case(fmt, experts=8, n=2304 if tile == 16 else 256, k=2304 if tile == 16 else 256, tile=tile,
+                  rows_per=rows_per, count=7, seed=11)
+    plan8, tiles8 = mod.hip_tile_view(c["plan"], c["tiles"])
+    out = run_hip(hip, dict(c, plan=plan8, tiles=tiles8))
+    ref, valid = reference(c), valid_mask(c)
+    assert ref[valid].abs().max() > 0
+    torch.testing.assert_close(out[valid].float(), ref[valid], rtol=1e-2, atol=1e-2)
+    assert torch.isnan(out[~valid]).all()
