@@ -1,0 +1,10 @@
+{
+ "concurrency": [
+  {
+   "level": 1,
+   "ok": 48,
+   "requests": 48,
+   "aggregate_tps": 163.0176646050933
+  }
+ ]
+}

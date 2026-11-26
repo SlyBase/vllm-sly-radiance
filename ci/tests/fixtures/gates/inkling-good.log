@@ -1,0 +1,4 @@
+(APIServer pid=1) INFO startup.py non-default args: {... 'cudagraph_capture_sizes': [1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56, 64] ...}
+RADIANCE_CODA_FP4_PROOF n=1 mxfp8->nvfp4 experts=128 bytes 1051 MB -> 573 MB
+[radiance.w4a16] post-load: gate_up+silu fused 0, GDN qkvz+ba merged 0, drafter conv projections int4 0
+(EngineCore pid=426) INFO 11-26 11:28:59 [speculator.py:179] Capturing model for DFlash2 speculator...

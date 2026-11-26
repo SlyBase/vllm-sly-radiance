@@ -46,7 +46,7 @@ on:
       mode:
         description: gate scope
         type: choice
-        options: [fast, full]
+        options: [fast, full, quick]
         default: fast
       force:
         description: take the GPU even if production saw recent traffic
@@ -153,6 +153,12 @@ jobs:
     environment: gpu-window
     timeout-minutes: 180
     steps:
+      - name: clean workspace (root-owned files of an earlier job break the checkout)
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -delete 2>/dev/null \
+            || docker run --rm -v "$GITHUB_WORKSPACE:/w" busybox find /w -mindepth 1 -delete \
+            || echo "::warning::could not clean $GITHUB_WORKSPACE"
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -213,7 +219,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_run' ||
       (github.ref == 'refs/heads/main' && inputs.image == '' && inputs.profile == 'vllm7-mxfp4' &&
-       !inputs.record_baseline)
+       !inputs.record_baseline && inputs.mode != 'quick')
     runs-on: ubuntu-26.04
     steps:
       # The App token, not GITHUB_TOKEN: a tag pushed with the latter does not start build.yml.

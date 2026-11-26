@@ -112,6 +112,12 @@ jobs:
     env:
       REGISTRY_IMAGE: ghcr.io/slybase/vllm-sly-radiance
     steps:
+      - name: clean workspace (root-owned files of an earlier job break the checkout)
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -delete 2>/dev/null \
+            || docker run --rm -v "$GITHUB_WORKSPACE:/w" busybox find /w -mindepth 1 -delete \
+            || echo "::warning::could not clean $GITHUB_WORKSPACE"
+
       - uses: actions/checkout@v7
 
       - name: resolve version, ROCm base and tag

@@ -1,0 +1,17 @@
+{
+  "_why": "Seed values. decode_tps / prefill_pps are null (skipped) until the first backtest window records them: python3 ci/quick_bench.py run --profile qwen ... --record. tok_per_update floor 5.2 = QP2 (1.13.4) BetterBench code median 5.5 minus ~5 %; c2/c4_over_c1_min 2.0 is conservative (full-gate baseline 2.66) until recorded with this probe.",
+  "decode_tps": {
+    "prose": null,
+    "code": null
+  },
+  "prefill_pps": null,
+  "tok_per_update": {
+    "code": 5.2
+  },
+  "c2_over_c1_min": 1.4,
+  "c4_over_c1_min": 2.0,
+  "thresholds": {
+    "decode_pct": 2.0,
+    "prefill_pct": 3.0
+  }
+}

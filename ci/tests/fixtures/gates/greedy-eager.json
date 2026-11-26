@@ -1,0 +1,22 @@
+[
+ {
+  "finish": "length",
+  "content": "",
+  "reasoning": "The user wants a Python function that:\n1. Returns the n-th Fibonacci number\n2. Uses memoization\n3. Has a docstring\n4. Has three assert tests\n\nLet me think about the design:\n\n- Memoization: I can use a dictionary to cache results, or use `functools.lru_cache`. Since the user specifically said \"using memoization,\" I'll implement it with a dictionary to make the memoization explicit and educational. Alternatively, I could use `lru_cache` which is a form of memoization. Let me go with a manual dictionary approach to make it more explicit, but I'll also consider `lru_cache`. Actually, let me use a dictionary-based approach since it's more illustrative of the concept.\n\n- Fibonacci: F(0) = 0, F(1) = 1, F(n) = F(n-1) + F(n-2)\n\n"
+ },
+ {
+  "finish": "length",
+  "content": "\n\n```python\ndef binary_search(arr, target):\n    low, high = 0, len(arr) - 1\n\n    while low <= high:\n        mid = (low + high) // 2\n\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target",
+  "reasoning": "The user wants a Python implementation of binary search and a two-sentence statement of its time complexity. Let me write a clean, correct binary search and then state the time complexity concisely in exactly two sentences.\n\nBinary search: works on a sorted array, repeatedly divides the search interval in half. Compare target with middle element, then narrow to left or right half.\n\nTime complexity: O(log n) for both best and worst case. Space complexity is O(1) for iterative, O(log n) for recursive. The user asked for time complexity specifically.\n\nLet me write a clean iterative implementation.\n"
+ },
+ {
+  "finish": "length",
+  "content": "",
+  "reasoning": "The user wants a bash one-liner that counts lines of all .py files recursively from the current directory, plus a brief explanation.\n\nLet me think about the options:\n\n1. `find . -name \"*.py\" -exec wc -l {} +` \u2014 This finds all .py files and runs wc -l on them. The `+` at the end batches the arguments, which is more efficient than `\\;`. This will print a line count per file AND a total line at the end.\n\n2. `find . -name \"*.py\" -exec cat {} + | wc -l` \u2014 This cats all files and pipes to wc -l, giving just a single total number.\n\n3. `find . -name \"*.py\" -print0 | xargs -0 wc -l` \u2014 Similar to option 1 but using xargs.\n\nThe user said \"counts the lines of all .py files\""
+ },
+ {
+  "finish": "length",
+  "content": "\n\n## What Is a Mutex?\n\nA **mutex** (short for *mutual exclusion*) is a synchronization primitive that lets only **one thread at a time** enter a critical section of code. It prevents **data races** \u2014 situations where two threads read/write the same memory concurrently and produce undefined results.\n\nThe basic",
+  "reasoning": "The user wants an explanation of what a mutex is and a short C++ example using std::mutex. Let me provide a clear, concise explanation followed by a practical code example.\n\nA mutex (mutual exclusion) is a synchronization primitive that ensures only one thread can access a shared resource at a time. It prevents data races by providing a lock/unlock mechanism.\n\nFor the example, I'll show a simple case where two threads increment a shared counter, protected by a mutex. I'll use std::mutex with std::lock_guard for RAII-style locking, which is the idiomatic C++ approach.\n"
+ }
+]

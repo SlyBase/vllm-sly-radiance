@@ -140,11 +140,17 @@
     "aggregate_tps_min_ratio_conc_1": 0.85
   },
   "chat_replay": {
-    "depths": [4000, 8000, 16000],
+    "depths": [
+      4000,
+      8000,
+      16000
+    ],
     "fast_levels": 1,
     "turns": 3,
     "max_tokens": 256,
     "_why": "BetterBench single-stream prompts are 60-120 tokens; the 1.9.0 k=15 release lost 50 % of the throughput in a ~1k-token chat and 30 % at 16k while the weighted median rose 10.3 %. Cold prefix cache (unique cache_salt), decode-only t/s (TTFT excluded), thinking off."
   },
-  "smoke_note": "Every answer is additionally checked for leaked <think>/</think> tags (reasoning parser armed); an empty reasoning_content is normal for easy prompts."
+  "smoke_note": "Every answer is additionally checked for leaked <think>/</think> tags (reasoning parser armed); an empty reasoning_content is normal for easy prompts.",
+  "quick_profile": "qwen",
+  "tok_per_update_floor": 5.2
 }

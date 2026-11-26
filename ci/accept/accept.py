@@ -46,6 +46,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
+sys.path.insert(0, str(REPO / "ci"))
+import quick_bench  # noqa: E402  (regression gates shared with the quick tier)
 
 # The needle prompt is generated, not stored: ~100k tokens of filler with one
 # marker sentence, so the long-prefill path (and the mamba-align fix) is exercised.
@@ -532,6 +534,36 @@ def run_gsm8k(python: str, base_url: str, model: str, limit: int, out_dir: Path)
 # --------------------------------------------------------------------------- #
 # Verdict
 # --------------------------------------------------------------------------- #
+def gate_checks(results: dict, profile: dict, add) -> None:
+    """Regression gates of ci/quick_bench.py as hard checks: hook proof, greedy vs the last release,
+    concurrency shape and drafter floor (the last two from the BetterBench result of fast/full)."""
+    qp = profile.get("quick_profile")
+    if "hooks" in results:
+        add("hook proof", not results["hooks"], results["hooks"] or "all present", "every required hook line")
+    q = results.get("quick")
+    if q:
+        for name, ok, detail in q["rows"]:
+            add(f"quick {name}", ok, detail, "reference JSON")
+        probs = [f for f in q["failures"] if f.startswith("greedy")]
+        add("quick greedy", not probs, probs or "ok", "matches the last release")
+    if results.get("greedy") is not None and qp:
+        ref_dir = ROOT / "references"
+        ref = json.loads((ref_dir / f"quick-{qp}-greedy.json").read_text())
+        allow = json.loads((ref_dir / "greedy_allow.json").read_text()).get(qp, {})
+        probs = quick_bench.greedy_problems(results["greedy"], ref, allow)
+        add("greedy vs last release", not probs, probs or "4/4 identical",
+            "identical, or allow-listed with a reason")
+    bb = results.get("betterbench") or {}
+    agg = {int(k): v for k, v in (bb.get("aggregate_tps") or {}).items()}
+    if len(agg) > 1:
+        probs = quick_bench.concurrency_problems(agg)
+        add("concurrency shape", not probs, probs or agg, "rising 1>2>4>8, 2 streams >= 1.2x")
+    floor = profile.get("tok_per_update_floor")
+    if floor and bb:
+        probs = quick_bench.floor_problems(bb.get("categories_tokens_per_update") or {}, floor)
+        add("drafter floor", not probs, probs or "ok", f"tok/update (code) >= {floor}")
+
+
 def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[dict]:
     checks: list[dict] = []
 
@@ -564,8 +596,12 @@ def compare(results: dict, baseline: dict, thresholds: dict, mode: str) -> list[
             f"{s_now:.0f}s", f"<= {thresholds['startup_s_max_ratio']:.1f}x of {s_base:.0f}s",
             hard=False)
 
+    gate_checks(results, profile, add)
+
     smoke = results.get("smoke", {})
-    if smoke.get("skipped"):
+    if not smoke:
+        pass  # quick tier: no smoke phase
+    elif smoke.get("skipped"):
         # A dry run never sends a request; reporting "all pass" here would claim
         # a result nobody measured.
         add("smoke", None, f"skipped ({smoke['skipped']})", "4/4 pass", hard=False)
@@ -757,7 +793,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", required=True)
     ap.add_argument("--image", required=True, help="candidate image tag, e.g. vllm-sly-radiance:0.2.5-rocm10.0")
-    ap.add_argument("--mode", choices=["fast", "full"], default="fast")
+    ap.add_argument("--mode", choices=["quick", "fast", "full"], default="fast")
     ap.add_argument("--baseline", help="defaults to ci/accept/baselines/<profile name>.json")
     ap.add_argument("--out", default="out/accept", help="result directory")
     ap.add_argument("--host", default=os.environ.get("ACCEPT_HOST", "192.168.178.51"))
@@ -828,7 +864,10 @@ def main() -> int:
         log(f"candidate up: {json.dumps(results['start'])}")
 
         log("checking logs")
-        results["logs"] = check_logs(win.logs(), profile)
+        log_text = win.logs()
+        results["logs"] = check_logs(log_text, profile)
+        if profile.get("quick_profile"):
+            results["hooks"] = quick_bench.hook_problems(log_text, profile["quick_profile"])
         if not results["logs"]["ok"]:
             failures.append("logs")
             log(f"log check failed: missing={results['logs']['missing']} "
@@ -837,13 +876,24 @@ def main() -> int:
         model = profile["model"]
         before("smoke")
         log("smoke tests")
-        results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
-        if not results["smoke"]["ok"]:
-            failures.append("smoke")
-
-        if args.dry_run:
-            log("DRY-RUN: skipping betterbench and gsm8k")
+        if args.mode == "quick":
+            # ~5 min tier for PR builds: hooks + greedy + decode/prefill/concurrency probes vs the
+            # reference JSON (ci/README.md, "GPU tiers"); no smoke, chat replay, BetterBench or GSM8K
+            if args.dry_run:
+                log("DRY-RUN: skipping the quick probes")
+            else:
+                before("quick")
+                results["quick"], _ = quick_bench.run_quick(profile["quick_profile"], base_url, model, log_text)
         else:
+            results["smoke"] = run_smoke(base_url, model, profile, args.dry_run)
+            if not results["smoke"]["ok"]:
+                failures.append("smoke")
+
+        if args.dry_run or args.mode == "quick":
+            log("skipping greedy, betterbench and gsm8k")
+        else:
+            before("greedy")
+            results["greedy"] = quick_bench.greedy_run(base_url, model)
             before("chat")
             log(f"chat replay (multi-turn, growing context, {args.mode})")
             results["chat"] = run_chat_replay(base_url, model, profile, args.mode)
