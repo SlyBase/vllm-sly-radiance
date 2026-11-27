@@ -14,5 +14,5 @@
   "c2_over_c1_min": 1.02,
   "c4_over_c1_min": 1.11,
   "c8_over_c1_min": 1.61,
-  "gsm8k_correct": 47
+  "gsm8k_correct": 44
 }

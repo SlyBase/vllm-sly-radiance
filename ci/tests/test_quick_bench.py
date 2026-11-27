@@ -273,6 +273,10 @@ class FakeServer(unittest.TestCase):
             def do_POST(self):
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 n = req.get("max_tokens", 8)
+                state["inflight"] = state.get("inflight", 0) + 1
+                state["max_inflight"] = max(state.get("max_inflight", 0), state["inflight"])
+                __import__("time").sleep(0.02)
+                state["inflight"] -= 1
                 state["drafts"] += n // 5
                 state["acc"] += 4 * (n // 5)
                 self.send_response(200)
@@ -333,6 +337,22 @@ class FakeRelease(FakeServer):
             self.assertIn("references not recorded, run ci/quick_backtest.sh RECORD=1", " ".join(fails))
             self.assertEqual(self.state, before)  # no probe was sent
             self.assertTrue(report["unrecorded"])
+
+    def test_gsm8k_runs_greedy_one_request_at_a_time(self):
+        # batching changes spec-decode numerics: the quality check must not run batched
+        self.state["max_inflight"] = 0
+        items = qb.gsm8k_items(self.base, "m", n=6)
+        self.assertEqual(len(items), 6)
+        self.assertEqual(self.state["max_inflight"], 1)
+        self.assertEqual(qb.gsm8k_probe(self.base, "m", n=6), sum(items))
+
+    def test_gsm8k_subcommand_prints_item_flags(self):
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(qb.main(["gsm8k", "--base", self.base, "--model", "m", "--n", "4"]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual((len(out["items"]), out["correct"]), (4, sum(out["items"])))
 
     def test_release_record_then_pass_with_gsm8k_and_c8(self):
         import tempfile

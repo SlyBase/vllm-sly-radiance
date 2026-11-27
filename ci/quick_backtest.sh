@@ -15,6 +15,8 @@
 #   I-GOOD     1.14.0-rocm10.1 (Inkling)      PASS       reference arm (released image)
 #   I-CONC     ci-262-032eabe (Inkling)       FAIL       2-/4-stream collapse (c2/c1, c4/c1)
 #   I-INT4     1.14.0 + CONV_W4=1             FAIL       int4 drafter (hook "conv projections int4 0", tok/update)
+#   I-DENSE    1.14.0 + INKLING2_MXFP4_DENSE=1 PASS      1.14.1 defaults DENSE=1, 1.14.0 does not: the 1.14.0 reference arm that matches 1.14.1
+# GSM_ONLY=1: per arm only the GSM8K-50 check (c1, greedy), item flags in $OUT/<arm>.gsm.json -- records/compares that reference alone.
 # Exit 0 only when every arm gave its expected verdict.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,8 +29,8 @@ mkdir -p "$OUT" "$CACHE"/{qwen,inkling}/{triton,torch_compile,aiter}
 
 declare -A IMAGE=([Q-GOOD]=vllm-sly-radiance:1.13.4-rocm10.1 [Q-GOOD2]=vllm-sly-radiance:1.14.0-rocm10.1 [Q-EAGER]=vllm-sly-radiance:ci-262-ff1aff1
                   [I-GOOD]=vllm-sly-radiance:1.14.0-rocm10.1 [I-CONC]=vllm-sly-radiance:ci-262-032eabe
-                  [I-INT4]=vllm-sly-radiance:1.14.0-rocm10.1)
-declare -A EXPECT=([Q-GOOD]=PASS [Q-GOOD2]=PASS [Q-EAGER]=FAIL [I-GOOD]=PASS [I-CONC]=FAIL [I-INT4]=FAIL)
+                  [I-INT4]=vllm-sly-radiance:1.14.0-rocm10.1 [I-DENSE]=vllm-sly-radiance:1.14.0-rocm10.1)
+declare -A EXPECT=([Q-GOOD]=PASS [Q-GOOD2]=PASS [Q-EAGER]=FAIL [I-GOOD]=PASS [I-CONC]=FAIL [I-INT4]=FAIL [I-DENSE]=PASS)
 
 start_qwen() {  # production unit args of 1.13.4 (QP2/docker_cmd.txt); one -e per variable
   docker run -d --name "$C" --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 993 \
@@ -90,11 +92,16 @@ for arm in $ARMS; do
   docker rm -f "$C" >/dev/null 2>&1
   if [ "$profile" = qwen ]; then start_qwen "${IMAGE[$arm]}"
   elif [ "$arm" = I-INT4 ]; then start_inkling "${IMAGE[$arm]}" RADIANCE_DFLASH_CONV_W4=1
+  elif [ "$arm" = I-DENSE ]; then start_inkling "${IMAGE[$arm]}" RADIANCE_INKLING2_MXFP4_DENSE=1
   else start_inkling "${IMAGE[$arm]}"; fi
   if wait_health; then
     T1=$SECONDS
     [ "$arm" = I-INT4 ] && { docker exec "$C" env | grep -qx RADIANCE_DFLASH_CONV_W4=1 || echo "::error::env proof failed: RADIANCE_DFLASH_CONV_W4=1 not in container"; }
     docker logs "$C" > "$OUT/$arm.server.log" 2>&1
+    if [ "${GSM_ONLY:-0}" = 1 ]; then
+      python3 "$HERE/quick_bench.py" gsm8k --base "http://127.0.0.1:$PORT" --model "$model" | tee "$OUT/$arm.gsm.json"
+      docker rm -f "$C" >/dev/null 2>&1; echo "--- $arm gsm8k $((SECONDS - T1))s"; continue
+    fi
     rec=(); [ "${RECORD:-0}" = 1 ] && [ "${EXPECT[$arm]}" = PASS ] && rec=(--record)
     python3 "$HERE/quick_bench.py" run --release --profile "$profile" --base "http://127.0.0.1:$PORT" --model "$model" \
       --log "$OUT/$arm.server.log" --out "$OUT/$arm.json" "${rec[@]}" | tee "$OUT/$arm.txt"
@@ -109,6 +116,8 @@ for arm in $ARMS; do
   SECS[$arm]="start $((${T1:-$SECONDS} - T0))s + tier $((SECONDS - ${T1:-$SECONDS}))s"
   echo "--- $arm ${SECS[$arm]}"
 done
+
+[ "${GSM_ONLY:-0}" = 1 ] && exit 0
 
 echo; echo "arm       expected  got"
 bad=0
