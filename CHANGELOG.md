@@ -12,6 +12,19 @@ upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
 ## [Unreleased]
 
+### Changed
+- **Inkling-2-Mini: breakable prefill CUDA graphs and the 64-row MoE plan tile are now entrypoint defaults (Inkling targets only; `VLLM_USE_BREAKABLE_CUDAGRAPH=0` / `RADIANCE_INKLING2_HIP_MOE_TILE=0` switch them off, an explicit value wins).**
+  *MEASURED* 2026-11-27, R9700 210 W, release-test config (32768 ctx, DFlash2 k=7), overlay of this branch vs 1.14.1, no extra env on either side (defaults proven in the server process environment):
+  BetterBench c8 (48 requests) 275.6 -> **412.7** tok/s (the 1.14.1 number is a cold-process run, first wave 9.0 s; a warm 1.14.1 control read 334), first wave 9.0 -> 0.7 s, TTFT p50 649 -> 301 ms;
+  Mia TTFT prose / code 92.3 / 114.4 -> **83.0 / 106.1 ms**, Mia decode 180.2 / 249.4 -> 178.5 / 247.4 tok/s (neutral), 8k prefill 1.47 -> 1.50 s, greedy gate 4/4 identical.
+  *Cause:* (1) the Inkling attention already breaks out of graph capture, so `VLLM_USE_BREAKABLE_CUDAGRAPH=1` lets prefill batches replay a graph: a cold first request costs 72 ms instead of 4.2 s; (2) the tile-16..64 expert GEMV kernel (`moe_gemv`) now takes the plan's tile as ONE CTA per expert tile (weights streamed once, passes of 8 rows) and `RADIANCE_INKLING2_HIP_MOE_TILE=64` plans 17..64-token steps (2-8 streams of verify rows) with tile 64 instead of 16.
+  *Quality (batch path changed):* GSM8K-150 greedy (lm-eval, flexible-extract) vs 1.14.1: concurrency 1 identical item for item (124 / 124); concurrency 8 119 vs 122 (-2.0 pp, 7 lost / 4 won, McNemar p 0.55; same-image c8 vs c1 differs by 1.3 / 3.3 pp: batching alone reorders sums). Accepted as not significant and within the -2 pp rule.
+  *Measured, not adopted:* prefill-shape warmup ladder (superseded by the graphs), MXFP4 dense GEMV up to 64 rows (`GEMV_MAX_M`, not additive with the tile), wide graph sizes to 512, async scheduling (does not start at 32768: KV 8.64 GiB needed, 8.01 available).
+- **Production arguments cost +24 % 8k prefill (MEASURED, overlay on prod args, BB prefill 8k): 1.80 s vs 1.45-1.50 s.** Two causes: (1) the entrypoint's chunk-4096 default only applies to `--max-model-len <= 131072`, so prod's 307200 runs chunk 2048 (1.80 -> 1.59 s with ctx 32768 or 131072 alone: the context size costs nothing); (2) fp8 KV (1.59 -> 1.45 s with bf16 KV). Prefix caching costs nothing (1.804 vs 1.803 s). With fp8 KV, chunk 4096 needs ctx <= ~292k (307200: 8.24 GiB KV needed, 8.01 available); ctx 262144 + `--max-num-batched-tokens 4096` measured 1.58 s. fp8 KV caches prefixes in 128-token blocks (bf16: 64): a 2.5k-token prompt hits 2432 of 2484 tokens either way; only prompts shorter than 128 tokens never hit.
+
+### Fixed
+- The dynamic MTP draft controller logs `dynamic draft intentionally inactive on vLLM >= 0.34 / DFlash` once instead of `install failed (dynamic draft disabled): No module named ...` when the MTP proposer module does not exist (V2 runner / DFlash); other install errors are still reported. DOCKERHUB.md / docker-compose.yml no longer claim the controller is "baked ON".
+
 ## [1.14.1] - 2026-11-26
 
 ### Changed

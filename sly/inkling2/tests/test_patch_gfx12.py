@@ -575,3 +575,14 @@ def test_fp8_kv_unpack_reads_the_e4m3_values(tree):
     want = src.view(-1, D)[offsets // D].float()
     want[N - 1] = 0.0                                             # masked row: other=0
     assert torch.equal(out, want)
+
+
+def test_expert_plan_takes_the_decode_tile_from_the_hip_moe_on_rocm(tree):
+    """moe.py plan(): vLLM plans 17..128 tokens as tile 16 (one weight stream per 16 rows of an expert);
+    on ROCm the tile comes from radiance_inkling2_moe.decode_tile (None = vLLM's own choice)."""
+    run(tree)
+    s = (tree / "vllm/models/inkling2/nvidia/moe.py").read_text()
+    assert "from radiance_inkling2_moe import decode_tile" in s
+    assert "self.shapes, decode_tile(tokens)" in s or "decode_tile(tokens)" in s
+    ast.parse(s)
+    assert "torch.version.hip" in s[s.index("def plan(self, tokens"):s.index("def scales(self")]

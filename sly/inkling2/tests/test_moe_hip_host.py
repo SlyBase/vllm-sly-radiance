@@ -115,18 +115,46 @@ def test_tile8_view_is_the_identity(m):
     assert plan8 is c["plan"] and tiles8 is c["tiles"]
 
 
-@pytest.mark.parametrize("tile", [16, 32])
+@pytest.mark.parametrize("tile", [16, 32, 64])
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
-def test_multi_stream_tiles_launch_the_hip_kernel_as_tile8(m, tile, fmt):
+def test_multi_stream_tiles_launch_the_hip_kernel_with_the_plan_tile(m, tile, fmt):
+    """Default: a tile-T CTA is ONE kernel CTA (the weights of its expert are read once, the kernel loops over
+    the rows in passes of lds_rows) - not T/8 tile-8 CTAs that each stream the expert again."""
     mod, fake = m
     c = make_case(fmt, experts=2, n=64, k=256, tile=tile, rows_per=[1, 5], seed=3)
     out = (mod.nvfp4_expert_gemm if fmt == "nvfp4" else mod.mxfp8_expert_gemm)(
         *(nvfp4_args(c) if fmt == "nvfp4" else mxfp8_args(c)))
     (kind, a), = fake.calls
-    f = tile // 8
     # ..., tiles ptr, max_ctas, experts, N, K, tile, lds rows, stream
-    assert kind == fmt and a[-7:-3] == (2 * f, 2, 64, 256) and a[-3] == 8
+    assert kind == fmt and a[-7:-3] == (2, 2, 64, 256) and a[-3] == tile
+    assert a[-8] == c["tiles"].data_ptr()              # the plan's own tile table, no expanded copy
     assert out.shape == (c["plan"].rows, 64)
+
+
+@pytest.mark.parametrize("tile", [16, 32])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_passes_off_switch_restores_the_tile8_split(m, monkeypatch, tile, fmt):
+    mod, fake = m
+    monkeypatch.setattr(mod, "_PASSES", False)
+    c = make_case(fmt, experts=2, n=64, k=256, tile=tile, rows_per=[1, 5], seed=3)
+    (mod.nvfp4_expert_gemm if fmt == "nvfp4" else mod.mxfp8_expert_gemm)(
+        *(nvfp4_args(c) if fmt == "nvfp4" else mxfp8_args(c)))
+    (kind, a), = fake.calls
+    assert a[-7:-3] == (2 * (tile // 8), 2, 64, 256) and a[-3] == 8
+
+
+def test_passes_env_knob(monkeypatch):
+    fake = types.ModuleType("radiance_inkling2_moe_hip")
+    monkeypatch.setitem(sys.modules, "radiance_inkling2_moe_hip", fake)
+    import radiance_inkling2_moe as mod
+    try:
+        monkeypatch.delenv("RADIANCE_INKLING2_HIP_MOE_PASSES", raising=False)
+        assert importlib.reload(mod)._PASSES is True                   # default on
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_PASSES", "0")
+        assert importlib.reload(mod)._PASSES is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(mod)
 
 
 def test_tiles_from_128_up_and_the_off_switch_stay_on_triton(m, monkeypatch):
@@ -183,20 +211,21 @@ SHAPES = [(n, k) for n, k in ((2304, 2304), (2304, 1152), (48, 192), (32, 64))]
 @pytest.mark.parametrize("nvfp4", [True, False])
 @pytest.mark.parametrize("n,k", SHAPES)
 @pytest.mark.parametrize("max_ctas", [8, 29, 64])
-def test_extents_of_the_real_shapes_fit_their_buffers(m, nvfp4, n, k, max_ctas):
+@pytest.mark.parametrize("tile", [8, 64])
+def test_extents_of_the_real_shapes_fit_their_buffers(m, nvfp4, n, k, max_ctas, tile):
     mod, _ = m
     if not nvfp4 and k % 128:
         pytest.skip("MXFP8 needs K % 128 == 0")
     e = 128
-    ext = mod.launch_extents(nvfp4, rows=8 * max_ctas, max_ctas=max_ctas, experts=e, n=n, k=k)
+    ext = mod.launch_extents(nvfp4, rows=tile * max_ctas, max_ctas=max_ctas, experts=e, n=n, k=k, tile=tile)
     # bytes the kernel may touch of each buffer, never beyond its exact size
     wb = e * n * (k // 2 if nvfp4 else k)
     sb = e * n * (k // 16 if nvfp4 else k // 32)
-    ab = 8 * max_ctas * (k // 2 if nvfp4 else k)
-    asb = 8 * max_ctas * (k // 16 if nvfp4 else k // 32)
+    ab = tile * max_ctas * (k // 2 if nvfp4 else k)
+    asb = tile * max_ctas * (k // 16 if nvfp4 else k // 32)
     assert ext["weight"] == wb and ext["weight_scale"] == sb       # the whole expert pool is read
     assert ext["act"] == ab and ext["act_scale"] == asb              # every row, every group
-    assert ext["out"] == 8 * max_ctas * n * 2
+    assert ext["out"] == tile * max_ctas * n * 2
     assert ext["tiles"] == (2 * max_ctas + 1) * 4
     assert ext["expert_scale"] == e * 4
 
@@ -336,3 +365,40 @@ def test_wrapper_refuses_a_wider_item_type_even_if_the_bytes_suffice(m, field, d
     with pytest.raises(ValueError, match=field):
         mod.nvfp4_expert_gemm(*nvfp4_args(c))
     assert fake.calls == []
+
+
+# ---- decode tile: one weight stream per expert for 17..64 tokens ------------------------------------
+
+@pytest.mark.parametrize("tokens,want", [(1, None), (8, None), (16, None), (17, 64), (32, 64), (64, 64), (65, None), (4096, None)])
+def test_decode_tile_widens_only_the_multi_stream_decode_batches(m, monkeypatch, tokens, want):
+    mod, _ = m
+    monkeypatch.setattr(mod, "_DECODE_TILE", 64)
+    assert mod.decode_tile(tokens) == want
+
+
+def test_decode_tile_is_off_by_default_and_without_the_hip_module(m, monkeypatch):
+    mod, _ = m
+    monkeypatch.setattr(mod, "_DECODE_TILE", 0)
+    assert mod.decode_tile(32) is None
+    monkeypatch.setattr(mod, "_DECODE_TILE", 64)
+    monkeypatch.setattr(mod, "_hip", None)
+    assert mod.decode_tile(32) is None
+    monkeypatch.setattr(mod, "_hip", object())
+    monkeypatch.setattr(mod, "_PASSES", False)          # the tile-8 split has no use for a wide tile
+    assert mod.decode_tile(32) is None
+
+
+def test_decode_tile_env_knob(monkeypatch):
+    fake = types.ModuleType("radiance_inkling2_moe_hip")
+    monkeypatch.setitem(sys.modules, "radiance_inkling2_moe_hip", fake)
+    import radiance_inkling2_moe as mod
+    try:
+        monkeypatch.delenv("RADIANCE_INKLING2_HIP_MOE_TILE", raising=False)
+        assert importlib.reload(mod)._DECODE_TILE == 0
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_TILE", "64")
+        assert importlib.reload(mod)._DECODE_TILE == 64
+        monkeypatch.setenv("RADIANCE_INKLING2_HIP_MOE_TILE", "20")      # not a multiple of 8: refused
+        assert importlib.reload(mod)._DECODE_TILE == 0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(mod)

@@ -133,6 +133,13 @@ case "${_target,,} ${_cfg,,} ${_parser,,}" in
     # 2+ stream step ran eager (MEASURED, with the tile-16..64 MoE fix: 2 streams 82 -> 130 tok/s/stream, 8 streams 313 -> 333
     # aggregate). 1-8 keep the one-request steps of the adaptive verify, 16..64 are 2..8 requests of 8 tokens (+0.4 GiB, KV -2 %).
     # RADIANCE_INKLING2_CUDAGRAPH_SIZES=<comma list> sets the sizes, `0` / empty = vLLM's own; any --compilation-config / -cc / -O wins.
+    # Breakable (piecewise) CUDA graphs: prefill batches of the captured sizes replay a graph (the Inkling attention already
+    # breaks out of capture). MEASURED B1 at 210 W: cold first request 4.2 s -> 72 ms (n=8), 3.3 s -> 0.46 s (n=512); c8 first
+    # wave 8 s -> 0.8 s. VLLM_USE_BREAKABLE_CUDAGRAPH=0 switches it off; an explicit value wins.
+    export VLLM_USE_BREAKABLE_CUDAGRAPH="${VLLM_USE_BREAKABLE_CUDAGRAPH:-1}"
+    # MoE plan tile 64 (needs the passes kernel): 17..64-row steps (2-8 streams of spec-verify rows) run one CTA, one weight
+    # stream, per expert. MEASURED T64 at 210 W: c8 +6.8 %, c2 +16 %, Mia TTFT -8 ms, greedy gate 4/4. `0` / empty = vLLM's tile 16.
+    export RADIANCE_INKLING2_HIP_MOE_TILE="${RADIANCE_INKLING2_HIP_MOE_TILE-64}"
     _cg="${RADIANCE_INKLING2_CUDAGRAPH_SIZES-1,2,3,4,5,6,7,8,16,24,32,40,48,56,64}"; _hascc=0
     for _a in "$@"; do case "$_a" in --compilation-config*|-cc|-cc=*|-O*) _hascc=1 ;; esac; done
     { [ -z "$_cg" ] || [ "$_cg" = 0 ] || [ "$_hascc" = 1 ]; } || set -- "$@" --compilation-config "{\"cudagraph_capture_sizes\":[$_cg]}" ;;

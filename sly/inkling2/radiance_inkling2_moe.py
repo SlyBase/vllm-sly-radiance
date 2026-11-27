@@ -34,11 +34,32 @@ _HIP_TILE = 8  # decode and spec-verify steps (<= 8 tokens)
 # Bigger (prefill) tiles stay on Triton. RADIANCE_INKLING2_HIP_MOE_SPLIT=0 = the old route (Triton above tile 8).
 _HIP_SPLIT_MAX = 64
 _SPLIT = os.environ.get("RADIANCE_INKLING2_HIP_MOE_SPLIT") != "0"
+# Tile 16..64: the kernel takes the plan's tile as ONE CTA per expert tile and loops over its rows in passes of
+# `lds_rows` with the weights kept in registers, so an expert's weights are streamed once however many rows it has.
+# RADIANCE_INKLING2_HIP_MOE_PASSES=0 = the tile-8 split above (`hip_tile_view`: one weight stream per 8 rows).
+_PASSES = os.environ.get("RADIANCE_INKLING2_HIP_MOE_PASSES") != "0"
+# RADIANCE_INKLING2_HIP_MOE_TILE=<T> (multiple of 8, <= 64; default 0 = vLLM's tile 16): plan 17..64-token decode
+# batches (2-8 streams of spec-verify rows) with token tile T, so each expert is ONE CTA (one weight stream) up to
+# T rows. Needs the passes kernel; the plan is made in vLLM's `MoE.plan` (patch_inkling2_gfx12.py hunk 4n).
+def _env_tile():
+    v = os.environ.get("RADIANCE_INKLING2_HIP_MOE_TILE", "0")
+    return int(v) if v.isdigit() and int(v) % _HIP_TILE == 0 and int(v) <= _HIP_SPLIT_MAX else 0
+
+
+_DECODE_TILE = _env_tile()
+_FUSED_ROUTE_MAX = 16   # vLLM's fused routing (tokens <= 16) keeps its own tile
+
+
+def decode_tile(tokens):
+    """Token tile for `expert_plan` of a `tokens`-row step, None = vLLM's own choice."""
+    if _hip is None or not _PASSES or not _DECODE_TILE or not _FUSED_ROUTE_MAX < tokens <= _HIP_SPLIT_MAX:
+        return None
+    return _DECODE_TILE
 _TOPK = 8      # experts per token: an expert (= one CTA) gets at most one row per token
 # Geometry of radiance_inkling2_moe.hip (test_moe_hip.py asserts it equals hip.geometry()):
 # BN weight rows per block, LPR lanes per row, a lane streams `quantum` k-values per step and at
 # most NJ_MAX steps (K <= K_MAX), a CTA holds at most MAX_ROWS rows.
-GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304)
+GEOMETRY = dict(bn=32, lpr=8, quantum=32, nj_max=9, max_rows=8, k_max=2304, max_tile=64)
 
 
 # Prefill / extend tiles (plan.tile > 8) run the Triton kernels below. Inkling does not read vLLM's
@@ -127,14 +148,14 @@ def hip_tile_view(plan, tiles):
 
 
 @functools.lru_cache(maxsize=None)
-def launch_extents(nvfp4, rows, max_ctas, experts, n, k):
+def launch_extents(nvfp4, rows, max_ctas, experts, n, k, tile=_HIP_TILE):
     """Bytes of each buffer the HIP kernel can touch, by emulating its index math over the whole
     launch (every block / wave / lane / step; every CTA with the worst case of 8 rows and the last
     expert).  Mirrors radiance_inkling2_moe.hip: change both together."""
     import numpy as np
 
     g = GEOMETRY
-    assert rows == _HIP_TILE * max_ctas and k % g["quantum"] == 0
+    assert rows == tile * max_ctas and k % g["quantum"] == 0
     nq = k // g["quantum"]
     qb, sb = (16, 2) if nvfp4 else (32, 1)         # weight / act bytes and scale bytes per quantum
     cols = nq * sb                                  # act scale columns per row
@@ -173,7 +194,7 @@ _DTYPE = dict(row_scale=torch.float32, expert_scale=torch.float32, tiles=torch.i
 
 def _check_launch(nvfp4, plan, experts, n, k, **tensors):
     """Refuse a launch whose index math leaves a buffer (a GPU fault can reset the host)."""
-    ext = launch_extents(nvfp4, plan.rows, plan.max_ctas, experts, n, k)
+    ext = launch_extents(nvfp4, plan.rows, plan.max_ctas, experts, n, k, plan.tile)
     for name, t in tensors.items():
         if not t.is_contiguous():
             raise ValueError(f"{name}: not contiguous")
@@ -377,7 +398,8 @@ def nvfp4_expert_gemm(act, act_scale, row_scale, weight, weight_scale, expert_sc
     interpreter mis-computes bf16 dots, so the tests pass float32 (same values)."""
     n, k = weight.shape[1], weight.shape[2] * 2
     if _hip_fits(plan, k, True):
-        plan, tiles = hip_tile_view(plan, tiles)
+        if not _PASSES:
+            plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(True, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       row_scale=row_scale, weight=weight, weight_scale=weight_scale,
                       expert_scale=expert_scale, tiles=tiles)
@@ -437,7 +459,8 @@ def mxfp8_expert_gemm(act, act_scale, weight, weight_scale, expert_scale, tiles,
     launches."""
     n, k = weight.shape[1], weight.shape[2]
     if _hip_fits(plan, k, False):
-        plan, tiles = hip_tile_view(plan, tiles)
+        if not _PASSES:
+            plan, tiles = hip_tile_view(plan, tiles)
         _check_launch(False, plan, weight.shape[0], n, k, act=act, act_scale=act_scale,
                       weight=weight, weight_scale=weight_scale, expert_scale=expert_scale,
                       tiles=tiles)

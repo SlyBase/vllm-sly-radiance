@@ -10,7 +10,10 @@
 //          e2m1 x e4m3 block scale per 16 k, act scales in the R8c4 layout
 //   MXFP8: same without row_scale; e4m3 x e8m0 block scale per 32 k, byte 0 -> 2^-127
 // `tiles` = [expert per CTA | row end per CTA | CTA count | padded rows]: CTA c holds rows
-// 8c .. min(row_end, 8c + 8); CTAs >= the count do nothing; rows past row_end stay unwritten.
+// T*c .. min(row_end, T*c + T) for the plan's token tile T (a multiple of 8, <= 64); CTAs >= the count do
+// nothing; rows past row_end stay unwritten.  A CTA with more than `lds_rows` rows takes extra passes
+// over its rows with the weights kept in registers: an expert's weights are streamed ONCE however many
+// rows (<= T) it has, where T/8 tile-8 CTAs of one expert would stream them T/8 times.
 //
 // Numerics: both operands stay in their storage format and meet in v_dot4_f32_fp8_fp8 (four e4m3
 // products summed into fp32), one block scale at a time:
@@ -49,7 +52,8 @@ constexpr int BN = INK_NW * ROWS_PER_WAVE;      // weight rows (output columns) 
 constexpr int QUANTUM = 32;                     // k values per lane and step
 constexpr int NJ_MAX = 9;                       // steps per lane: K <= 9 * 8 * 32 = 2304
 constexpr int K_MAX = NJ_MAX * LPR * QUANTUM;
-constexpr int MAX_ROWS = 8;                     // rows per CTA = the token tile
+constexpr int MAX_ROWS = 8;                     // rows per pass (accumulators / LDS rows)
+constexpr int MAX_TILE = 64;                    // largest plan tile (rows per CTA)
 constexpr int NT = INK_NW * 32;
 constexpr int ITEMS = (MAX_ROWS * (K_MAX / QUANTUM) + NT - 1) / NT;  // act staging items per thread
 
@@ -86,7 +90,7 @@ __global__ __launch_bounds__(NT) void moe_gemv(
     const float *__restrict__ row_scale, const uint8_t *__restrict__ weight,
     const uint8_t *__restrict__ weight_scale, const float *__restrict__ expert_scale,
     __hip_bfloat16 *__restrict__ out, const int32_t *__restrict__ tiles,
-    int max_ctas, int E, int N, int K, int lds_rows)
+    int max_ctas, int E, int N, int K, int lds_rows, int tile)
 {
     constexpr int QB = NVFP4 ? 16 : 32;     // act and weight bytes per quantum
     constexpr int SB = NVFP4 ? 2 : 1;       // scale bytes (= groups) per quantum
@@ -95,8 +99,9 @@ __global__ __launch_bounds__(NT) void moe_gemv(
     if (cta >= tiles[2 * max_ctas]) return;
     const int expert = tiles[cta];
     if (expert < 0 || expert >= E) return;
-    int nr = tiles[max_ctas + cta] - cta * MAX_ROWS;
-    if (nr > MAX_ROWS) nr = MAX_ROWS;
+    const int row0 = cta * tile;
+    int nr = tiles[max_ctas + cta] - row0;
+    if (nr > tile) nr = tile;
     if (nr <= 0) return;
 
     const int nq = K / QUANTUM;
@@ -119,7 +124,7 @@ __global__ __launch_bounds__(NT) void moe_gemv(
     _Pragma("unroll") for (int i = 0; i < ITEMS; i++) {                                           \
         const int idx = tid + i * NT;                                                             \
         if (idx < (PROW) * nq) {                                                                  \
-            const int r = idx / nq, q = idx - r * nq, row = cta * MAX_ROWS + (R0) + r;            \
+            const int r = idx / nq, q = idx - r * nq, row = row0 + (R0) + r;            \
             const uint4 *ap = reinterpret_cast<const uint4 *>(                                    \
                 act + (size_t)row * (NVFP4 ? K / 2 : K) + (size_t)q * QB);                        \
             av0[i] = ap[0];                                                                       \
@@ -246,7 +251,7 @@ __global__ __launch_bounds__(NT) void moe_gemv(
             if (r < prow) {
                 const float v = row_sum(acc[r]);
                 if (nok && r == li) {
-                    const int row = cta * MAX_ROWS + r0 + r;
+                    const int row = row0 + r0 + r;
                     out[(size_t)row * N + n] =
                         __float2bfloat16(v * es * (NVFP4 ? row_scale[row] : 1.0f));
                 }
@@ -265,7 +270,8 @@ static void launch(bool nvfp4, uintptr_t act, uintptr_t act_scale, uintptr_t row
                    uintptr_t weight, uintptr_t weight_scale, uintptr_t expert_scale, uintptr_t out,
                    uintptr_t tiles, int max_ctas, int E, int N, int K, int tile, int lds_rows,
                    uintptr_t stream) {
-    check(tile == MAX_ROWS, "tile must be 8 (decode / spec-verify tile)");
+    check(tile >= MAX_ROWS && tile <= MAX_TILE && tile % MAX_ROWS == 0,
+          "tile must be a multiple of 8 in [8, 64] (decode / spec-verify tile)");
     check(max_ctas >= 1 && max_ctas <= 65535, "max_ctas out of range");
     check(E >= 1 && N >= 1, "experts and N must be positive");
     check(K >= QUANTUM && K <= K_MAX, "K outside the kernel's register budget (<= 2304)");
@@ -289,10 +295,10 @@ static void launch(bool nvfp4, uintptr_t act, uintptr_t act_scale, uintptr_t row
     auto s = reinterpret_cast<hipStream_t>(stream);
     if (nvfp4)
         hipLaunchKernelGGL(moe_gemv<true>, grid, block, smem, s, a, as, rs, w, ws, es, o, t,
-                           max_ctas, E, N, K, lds_rows);
+                           max_ctas, E, N, K, lds_rows, tile);
     else
         hipLaunchKernelGGL(moe_gemv<false>, grid, block, smem, s, a, as, rs, w, ws, es, o, t,
-                           max_ctas, E, N, K, lds_rows);
+                           max_ctas, E, N, K, lds_rows, tile);
     hipError_t err = hipGetLastError();
     if (err != hipSuccess)
         throw std::runtime_error(std::string("moe_gemv launch: ") + hipGetErrorString(err));
@@ -316,7 +322,7 @@ static void mxfp8_gemm(uintptr_t act, uintptr_t act_scale, uintptr_t weight, uin
 static py::dict geometry() {
     py::dict d;
     d["bn"] = BN; d["lpr"] = LPR; d["quantum"] = QUANTUM; d["nj_max"] = NJ_MAX;
-    d["max_rows"] = MAX_ROWS; d["k_max"] = K_MAX;
+    d["max_rows"] = MAX_ROWS; d["k_max"] = K_MAX; d["max_tile"] = MAX_TILE;
     return d;
 }
 
