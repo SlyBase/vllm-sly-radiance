@@ -14,8 +14,8 @@ import time
 
 KNOB = "RADIANCE_INKLING2_PREFILL_WARMUP"
 # per tile bucket of the prefill kernels: a %16 and a non-%16 size, plus the edges; 512/513 bracket the GEMM switch
-_BASE = (2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 48, 63, 64, 65, 100, 127, 128, 129, 200, 255, 256, 257, 400, 511, 512,
-         513, 600, 1000, 1024, 1500, 2048, 2049, 3000)
+_BASE = (2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 46, 48, 63, 64, 65, 75, 100, 127, 128, 129, 200, 255, 256, 257, 400,
+         511, 512, 513, 600, 1000, 1024, 1500, 2048, 2049, 3000)
 
 
 def ladder(max_tokens, max_len):
