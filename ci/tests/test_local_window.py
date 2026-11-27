@@ -3,9 +3,12 @@
 Order is the contract: acquire -> stop prod -> docker run -> health ... docker rm -f -> start prod -> release.
 Cleanup must run on every exit path (failed start, exception in a probe, SIGTERM) and only once.
 """
+import os
 import re
 import signal
+import stat
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -113,6 +116,31 @@ class Order(unittest.TestCase):
                 signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
         finally:
             signal.signal(signal.SIGTERM, old)
+
+
+class LogCapture(unittest.TestCase):
+    """docker logs replays the container's stderr on OUR stderr. The radiance hook lines
+    ([radiance.fused_norm] ..., drafter conv projections int4 N) are sys.stderr.write calls in the
+    image, so a capture of stdout alone misses them (run 45969951421: false hook-proof failure)."""
+
+    def test_logs_contain_the_containers_stderr_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "docker")
+            with open(fake, "w") as fh:
+                fh.write("#!/bin/sh\necho 'compilation_config={}'\n"
+                         "echo '[radiance.fused_norm] add_rms_quant active: M=4096 K=5120' >&2\n"
+                         "echo '[radiance.w4a16] post-load: drafter conv projections int4 0' >&2\n")
+            os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+            old = os.environ["PATH"]
+            os.environ["PATH"] = d + os.pathsep + old
+            try:
+                w = accept.LocalDockerWindow("gpuwin@x", None, "o", 600, install_signals=False)
+                text = w.logs()
+            finally:
+                os.environ["PATH"] = old
+        self.assertIn("compilation_config", text)
+        self.assertIn("add_rms_quant active", text)
+        self.assertIn("conv projections int4 0", text)
 
 
 class ReleaseErrors(unittest.TestCase):

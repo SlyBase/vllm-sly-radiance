@@ -277,8 +277,9 @@ class LocalDockerWindow(GpuWindow):
         signal.signal(signal.SIGINT, bye)
 
     @staticmethod
-    def _subprocess_run(argv, check=True, timeout=300, **kw):  # noqa: ARG004
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    def _subprocess_run(argv, check=True, timeout=300, merge_stderr=False, **kw):  # noqa: ARG004
+        proc = subprocess.run(argv, stdout=subprocess.PIPE, text=True, timeout=timeout,
+                              stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE)
         if check and proc.returncode != 0:
             raise RuntimeError(f"{' '.join(argv[:3])} failed (rc={proc.returncode}): "
                                f"{(proc.stderr or proc.stdout).strip()[:400]}")
@@ -310,7 +311,8 @@ class LocalDockerWindow(GpuWindow):
                 "kv_tokens": int(re.sub(r"[,._]", "", m[-1])) if m else None}
 
     def logs(self, lines: int = 999_999) -> str:  # noqa: ARG002
-        return self._run(["docker", "logs", self.container], check=False)
+        # merge_stderr: the radiance hook lines are stderr writes and docker logs keeps the streams apart
+        return self._run(["docker", "logs", self.container], check=False, merge_stderr=True)
 
     def cleanup(self) -> None:
         if self._cleaned:
