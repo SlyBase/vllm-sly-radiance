@@ -152,7 +152,11 @@ jobs:
     if: needs.plan.outputs.skip != 'true'
     # The inkling leg starts its own container and stops/starts the prod unit (LocalDockerWindow), so it
     # runs on the GPU host (LXC 2408: docker, the model dirs); the Qwen leg drives the helper over SSH.
-    runs-on: ${{ matrix.profile == 'inkling' && fromJSON('["self-hosted","linux","x64","rocm-build"]') || fromJSON('["self-hosted","linux","gpu-accept"]') }}
+    runs-on: [self-hosted, linux, x64, rocm-build]
+    # Both legs start their own container on the GPU host (LocalDockerWindow:
+    # stop docker-vllm7, docker run on :8001, health, rm, start prod), so both
+    # run on LXC 2408 where docker, systemctl and the model dirs live. The
+    # helper lock is still taken over SSH (ACCEPT_SSH).
     # Protected: a reviewer has to approve before production is touched.
     environment: gpu-window
     timeout-minutes: 180
@@ -193,6 +197,10 @@ jobs:
           ACCEPT_INKLING_MODEL: ${{ vars.ACCEPT_INKLING_MODEL || '/root/inkling2-mini' }}
           ACCEPT_INKLING_DRAFTER: ${{ vars.ACCEPT_INKLING_DRAFTER || '/root/dflash2-ink/model' }}
           ACCEPT_INKLING_CACHE: ${{ vars.ACCEPT_INKLING_CACHE || '/root/accept-inkling-cache' }}
+          # Qwen leg (local-docker too): checkpoint and compile-cache dirs of the
+          # homelab swift-mxfp4 profile (lxc_vllm7.yml).
+          ACCEPT_QWEN_MODEL: ${{ vars.ACCEPT_QWEN_MODEL || '/root/mcb-ckpt-v2' }}
+          ACCEPT_QWEN_CACHE: ${{ vars.ACCEPT_QWEN_CACHE || '/root/vllm7-cache' }}
         run: |
           set -o pipefail
           python3 ci/accept/accept.py \

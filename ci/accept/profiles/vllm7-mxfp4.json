@@ -1,6 +1,8 @@
 {
   "description": "Production setup (the launch of docker-vllm7.service on LXC 2408, which is production again since 2026-10-24; Radiance on LXC 2413 is off): since 2026-11-07 the BCQ4 v2 checkpoint /root/mcb-ckpt-v2 (bcq_tables.pt + lm_head_int4.pt, env RADIANCE_MXFP4_BCQ / RADIANCE_LMHEAD_INT4_CODES; image >= 1.10.0), before that Swift-1.5 /root/swift-heretic-gptq (HF repo slybase/Swift-1.5-Qwen3.8-27B-heretic-MXFP4-GPTQ). The unit keeps --served-model-name slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ, and \"model\" below must be that served name, else every request 404s. DFlash2 k=7, R4D_HYBRID, util 0.98, FULL_DECODE_ONLY, RADIANCE_MXFP4_WIDE_MAX_M=192, RADIANCE_ADAPTIVE_WIDTH=perseq (README reference launch). The gate does NOT carry a copy of that launch: gpu-window reads the ExecStart of the live docker-vllm7.service and only swaps image, container name and compile-cache directories, so the homelab unit is the one place that defines the launch (checkpoint and env included); this profile only declares what to assert. The two BCQ markers fail a candidate image without BCQ support (< 1.10.0) loudly instead of letting it load the v2 checkpoint with the wrong loader; after a rollback to the K4 checkpoint drop them.",
   "service": "docker-vllm7.service",
+  "window": "local-docker",
+  "docker_argv": "qwen",
   "model": "slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ",
   "required_log_patterns": [
     [
