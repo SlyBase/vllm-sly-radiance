@@ -36,6 +36,7 @@ REFS = Path(__file__).resolve().parent / "accept" / "references"
 # accept profiles (ci/accept/profiles/<name>.json) that a release has to pass, one GPU window each
 RELEASE_PROFILES = ("vllm7-mxfp4", "inkling")
 QUICK_TWO_STREAM_MIN = 1.05
+GSM8K_CONC = 1  # streams of the GSM8K check (greedy at c1 is reproducible across starts)
 GSM8K_SLACK = 2  # items below the stored reference that still pass (50 items: 4 %)
 RECORD_HINT = "references not recorded, run ci/quick_backtest.sh RECORD=1"
 
@@ -339,9 +340,10 @@ def concurrency_probe(base, model, levels=(1, 2, 4), requests=8, tokens=128):
     return agg
 
 
-def gsm8k_probe(base, model, n=50, conc=8, max_tokens=4096):
-    """GSM8K-n at T=0 (production chat template, thinking on): number of correct answers. A truncated
-    or failed request counts as wrong -- the reference was recorded the same way."""
+def gsm8k_items(base, model, n=50, conc=GSM8K_CONC, max_tokens=4096):
+    """GSM8K-n at T=0 (production chat template, thinking on): per-item correct flags. A truncated
+    or failed request counts as wrong -- the reference was recorded the same way. One request at a
+    time: batching changes spec-decode numerics (same image: 44..47/50 at 8 streams)."""
     from concurrent.futures import ThreadPoolExecutor
     suffix = "\n\nThink step by step. End your reply with the final numeric answer on its own line as: #### <number>"
 
@@ -356,7 +358,11 @@ def gsm8k_probe(base, model, n=50, conc=8, max_tokens=4096):
             return False
 
     with ThreadPoolExecutor(conc) as ex:
-        return sum(ex.map(one, load_gsm8k(n)))
+        return list(ex.map(one, load_gsm8k(n)))
+
+
+def gsm8k_probe(base, model, n=50):
+    return sum(gsm8k_items(base, model, n))
 
 
 def greedy_run(base, model):
@@ -441,6 +447,10 @@ def main(argv=None) -> int:
     r.add_argument("--release", action="store_true", help="release tier: + 8 streams, GSM8K-50, fails closed on null references")
     r.add_argument("--gsm8k-n", type=int, default=50)
     s_ = sub.add_parser("release-check", help="both release-tier statuses of a commit are green (stdin: JSON {context: state})")
+    g = sub.add_parser("gsm8k", help="GSM8K-n check only (c1, greedy): prints {correct, items} as JSON, for recording/reproducibility")
+    g.add_argument("--base", required=True)
+    g.add_argument("--model", required=True)
+    g.add_argument("--n", type=int, default=50)
     h = sub.add_parser("hooks", help="hook proof on a log file")
     h.add_argument("log")
     h.add_argument("--profile", choices=sorted(HOOKS), required=True)
@@ -452,6 +462,10 @@ def main(argv=None) -> int:
     f.add_argument("--category", default="code")
     a = ap.parse_args(argv)
 
+    if a.cmd == "gsm8k":
+        items = gsm8k_items(a.base.rstrip("/"), a.model, a.n)
+        print(json.dumps({"correct": sum(items), "items": items}))
+        return 0
     if a.cmd == "release-check":
         probs = release_gate_problems(json.load(sys.stdin))
     elif a.cmd == "hooks":
