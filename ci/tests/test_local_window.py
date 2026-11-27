@@ -103,7 +103,7 @@ class Order(unittest.TestCase):
         w2.start("img:t", "x")
         w2.cleanup()
         w2.cleanup()
-        self.assertEqual(sum(1 for c in f2.calls if c == f"systemctl start {PROD}"), 1)
+        self.assertEqual(sum(1 for c in f2.calls if c == f"sudo -n systemctl start {PROD}"), 1)
 
     def test_sigterm_handler_turns_into_exit_so_finally_blocks_run(self):
         old = signal.getsignal(signal.SIGTERM)
