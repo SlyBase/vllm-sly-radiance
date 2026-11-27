@@ -158,6 +158,79 @@ def inkling_docker_argv(image: str, name: str, port: int, model_dir: str, drafte
     return argv
 
 
+def qwen_docker_argv(image: str, name: str, port: int, model_dir: str,
+                     drafter_dir: str | None, cache_dir: str,
+                     extra_env: list[str] | None = None) -> list[str]:
+    """`docker run` of the Qwen release arm: pinned argv verbatim from the
+    homelab swift-mxfp4 profile (lxc_vllm7.yml + docker-vllm7.service.j2) and
+    the 1.13.4 reference arm on host 51 (/root/qfix/out/QP2/docker_cmd.txt).
+    One `-e` per variable; `drafter_dir` is unused -- Qwen serves one model.
+    ci/quick_backtest.sh start_qwen() is its hand-run twin and is covered by
+    ci/tests/test_qwen_argv.py's drift test.
+    """
+    env = ["HIP_VISIBLE_DEVICES=0", "HF_HUB_OFFLINE=1",
+           "GPU_MAX_HW_QUEUES=1", "RADIANCE_MXFP4=1",
+           "RADIANCE_MXFP4_W4A8=1", "RADIANCE_MXFP4_W4A8_MIN_M=0",
+           "RADIANCE_MXFP4_DECODE_MAX_M=128", "RADIANCE_MXFP4_SANITIZE=0",
+           "RADIANCE_LMHEAD_FP8=1", "RADIANCE_LMHEAD_INT4=1",
+           "RADIANCE_FUSED_NORM_QUANT=1", "RADIANCE_KV_GROUP_SIZE=8",
+           "RADIANCE_EMBED_INT8=1", "RADIANCE_EMBED_BITS=4",
+           "RADIANCE_MXFP4_A_TILED_MIN_M=513", "RADIANCE_MXFP4_TN4_MIN_M=513",
+           "RADIANCE_FUSED_NQ_REG=1", "RADIANCE_MXFP4_AT_SKIP_PAD=1",
+           "RADIANCE_MXFP4_TILED_OPROJ=1", "R4D_ATTN_FP8=3",
+           "RADIANCE_MXFP4_WPERM=1", "RADIANCE_MXFP4_WIDE_MAX_M=192",
+           "RADIANCE_ADAPTIVE_WIDTH=perseq", "RADIANCE_CACTUS_DELTA=0.5",
+           "RADIANCE_MXFP4_BCQ=/models/swift-mxfp4/bcq_tables.pt",
+           "RADIANCE_LMHEAD_INT4_CODES=/models/swift-mxfp4/lm_head_int4.pt",
+           *(extra_env or [])]
+    argv = ["docker", "run", "-d", "--name", name, "--device=/dev/kfd",
+            "--device=/dev/dri", "--group-add", "44", "--group-add", "993",
+            "--security-opt", "seccomp=unconfined", "--ipc=host"]
+    for kv in env:
+        argv += ["-e", kv]
+    argv += ["-p", f"{port}:8000",
+             "-v", "/root/hf-cache:/root/.cache/huggingface",
+             "-v", f"{model_dir}:/models/swift-mxfp4:ro",
+             "-v", f"{cache_dir}/triton:/root/.triton",
+             "-v", f"{cache_dir}/torch_compile:/root/.cache/vllm/torch_compile_cache",
+             "-v", f"{cache_dir}/aiter:/root/.aiter",
+             image,
+             "--model", "/models/swift-mxfp4",
+             "--served-model-name", "slybase/Swift-1.5-Qwen3.8-27B-MXFP4-GPTQ",
+             "amd/Qwen3.8-27B-Quark-AWQ-MXFP4",
+             "slybase/ThinkingCap-Qwen3.8-27B-MXFP4",
+             "bottlecapai/ThinkingCap-Qwen3.8-27B-NVFP4",
+             "--max-model-len", "262144",
+             "--gpu-memory-utilization", "0.98",
+             "--kv-cache-dtype", "fp8",
+             "--port", "8000",
+             "--speculative-config.method", "dflash",
+             "--speculative-config.model", "syvai/Qwen3.8-27B-DFlash2-W4A16",
+             "--speculative-config.num_speculative_tokens", "7",
+             "--speculative-config.draft_sample_method", "probabilistic",
+             "--speculative-config.attention_backend", "TRITON_ATTN",
+             "--override-generation-config",
+             '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0}',
+             "--max-num-seqs", "8",
+             "--max-num-batched-tokens", "4096",
+             "--mamba-ssm-cache-dtype", "bfloat16",
+             "--compilation-config.cudagraph_mode", "FULL_DECODE_ONLY",
+             "--compilation-config.cudagraph_capture_sizes",
+             "[8,16,24,32,40,48,56,64]",
+             "--skip-mm-profiling", "--enable-mm-embeds",
+             "--limit-mm-per-prompt.image", "0",
+             "--limit-mm-per-prompt.video", "0",
+             "--attention-backend", "R4D_HYBRID",
+             "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml",
+             "--reasoning-parser", "qwen3",
+             "--chat-template", "/opt/qwen-fixed.jinja",
+             "--default-chat-template-kwargs",
+             '{"reasoning_effort": "medium"}',
+             "--enable-prefix-caching", "--no-enable-extensible-kv-cache",
+             "--kv-cache-memory-bytes", "15569256448"]
+    return argv
+
+
 class LocalDockerWindow(GpuWindow):
     """A gpu-window whose candidate is a container we start ourselves (no service unit in the helper).
 
@@ -172,7 +245,7 @@ class LocalDockerWindow(GpuWindow):
     def __init__(self, target, key, owner, ttl, dry_run=False, load_format="auto", *, run=None, ssh=None,
                  health=None, sleep=time.sleep, prod_service="docker-vllm7.service", port=8001,
                  container="vllm-accept-inkling", model_dir=None, drafter_dir=None, cache_dir=None,
-                 health_wait_s=1200, install_signals=True, extra_env=None):
+                 docker_argv=None, health_wait_s=1200, install_signals=True, extra_env=None):
         super().__init__(target, key, owner, ttl, dry_run, load_format)
         self._run = run or self._subprocess_run
         if ssh:
@@ -182,6 +255,7 @@ class LocalDockerWindow(GpuWindow):
         self.model_dir = model_dir or os.environ.get("ACCEPT_INKLING_MODEL", "/root/inkling2-mini")
         self.drafter_dir = drafter_dir or os.environ.get("ACCEPT_INKLING_DRAFTER", "/root/dflash2-ink/model")
         self.cache_dir = cache_dir or os.environ.get("ACCEPT_INKLING_CACHE", "/root/accept-inkling-cache")
+        self._docker_argv = docker_argv or inkling_docker_argv
         self.health_wait_s, self.extra_env = health_wait_s, extra_env
         self._prod_stopped = self._started = self._cleaned = False
         if install_signals:
@@ -211,8 +285,8 @@ class LocalDockerWindow(GpuWindow):
         self._run(["systemctl", "stop", self.prod], timeout=600)
         self._run(["docker", "rm", "-f", self.container], check=False)
         self._started = True
-        self._run(inkling_docker_argv(image, self.container, self.port, self.model_dir, self.drafter_dir,
-                                      self.cache_dir, self.extra_env))
+        self._run(self._docker_argv(image, self.container, self.port, self.model_dir,
+                                    self.drafter_dir, self.cache_dir, self.extra_env))
         url = f"http://127.0.0.1:{self.port}/health"
         waited = 0
         while self._health(url) != 200:
@@ -287,6 +361,29 @@ def chat(base_url: str, model: str, payload: dict, timeout: int = 900) -> dict:
 
 
 PROM_RE = re.compile(r"^(?P<name>[a-zA-Z_:][\w:]*)(?P<labels>\{[^}]*\})?\s+(?P<value>[-\d.eE+]+)$")
+
+
+def served_models(base_url: str, timeout: int = 30) -> list[str]:
+    """IDs the container lists at /v1/models. The gate fails fast when the
+    profile's model is not among them -- that is the 'Qwen leg measured Inkling'
+    class: the served model is the only thing that makes every later number
+    mean what the profile says it means."""
+    status, text = http_get(f"{base_url}/v1/models", timeout=timeout)
+    if status != 200:
+        raise RuntimeError(f"/v1/models returned {status}: {text[:200]}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:  # noqa: BLE001
+        raise RuntimeError(f"/v1/models returned non-JSON: {text[:200]}") from exc
+    return [m.get("id", "") for m in data.get("data", [])
+            if isinstance(m, dict)]
+
+
+def ensure_served_model(base_url: str, model: str) -> None:
+    ids = served_models(base_url)
+    if model not in ids:
+        raise RuntimeError(f"served model is not the profile model: "
+                           f"expected {model!r}, served {ids}")
 
 
 def scrape_metrics(base_url: str) -> dict[str, float]:
@@ -979,11 +1076,27 @@ def main() -> int:
     if profile.get("window") == "local-docker":
         # no service unit in the helper: the candidate is our own container on the GPU host (class docstring)
         base_url = f"http://127.0.0.1:{profile.get('port', 8001)}"
+        if profile.get("docker_argv") == "qwen":
+            # Qwen: own pinned argv (homelab swift-mxfp4 + 1.13.4 reference), own container
+            docker_argv = qwen_docker_argv
+            container = "vllm-accept-qwen"
+            model_dir = os.environ.get("ACCEPT_QWEN_MODEL", "/root/mcb-ckpt-v2")
+            cache_dir = os.environ.get("ACCEPT_QWEN_CACHE", "/root/vllm7-cache")
+            drafter_dir = None
+        else:
+            docker_argv = inkling_docker_argv
+            container = "vllm-accept-inkling"
+            model_dir = os.environ.get("ACCEPT_INKLING_MODEL", "/root/inkling2-mini")
+            cache_dir = os.environ.get("ACCEPT_INKLING_CACHE", "/root/accept-inkling-cache")
+            drafter_dir = os.environ.get("ACCEPT_INKLING_DRAFTER", "/root/dflash2-ink/model")
         win = LocalDockerWindow(
             args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run, load_format,
+            docker_argv=docker_argv, container=container,
             prod_service=profile.get("prod_service", "docker-vllm7.service"), port=profile.get("port", 8001),
             run=(lambda argv, **kw: log(f"DRY-RUN: {' '.join(argv[:4])}") or "") if args.dry_run else None,
-            health=(lambda url: 200) if args.dry_run else None, install_signals=not args.dry_run)
+            health=(lambda url: 200) if args.dry_run else None,
+            model_dir=model_dir, drafter_dir=drafter_dir, cache_dir=cache_dir,
+            install_signals=not args.dry_run)
     else:
         win = GpuWindow(args.ssh_target, args.ssh_key, args.owner, args.ttl, args.dry_run,
                         load_format=load_format)
@@ -1001,6 +1114,11 @@ def main() -> int:
         log(f"starting candidate {args.image} ({profile.get('service') or 'own container'})")
         results["start"] = win.start(args.image, profile.get("service", ""))
         log(f"candidate up: {json.dumps(results['start'])}")
+        # Fail fast: the window must serve the profile's model, not production.
+        # That is the 'Qwen leg measured Inkling' class -- the served model is
+        # the only thing that makes every later number mean what the profile
+        # says it means (guard message is kept stable: consumers match on it).
+        ensure_served_model(base_url, profile["model"])
 
         log("checking logs")
         log_text = win.logs()
