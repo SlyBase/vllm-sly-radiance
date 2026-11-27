@@ -242,6 +242,8 @@ class LocalDockerWindow(GpuWindow):
     Runs on the GPU host (the runner needs docker and may stop/start the prod unit). Contract:
         acquire (lock, via the helper) -> systemctl stop <prod> -> docker run -> health ...
         docker rm -f -> systemctl start <prod> -> release (helper: verifies /health)
+    The runner is not root: stop/start go through `sudo -n` (sudoers rule of the homelab playbook
+    lxc-gpu-window.yml).
     `cleanup()` is idempotent and runs from release(), from the atexit hook and from SIGTERM/SIGINT (a
     cancelled GitHub job), so the container is removed and prod is restored on every exit path we control.
     A SIGKILL is covered by gpu-window-guard.timer (restores prod when the TTL runs out).
@@ -287,7 +289,7 @@ class LocalDockerWindow(GpuWindow):
         self._cleaned = False
         # flag first: a stop that fails half way must still be answered by a start in cleanup()
         self._prod_stopped = True
-        self._run(["systemctl", "stop", self.prod], timeout=600)
+        self._run(["sudo", "-n", "systemctl", "stop", self.prod], timeout=600)
         self._run(["docker", "rm", "-f", self.container], check=False)
         self._started = True
         self._run(self._docker_argv(image, self.container, self.port, self.model_dir,
@@ -322,7 +324,7 @@ class LocalDockerWindow(GpuWindow):
                 errors.append(str(exc))
         if self._prod_stopped:
             try:
-                self._run(["systemctl", "start", self.prod], timeout=600)
+                self._run(["sudo", "-n", "systemctl", "start", self.prod], timeout=600)
                 self._prod_stopped = False
             except Exception as exc:  # noqa: BLE001
                 errors.append(str(exc))
