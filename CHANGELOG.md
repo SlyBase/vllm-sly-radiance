@@ -10,6 +10,16 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [Unreleased]
+
+### Added
+- **sly/inkling2/radiance_inkling2_warmup.py + sly/patch_inkling2_warmup.py**: prefill-shape Triton warmup before "API up": one real single-request prefill + one spec-decode step per ladder size (covers %16 and non-%16 classes plus the 512/513 GEMM switch, max 4096 tokens / max_model_len - 1), on for Inkling via `RADIANCE_INKLING2_PREFILL_WARMUP` (default on, `=0` off), one failing size is logged and skipped and never blocks startup. Target: kill cold JIT of `_attn_prologue`, `_rel_attention`, `_sconv`, `_route_tokens`, `_expert_gemm`, `_situ_quantize`, `_mxfp8_gemm`, `_seq_metadata`, `_k_group`, `_scatter` on the first request of a new prompt length (cold first request < 1 s).
+
+### Changed
+- TTFT levers on branch `perf/ink-ttft` (owner `ink-200-ttft`, R9700 210 W): release-test config arms (`RADIANCE_INKLING2_HIP_MOE=1`, `RADIANCE_INKLING2_MXFP4_DENSE=1`, `--max-model-len 32768`, DFlash2 k=7, prefix caching off, `GPU_MAX_HW_QUEUES=1`, `--no-async-scheduling`) measured with `mia_decode.py` (Mia-method TTFT), `tt_probe.py` (fixed-intercept fit) and `sly/inkling2/ttft/trace_phases.py` (rocprofv3 GPU busy/idle per request):
+  - `B0` baseline 1.14.0-rocm10.1; `C0`/`C1` cold start with empty Triton cache without/with the prefill-shape warmup overlay (`ink-ttft-eff0f5e`); `B1`/`B2` breakable/piecewise prefill CUDA graphs via `VLLM_USE_BREAKABLE_CUDAGRAPH=1` (+ capture sizes to 512 tokens); `B3` `--async-scheduling` re-check once prefill graphs exist; `W1` warmup-overlay regression check on warm cache. One change per arm, ledger at `/opt/data/analysis/inkling2-mini/ttft/ledger.md`.
+  - `sly/inkling2/ttft/trace_phases.py` + CPU test: `rocprofv3` kernel_trace.csv -> per-request GPU busy / span / idle and top kernels.
+
 ## [1.14.0] - 2026-11-26
 
 ### Changed
