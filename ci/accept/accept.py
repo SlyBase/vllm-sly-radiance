@@ -72,6 +72,10 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------- #
 # gpu-window helper (SSH)
 # --------------------------------------------------------------------------- #
+# Pinned host key of the helper host (LXC 2408); the runner user has no known_hosts of its own.
+KNOWN_HOSTS = Path(__file__).resolve().parent / "known_hosts"
+
+
 class GpuWindow:
     """Thin client for /usr/local/sbin/gpu-window in LXC 2408."""
 
@@ -86,7 +90,8 @@ class GpuWindow:
         self.held = False
 
     def _ssh(self, *args: str, timeout: int = 900) -> str:
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+               "-o", f"UserKnownHostsFile={KNOWN_HOSTS}"]
         if self.key:
             cmd += ["-i", self.key]
         cmd += [self.target, " ".join(shlex.quote(a) for a in args)]

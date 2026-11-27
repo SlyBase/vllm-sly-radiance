@@ -183,7 +183,9 @@ jobs:
       - name: gpu-window status
         env:
           ACCEPT_SSH: ${{ vars.ACCEPT_SSH || 'gpuwin@192.168.178.51' }}
-        run: ssh -o BatchMode=yes "$ACCEPT_SSH" status
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=ci/accept/known_hosts "$ACCEPT_SSH" status
 
       - name: run gate
         id: gate
@@ -231,9 +233,11 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           STATE=failure; [ "$GATE" = success ] && STATE=success
-          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state="$STATE" \
-            -f context="release-tier/$PROFILE" -f target_url="$RUN_URL" \
-            -f description="release tier: image ${{ needs.plan.outputs.image }}"
+          # curl, not gh: the rocm-build runner has no gh
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/$SHA" \
+            -d "{\"state\":\"$STATE\",\"context\":\"release-tier/$PROFILE\",\"target_url\":\"$RUN_URL\",\"description\":\"release tier: image ${{ needs.plan.outputs.image }}\"}"
 
       - name: production health (independent of the gate result)
         if: always()
