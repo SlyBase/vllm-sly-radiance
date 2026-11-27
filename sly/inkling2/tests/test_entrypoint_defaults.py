@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+BG = "VLLM_USE_BREAKABLE_CUDAGRAPH"
 ENTRY = Path(__file__).resolve().parents[3] / "radiance_entrypoint.sh"
 KNOBS = {
     "RADIANCE_INKLING2_DRAFT_SHORTLIST": "4096",
@@ -25,7 +26,7 @@ def serve(tmp_path):
     fake.chmod(0o755)
 
     def run(args, **env):
-        base = {k: v for k, v in os.environ.items() if not k.startswith("RADIANCE_")}
+        base = {k: v for k, v in os.environ.items() if not k.startswith(("RADIANCE_", BG))}
         base["PATH"] = f"{fake.parent}:{base['PATH']}"
         base.update(env)
         out = subprocess.run(["bash", str(ENTRY), *args], capture_output=True, text=True, env=base, check=True)
@@ -260,3 +261,16 @@ def test_cudagraph_env_sets_or_switches_off(serve):
 
 def test_other_models_get_no_graph_sizes(serve):
     assert CG not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])["_ARGS"]
+
+
+def test_inkling_gets_breakable_prefill_graphs(serve):
+    # MEASURED (B1, 210 W): prefill batches replay a graph: cold first request 4.2 s -> 72 ms, n=8 prompt 69 -> 41 ms.
+    assert serve(MODEL)[BG] == "1"
+
+
+def test_breakable_graph_env_off_wins(serve):
+    assert serve(MODEL, **{BG: "0"})[BG] == "0"
+
+
+def test_other_models_get_no_breakable_graphs(serve):
+    assert BG not in serve(["--model", "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"])
