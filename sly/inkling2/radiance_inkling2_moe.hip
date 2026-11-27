@@ -183,12 +183,22 @@ __global__ __launch_bounds__(NT) void moe_gemv(
     const float es = expert_scale[expert] * (NVFP4 ? 4096.0f : 1.0f);   // 2^12: e2m1 as e4m3 = 2^-6 each
     for (int r0 = 0; r0 < nr; r0 += lds_rows) {
         prow = nr - r0 < lds_rows ? nr - r0 : lds_rows;
+#ifdef INK_PREFETCH
+        if (r0 > 0) __syncthreads();        // every wave is done with the previous rows' LDS (rows were loaded last pass)
+#else
         if (r0 > 0) {
             __syncthreads();                // every wave is done with the previous rows' LDS
             LOAD_ACT(r0, prow)
         }
+#endif
         STORE_ACT(prow)
         __syncthreads();
+#ifdef INK_PREFETCH
+        if (r0 + lds_rows < nr) {           // next pass's act rows load while this pass computes
+            const int nprow = nr - r0 - lds_rows < lds_rows ? nr - r0 - lds_rows : lds_rows;
+            LOAD_ACT(r0 + lds_rows, nprow)
+        }
+#endif
 
         float acc[MAX_ROWS];
 #pragma unroll
