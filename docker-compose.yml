@@ -140,7 +140,7 @@ services:
       # single-node hosts). Set "auto" to detect, or explicit nodes (e.g. "0" / "0,1"). Requires the
       # SYS_NICE cap above. Equivalent to passing --numa-bind in command:.
       RADIANCE_NUMA_BIND: "${RADIANCE_NUMA_BIND:-}"
-      # RADIANCE dynamic drafting (baked ON in the image; explicit here for visibility/overridability).
+      # RADIANCE dynamic drafting (env default ON in the image, but active only on vLLM < 0.34 MTP: inactive by design on the V2 runner / DFlash).
       # Per-request MTP draft-depth control: a per-slot confidence gate picks the draft depth and takes
       # free-win n-grams; the schedule caps serial MTP forwards by batch size. Set DYNAMIC_DRAFT="0" to
       # disable (byte-identical stock MTP). The two knobs below are the only tunables.

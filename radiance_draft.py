@@ -359,5 +359,10 @@ def install():
         _install_runner_wrap()
         _log(f"RADIANCE_DYNAMIC_DRAFT=ON  controller=policy  tau={TAU}  schedule={SCHEDULE or 'off'}  "
              f"(GPU-resident capture + n-gram matcher; per-slot confidence gate short-circuits the forward loop)")
+    except ModuleNotFoundError as e:
+        if not (e.name or "").startswith("vllm.v1.spec_decode"):
+            _log(f"install failed (dynamic draft disabled): {e!r}")
+        else:   # the MTP proposer does not exist on the V2 runner; DFlash drafts every position in one pass
+            _log("dynamic draft intentionally inactive on vLLM >= 0.34 / DFlash (no MTP proposer to hook)")
     except Exception as e:
         _log(f"install failed (dynamic draft disabled): {e!r}")
