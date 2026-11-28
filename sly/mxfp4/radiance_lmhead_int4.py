@@ -289,6 +289,12 @@ class RadianceLMHeadInt4(UnquantizedEmbeddingMethod):
         attach_hot(layer, w)  # before layer.weight loses the bf16 rows
         layer.weight = Parameter(w_i8, requires_grad=False)
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
+        try:
+            import radiance_w4a16_gemv_hip as _hip_u4
+
+            _hip_u4.prepack_weights(layer.weight.data, layer.weight_scale.data, None, g, "lm_head")
+        except Exception:
+            pass
         logger.info(
             "[radiance] lm_head quantised to int4 g%d: [%d, %d], %.2f GiB freed",
             g, n, k, (n * k * w.element_size() - n * k // 2 - scale.numel() * 2) / 2**30,

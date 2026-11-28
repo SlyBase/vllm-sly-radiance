@@ -73,6 +73,23 @@ def test_softcap_runs_after_the_edge_scores(tree):
     assert fwd.index("_score_edges(") < fwd.index("softcap_after(")
 
 
+def test_drafter_mxfp4_hook_lands_after_the_head_wiring(tree):
+    run(tree)
+    t = text(tree, LOADER)
+    ast.parse(t)
+    wired, hook = t.index("dflash_model.lm_head = target_lm_head"), t.index("process_dflash_draft(dflash_model)")
+    assert wired < hook < t.index("return dflash_model")
+    assert "if torch.version.hip:" in t[wired:hook] and "maybe_release_shared_head(dflash_model, target_lm_head)" in t[hook:]
+
+
+def test_drafter_mxfp4_hook_lands_without_inkling2(tree):  # RADIANCE_DFLASH_MXFP4=1 serves a Qwen target too
+    shutil.rmtree(tree / "vllm/models/inkling2")
+    r = run(tree)
+    assert r.returncode == 0 and "NOOP" in r.stdout
+    assert "process_dflash_draft(dflash_model)" in text(tree, LOADER)
+    assert "attach_embed_norm" not in text(tree, LOADER)
+
+
 def test_original_vocab_clamp_is_still_upstream(tree):
     """Candidates index the selector codebooks (draft vocab); the clamp is upstream already."""
     run(tree)

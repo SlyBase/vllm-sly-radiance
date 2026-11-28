@@ -114,15 +114,16 @@ class State:
 
 
 def state_from_env():
-    """State for RADIANCE_INKLING2_ADAPTIVE_K, or None (off).
+    """State for RADIANCE_ADAPTIVE_K (legacy name RADIANCE_INKLING2_ADAPTIVE_K), or None (off).
 
     The value is a comma list of allowed k's, each in {3, 5, 7}, at most three
     entries, e.g. "3,5,7" (adaptive) or "5" (fixed). Anything else is off: the
     DSpark checkpoint only graphs the 4/6/8 verify rows, so no other k exists.
     """
     import os
+    import sys
 
-    raw = os.environ.get("RADIANCE_INKLING2_ADAPTIVE_K", "")
+    raw = os.environ.get("RADIANCE_ADAPTIVE_K") or os.environ.get("RADIANCE_INKLING2_ADAPTIVE_K", "")
     ks = []
     for part in raw.split(","):
         part = part.strip()
@@ -131,4 +132,5 @@ def state_from_env():
         ks.append(int(part))
     if not ks or len(ks) > 3 or len(set(ks)) != len(ks):
         return None
+    print(f"[radiance.adaptive_k] active: ks={tuple(ks)}", file=sys.stderr, flush=True)
     return State(ks)

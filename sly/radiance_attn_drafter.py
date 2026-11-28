@@ -36,8 +36,8 @@ A wider window (`dflash_config.swa_window_size` 8192) costs only ~0.4 ms per ste
 drafter was trained with 2048: at 8192 the accepted tokens/step fall by 25-43 % for generation and summarising
 (copy is mixed, +6 % at 33k, -19 % at 99k), so the checkpoint's window stays.
 
-Untouched, deliberately: every call that is not this shape -- other head sizes / GQA ratios, bf16 KV, a
-per-sequence causal tensor, alibi / sinks / softcap / mm-prefix / rswa / chunked, queries per sequence outside
+Untouched, deliberately: every call that is not this shape -- other head sizes / GQA ratios outside 1/2/3/4/6/8/16, a
+per-sequence causal tensor, per-token-head scaled KV, alibi / sinks / softcap / mm-prefix / rswa / chunked, queries per sequence outside
 2..16 (prefill chunks), no sliding window. Any exception in the tuned path falls back to vLLM's own call for the
 rest of the process.
 
@@ -57,7 +57,9 @@ except Exception:                       # no triton (offline check): the tuned p
 ENABLED = os.environ.get("RADIANCE_ATTN_DRAFTER_TUNE", "1") != "0"
 _SEG_ENV = os.environ.get("RADIANCE_ATTN_DRAFTER_SEGMENTS", "auto")
 
-HEAD, NQPKV = 128, 4               # the only shape these numbers were measured at
+HEAD = 128
+TUNED_NQPKV = 4                    # the ratio BLOCK_M 32 / TILE 32 / 4 warps were measured at; others use BLOCK_M 16
+GQA_RATIOS = (1, 2, 3, 4, 6, 8, 16)   # BLOCK_Q = 16 // ratio >= 1 and BLOCK_Q * ratio fits the tile
 MAX_Q = 16                         # queries per sequence: a verify block, not a prefill chunk
 BLOCK_M, TILE, WARPS, STAGES = 32, 32, 4, 1
 # Split count by sequence count: one workgroup per (q-block, kv head, segment); with a single sequence there are
@@ -66,7 +68,7 @@ SEGMENTS_BY_SEQS = {1: 64, 2: 32, 3: 32}
 DEFAULT_SEGMENTS = 16
 
 _state = {"orig": None, "wrapper": None, "logged": False, "failed": False, "declined": False,
-          "calls": 0}                      # calls: tuned launches
+          "calls": 0, "seen": set()}       # calls: tuned launches; seen: (kv mode, ratio) pairs already logged
 
 
 def segments_for(nseq):
@@ -127,17 +129,25 @@ def _gate(kw):
     (the backend's form)."""
     try:
         q, k, v = kw["q"], kw["k"], kw["v"]
-        if kw.get("kv_quant_mode") != _state["fp8_per_tensor"]:
-            return None, f"kv_quant_mode={kw.get('kv_quant_mode')}"
-        if q.dtype not in (_state["bf16"], _state["fp8"]) or k.dtype != _state["fp8"] or v.dtype != _state["fp8"]:
-            return None, f"dtypes q={q.dtype} k={k.dtype} v={v.dtype}"
-        if q.dtype == _state["fp8"] and kw.get("q_descale") is None:
-            return None, "fp8 query without q_descale"
+        out, mode = kw["out"], kw.get("kv_quant_mode")
+        bf16, fp16, fp8 = _state["bf16"], _state["fp16"], _state["fp8"]
+        if mode == _state["fp8_per_tensor"]:
+            if q.dtype not in (bf16, fp8) or k.dtype != fp8 or v.dtype != fp8 or out.dtype != bf16:
+                return None, f"dtypes q={q.dtype} k={k.dtype} v={v.dtype} out={out.dtype}"
+            if q.dtype == fp8 and kw.get("q_descale") is None:
+                return None, "fp8 query without q_descale"
+        elif mode in (_state["kv_none"], None, 0):         # unquantised cache: the kernel reads it as is
+            mode = _state["kv_none"]
+            if out.dtype not in (bf16, fp16) or not q.dtype == k.dtype == v.dtype == out.dtype:
+                return None, f"dtypes q={q.dtype} k={k.dtype} v={v.dtype} out={out.dtype}"
+        else:                                              # per-token-head scale modes
+            return None, f"kv_quant_mode={mode}"
         if q.dim() != 3 or q.shape[2] != HEAD or k.shape[3] != HEAD or q.stride(2) != 1:
             return None, f"shapes q={tuple(q.shape)} k={tuple(k.shape)} q_stride={tuple(q.stride(i) for i in range(q.dim()))}"
         kvh = k.shape[2]
-        if kvh <= 0 or q.shape[1] % kvh or q.shape[1] // kvh != NQPKV:
+        if kvh <= 0 or q.shape[1] % kvh or q.shape[1] // kvh not in GQA_RATIOS:
             return None, f"heads q={q.shape[1]} kv={kvh}"
+        nqpkv = q.shape[1] // kvh
         causal = kw.get("causal")
         if not isinstance(causal, bool):                  # a per-sequence tensor is not this launch
             return None, f"causal={causal!r}"
@@ -154,7 +164,7 @@ def _gate(kw):
         max_q = int(kw["max_seqlen_q"])
         if not 2 <= max_q <= MAX_Q:
             return None, f"max_seqlen_q={max_q}"
-        return (int(left) + 1, max_q, len(kw["seqused_k"]), causal), None
+        return (int(left) + 1, max_q, len(kw["seqused_k"]), causal, nqpkv, mode), None
     except (KeyError, TypeError, AttributeError, ValueError) as e:
         return None, f"{type(e).__name__}: {e}"
 
@@ -163,7 +173,7 @@ def _params(kw):
     return _gate(kw)[0]
 
 
-def _run(kw, window, max_q, nseq, causal):
+def _run(kw, window, max_q, nseq, causal, nqpkv, kv_mode):
     torch, TU = _state["torch"], _state["TU"]
     q, k, v, out = kw["q"], kw["k"], kw["v"], kw["out"]
     q_is_fp8 = q.dtype == _state["fp8"]   # 0.34 hands the drafter an e4m3 query; vLLM's kernel reads it via Q_IS_FP8
@@ -177,7 +187,8 @@ def _run(kw, window, max_q, nseq, causal):
     _slice_window[(nseq,)](bt, seq, bt2, seq2, bt.stride(0), bt.shape[1], KEEP=keep, BLOCK=block,
                            NB_WIN=nb_win, NB_PAD=_next_pow2(nb_win), num_warps=1)
     segs = segments_for(nseq)
-    bq = BLOCK_M // NQPKV
+    block_m = BLOCK_M if nqpkv == TUNED_NQPKV else 16        # 16 = vLLM's own tile for any other ratio
+    bq = block_m // nqpkv
     grid = (q.shape[0] // bq + nseq, k.shape[2], segs)
     so = torch.empty(q.shape[0], nq, segs, HEAD, dtype=torch.float32, device=q.device)
     sm = torch.empty(q.shape[0], nq, segs, dtype=torch.float32, device=q.device)
@@ -187,7 +198,7 @@ def _run(kw, window, max_q, nseq, causal):
         value_cache_ptr=v, sink_ptr=None, block_tables_ptr=bt2, seq_lens_ptr=seq2, alibi_slopes_ptr=None,
         qq_bias_ptr=None, k_scale_cache_ptr=None, v_scale_cache_ptr=None, scale=kw["softmax_scale"],
         q_scale=(kw.get("q_descale") if q_is_fp8 else None), k_scale=kw["k_descale"], v_scale=kw["v_descale"], out_scale=1.0, softcap=0,
-        num_query_heads=nq, num_queries_per_kv=NQPKV, block_table_stride=bt2.stride(0),
+        num_query_heads=nq, num_queries_per_kv=nqpkv, block_table_stride=bt2.stride(0),
         query_stride_0=q.stride(0), query_stride_1=q.stride(1), output_stride_0=out.stride(0),
         output_stride_1=out.stride(1), qq_bias_stride_0=0, BLOCK_SIZE=block, TILE_SIZE=TILE, HEAD_SIZE=HEAD,
         HEAD_SIZE_PADDED=HEAD, USE_ALIBI_SLOPES=False, USE_ALIBI_SQRT=False, USE_QQ_BIAS=False,
@@ -198,17 +209,21 @@ def _run(kw, window, max_q, nseq, causal):
         stride_v_cache_0=v.stride(0), stride_v_cache_1=v.stride(1), stride_v_cache_2=v.stride(2),
         stride_v_cache_3=v.stride(3), stride_ks_blk=None, stride_ks_slot=None, stride_ks_head=None,
         stride_vs_blk=None, stride_vs_slot=None, stride_vs_head=None, query_start_len_ptr=cu, BLOCK_Q=bq,
-        num_seqs=nseq, BLOCK_M=BLOCK_M, NUM_SEGMENTS_PER_SEQ=segs, USE_FP8=False, IS_3D=True,
-        KV_QUANT_MODE=_state["fp8_per_tensor"], Q_IS_FP8=q_is_fp8, CHUNK_LOOKBACK=-1, CHUNK_SIZE=-1, USE_TD=False,
+        num_seqs=nseq, BLOCK_M=block_m, NUM_SEGMENTS_PER_SEQ=segs, USE_FP8=False, IS_3D=True,
+        KV_QUANT_MODE=kv_mode, Q_IS_FP8=q_is_fp8, CHUNK_LOOKBACK=-1, CHUNK_SIZE=-1, USE_TD=False,
         USE_TD_QO=False, MM_PREFIX_CLAMP_SW=False, num_warps=WARPS, num_stages=(2 if q_is_fp8 else STAGES))
     TU.reduce_segments[(q.shape[0], nq)](
         output_ptr=out, segm_output_ptr=so, segm_max_ptr=sm, segm_expsum_ptr=se, seq_lens_ptr=seq2,
         num_seqs=nseq, num_query_heads=nq, out_scale_inv=1.0, output_stride_0=out.stride(0),
         output_stride_1=out.stride(1), block_table_stride=bt2.stride(0), TILE_SIZE=TILE, HEAD_SIZE=HEAD,
         HEAD_SIZE_PADDED=HEAD, query_start_len_ptr=cu, BLOCK_Q=bq, NUM_SEGMENTS_PER_SEQ=segs, USE_FP8=False)
+    if (kv_mode, nqpkv) not in _state["seen"]:
+        _state["seen"].add((kv_mode, nqpkv))
+        sys.stderr.write(f"[radiance.attn_drafter] split-KV active: kv_mode={kv_mode} nqpkv={nqpkv} block_m={block_m}\n")
+        sys.stderr.flush()
     if not _state["logged"]:
         _state["logged"] = True
-        sys.stderr.write(f"[radiance] drafter attn plan: window={window} q_len<={max_q} split-KV BLOCK_M={BLOCK_M} "
+        sys.stderr.write(f"[radiance] drafter attn plan: window={window} q_len<={max_q} split-KV BLOCK_M={block_m} "
                          f"TILE={TILE} warps={WARPS} splits={segs} (seqs={nseq} tokens={q.shape[0]})\n")
         sys.stderr.flush()
 
@@ -268,8 +283,8 @@ def install():
         if missing:
             sys.stderr.write(f"[radiance] drafter attn tune skipped: vLLM's kernel lacks {sorted(missing)}\n")
             return True
-    _state.update(orig=TA.unified_attention, torch=torch, TU=TU, bf16=torch.bfloat16,
-                  fp8=current_platform.fp8_dtype(), fp8_per_tensor=KVQuantMode.FP8_PER_TENSOR)
+    _state.update(orig=TA.unified_attention, torch=torch, TU=TU, bf16=torch.bfloat16, fp16=torch.float16,
+                  kv_none=getattr(KVQuantMode, "NONE", 0), fp8=current_platform.fp8_dtype(), fp8_per_tensor=KVQuantMode.FP8_PER_TENSOR)
     wrapper._radiance_drafter_tune = True
     _state["wrapper"] = wrapper
     TA.unified_attention = wrapper

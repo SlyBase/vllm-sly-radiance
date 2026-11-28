@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adaptive DSpark verify window for Inkling-2-Mini (RADIANCE_INKLING2_ADAPTIVE_K).
+"""Adaptive speculative verify window (RADIANCE_ADAPTIVE_K, legacy name RADIANCE_INKLING2_ADAPTIVE_K).
 
 The DSpark drafter's checkpoint block size fixes the MAX verify window at k = 7
 (a verify step is M = 8 rows). A shorter window (k in {3, 5}) verifies exactly
@@ -7,8 +7,8 @@ the same way -- rejection sampling is exact for any k -- it just reads fewer
 distinct MoE experts and less dense attention per step, so the step is cheaper.
 This patch lets the scheduler pick k in {3, 5, 7} per step from a running
 acceptance estimate (EMA of accepted tokens per step, hysteresis + cooldown),
-using the native per-step `num_spec_tokens_to_schedule` seam. It is a NOOP on a
-vLLM without `models/inkling2`.
+using the native per-step `num_spec_tokens_to_schedule` seam. The hooks sit in the
+model-agnostic scheduler and runner, so any DSpark/DFlash target (Inkling-2-Mini, Qwen3.8-27B) can use it.
 
 The k override runs AFTER the native `dynamic_sd_lookup` block (which is batch-
 size keyed and off here) so the acceptance-based k wins. The draft step still
@@ -16,17 +16,16 @@ runs at its fixed 8-row block; only the verify width (k + 1 rows) changes, and
 the runner already masks `draft_tokens[:, k:] = -1` from the same value, so the
 draft and verify widths stay in lockstep.
 
-Inert unless RADIANCE_INKLING2_ADAPTIVE_K is set to a comma list of k's, each in
+Inert unless RADIANCE_ADAPTIVE_K (or the legacy RADIANCE_INKLING2_ADAPTIVE_K) is set to a comma list of k's, each in
 {3, 5, 7}, at most three entries (e.g. "3,5,7" adaptive, "5" fixed).
 """
 import os
 import sysconfig
 from pathlib import Path
 
-from _patchlib import apply
+from _patchlib import apply, apply_any
 
 SP = Path(os.environ.get("RADIANCE_PATCH_TARGET_DIR") or sysconfig.get_paths()["purelib"])
-ROOT = SP / "vllm/models/inkling2"
 SCHED = SP / "vllm/v1/core/sched/scheduler.py"
 MR = SP / "vllm/v1/worker/gpu/model_runner.py"
 
@@ -34,6 +33,9 @@ OBSERVE_ANCHOR = (
     "                num_rejected = len(scheduled_spec_token_ids) - num_accepted\n"
 )
 OBSERVE_NEW = OBSERVE_ANCHOR + "                self._rad_ik_observe(num_draft_tokens, num_accepted)\n"
+# newer vLLM: num_rejected is derived from the draft count, not from the scheduled list
+OBSERVE_ANCHOR_2 = "                num_rejected = num_draft_tokens - num_accepted\n"
+OBSERVE_NEW_2 = OBSERVE_ANCHOR_2 + "                self._rad_ik_observe(num_draft_tokens, num_accepted)\n"
 
 K_ANCHOR = (
     "        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:\n"
@@ -64,7 +66,7 @@ def _rad_ik_query_lens(vllm_config, decode_query_len):
     window still replays a FULL cudagraph instead of falling to PIECEWISE."""
     lens = vllm_config.get_decode_cudagraph_query_lens(decode_query_len)
     import os
-    raw = os.environ.get("RADIANCE_INKLING2_ADAPTIVE_K", "")
+    raw = os.environ.get("RADIANCE_ADAPTIVE_K") or os.environ.get("RADIANCE_INKLING2_ADAPTIVE_K", "")
     ks = {int(p) for p in raw.split(",") if p.strip() in ("3", "5", "7")}
     if ks:
         cap = max(lens.values()) if lens else vllm_config.scheduler_config.max_num_seqs
@@ -102,10 +104,11 @@ Scheduler._rad_ik_k = _rad_ik_k
 
 
 def main():
-    if not ROOT.is_dir():
-        print("  NOOP  inkling2 adaptive-k: this vLLM has no models/inkling2")
+    if not SCHED.is_file() or not MR.is_file():
+        print("  NOOP  adaptive-k: scheduler.py / model_runner.py not found in this vLLM")
         return
-    apply(SCHED, OBSERVE_ANCHOR, OBSERVE_NEW, "self._rad_ik_observe(", "inkling2 adaptive-k observe hook")
+    apply_any(SCHED, [(OBSERVE_ANCHOR, OBSERVE_NEW), (OBSERVE_ANCHOR_2, OBSERVE_NEW_2)], "self._rad_ik_observe(",
+              "inkling2 adaptive-k observe hook")
     apply(SCHED, K_ANCHOR, K_NEW, "self._rad_ik_k(num_spec_tokens_to_schedule)", "inkling2 adaptive-k override")
     # append the helper methods once (idempotent on the sentinel)
     s = SCHED.read_text()

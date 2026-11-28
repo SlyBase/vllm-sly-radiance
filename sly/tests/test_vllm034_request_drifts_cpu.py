@@ -63,7 +63,7 @@ def _drafter_kw(qdtype, *, q_descale="present"):
     v = torch.zeros(2, 16, kvh, head, dtype=fp8)
     out = torch.zeros(ntok, nq, head, dtype=torch.bfloat16)
     sentinel = object()
-    D._state.update(bf16=torch.bfloat16, fp8=fp8, fp8_per_tensor=sentinel,
+    D._state.update(bf16=torch.bfloat16, fp16=torch.float16, kv_none=0, fp8=fp8, fp8_per_tensor=sentinel,
                     torch=torch, logged=True, failed=False, declined=False)
     kw = dict(q=q, k=k, v=v, out=out, kv_quant_mode=sentinel,
               causal=True, window_size=(8192, 0), max_seqlen_q=8,

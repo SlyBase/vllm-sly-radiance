@@ -2,21 +2,16 @@
 """Inkling 2 prefill attention on gfx12: run the unmasked bulk loop in the prefill launch too.
 
 `sly/patch_inkling2_decode_attn.py` made key blocks that lie entirely before `pos_lo - E` (E = relative-bias
-extent, 1024) run without per-key masks, distance matrix and bias gather, but only for decode launches
+extent, 1024) run without per-key masks, distance matrix and bias gather, for decode launches
 (MODE_GATED / MODE_PARTIAL). The prefill launch (MODE_OUT_LSE, 128-row tiles of 42 tokens x 3 GQA heads) kept the
 masked loop over every key block. rocprofv3 of a cold 150k prompt (R9700, 210 W): `_rel_attention_kernel` is 48.6 s
 of 69.8 s GPU time (70 %), 12.2 of 27.3 s at 64k; almost all of its key blocks are such bulk blocks.
 
   * `RADIANCE_INKLING2_PREFILL_BULK` (default 1, 0 = masked loop): BULK=True for MODE_OUT_LSE launches of full
-    layers. The kernel needs no change: bulk blocks are visible to every row of the tile, carry no bias and lie
-    inside the sequence, for prefill exactly as for decode (pos >= pos_lo). The decode knob
-    `RADIANCE_INKLING2_ATTN_BULK=0` still turns every bulk loop off.
+    layers. The decode knob `RADIANCE_INKLING2_ATTN_BULK=0` still turns every bulk loop off.
   * `RADIANCE_INKLING2_PREFILL_BLOCK_N` (default 16; stock ROCm 32), `RADIANCE_INKLING2_PREFILL_BLOCK_M` (0 = stock 128
-    rows) and `RADIANCE_INKLING2_PREFILL_WARPS` (default 4; 0 = stock 8): tile of that launch (swept on the R9700 with
-    `sly/inkling2/bench_prefill_attn.py`: 16 variants of BLOCK_M x BLOCK_N x warps, 150k chunk 173 -> ~110 ms).
-  * `RADIANCE_INKLING2_PREFILL_LAZY` (default 0): conditional rescale of the running output in the bulk loop of that
-    launch -- the max / exp2 / multiply of the 128x128 accumulator runs only when a row's max rose by more than 8
-    (log2 units, p stays <= 256); the exact softmax is unchanged, the rounding is not.
+    rows) and `RADIANCE_INKLING2_PREFILL_WARPS` (default 4; 0 = stock 8): tile of that launch.
+  * `RADIANCE_INKLING2_PREFILL_LAZY` (default 0): conditional rescale of the running output in the bulk loop.
 
 Idempotent (sentinel per hunk). A vLLM without models/inkling2 is a NOOP. Runs after patch_inkling2_decode_attn.
 """
@@ -39,31 +34,39 @@ NEW_BM = (
     "        block_m = _PREFILL_BLOCK_M\n"
 )
 OLD_LAUNCH = (
-    "        BLOCK_N=64\n"
-    "        if _BULK and torch.version.hip and mode != MODE_OUT_LSE and window == 0 and block_m <= 32\n"
-    "        else (32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64,\n"
-    "        BULK=_BULK and mode != MODE_OUT_LSE,\n"
-    "        num_warps=8 if block_m >= 128 else 4,\n"
+    "        BLOCK_N=block_n,\n"
+    "        BULK=_RAD_DEC_SPLITS and _BULK and mode != MODE_OUT_LSE,\n"
+    "        VEC_KV=vec,\n"
+    "        num_warps=num_warps,\n"
 )
 NEW_LAUNCH = (
-    "        BLOCK_N=64\n"
-    "        if _BULK and torch.version.hip and mode != MODE_OUT_LSE and window == 0 and block_m <= 32\n"
-    "        else _PREFILL_BLOCK_N\n"
-    "        if prefill_bulk\n"
-    "        else (32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64,\n"
-    "        BULK=_BULK and (_PREFILL_BULK or mode != MODE_OUT_LSE),\n"
+    "        BLOCK_N=_PREFILL_BLOCK_N if prefill_bulk else block_n,\n"
+    "        BULK=_BULK and (_PREFILL_BULK if mode == MODE_OUT_LSE else _RAD_DEC_SPLITS),\n"
+    "        VEC_KV=vec,\n"
     "        LAZY=_PREFILL_LAZY and bool(prefill_bulk),\n"
-    "        num_warps=_PREFILL_WARPS if prefill_bulk and _PREFILL_WARPS else 8 if block_m >= 128 else 4,\n"
+    "        num_warps=_PREFILL_WARPS if prefill_bulk and _PREFILL_WARPS else num_warps,\n"
 )
 
-OLD_SIG = "    BULK: tl.constexpr,\n):\n"
-NEW_SIG = "    BULK: tl.constexpr,\n    LAZY: tl.constexpr,\n):\n"
+OLD_SIG = "    BULK: tl.constexpr,\n    VEC_KV: tl.constexpr,\n):\n"
+NEW_SIG = "    BULK: tl.constexpr,\n    VEC_KV: tl.constexpr,\n    LAZY: tl.constexpr,\n):\n"
+
+V_EXPR = (
+    "(\n"
+    "                    _load_fp8_kv_block(V, kv_base, stride_kv_slot, None, False, q.dtype, BLOCK_N, D)\n"
+    "                    if VEC\n"
+    "                    else _load_fp8_kv_all(V, kv_ptrs, q.dtype, D)\n"
+    "                )"
+)
 OLD_STEP = (
     "            m_new = tl.maximum(m_i, tl.max(s, 1))\n"
     "            alpha = tl.exp2(m_i - m_new)\n"
     "            p = tl.exp2(s - m_new[:, None])\n"
     "            l_i = l_i * alpha + tl.sum(p, 1)\n"
-    "            v = _load_fp8_kv_all(V, kv_ptrs, q.dtype, D)\n"
+    "            v = (\n"
+    "                _load_fp8_kv_block(V, kv_base, stride_kv_slot, None, False, q.dtype, BLOCK_N, D)\n"
+    "                if VEC\n"
+    "                else _load_fp8_kv_all(V, kv_ptrs, q.dtype, D)\n"
+    "            )\n"
     "            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)\n"
     "            m_i = m_new\n"
 )
@@ -79,14 +82,14 @@ NEW_STEP = (
     "                    m_i = m_new\n"
     "                p = tl.exp2(s - m_i[:, None])\n"
     "                l_i = l_i + tl.sum(p, 1)\n"
-    "                v = _load_fp8_kv_all(V, kv_ptrs, q.dtype, D)\n"
+    f"                v = {V_EXPR}\n"
     "                acc = acc + tl.dot(p.to(v.dtype), v)\n"
     "            else:\n"
     "                m_new = tl.maximum(m_i, tl.max(s, 1))\n"
     "                alpha = tl.exp2(m_i - m_new)\n"
     "                p = tl.exp2(s - m_new[:, None])\n"
     "                l_i = l_i * alpha + tl.sum(p, 1)\n"
-    "                v = _load_fp8_kv_all(V, kv_ptrs, q.dtype, D)\n"
+    f"                v = {V_EXPR}\n"
     "                acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)\n"
     "                m_i = m_new\n"
 )
@@ -113,7 +116,7 @@ def main():
     apply(SM90, OLD_SIG, NEW_SIG, "    LAZY: tl.constexpr,\n", "inkling2 prefill attention: signature")
     apply(SM90, OLD_STEP, NEW_STEP, "            if LAZY:\n", "inkling2 prefill attention: lazy rescale")
     apply(SM90, OLD_BM, NEW_BM, "    prefill_bulk = (\n", "inkling2 prefill attention: tile gate")
-    apply(SM90, OLD_LAUNCH, NEW_LAUNCH, "BULK=_BULK and (_PREFILL_BULK or mode", "inkling2 prefill attention: launch")
+    apply(SM90, OLD_LAUNCH, NEW_LAUNCH, "LAZY=_PREFILL_LAZY and bool(prefill_bulk)", "inkling2 prefill attention: launch")
 
 
 if __name__ == "__main__":

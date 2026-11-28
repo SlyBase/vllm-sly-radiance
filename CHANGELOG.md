@@ -10,6 +10,15 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.15.0] - 2026-11-28
+
+### Changed
+- **Inkling-2-Mini: vectorized 16-byte `global_load_b128` KV loads + zero-spill decode attention tile (global + local SWA layers).** Offline `gfx1201` ISA analysis showed `_rel_attention_kernel` emitted 1-byte `global_load_u8` gathers and spilled 149-662 VGPRs per thread. `sly/patch_inkling2_decode_attn.py` (`RADIANCE_INKLING2_VEC_KV=1`) adds scalar page lookup (`PAGE % BLOCK_N == 0`) and 16B/128B alignment hints (`_load_fp8_kv_block`) for both the unmasked bulk loop and the masked SWA/tail loop, paired with `(BLOCK_N=32, warps=8)` on global decode and `(BLOCK_N=32, warps=4, 33 splits)` on local SWA: 0 VGPR spills and 4 x `global_load_b128`.
+- **DFlash / DFlash2 drafter: MXFP4 Transformer linears (`RADIANCE_DFLASH_MXFP4=1`), shared bf16 `lm_head` release (`RADIANCE_INKLING2_FREE_DFLASH_HEAD=1`), and bf16/fp16 split-KV drafter attention (`radiance_attn_drafter.py`).** Unquantized bf16 DFlash/DFlash2 Transformer projections (`qkv/o/gate_up/down`, `fc`, `_fused_kv_weight`) quantize at load to MXFP4 on `gemv_mx4` while keeping grouped convs and candidate selector in bf16; the dead shared bf16 `lm_head` (883 MiB) is released before KV sizing once drafter head processors route through `_apply_head`; `radiance_attn_drafter.py` now dispatches split-KV SWA for unquantized bf16/fp16 drafter KV caches (`kv_cache_dtype="auto"`) and GQA ratios 1..16.
+- **Model-agnostic `RADIANCE_ADAPTIVE_K` + symmetric W4A16 HIP WMMA GEMV (`RADIANCE_W4A16_HIP_GEMV`).** `sly/patch_inkling2_adaptive.py` honors `RADIANCE_ADAPTIVE_K` across any target (Inkling-2-Mini and Qwen3.8-27B). `sly/w4a16/radiance_w4a16_gemv.hip` (`sly/patch_w4a16_hip_gemv.py`) adds a pre-tiled wave32 WMMA W4A16 GEMV for M 1..16 (`q = n - 8`, bf16 group scales G in {32,64,128}).
+
+## [Unreleased]
+
 ## [1.14.2] - 2026-11-28
 
 ### Changed
