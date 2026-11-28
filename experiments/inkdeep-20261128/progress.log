@@ -1,0 +1,69 @@
+10:00:34 PREFLIGHT OK
+10:03:18 window acquired, prod stopped
+10:03:18 === ARM M0_micro START (decode attn sweep) ===
+10:04:43 === ARM M0_micro DONE ===
+10:04:43 === ARM C1 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[] ===
+10:09:42 === ARM C1 DONE rc=0 ===
+10:09:42 === ARM OLD START img=vllm-sly-radiance:1.14.2-rocm10.1 env=[] ===
+10:12:33 container died during startup
+10:12:33 === ARM OLD DONE rc=1 ===
+10:12:33 === ARM T START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_BLOCK_N=64 RADIANCE_INKLING2_DECODE_WARPS=4 RADIANCE_INKLING2_LOCAL_BLOCK_N=128 RADIANCE_INKLING2_LOCAL_WARPS=4] ===
+10:17:13 PREFLIGHT OK (1 arms)
+10:17:55 === ARM T DONE rc=0 ===
+10:17:55 === ARM D START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_DFLASH_MXFP4=0] ===
+10:24:45 === ARM D DONE rc=0 ===
+10:24:45 === ARM A START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_ADAPTIVE_K= RADIANCE_INKLING2_ADAPTIVE_K=] ===
+10:29:49 === ARM A DONE rc=0 ===
+10:29:49 === ARM C2 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[] ===
+10:34:52 === ARM C2 DONE rc=0 ===
+10:34:52 ALL DONE
+10:34:52 RESTORE: prod + window release
+10:36:02 window acquired, prod stopped
+10:36:02 === ARM W2 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_WARPS=2] suites=mia,ctx ===
+10:37:53 prod health: 000
+10:40:54 === ARM W2 DONE rc=0 ===
+10:40:57 === ARM W4 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_WARPS=4] suites=mia,ctx ===
+10:43:31 container died during startup
+10:43:31 === ARM W4 DONE rc=1 ===
+10:43:33 RESTORE done
+10:45:31 resource gate failed (RAM 21315 MB, VRAM 28083159040 B)
+10:45:31 ALL DONE
+10:45:31 RESTORE: prod + window release
+10:45:31 prod health: 200
+10:45:31 RESTORE done
+10:51:01 window acquired, prod stopped
+10:51:01 === ARM W2b START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_WARPS=2] suites=mia,ctx ===
+10:55:51 === ARM W2b DONE rc=0 ===
+10:55:51 === ARM W4 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_WARPS=4] suites=mia,ctx ===
+11:00:42 === ARM W4 DONE rc=0 ===
+11:00:42 === ARM OLD2 START img=vllm-sly-radiance:1.14.2-rocm10.1 env=[] suites=mia,ctx ===
+11:03:22 container died during startup
+11:03:22 === ARM OLD2 DONE rc=1 ===
+11:03:22 ALL DONE
+11:03:22 RESTORE: prod + window release
+11:05:59 prod health: 200
+11:05:59 RESTORE done
+11:09:51 M1 START cap=210000000 vram=59912192
+11:10:45 M1 DONE rc=2
+11:10:45 === ARM OLD3 START img=vllm-sly-radiance:1.14.2-rocm10.1 env=[] suites=mia,ctx caches=fresh ===
+11:13:37 OLD3 container died during startup
+11:13:37 === ARM OLD3 DONE rc=1 ===
+{"service": "docker-vllm7.service", "health": 200, "kv_tokens": 470231, "restore_s": 0.0, "containers": ["vllm7-mxfp4"], "silences_end_in_s": 300, "silences_shortened": 2}
+11:16:17 W1D RESTORE: prod health=200 cap=210000000
+11:16:26 M1+M2 START cap=210000000 vram=59912192
+11:16:35 M1+M2 DONE rc=0
+11:16:35 === ARM OLD4 START img=vllm-sly-radiance:1.14.2-rocm10.1 util=0.92 suites=mia,ctx caches=fresh ===
+11:19:11 OLD4 container died during startup
+11:19:11 === ARM OLD4 DONE rc=1 ===
+11:19:11 === ARM OLD5 START img=vllm-sly-radiance:1.14.2-rocm10.1 util=0.85 suites=mia,ctx caches=fresh ===
+11:21:58 OLD5 container died during startup
+11:21:58 === ARM OLD5 DONE rc=1 ===
+{"service": "docker-vllm7.service", "health": 200, "kv_tokens": 470961, "restore_s": 0.0, "containers": ["vllm7-mxfp4"], "silences_end_in_s": 300, "silences_shortened": 2}
+11:24:38 W1E RESTORE: prod health=200 cap=210000000
+11:26:11 M1 START cap=210000000 vram=59912192
+11:26:33 M1 DONE rc=0
+11:26:33 === ARM OLD6 START img=vllm-sly-radiance:1.14.2-rocm10.1 extra=[--compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY"}] suites=mia,ctx caches=fresh ===
+11:29:14 OLD6 container died during startup
+11:29:15 === ARM OLD6 DONE rc=1 ===
+11:29:15 === ARM OLD7 START img=vllm-sly-radiance:1.14.2-rocm10.1 extra=[--enforce-eager] suites=mia,ctx caches=fresh ===
+11:36:29 === ARM OLD7 DONE rc=0 ===

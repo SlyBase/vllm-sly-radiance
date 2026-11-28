@@ -1,0 +1,78 @@
+{
+ "settings": {
+  "temperature": 0.7,
+  "top_p": 1,
+  "top_k": 20,
+  "thinking": true,
+  "concurrency": 1,
+  "tokens": "400",
+  "reps": "3",
+  "force": "min_tokens=max_tokens, ignore_eos, stop=[]"
+ },
+ "jobs": [
+  {
+   "type": "prose",
+   "max_tokens": 400,
+   "runs": [
+    {
+     "ttft_ms": 92.13,
+     "decode_ms": 2067.24,
+     "completion_tokens": 400,
+     "reasoning_tokens": 203,
+     "decode_tps": 193.01,
+     "finish": "length"
+    },
+    {
+     "ttft_ms": 93.2,
+     "decode_ms": 2172.06,
+     "completion_tokens": 400,
+     "reasoning_tokens": 398,
+     "decode_tps": 183.7,
+     "finish": "length"
+    },
+    {
+     "ttft_ms": 93.32,
+     "decode_ms": 2251.67,
+     "completion_tokens": 400,
+     "reasoning_tokens": 336,
+     "decode_tps": 177.2,
+     "finish": "length"
+    }
+   ],
+   "median_decode_tps": 183.7,
+   "median_ttft_ms": 93.2
+  },
+  {
+   "type": "code",
+   "max_tokens": 400,
+   "runs": [
+    {
+     "ttft_ms": 676.58,
+     "decode_ms": 1586.55,
+     "completion_tokens": 400,
+     "reasoning_tokens": 361,
+     "decode_tps": 251.49,
+     "finish": "length"
+    },
+    {
+     "ttft_ms": 115.37,
+     "decode_ms": 1624.18,
+     "completion_tokens": 400,
+     "reasoning_tokens": 398,
+     "decode_tps": 245.66,
+     "finish": "length"
+    },
+    {
+     "ttft_ms": 114.01,
+     "decode_ms": 1360.68,
+     "completion_tokens": 400,
+     "reasoning_tokens": 303,
+     "decode_tps": 293.24,
+     "finish": "length"
+    }
+   ],
+   "median_decode_tps": 251.49,
+   "median_ttft_ms": 115.37
+  }
+ ]
+}

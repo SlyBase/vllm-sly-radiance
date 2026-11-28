@@ -1,0 +1,1 @@
+GSMQ S1: acc 0.880 of 200 (temp 0.7), mean tokens 319.6, 157s

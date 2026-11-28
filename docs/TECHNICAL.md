@@ -902,3 +902,86 @@ effect: [NOT-ADOPTED.md](NOT-ADOPTED.md#inkling-2-mini-2026-11).
 **DSpark launch folding.** The draft path ran many tiny launches (RMSNorm 10 torch launches, Markov step,
 fold GEMM + softcap, dynamic sconv taps). Folded into single kernels with the same math (RMSNorm bit
 exact, 27.8 -> 3.3 us): verify step 30.3 -> 29.55 ms.
+
+## 1.15.2: the decode-tile warps trade (Inkling-2-Mini)
+
+**Symptom.** 1.14.2 → 1.15.1 lost long-context decode: ctxbench 64k 106.7 → 98.2 tok/s, 150k 81.9 → 71.0
+(ab-1151 reference, thinking medium). The 1.15.0 release notes claimed a *faster* decode tile.
+
+**Attribution (window 1, 2026-11-28, one R9700, 210 W, production args).** One-change-at-a-time arms
+against a twice-measured 1.15.1 control (C1/C2, spread ≤ 0.5 %):
+
+| arm | change vs control | 64k tok/s | 150k tok/s | verdict |
+|---|---|---|---|---|
+| T | local+global tile (64,4)/(128,4) | 99.0 | 84.1 | global tile helps, local tile hurts |
+| D | bf16 drafter (MXFP4 drafter off) | 91.9 | 71.8 | drafter quant neutral at depth |
+| A | adaptive K off | 97.9 | 70.9 | neutral |
+| W4 | global warps 8 → 4 | 122.9 | 104.5 | **the lever** |
+| W2/W2b | global warps 8 → 2 | 125.3 | 109.4 | **best at every depth** |
+
+Offline tile sweep (M0, µs per global-layer call, 8 calls/step): (32,8) 704/1651 at 64k/150k,
+(32,4) 420/948, (32,2) 362/744, (64,4) 423/930, (128,4) 1376/2726. The M1 split-count sweep
+(warps × `CTAS_PER_SM` 16/32/64 at 2k/8k/64k/150k) confirms warps=2 wins everywhere and more splits
+lose to merge overhead (150k: 724/740/773 µs at 16/32/64) — `CTAS_PER_SM=16` stays.
+
+**Why 1.15.0 got it wrong.** The tile was chosen by an ISA gate: warps=8 compiles to 0 VGPR spills,
+warps=2 to 143 (image triton 3.8/gfx1201; 154 on 3.9). But `_rel_attention_kernel` at long context is
+bandwidth-bound: 8 warps per split halve the number of concurrent splits per CU and serialize the
+16-byte KV loads; the spills of warps=2 stay in L2 and cost less than the lost parallelism. The ISA
+gate now budgets spills per configuration instead of demanding 0 everywhere
+(`test_gfx1201_isa_has_16_byte_kv_loads_and_spill_budget`), and a shipping-default test pins (32,2).
+
+**Costs, measured.** MIA single-stream −5 % (prose 193.4 → 183.9, code 264.0 → 250.5); the loss is a
+warps<8 effect (warps=4 identical), not specific to warps=2, and the kernel micro is *faster* at
+warps=2 even at 2k — the end-to-end loss sits outside the attention kernel. Acceptance length at
+64k/150k rises (2.72 → 3.05, 2.56 → 3.09; config-deterministic, W2 = W2b to 0.1 %).
+
+**The AL "regression" was a harness artifact.** A 1.14.2 control on the same ctxbench harness gives
+AL 2.79/2.75/2.56 (8k/64k/150k) vs 1.15.1's 2.79/2.72/2.56. The earlier 2.88@64k came from a different
+harness. Getting 1.14.2 to start at all took six attempts: its released `FULL_AND_PIECEWISE` graphs
+OOM at capture with a fresh compile cache (34.08 GB capture vs 31.5 GB budget, independent of
+`--gpu-memory-utilization`), and `FULL_DECODE_ONLY` hits the mxfp4-dense dynamo bug that 1.15.1 fixed
+(`released … weight has no MXFP4 entry`). The control ran `--enforce-eager`: AL valid, speed not
+comparable (eager loses ~60 % to launch overhead on this hybrid model).
+
+**Not measured.** BetterBench per-category decode and the multi-turn chat replay for this change;
+the 1.14.2 graph-mode speed reference on this host. Raw data: `experiments/inkdeep-20261128/`.
+
+**Quality gate (window 2, 2026-11-28, same host and 210 W, published ghcr bits).** G0a/G0b = 1.15.1
+control first and last, G1 = 1.15.2 measured on its second start (fresh compile on the first):
+
+| metric | G0a | G1 | G0b |
+|---|---|---|---|
+| ctx 7942 tok/s | 126.9 | 130.5 | 125.8 |
+| ctx 63696 tok/s | 98.4 | 125.2 | 97.5 |
+| ctx 149881 tok/s | 71.4 | 109.4 | 70.5 |
+| MIA prose/code tok/s | 192.6/261.6 | 183.7/251.5 | 192.5/261.8 |
+| lc64 (Niklas, 100 needles) | 100/100 | 100/100 | 100/100 |
+| lc150 (Niklas, 100 needles) | 99/100 | 99/100 | 99/100 |
+| GSM8K-660 greedy (flexible) | 0.897 | 0.8879 | 0.897 |
+
+Control spread ≤ 1.3 % (noise floor); the candidate's +28 % / +54 % at depth sit far above it. lc150
+misses the same single item (id 364) in all three arms — item-specific, not a regression. GSM8K
+−0.9 pp is within the ±1.2 pp standard error. Concurrency probe at 64k (shared prefix, c1/c2/c4):
+aggregate 64–79 / 83–95 / 106–121 tok/s — sublinear batching, no c1 cliff. The tree has no
+batch-keyed draft gate: native `dynamic_sd_lookup` is off, adaptive K is acceptance-EMA-keyed and
+unset in shipping, and the dynamic-draft controller fails to install on the pinned vLLM
+(`llm_base_proposer` module absent).
+
+**Sampled quality gate (window 3, 2026-11-28, same host and 210 W, published ghcr bits).** The
+greedy gate alone cannot see a sampling-path regression, so the same three-arm pattern ran the
+production sampling profile: GSM8K first 200 test items, `temperature 0.7, top_p 0.8, top_k 20,
+seed 1234`, 700-token cap, flexible-extract scoring (the repo's `gsmq.py`, copied into each
+container; host python still lacks pandas, the container has it). S0a/S0b = 1.15.1 control first
+and last, S1 = 1.15.2 on its second start:
+
+| arm | image | GSM8K-200 sampled |
+|---|---|---|
+| S0a | 1.15.1 (control first) | 0.895 |
+| S1 | 1.15.2 (candidate) | 0.880 |
+| S0b | 1.15.1 (control last) | 0.885 |
+
+The candidate sits 1.0 pp below the control mean (0.890); the controls themselves span 1.0 pp, so
+the difference is inside the same-start noise band of this 200-item sampled probe (binomial SE
+≈ 2.2 pp). No sampled regression attributable to the tile change. Raw per-item results, boot logs,
+env proofs and spec metrics: `experiments/inkdeep-20261128/out/S0a|S1|S0b/`, driver `w3.sh`.

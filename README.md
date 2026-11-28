@@ -595,6 +595,7 @@ single-stream decode at 210 W (code 125.6), step ~30 ms. Arguments, measurements
 | `RADIANCE_INKLING2_HIP_CTRL` | off | opt-in: the loop message controllers' two `torch.bmm` (hipBLASLt, 0.92 ms per verify step, 96 launches) as two launches of the batched HIP bf16 GEMV; same bf16 weights, fp32 accumulate (summation order only). Not yet measured end to end |
 | `RADIANCE_INKLING2_FOLD_INT8` | off | opt-in, lossy, drafter only: the DSpark Markov fold weight (103 MB, read 7x per verify step) as int8 + one fp32 scale per vocabulary row (51 MB); the target still verifies every token. Not yet measured end to end |
 | `RADIANCE_INKLING2_HIP_DEBUG` | off | `1` = host-side launch checks of the expert kernel |
+| `RADIANCE_INKLING2_DECODE_WARPS` (+ `..._DECODE_BLOCK_N`) | **2** (BLOCK_N 32) | warps of the global decode/verify attention tile. 1.15.0/1 shipped 8 for a zero-spill ISA; end-to-end warps=2 is +27 % @64k / +53 % @150k (143 VGPR spills, bandwidth-bound, spills stay in L2), −5 % single-stream MIA. `8` = the old tile, A/B without a rebuild |
 
 ### Other checkpoints and GPUs
 

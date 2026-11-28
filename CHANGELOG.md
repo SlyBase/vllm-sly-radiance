@@ -10,6 +10,24 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.15.2] - 2026-11-28
+
+### Fixed
+- **Inkling-2-Mini: long-context decode is fast again — the global decode tile now ships `(BLOCK_N=32, warps=2)` instead of `(32, 8)`.** 1.15.0 chose warps=8 for a zero-spill ISA; end-to-end the kernel is bandwidth-bound and warps=8 halves the load parallelism per split: at 150k context one global-layer call took 1651 µs at warps=8 vs 744 µs at warps=2 (offline tile sweep, 8 global calls per engine step). *Measured* on one R9700, 210 W, production arguments, thinking=medium, medians, same `ctxbench` harness in both arms (1.15.1 control measured twice, candidate twice):
+
+  | context | 1.15.1 (32,8) | 1.15.2 (32,2) | delta tok/s |
+  |---|---|---|---|
+  | 7942 | 127.0 tok/s · 45.4 steps/s · AL 2.79 | 130.6 · 45.5 · 2.91 | +2.8 % |
+  | 63696 | 98.5 · 36.6 · 2.72 | 125.3 · 41.1 · 3.05 | +27.2 % |
+  | 149881 | 71.3 · 27.9 · 2.56 | 109.4 · 35.5 · 3.09 | +53.4 % |
+
+  Single-stream MIA (400 tokens, median of 3): prose 193.4 → 183.9 tok/s (−4.9 %), code 264.0 → 250.5 (−5.1 %). The loss appears at any warps<8 (warps=4 loses the same), while the kernel micro is faster at warps=2 even at 2k context; the trade buys +27 % / +53 % at depth. warps=2 spills 143 VGPRs (image triton 3.8, gfx1201; 154 on triton 3.9) — accepted deliberately: the spills stay in L2 on a bandwidth-bound kernel and it wins end-to-end at every measured depth. The ISA gate now budgets spills per configuration (warps=8 and the local SWA tile must stay at 0).
+- **Acceptance length did not regress between 1.14.2 and 1.15.1.** A 1.14.2 control on the same harness gives AL 2.79 / 2.75 / 2.56 at 8k / 64k / 150k vs 1.15.1's 2.79 / 2.72 / 2.56 — the earlier "2.88 → 2.72" compared two different harnesses. The 1.14.2 control ran `--enforce-eager` (its released `FULL_AND_PIECEWISE` graphs OOM at capture with a fresh compile cache on this host, and `FULL_DECODE_ONLY` hits the mxfp4-dense compile bug that 1.15.1 fixed), so its AL is valid but its speed is not comparable.
+- Quality gate on the published image (1.15.1 control measured first and last, candidate on its second start): lc64 100/100 and lc150 99/100 in all three arms (the single lc150 miss is the same item in every arm), GSM8K-660 greedy 0.897 → 0.8879 → 0.897 (−0.9 pp, within the ±1.2 pp standard error); control spread ≤ 1.3 %. Sampled GSM8K-200 (temp 0.7 / top_p 0.8 / top_k 20 / seed 1234, same 200 items, 700-token cap): control 0.895 / 0.885 first-and-last, candidate 0.880 — 1.0 pp below the control mean, inside the 1.0 pp control spread. Not measured for this change: BetterBench per-category decode and the multi-turn chat replay.
+
+### Changed
+- `RADIANCE_INKLING2_DECODE_WARPS` default 8 → 2. The knob is unchanged; `8` restores the 1.15.0/1.15.1 tile without a rebuild.
+
 ## [1.15.1] - 2026-11-28
 
 ### Fixed

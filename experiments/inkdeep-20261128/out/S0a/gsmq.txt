@@ -1,0 +1,1 @@
+GSMQ S0a: acc 0.895 of 200 (temp 0.7), mean tokens 316.9, 157s

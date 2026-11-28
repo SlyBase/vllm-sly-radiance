@@ -1,0 +1,172 @@
+# Inkling-2-Mini deep-context decode: attribution + hill-climb (2026-11-28)
+
+Card t_11ca1edc. Branch `perf/inkling2-deep-decode` off origin/main c50c3ba (1.15.1).
+Steering 2026-11-28 (Timon): brief point 8 (upstream radiance-2 comparison) is STRUCK —
+separate card after the prod switch; no GPU/build budget for it here. Reddit values are
+literature reference only.
+Host: LXC 2408 (.51), R9700 gfx1201, 210 W, prod unit docker-vllm7 (image 1.15.1-rocm10.1).
+Raw data + ledger: host `/root/inkdeep-20261128/`, mirrored here (committed).
+
+## Baseline (MESSUNG, ab-1151 window 2026-11-28, 210 W, same scripts)
+
+| metric | 1.14.2 | 1.15.1 | delta |
+|---|---|---|---|
+| MIA prose / code tok/s | 177.9 / 227.2 | 192.9 / 262.5 | +8.4 % / +15.5 % |
+| ctx 8k / 64k / 150k tok/s | 122.6 / 106.7 / 81.9 | 126.5 / 98.2 / 71.0 | +3.2 / -7.9 / -13.3 % |
+| steps/s 8k / 64k / 150k | 41.8 / 37.5 / 31.8 | 45.4 / 36.6 / 27.9 | +8.6 / -2.4 / -12.3 % |
+| AL 8k / 64k / 150k | 2.94 / 2.88 / 2.59 | 2.79 / 2.72 / 2.56 | -5.1 / -5.6 / -1.2 % |
+
+Decomposition (RECHNUNG, tok/s = steps/s x AL): the 64k loss is mostly **AL** (drafter),
+the 150k loss is mostly **steps/s** (step time, grows with depth -> per-key attention cost).
+Two distinct causes, not one.
+
+## Suspects (code diff cd29507..c50c3ba, no vLLM bump in Dockerfile)
+
+1. Global decode tile: 1.14.2 BLOCK_N=64/warps=4 -> 1.15.1 BLOCK_N=32/warps=8
+   (`RADIANCE_INKLING2_DECODE_BLOCK_N/_WARPS`). Depth-growing cost -> prime suspect for 150k.
+2. Local SWA plan+tile: 1.14.2 stock BLOCK_N=128/warps=4, splits=cdiv(1023,128)+1=9 ->
+   1.15.1 BLOCK_N=32/warps=4, splits=min(33, cdiv(1023,32)+1)=33
+   (`RADIANCE_INKLING2_LOCAL_BLOCK_N/_LOCAL_WARPS`). Depth-independent, candidate for 8k gain.
+3. MXFP4 drafter default on (`RADIANCE_DFLASH_MXFP4=1` with MXFP4_DENSE=1, RTN clip):
+   AL -5 % at 8k/64k. bf16 drafter in 1.14.2.
+4. VEC_KV b128 loads: measured NEUTRAL end-to-end (ab-1151 B arm). Note: VEC_KV=0 does NOT
+   revert tiles/plan -> that arm did not test suspects 1/2. Do not reopen VEC_KV alone.
+5. ADAPTIVE_K: entrypoint default "3,5,7" UNCHANGED since 1.14.2; 1.15.0 only added the
+   RADIANCE_ADAPTIVE_K alias + a proof line. Low prior, one bounding arm.
+6. DECODE_SPLITS=0 collapses long context (ab-1151 C arm) -> split plan carries, NOT the cause.
+   Do not reopen.
+
+## Ceilings (RECHNUNG, estimates; measured BW 563 GB/s, peak 640)
+
+Config: 24 layers, loop core 6..18 x3 passes = 48 layer visits/step; MoE 128 experts top-8,
+expert = 3x2304x1152 MXFP4 ~ 4.23 MB; routed union ~20 (w=4) .. 29.6 (w=8) experts/visit;
+8 global attn calls/step (layers 5,23 x1; 11,17 x3), KV fp8 8 heads x 128 x 2 = 2048 B/token/layer;
+40 local visits x window 1024; lm_head int4 0.23 GB; drafter bf16 ~0.5 GB vs MXFP4 ~0.15 GB (est).
+
+| ctx | bytes/step (est) | floor @563 GB/s | measured step 1.15.1 | eff |
+|---|---|---|---|---|
+| 8k | ~5.4-7.4 GB | ~10-13 ms | 22.0 ms | ~50 % |
+| 64k | ~6.5-8.5 GB | ~12-15 ms | 27.3 ms | ~50 % |
+| 150k | ~7.9-9.9 GB | ~14-18 ms | 35.8 ms | ~45 % |
+
+Not at the bandwidth wall; kernel/launch efficiency headroom exists, largest at depth.
+Acceptance needs step <= ~27.7 ms @64k (AL 2.88) and <= ~32.4 ms @150k (AL 2.59).
+
+## Hill-climb literature (steering 2026-11-28, ONLY after attribution+fix; clean-room, no forced arms)
+
+Notes: /opt/data/analysis/inkling2-mini/references-external.md
+- radiance PR #586 split-KV decode: live-bound merge (8 tiles/split), 4-K-word prefetch then
+  score, butterfly wave-sum over 8 keys, int8 K+V in one load; 250k kernel 1.17->0.92 ms,
+  512k 4.06->1.90 ms. Check whether our split-KV path tolerates similar prefetch/reduction/load
+  improvements (technique description only, no code/identifier takeover).
+- saber-engine (Rust/R9700): resolved plan instead of env namespace; W4A8-iu8 on int8 matrix
+  cores (per-row int4, per-token int8) — technique idea only.
+- Reddit Tangenius: long-context draft-verify fastpath gated >=4 conversations, switch opens
+  it for c1 (+12-21 % @46K-95K) — check whether our tree has an equivalent concurrency gate.
+- losingle/basalt fork: Blackwell/CUDA only, ignore.
+
+## Window 1 arms (one knob each; C first and last; ~6 min/arm)
+
+| arm | image | env delta | question |
+|---|---|---|---|
+| M0 | 1.15.1 | microbench --sweep, no server | which (BLOCK_N,warps) wins per depth, global+local |
+| C1 | 1.15.1 | none | control |
+| OLD | 1.14.2 | none (old compile cache) | same-window reference |
+| T | 1.15.1 | DECODE_BLOCK_N=64 DECODE_WARPS=4 LOCAL_BLOCK_N=128 LOCAL_WARPS=4 | old tiles/plan recover 150k? |
+| D | 1.15.1 | DFLASH_MXFP4=0 | bf16 drafter recover AL? |
+| A | 1.15.1 | ADAPTIVE_K="" INKLING2_ADAPTIVE_K="" | bound adaptive-k share |
+| C2 | 1.15.1 | none | drift control |
+
+Suites per arm: mia (400 tok, 3 reps) + ctx (8k/64k/150k). Validity per arm: result files
+non-empty, `docker exec env` proof, hooks.txt, MemAvailable >= 14 GB before start (A2 died
+at 11.5 GB available during weight load). Drift floor ~3 %.
+
+## Acceptance (hard, vs 1.14.2 control in the SAME window)
+
+- ctx 64k >= ~104 tok/s, 150k >= ~80 tok/s; MIA prose >= ~185, code >= ~245; ctx 8k >= ~122.
+- Quality: GSM8K paired vs 1.15.1 (baseline twice, noise floor), greedy gate, needle 64k/150k
+  exact-match (lc.py). No loss above noise.
+- Deliverables: open PR (CI green, no merge), provisional ghcr image (pull verified), ledger.
+
+## Window 1 results (2026-11-28 10:03-10:35 UTC, 210 W, raw in out/)
+
+| arm | MIA prose/code | ctx 8k tok/s (steps/s, AL) | ctx 64k | ctx 150k |
+|---|---|---|---|---|
+| C1 (1.15.1) | 193.4 / 264.0 | 127.0 (45.4, 2.79) | 98.5 (36.6, 2.72) | 71.3 (27.9, 2.56) |
+| T (old tiles 64/4+128/4) | 179.4 / 222.5 | 121.7 (43.9, 2.77) | 99.0 (39.1, 2.55) | **84.1 (33.2, 2.55)** |
+| D (bf16 drafter) | 195.8 / 247.8 | 129.0 (43.1, **3.05**) | 91.9 (35.6, 2.58) | 71.8 (27.1, 2.65) |
+| A (adaptive K off) | 193.1 / 262.9 | 126.3 (45.2, 2.79) | 97.9 (36.4, 2.72) | 70.9 (27.7, 2.56) |
+| C2 (control) | 192.6 / 262.0 | 126.4 (45.2, 2.79) | 97.9 (36.3, 2.72) | 70.9 (27.7, 2.56) |
+
+Attribution (VERDICT):
+- **150k steps/s loss = global decode tile warps 4->8.** T recovers +18 % (84.1 >= 80 target).
+  MXFP4 drafter neutral at depth (D ~= C1). Adaptive K neutral (A ~= C1).
+- Tile trade-off is real: (32,8) wins short ctx (T loses MIA code -15.7 %, 8k -4.2 %);
+  (64,4) wins depth. Single tile must serve all depths (cudagraph constexpr).
+- MXFP4 drafter: 8k steps +5.3 %, AL -8.5 % (3.05->2.79), MIA code +6.6 %, 8k tok/s -1.6 %.
+  Keep (MIA/code acceptance depends on it).
+- AL at 64k varies 2.55-2.72 across arms with unrelated knobs -> greedy trajectory noise,
+  small sample. Do not attribute AL deltas < ~0.15 at 64k/150k to a knob without repeats.
+- OLD (1.14.2) arm FAILED: VRAM OOM at KV init (C1's pool not freed yet, 130 MB free).
+  Retry as OLD2 with VRAM gate (w1b.sh). M0 ledger rc=1: local split-config tolerance flag
+  (patched_vs_stock 0.0078), fp32-ref error 0.004 fine; sweep data valid.
+
+M0 micro (T=8, us/call): global 64k: (32,2)=362 (32,4)=420 (64,4)=423 (32,8)=704;
+global 150k: (32,2)=744 (64,4)=930 (32,4)=948 (32,8)=1651. Local 64k: ~(32,4)=55 (128,4)=70.
+ISA probe (triton 3.9, gfx1201, BLOCK_N=32): warps=2 -> **154 VGPR spills**, warps=4 -> 53,
+warps=8 -> 0. Micro-optimum (32,2) violates the 0-spill ISA gate; depth is BW-bound so
+spills may still win end-to-end. W2/W4 arms decide; ISA test contract may need a documented
+relaxation for the chosen default.
+
+Window-1b/1d addendum (clean rerun after driver-overlap fix):
+- W2b (warps=2, clean window) reproduces W2 within 0.3 %: MIA 184.2/250.7,
+  ctx 130.7 (45.5, 2.91) / 125.5 (41.1, 3.05) / 109.5 (35.5, 3.09).
+  The earlier prod-overlap contamination was negligible. AL 3.05/3.09 at
+  64k/150k is config-deterministic (identical in W2 and W2b), not noise.
+- W4 (warps=4): MIA 184.3/251.6 (same as W2), ctx 130.8 / 122.9 / 104.5,
+  AL identical to W2. W2 dominates W4 at depth (+4 % at 150k); the MIA
+  -5 % vs C1 comes from warps<8 generally, not from warps=2 specifically.
+- OLD/OLD2 (1.14.2 control) OOMed during cudagraph capture: the 1.14.2
+  image defaults to FULL_AND_PIECEWISE (1.15.1 bakes FULL_DECODE_ONLY),
+  and the shared TC142 cache state now over-allocates at capture
+  (34.08 GB used vs 31.5 GB target, OOM on a 23 MB alloc). The live unit
+  sets no cudagraph flags, so image defaults ARE the released config.
+  OLD3 retries with fresh compile caches (fresh compile profiles a
+  smaller KV pool; decode speed is pool-size independent). Documented
+  deviation: cache state, not flags.
+- M1 micro-sweep (warps 2/4/8 x CTAS_PER_SM 16/32/64 at ctx 2k/8k/64k/150k)
+  tests whether more splits recover the short-ctx MIA loss at warps=2.
+
+Window-1f FINAL (M1 fixed bench path, M2, OLD6/OLD7):
+- M1 (36 cells, all err<=0.005): warps=2 wins at EVERY depth and CTAS=16 is
+  optimal. 150k us/call: w2 724/740/773 at ctas 16/32/64; w4 948; w8 1666.
+  2k: w2 58.2 vs w8 67.3 (w2 faster even short-ctx at kernel level -> the
+  end-to-end MIA -5% sits outside the attention kernel). More splits lose
+  to merge overhead. CTAS_PER_SM stays 16. No second knob needed.
+- M2 (image triton 3.8, shipping kernel): warps=2 -> 143 VGPR spills,
+  4x global_load_b128, no u8. ISA gate relaxed per-config: (0,2)<=160,
+  (0,8)==0, (1024,4)==0. Test renamed ..._and_spill_budget.
+- OLD6 (1.14.2, FULL_DECODE_ONLY) died in dynamo: "[radiance.inkling2.mxfp4dense]
+  released NxK weight has no MXFP4 entry" — the exact bug 1.15.1 fixed.
+  OLD4/OLD5 (FULL_AND_PIECEWISE, fresh caches / util 0.85) OOM at capture
+  independent of util -> 1.14.2 graph mode is unreproducible on this host.
+- OLD7 (1.14.2, --enforce-eager, fresh caches) rc=0: MIA 74.2/91.3,
+  ctx 51.2 (18.3, 2.79) / 51.0 (18.8, 2.75) / 47.9 (18.8, 2.56).
+  Eager loses ~60% to launch overhead -> speed NOT comparable. But AL on
+  the SAME ctxbench harness: 2.79/2.75/2.56 == 1.15.1 C1/C2 (2.79/2.72/2.56).
+  **The 64k AL "regression" 2.88->2.72 was a harness artifact. No drafter
+  regression exists.** Documented deviation: eager, not released graphs.
+
+FIX (shipped in 1.15.2): `_RAD_DEC_WARPS` default 8 -> 2, one line.
+Tests: test_shipping_decode_tile_is_32_2 (RED (32,8)!=(32,2) -> GREEN),
+ISA spill budget per config. 14/14 local (triton 3.9 venv). Docs: VERSION,
+CHANGELOG (per-depth table + MIA + not-measured list), README knob row,
+sly/README, docs/TECHNICAL.md. ci/check_consistency.py OK.
+
+## Rejected (do not reopen)
+
+- VEC_KV=0 alone: neutral (ab-1151 B).
+- DECODE_SPLITS=0: collapses long context (ab-1151 C).
+- ADAPTIVE_K off: neutral end-to-end (window 1 A). Not the cause; do not reopen.
+- DFLASH_MXFP4=0 as the 150k fix: neutral at depth (window 1 D); costs MIA code -6 %.
+- (append after each arm)

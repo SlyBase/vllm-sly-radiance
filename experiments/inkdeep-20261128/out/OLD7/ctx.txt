@@ -1,0 +1,3 @@
+{"ctx": 7942, "cold_ttft_s": 11.3, "tok_s": 51.2, "steps_s": 18.3, "AL": 2.79}
+{"ctx": 63696, "cold_ttft_s": 21.6, "tok_s": 51.0, "steps_s": 18.8, "AL": 2.75}
+{"ctx": 149881, "cold_ttft_s": 49.1, "tok_s": 47.9, "steps_s": 18.8, "AL": 2.56}
