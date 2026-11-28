@@ -78,6 +78,21 @@ def test_decode_launch_is_decode_only_and_gated_by_the_splits_knob(tree):
     assert "if torch.version.hip and _RAD_DEC_SPLITS:" in plan
 
 
+def test_shipping_decode_tile_is_32_2(tree, monkeypatch):
+    """The released global decode tile is (BLOCK_N=32, warps=2).
+
+    warps=8 (1.15.0/1.15.1 default) cost ~30 % of the 150k decode steps/s
+    vs 1.14.2's warps=4; warps=2 recovers it and beats warps=4 by a further
+    ~5 % at 150k with identical short-context speed (inkdeep-20261128,
+    arms W2/W2b/W4). The env knob stays for A/Bs.
+    """
+    monkeypatch.delenv("RADIANCE_INKLING2_DECODE_WARPS", raising=False)
+    monkeypatch.delenv("RADIANCE_INKLING2_DECODE_BLOCK_N", raising=False)
+    patched(tree)
+    S = load_kernels(tree / OPS / "attention_sm90.py")
+    assert (S._RAD_DEC_BN, S._RAD_DEC_WARPS) == (32, 2)
+
+
 def test_second_run_is_a_noop(tree):
     first = patched(tree)
     assert "OK " in first.stdout and "FAIL" not in first.stdout
@@ -218,8 +233,12 @@ def gfx1201_asm(path, window, num_warps, block_n, vec):
     return code.asm["amdgcn"]
 
 
-@pytest.mark.parametrize("window,num_warps", [(0, 8), (1024, 4)])
-def test_gfx1201_isa_has_16_byte_kv_loads_and_no_spills(tree, window, num_warps):
+# Spill budget per config: warps=2 (the shipping global tile) trades VGPR
+# spills (143 on triton 3.8/gfx1201) for occupancy; the kernel is
+# bandwidth-bound and the spills stay in L2 — measured end-to-end faster at
+# every depth (inkdeep-20261128). warps=8 and the local tile keep zero spills.
+@pytest.mark.parametrize("window,num_warps,max_spills", [(0, 2, 160), (0, 8, 0), (1024, 4, 0)])
+def test_gfx1201_isa_has_16_byte_kv_loads_and_spill_budget(tree, window, num_warps, max_spills):
     pytest.importorskip("triton")
     prefill_patched(tree)
     env = dict(os.environ, TRITON_INTERPRET="0")
@@ -227,7 +246,7 @@ def test_gfx1201_isa_has_16_byte_kv_loads_and_no_spills(tree, window, num_warps)
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stdout + r.stderr[-3000:]
     asm = r.stdout
-    assert int(re.search(r"\.vgpr_spill_count:\s*(\d+)", asm).group(1)) == 0
+    assert int(re.search(r"\.vgpr_spill_count:\s*(\d+)", asm).group(1)) <= max_spills
     assert len(re.findall(r"global_load_b128", asm)) >= 4
     assert "global_load_u8" not in asm
 

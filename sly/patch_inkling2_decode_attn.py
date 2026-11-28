@@ -138,7 +138,7 @@ _BULK = os.environ.get("RADIANCE_INKLING2_ATTN_BULK", "1") != "0"
 _RAD_VEC_KV = _RAD_DEC_SPLITS and os.environ.get("RADIANCE_INKLING2_VEC_KV", "1") != "0"
 # ROCm decode tile (block_n, warps): global layers (window 0) and local sliding-window layers.
 _RAD_DEC_BN = int(os.environ.get("RADIANCE_INKLING2_DECODE_BLOCK_N", "32"))
-_RAD_DEC_WARPS = int(os.environ.get("RADIANCE_INKLING2_DECODE_WARPS", "8"))
+_RAD_DEC_WARPS = int(os.environ.get("RADIANCE_INKLING2_DECODE_WARPS", "2"))
 _RAD_LOC_BN = int(os.environ.get("RADIANCE_INKLING2_LOCAL_BLOCK_N", "32"))
 _RAD_LOC_WARPS = int(os.environ.get("RADIANCE_INKLING2_LOCAL_WARPS", "4"))
 print(

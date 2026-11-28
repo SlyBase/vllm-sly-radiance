@@ -902,3 +902,47 @@ effect: [NOT-ADOPTED.md](NOT-ADOPTED.md#inkling-2-mini-2026-11).
 **DSpark launch folding.** The draft path ran many tiny launches (RMSNorm 10 torch launches, Markov step,
 fold GEMM + softcap, dynamic sconv taps). Folded into single kernels with the same math (RMSNorm bit
 exact, 27.8 -> 3.3 us): verify step 30.3 -> 29.55 ms.
+
+## 1.15.2: the decode-tile warps trade (Inkling-2-Mini)
+
+**Symptom.** 1.14.2 → 1.15.1 lost long-context decode: ctxbench 64k 106.7 → 98.2 tok/s, 150k 81.9 → 71.0
+(ab-1151 reference, thinking medium). The 1.15.0 release notes claimed a *faster* decode tile.
+
+**Attribution (window 1, 2026-11-28, one R9700, 210 W, production args).** One-change-at-a-time arms
+against a twice-measured 1.15.1 control (C1/C2, spread ≤ 0.5 %):
+
+| arm | change vs control | 64k tok/s | 150k tok/s | verdict |
+|---|---|---|---|---|
+| T | local+global tile (64,4)/(128,4) | 99.0 | 84.1 | global tile helps, local tile hurts |
+| D | bf16 drafter (MXFP4 drafter off) | 91.9 | 71.8 | drafter quant neutral at depth |
+| A | adaptive K off | 97.9 | 70.9 | neutral |
+| W4 | global warps 8 → 4 | 122.9 | 104.5 | **the lever** |
+| W2/W2b | global warps 8 → 2 | 125.3 | 109.4 | **best at every depth** |
+
+Offline tile sweep (M0, µs per global-layer call, 8 calls/step): (32,8) 704/1651 at 64k/150k,
+(32,4) 420/948, (32,2) 362/744, (64,4) 423/930, (128,4) 1376/2726. The M1 split-count sweep
+(warps × `CTAS_PER_SM` 16/32/64 at 2k/8k/64k/150k) confirms warps=2 wins everywhere and more splits
+lose to merge overhead (150k: 724/740/773 µs at 16/32/64) — `CTAS_PER_SM=16` stays.
+
+**Why 1.15.0 got it wrong.** The tile was chosen by an ISA gate: warps=8 compiles to 0 VGPR spills,
+warps=2 to 143 (image triton 3.8/gfx1201; 154 on 3.9). But `_rel_attention_kernel` at long context is
+bandwidth-bound: 8 warps per split halve the number of concurrent splits per CU and serialize the
+16-byte KV loads; the spills of warps=2 stay in L2 and cost less than the lost parallelism. The ISA
+gate now budgets spills per configuration instead of demanding 0 everywhere
+(`test_gfx1201_isa_has_16_byte_kv_loads_and_spill_budget`), and a shipping-default test pins (32,2).
+
+**Costs, measured.** MIA single-stream −5 % (prose 193.4 → 183.9, code 264.0 → 250.5); the loss is a
+warps<8 effect (warps=4 identical), not specific to warps=2, and the kernel micro is *faster* at
+warps=2 even at 2k — the end-to-end loss sits outside the attention kernel. Acceptance length at
+64k/150k rises (2.72 → 3.05, 2.56 → 3.09; config-deterministic, W2 = W2b to 0.1 %).
+
+**The AL "regression" was a harness artifact.** A 1.14.2 control on the same ctxbench harness gives
+AL 2.79/2.75/2.56 (8k/64k/150k) vs 1.15.1's 2.79/2.72/2.56. The earlier 2.88@64k came from a different
+harness. Getting 1.14.2 to start at all took six attempts: its released `FULL_AND_PIECEWISE` graphs
+OOM at capture with a fresh compile cache (34.08 GB capture vs 31.5 GB budget, independent of
+`--gpu-memory-utilization`), and `FULL_DECODE_ONLY` hits the mxfp4-dense dynamo bug that 1.15.1 fixed
+(`released … weight has no MXFP4 entry`). The control ran `--enforce-eager`: AL valid, speed not
+comparable (eager loses ~60 % to launch overhead on this hybrid model).
+
+**Not measured.** BetterBench per-category decode and the multi-turn chat replay for this change;
+the 1.14.2 graph-mode speed reference on this host. Raw data: `experiments/inkdeep-20261128/`.

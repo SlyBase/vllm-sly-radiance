@@ -118,7 +118,52 @@ warps=8 -> 0. Micro-optimum (32,2) violates the 0-spill ISA gate; depth is BW-bo
 spills may still win end-to-end. W2/W4 arms decide; ISA test contract may need a documented
 relaxation for the chosen default.
 
-## Rejected / do not reopen
+Window-1b/1d addendum (clean rerun after driver-overlap fix):
+- W2b (warps=2, clean window) reproduces W2 within 0.3 %: MIA 184.2/250.7,
+  ctx 130.7 (45.5, 2.91) / 125.5 (41.1, 3.05) / 109.5 (35.5, 3.09).
+  The earlier prod-overlap contamination was negligible. AL 3.05/3.09 at
+  64k/150k is config-deterministic (identical in W2 and W2b), not noise.
+- W4 (warps=4): MIA 184.3/251.6 (same as W2), ctx 130.8 / 122.9 / 104.5,
+  AL identical to W2. W2 dominates W4 at depth (+4 % at 150k); the MIA
+  -5 % vs C1 comes from warps<8 generally, not from warps=2 specifically.
+- OLD/OLD2 (1.14.2 control) OOMed during cudagraph capture: the 1.14.2
+  image defaults to FULL_AND_PIECEWISE (1.15.1 bakes FULL_DECODE_ONLY),
+  and the shared TC142 cache state now over-allocates at capture
+  (34.08 GB used vs 31.5 GB target, OOM on a 23 MB alloc). The live unit
+  sets no cudagraph flags, so image defaults ARE the released config.
+  OLD3 retries with fresh compile caches (fresh compile profiles a
+  smaller KV pool; decode speed is pool-size independent). Documented
+  deviation: cache state, not flags.
+- M1 micro-sweep (warps 2/4/8 x CTAS_PER_SM 16/32/64 at ctx 2k/8k/64k/150k)
+  tests whether more splits recover the short-ctx MIA loss at warps=2.
+
+Window-1f FINAL (M1 fixed bench path, M2, OLD6/OLD7):
+- M1 (36 cells, all err<=0.005): warps=2 wins at EVERY depth and CTAS=16 is
+  optimal. 150k us/call: w2 724/740/773 at ctas 16/32/64; w4 948; w8 1666.
+  2k: w2 58.2 vs w8 67.3 (w2 faster even short-ctx at kernel level -> the
+  end-to-end MIA -5% sits outside the attention kernel). More splits lose
+  to merge overhead. CTAS_PER_SM stays 16. No second knob needed.
+- M2 (image triton 3.8, shipping kernel): warps=2 -> 143 VGPR spills,
+  4x global_load_b128, no u8. ISA gate relaxed per-config: (0,2)<=160,
+  (0,8)==0, (1024,4)==0. Test renamed ..._and_spill_budget.
+- OLD6 (1.14.2, FULL_DECODE_ONLY) died in dynamo: "[radiance.inkling2.mxfp4dense]
+  released NxK weight has no MXFP4 entry" — the exact bug 1.15.1 fixed.
+  OLD4/OLD5 (FULL_AND_PIECEWISE, fresh caches / util 0.85) OOM at capture
+  independent of util -> 1.14.2 graph mode is unreproducible on this host.
+- OLD7 (1.14.2, --enforce-eager, fresh caches) rc=0: MIA 74.2/91.3,
+  ctx 51.2 (18.3, 2.79) / 51.0 (18.8, 2.75) / 47.9 (18.8, 2.56).
+  Eager loses ~60% to launch overhead -> speed NOT comparable. But AL on
+  the SAME ctxbench harness: 2.79/2.75/2.56 == 1.15.1 C1/C2 (2.79/2.72/2.56).
+  **The 64k AL "regression" 2.88->2.72 was a harness artifact. No drafter
+  regression exists.** Documented deviation: eager, not released graphs.
+
+FIX (shipped in 1.15.2): `_RAD_DEC_WARPS` default 8 -> 2, one line.
+Tests: test_shipping_decode_tile_is_32_2 (RED (32,8)!=(32,2) -> GREEN),
+ISA spill budget per config. 14/14 local (triton 3.9 venv). Docs: VERSION,
+CHANGELOG (per-depth table + MIA + not-measured list), README knob row,
+sly/README, docs/TECHNICAL.md. ci/check_consistency.py OK.
+
+## Rejected (do not reopen)
 
 - VEC_KV=0 alone: neutral (ab-1151 B).
 - DECODE_SPLITS=0: collapses long context (ab-1151 C).

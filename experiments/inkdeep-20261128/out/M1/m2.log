@@ -1,0 +1,8 @@
+[radiance.inkling2] decode_attn: splits=1 vec_kv=1 bulk=1 global(block_n=32,warps=8) local(block_n=32,warps=4)
+{"window": 0, "warps": 2, "spills": 143, "b128": 16, "u8": false, "triton": "3.8.0"}
+{"window": 0, "warps": 4, "spills": 13, "b128": 8, "u8": false, "triton": "3.8.0"}
+{"window": 0, "warps": 8, "spills": 0, "b128": 4, "u8": false, "triton": "3.8.0"}
+{"window": 1024, "warps": 2, "spills": 82, "b128": 8, "u8": false, "triton": "3.8.0"}
+{"window": 1024, "warps": 4, "spills": 0, "b128": 4, "u8": false, "triton": "3.8.0"}
+{"window": 1024, "warps": 8, "spills": 0, "b128": 2, "u8": false, "triton": "3.8.0"}
+M2 DONE

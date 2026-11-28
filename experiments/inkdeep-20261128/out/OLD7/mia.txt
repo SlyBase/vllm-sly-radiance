@@ -1,0 +1,2 @@
+prose max_tokens=400: 74.21 tok/s, TTFT 133.69 ms (median of 3)
+code  max_tokens=400: 91.33 tok/s, TTFT 149.2 ms (median of 3)
