@@ -367,11 +367,24 @@ def process_draft(model) -> None:
     _report("the draft")
 
 
+@torch.library.custom_op("radiance::mxfp4_draft_linear", mutates_args=())
+def _draft_linear_op(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
+    """x @ weight.T (+ bias) via the MXFP4 copy keyed by `weight`. An op, because the drafter runs inside
+    torch.compile: the _CACHE lookup reads data_ptr(), which a traced fake tensor does not have (the compile
+    then sees the released stub as a real weight and raises, or replays a bf16 graph from a stale cache)."""
+    return mxfp4_dense_linear(x, weight, bias=bias)
+
+
+@_draft_linear_op.register_fake
+def _(x, weight, bias):
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
 class _MXFP4DraftLinearMethod:
     """quant_method of a drafter linear whose bf16 weight was released (same apply() as the stock one)."""
 
     def apply(self, layer, x, bias=None):
-        return mxfp4_dense_linear(x, layer.weight, bias=bias)
+        return _draft_linear_op(x, layer.weight, bias)
 
 
 def _register_now(p) -> bool:
@@ -405,8 +418,8 @@ def process_dflash_draft(draft_model) -> int:
         and _register_now(kv)
     if fused:  # the stock projection would run F.linear on the released weight
         def project(context_states, num_ctx, num_layers, num_kv_heads, head_dim):
-            y = mxfp4_dense_linear(inner._normalize_context_states(context_states), inner._fused_kv_weight,
-                                   bias=inner._fused_kv_bias)
+            y = _draft_linear_op(inner._normalize_context_states(context_states), inner._fused_kv_weight,
+                                 inner._fused_kv_bias)
             return y.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
 
         inner._project_context_kv_token_major = project

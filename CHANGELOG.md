@@ -10,6 +10,12 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
+## [1.15.1] - 2026-11-28
+
+### Fixed
+- **DFlash2 drafter with `RADIANCE_DFLASH_MXFP4=1` (the 1.15.0 default with `RADIANCE_INKLING2_MXFP4_DENSE=1`) crashed at engine start** (`released 6144x2304 weight has no MXFP4 entry`; with a compile cache from 1.14.x: `AssertionError: expected size 6144==6144, stride 1==2304`). *Cause:* the drafter runs inside `torch.compile`; the MXFP4 lookup read `data_ptr()` of the traced weight, so dynamo saw the released NaN stub as a real weight. The drafter linears and the fused context-KV projection now go through the custom op `radiance::mxfp4_draft_linear` (fake impl: shape only). Test `sly/inkling2/tests/test_dflash_mxfp4.py::test_drafter_linear_compiles_without_graph_break`.
+- Upgrading from 1.14.x: use a fresh `torch_compile_cache` mount once; a graph compiled with bf16 drafter weights is replayed by key and fails the stride assert.
+
 ## [1.15.0] - 2026-11-28
 
 ### Changed
