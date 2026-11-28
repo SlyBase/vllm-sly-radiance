@@ -18,6 +18,7 @@ import sys
 import torch
 
 ENABLED = os.environ.get("RADIANCE_W4A16_HIP_GEMV", "0") == "1"
+HIP_HEAD = os.environ.get("RADIANCE_W4A16_HIP_HEAD", "1") != "0"  # 0 = skip vocab-sized (>=131072 rows) lm_head
 MAX_CACHE_MB = int(os.environ.get("RADIANCE_W4A16_MAX_CACHE_MB", "2048"))
 MAX_M = 16  # rows per gemv_u4 launch (the kernel's range)
 TILE = 16  # weight rows per tile (one wmma operand)
@@ -149,6 +150,8 @@ def prepack_weights(w_q, w_s, w_zp, group_size: int, prefix: str = "") -> bool:
     if nk is None:
         return False
     n, k = nk
+    if not HIP_HEAD and n >= (1 << 17):
+        return False
     if k % GROUP or k % group_size or tuple(w_s.shape) != (n, k // group_size):
         return False
     return _tiles(w_q, w_s, n, k, group_size) is not None
@@ -164,6 +167,8 @@ def try_w4a16_hip_gemv(x, w_q, w_s, w_zp, group_size, bias=None, act_fn=None):
     if nk is None:
         return None
     n, k = nk
+    if not HIP_HEAD and n >= (1 << 17):
+        return None
     if x.shape[-1] != k or k % GROUP or k % group_size or tuple(w_s.shape) != (n, k // group_size):
         return None
     m = x.numel() // k

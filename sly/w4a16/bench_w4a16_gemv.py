@@ -69,18 +69,18 @@ def main():
         stock_bytes = wq.numel() + s.numel() * 2
         u4_bytes = qt.numel() + st.numel() * 2
         copies = max(2, -(-POOL_BYTES // max(stock_bytes, u4_bytes)))
-        pool = [(wq.clone(), s.clone(), qt.clone(), st.clone()) for _ in range(copies - 1)] + [(wq, s, qt, st)]
+        cur_pool = [(wq.clone(), s.clone(), qt.clone(), st.clone()) for _ in range(copies - 1)] + [(wq, s, qt, st)]
         for m in a.ms:
             x = torch.randn(m, k, device=dev, dtype=torch.bfloat16)
             y = torch.empty(m, n, device=dev, dtype=torch.bfloat16)
 
-            def u4(i, cfg=-1):
-                _, _, q_, s_ = pool[i % copies]
+            def u4(i, cfg=-1, _p=cur_pool, _c=copies, _qt=qt):
+                _, _, q_, s_ = _p[i % _c]
                 W._ext.gemv_u4(x.data_ptr(), q_.data_ptr(), s_.data_ptr(), y.data_ptr(), 0, m, n, k, x.stride(0),
-                               y.stride(0), 0, qt.shape[0], torch.cuda.current_stream().cuda_stream, cfg)
+                               y.stride(0), 0, _qt.shape[0], torch.cuda.current_stream().cuda_stream, cfg)
 
-            def stock(i):
-                w_, s_, _, _ = pool[i % copies]
+            def stock(i, _p=cur_pool, _c=copies):
+                w_, s_, _, _ = _p[i % _c]
                 return stock_op(x, w_, s_, None, None, cu, g)
 
             ref = stock(copies - 1)
@@ -95,7 +95,7 @@ def main():
                 best = min(ts, key=ts.get)
                 print(f"{'':>12} cfgs us: " + " ".join(f"{c}:{t:.1f}" for c, t in ts.items()) + f"  best {best} "
                       f"{W._ext.CFGS[best]} (auto {W._ext.auto_cfg_u4(m, n, k)})")
-        del pool
+        cur_pool = None
 
 
 if __name__ == "__main__":
