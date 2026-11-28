@@ -149,7 +149,7 @@ def main():
         "        if _BULK and torch.version.hip and mode != MODE_OUT_LSE and window == 0 and block_m <= 32\n"
         "        else (32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64,\n"
         "        BULK=_BULK and mode != MODE_OUT_LSE,\n",
-        "BULK=_BULK and mode",
+        "mode != MODE_OUT_LSE and window == 0 and block_m <= 32",
         "inkling2 attention bulk: launch (BLOCK_N 64 on full decode layers, bulk flag)",
     )
 
