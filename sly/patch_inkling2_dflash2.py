@@ -34,6 +34,19 @@ IMPORT = "from radiance_inkling2_dflash2 import"
 
 
 def main():
+    apply(  # not Inkling-only: RADIANCE_DFLASH_MXFP4=1 serves a bf16 drafter of any target
+        LOADER,
+        "        dflash_model.lm_head = target_lm_head\n\n    return dflash_model\n",
+        "        dflash_model.lm_head = target_lm_head\n\n"
+        "    import torch\n\n"
+        "    if torch.version.hip:\n"
+        "        from radiance_inkling2_mxfp4dense import maybe_release_shared_head, process_dflash_draft\n\n"
+        "        process_dflash_draft(dflash_model)\n"
+        "        maybe_release_shared_head(dflash_model, target_lm_head)\n\n"
+        "    return dflash_model\n",
+        "process_dflash_draft(dflash_model)",
+        "dflash drafter mxfp4 + shared head release",
+    )
     if not (SP / "vllm/models/inkling2").is_dir():
         print("  NOOP  inkling2 dflash2: this vLLM has no models/inkling2")
         return

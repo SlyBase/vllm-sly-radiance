@@ -42,6 +42,9 @@ import sys
 import torch
 
 ENABLED = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE", "0") == "1"
+# the bf16 DFlash/DFlash2 drafter's transformer linears: on with the dense knob, or alone (e.g. a Qwen target)
+DFLASH_MXFP4 = os.environ.get("RADIANCE_DFLASH_MXFP4", "1" if ENABLED else "0") == "1"
+FREE_DFLASH_HEAD = os.environ.get("RADIANCE_INKLING2_FREE_DFLASH_HEAD", "1") == "1"  # see maybe_release_shared_head
 MODE = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MODE", "gemv")
 CLIP = os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_CLIP", "rtn")
 MIN_N = int(os.environ.get("RADIANCE_INKLING2_MXFP4_DENSE_MIN_N", "256"))
@@ -303,10 +306,11 @@ def register(p: torch.nn.Parameter, rows=(), free: bool = True) -> None:
         p.data = view
 
 
-def _ready(model) -> bool:
-    """Knob on and the kernel usable (checked once, at load); allocates the decode scratch."""
+def _ready(model, on: bool | None = None) -> bool:
+    """Knob on (`on`, default the dense knob) and the kernel usable (checked once, at load); allocates the
+    decode scratch."""
     global MODE
-    if not ENABLED:
+    if not (ENABLED if on is None else on):
         return False
     if MODE not in ("gemv", "w4a8", "w4a16"):
         raise ValueError(f"RADIANCE_INKLING2_MXFP4_DENSE_MODE must be gemv, w4a8 or w4a16, got {MODE!r}")
@@ -363,6 +367,69 @@ def process_draft(model) -> None:
     _report("the draft")
 
 
+class _MXFP4DraftLinearMethod:
+    """quant_method of a drafter linear whose bf16 weight was released (same apply() as the stock one)."""
+
+    def apply(self, layer, x, bias=None):
+        return mxfp4_dense_linear(x, layer.weight, bias=bias)
+
+
+def _register_now(p) -> bool:
+    n = _STATS[0]
+    register(p)
+    return _STATS[0] > n
+
+
+def process_dflash_draft(draft_model) -> int:
+    """Load-time hook of a DFlash / DFlash2 drafter: quantize + release its UNQUANTIZED bf16 transformer linears
+    (qkv/o/gate_up/down of every layer, fc) and the fused context-KV weight built from them; returns how many
+    linears. The grouped convs, the candidate selector, embeddings, norms, the head and any already-quantized
+    linear are left alone (draft acceptance depends on them staying bf16)."""
+    if not _ready(draft_model, DFLASH_MXFP4):
+        return 0
+    inner = getattr(draft_model, "model", None)
+    lins = [getattr(getattr(l, blk), name) for l in getattr(inner, "layers", ())
+            for blk, name in (("self_attn", "qkv_proj"), ("self_attn", "o_proj"), ("mlp", "gate_up_proj"),
+                              ("mlp", "down_proj"))]
+    lins.append(getattr(inner, "fc", None))
+    n = 0
+    for lin in lins:
+        w = getattr(lin, "weight", None)
+        if (type(getattr(lin, "quant_method", None)).__name__ == "UnquantizedLinearMethod" and w is not None
+                and w.ndim == 2 and w.dtype == torch.bfloat16 and w.shape[1] % MX_GROUP == 0
+                and _register_now(lin.weight)):
+            lin.quant_method = _MXFP4DraftLinearMethod()
+            n += 1
+    kv = getattr(inner, "_fused_kv_weight", None)
+    fused = kv is not None and kv.ndim == 2 and kv.dtype == torch.bfloat16 and kv.shape[1] % MX_GROUP == 0 \
+        and _register_now(kv)
+    if fused:  # the stock projection would run F.linear on the released weight
+        def project(context_states, num_ctx, num_layers, num_kv_heads, head_dim):
+            y = mxfp4_dense_linear(inner._normalize_context_states(context_states), inner._fused_kv_weight,
+                                   bias=inner._fused_kv_bias)
+            return y.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+
+        inner._project_context_kv_token_major = project
+    if n or fused:
+        sys.stderr.write(f"[radiance.inkling2] dflash_mxfp4: quantized {n} linear tensors (+fused_kv={fused})\n")
+    return n
+
+
+def maybe_release_shared_head(dflash_model, target_lm_head) -> bool:
+    """Free the target's bf16 lm_head (kept for the DSpark fold only) once the DFlash drafter shares it: every
+    reader (the drafter's logits processor and its candidate processor) must use the MXFP4 head route
+    (`_apply_head`); a stock LogitsProcessor (LoRA) would read the released weight, so it keeps the bf16."""
+    w = getattr(target_lm_head, "weight", None)
+    if not (ENABLED and FREE_DFLASH_HEAD) or w is None or _is_stub(w.data) or _key(w.data) not in _CACHE:
+        return False
+    procs = [getattr(dflash_model, "logits_processor", None), getattr(dflash_model, "candidate_logits_processor", None)]
+    if any(p is not None and "_apply_head" not in vars(type(p)) for p in procs) or procs[0] is None:
+        return False
+    release_head(w)
+    sys.stderr.write("[radiance.inkling2] dflash_head: released the dead shared bf16 lm_head\n")
+    return True
+
+
 @torch.no_grad()
 def release_head(p: torch.nn.Parameter) -> None:
     """Free the bf16 lm_head once the draft has folded it (no-op if it was not registered)."""
@@ -395,7 +462,7 @@ def mxfp4_dense_linear(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor 
                        bias: torch.Tensor | None = None, dtype: torch.dtype | None = None):
     """x @ weight.T via the MXFP4 copy registered for `weight`; None = not ours (caller runs bf16).
     `dtype` (default bf16): result dtype, fp32 straight from the kernel's accumulator in gemv mode."""
-    if not ENABLED or weight.ndim != 2:
+    if not (ENABLED or DFLASH_MXFP4) or weight.ndim != 2:
         return None
     n, k = weight.shape
     ent = _CACHE.get(_key(weight))
