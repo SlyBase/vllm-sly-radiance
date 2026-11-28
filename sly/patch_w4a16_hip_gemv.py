@@ -47,3 +47,14 @@ apply(F,
       '    M = x_2d.shape[0]\n',
       '_radiance_hip_gemv.try_w4a16_hip_gemv(x_2d, w_q, w_s, w_zp, group_size, bias)',
       'rdna_hybrid_w4a16: HIP GEMV hook at the top of the apply op')
+
+apply(F,
+      '        kernel_config = get_current_vllm_config().kernel_config\n',
+      '        if _radiance_hip_gemv is not None:\n'
+      '            _hq, _hs, _hz = self._get_weight_params(layer)\n'
+      '            _radiance_hip_gemv.prepack_weights(\n'
+      '                _hq.data, _hs.data, _hz.data if _hz is not None else None, c.group_size, getattr(layer, "prefix", "")\n'
+      '            )\n'
+      '        kernel_config = get_current_vllm_config().kernel_config\n',
+      '_radiance_hip_gemv.prepack_weights(',
+      'rdna_hybrid_w4a16: prepack HIP GEMV tiles at weight load before KV sizing')

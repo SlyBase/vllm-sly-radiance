@@ -191,11 +191,15 @@ def test_standalone_knob_works_without_the_dense_knob():
 # ---------------------------------------------------------------- maybe_release_shared_head
 
 
-class Stock:  # stands in for vLLM's LogitsProcessor
+class LogitsProcessor:  # stands in for vLLM's plain LogitsProcessor (upgradable when cand is Inkling)
     pass
 
 
-class Inkling(Stock):
+class LoRALogitsProcessor(LogitsProcessor):  # stands in for a LoRA/custom processor without _apply_head
+    pass
+
+
+class Inkling(LogitsProcessor):
     def _apply_head(self, lm_head, h, bias):
         return h
 
@@ -218,8 +222,16 @@ def test_release_frees_head_when_both_processors_use_the_mxfp4_head():
     assert m.mxfp4_dense_head(head.weight, h, torch.float32).shape == (3, 512)  # still served from the tiles
 
 
-@pytest.mark.parametrize("kw", [dict(logits=Stock), dict(cand=Stock)])
-def test_release_refuses_a_stock_processor(kw):
+def test_release_upgrades_plain_drafter_logits_processor_when_candidate_is_inkling():
+    m = load(RADIANCE_INKLING2_MXFP4_DENSE="1")
+    head, d = head_and_draft(m, logits=LogitsProcessor, cand=Inkling)
+    assert m.maybe_release_shared_head(d, head) is True
+    assert isinstance(d.logits_processor, Inkling)
+    assert freed(head.weight)
+
+
+@pytest.mark.parametrize("kw", [dict(logits=LoRALogitsProcessor), dict(cand=LoRALogitsProcessor)])
+def test_release_refuses_a_custom_or_lora_processor(kw):
     m = load(RADIANCE_INKLING2_MXFP4_DENSE="1")
     head, d = head_and_draft(m, **kw)
     assert m.maybe_release_shared_head(d, head) is False

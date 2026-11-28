@@ -68,6 +68,7 @@ mkdir -p "$SP/triton/backends/amd" && cp -r "$WORK/src/triton/third_party/amd/ba
 # top-level radiance_mxfp4.py the image never ships; GNU cp refuses two same-named sources in one call)
 cp "$ROOT"/radiance_*.py "$SP/"
 cp "$ROOT"/sly/mxfp4/radiance_*.py "$SP/"
+cp "$ROOT"/sly/w4a16/radiance_*.py "$SP/"
 mkdir -p "$SP/aiter/ops/triton/configs" && cp -r "$ROOT/sly/mxfp4-configs/." "$SP/aiter/ops/triton/configs/"
 
 # --- skip allowlist ---

@@ -136,6 +136,24 @@ def _tiles(w_q, w_s, n, k, g):
     return ent
 
 
+def prepack_weights(w_q, w_s, w_zp, group_size: int, prefix: str = "") -> bool:
+    """Build the kernel's tile copy at load time (before profile_run and KV-cache sizing) so the KV budget
+    sees the allocation. Skips merged MLP gate_up_proj when RADIANCE_W4A16_SILU (default 1) bypasses apply."""
+    if not ENABLED or _ext is None or w_zp is not None or group_size not in GROUPS:
+        return False
+    if os.environ.get("RADIANCE_W4A16_SILU", "1") != "0" and ".gate_up_proj" in prefix:
+        return False
+    if w_s is None or w_s.dtype != torch.bfloat16 or not _is_gpu(w_q):
+        return False
+    nk = _nk(w_q)
+    if nk is None:
+        return False
+    n, k = nk
+    if k % GROUP or k % group_size or tuple(w_s.shape) != (n, k // group_size):
+        return False
+    return _tiles(w_q, w_s, n, k, group_size) is not None
+
+
 def try_w4a16_hip_gemv(x, w_q, w_s, w_zp, group_size, bias=None, act_fn=None):
     """y = x @ W^T (+ bias) on the HIP GEMV; None = not ours (the caller runs the stock kernel)."""
     if not ENABLED or _ext is None or act_fn is not None or w_zp is not None:

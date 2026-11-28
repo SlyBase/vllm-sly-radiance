@@ -418,11 +418,25 @@ def process_dflash_draft(draft_model) -> int:
 def maybe_release_shared_head(dflash_model, target_lm_head) -> bool:
     """Free the target's bf16 lm_head (kept for the DSpark fold only) once the DFlash drafter shares it: every
     reader (the drafter's logits processor and its candidate processor) must use the MXFP4 head route
-    (`_apply_head`); a stock LogitsProcessor (LoRA) would read the released weight, so it keeps the bf16."""
+    (`_apply_head`); a plain LogitsProcessor on the drafter is upgraded to the candidate/Inkling processor, while
+    any custom/LoRA subclass without `_apply_head` keeps the bf16 head."""
     w = getattr(target_lm_head, "weight", None)
     if not (ENABLED and FREE_DFLASH_HEAD) or w is None or _is_stub(w.data) or _key(w.data) not in _CACHE:
         return False
-    procs = [getattr(dflash_model, "logits_processor", None), getattr(dflash_model, "candidate_logits_processor", None)]
+    lp = getattr(dflash_model, "logits_processor", None)
+    clp = getattr(dflash_model, "candidate_logits_processor", None)
+    if lp is not None and type(lp).__name__ == "LogitsProcessor" and "_apply_head" not in vars(type(lp)):
+        if clp is not None and "_apply_head" in vars(type(clp)):
+            lp.__class__ = type(clp)
+        else:
+            try:
+                from vllm.models.inkling2.nvidia.model import Inkling2LogitsProcessor
+
+                if issubclass(Inkling2LogitsProcessor, type(lp)):
+                    lp.__class__ = Inkling2LogitsProcessor
+            except Exception:
+                pass
+    procs = [lp, clp]
     if any(p is not None and "_apply_head" not in vars(type(p)) for p in procs) or procs[0] is None:
         return False
     release_head(w)

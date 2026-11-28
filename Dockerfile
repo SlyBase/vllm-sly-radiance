@@ -630,6 +630,14 @@ RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
       /opt/kernels/radiance_inkling2_mx4.hip -o /out/radiance_inkling2_mx4.so \
  && PYTHONPATH=/out python -c "import torch, radiance_inkling2_mx4 as m; print('radiance_inkling2_mx4 built:', m.__file__)"
 
+# sly/w4a16/radiance_w4a16_gemv.hip: symmetric W4A16 low-M WMMA GEMV (M 1..16, opt-in RADIANCE_W4A16_HIP_GEMV=1)
+# for the W4A16 DFlash2 drafter and RADIANCE_LMHEAD_INT4 on Qwen3.8-27B.
+COPY sly/w4a16/radiance_w4a16_gemv.hip /opt/kernels/
+RUN hipcc -O3 -fPIC -shared -std=c++20 --offload-arch=${GFX_ARCH} \
+      $(python -m pybind11 --includes) \
+      /opt/kernels/radiance_w4a16_gemv.hip -o /out/radiance_w4a16_gemv.so \
+ && PYTHONPATH=/out python -c "import torch, radiance_w4a16_gemv as m; print('radiance_w4a16_gemv built:', m.__file__)"
+
 # ggz14's three extra weight formats, each a single-file pybind11 extension built like the two
 # above (their own flags: C++17, warnings off, as in run_autoround.sh / run_escha.sh /
 # paroquant/run_paroquant.sh). The Python sides register a quantization config and only load when
@@ -679,6 +687,7 @@ COPY radiance_amdsmi.py radiance_amdsmi.pth \
      sly/inkling2/radiance_inkling2_moe.py sly/inkling2/radiance_inkling2_kv.py \
      sly/inkling2/radiance_inkling2_mxfp4dense.py sly/inkling2/radiance_inkling2_adaptive_k.py ${SP}/
 COPY sly/inkling2/radiance_inkling2_gemv_hip.py ${SP}/
+COPY sly/w4a16/radiance_w4a16_gemv_hip.py ${SP}/
 # launch folding of the DSpark draft (hooks: sly/patch_inkling2_gfx12.py)
 COPY sly/inkling2/radiance_inkling2_draft.py ${SP}/
 # native DFlash2 drafter on the Inkling target (opt-in by serving flag; hooks: sly/patch_inkling2_dflash2.py)
@@ -823,7 +832,7 @@ RUN set -eu; cd /opt/patches; \
              patch_dflash_fused_kv_fp8 patch_dflash_w4 patch_gdn_metadata patch_gdn_lazy \
              sly/patch_quark_mxfp4 \
              sly/patch_dflash_w4_packed sly/patch_lmhead_fp8 \
-             sly/patch_w4a16_tiles sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
+             sly/patch_w4a16_tiles sly/patch_w4a16_hip_gemv sly/patch_lmhead_int4 sly/patch_lmhead_int4_ct sly/patch_lmhead_int2 patch_nvfp4_mxfp4 \
              sly/patch_fused_norm_quant sly/patch_linear_carrier sly/patch_qwen35_legacy \
              sly/patch_kv_groups sly/patch_ultraquant_gqa sly/patch_embed_int8 sly/patch_embed_host sly/patch_nvfp4_compile_key sly/patch_w4a16_fuse \
              sly/patch_gdn_fused_decode sly/patch_adaptive_width sly/patch_nsd \
