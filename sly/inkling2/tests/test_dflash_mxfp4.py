@@ -249,3 +249,24 @@ def test_release_without_candidate_processor_and_knob_off_and_unregistered():
     head = ns(weight=torch.nn.Parameter(torch.randn(512, H, dtype=torch.bfloat16)))  # never registered
     assert m.maybe_release_shared_head(ns(logits_processor=Inkling(), lm_head=head), head) is False
     assert m.maybe_release_shared_head(ns(logits_processor=Inkling()), None) is False
+
+
+def test_drafter_linear_compiles_without_graph_break():
+    """The drafter runs inside torch.compile: the released stub must reach the op, not be read by dynamo."""
+    m = load(RADIANCE_INKLING2_MXFP4_DENSE="1")
+    d = make_drafter()
+    m.process_dflash_draft(d)
+    lin = d.model.layers[0].self_attn.qkv_proj
+    assert m._is_stub(lin.weight)
+    f = torch.compile(lambda x: lin.quant_method.apply(lin, x, None), backend="eager", fullgraph=True)
+    x = torch.randn(7, H, dtype=torch.bfloat16)
+    assert torch.equal(f(x), m.mxfp4_dense_linear(x, lin.weight))
+
+
+def test_drafter_linear_op_matches_direct_call():
+    m = load(RADIANCE_INKLING2_MXFP4_DENSE="1")
+    d = make_drafter()
+    m.process_dflash_draft(d)
+    lin = d.model.layers[0].mlp.gate_up_proj
+    x = torch.randn(3, H, dtype=torch.bfloat16)
+    assert torch.equal(lin.quant_method.apply(lin, x, None), m.mxfp4_dense_linear(x, lin.weight))
