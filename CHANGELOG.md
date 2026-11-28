@@ -10,7 +10,7 @@ full benchmark tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions before 0.1.0 belong to the
 upstream repositories (StillDeadcode/vllm-radiance, ggz14/radiance-vllm-mxfp4).
 
-## [Unreleased]
+## [1.14.2] - 2026-11-28
 
 ### Changed
 - **Inkling-2-Mini: decode step time no longer grows with context (150k: 73 -> 31 ms per step, 37.7 -> 97.3 tok/s).** *Cause, MEASURED* (microbench of the real kernels + rocprofv3 trace, R9700 210 W): `plan_decode_attention` sized the split-KV grid from `num_sms // 8`, a count tuned for 188 NVIDIA SMs. `torch` reports 32 compute units for the R9700, so one sequence launched 32 programs, each walking ~37k keys serially at 150k context (6.7 ms and 46 GB/s per call, 8 global-layer calls per step). `sly/patch_inkling2_decode_attn.py` plans `16 * num_sms // work` splits on ROCm, uses BLOCK_N 64 on the decode launch of full layers and runs key blocks older than the relative-bias extent without masks or bias gather: 0.95 ms per call at 150k. *MEASURED* ctxbench 8k / 64k / 150k (temp 0, median of 3, control arm repeated, same 210 W cap): 99.0 / 66.2 / 37.7 -> 121.9 / 107.8 / 97.3 tok/s, steps/s 38.7 / 22.1 / 13.6 -> 42.0 / 37.5 / 31.9. Knobs `RADIANCE_INKLING2_DECODE_CTAS_PER_SM` (0 = stock plan) and `RADIANCE_INKLING2_ATTN_BULK` (0 = stock tile and masked loop). Summation order changes (greedy text diverges after 4-113 tokens, coherent). Test `sly/inkling2/tests/test_patch_decode_attn.py`, bench `sly/inkling2/bench_decode_attn.py`.
