@@ -1,0 +1,1 @@
+GSMQ S0b: acc 0.885 of 200 (temp 0.7), mean tokens 318.6, 158s

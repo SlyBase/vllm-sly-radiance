@@ -1,0 +1,636 @@
+
+[1;38;5;39m┌─[ RADIANCE · GPU TOPOLOGY & BANDWIDTH (rocm-bandwidth-test) ]──[0m
+........
+          RocmBandwidthTest Version: 2.6.0
+
+          Launch Command is: rocm-bandwidth-test (rocm_bandwidth -a + rocm_bandwidth -A)
+
+
+          Device: 0,  AMD Ryzen 7 255 w/ Radeon 780M Graphics
+          Device: 1,  AMD Radeon AI PRO R9700,  GPU-c2d2a77b76a16286,  03:0.0
+
+          Inter-Device Access
+
+          D/D       0         1         
+
+          0         1         1         
+
+          1         1         1         
+
+
+          Inter-Device Numa Distance
+
+          D/D       0         1         
+
+          0         0         20        
+
+          1         20        0         
+
+
+          Unidirectional copy peak bandwidth GB/s
+
+          D/D       0           1           
+
+          0         N/A         7.212       
+
+          1         7.018       183.910     
+
+
+          Bidirectional copy peak bandwidth GB/s
+
+          D/D       0           1           
+
+          0         N/A         12.539      
+
+          1         12.539      N/A         
+[1;38;5;39m└─[ end bandwidth report ]──────────────────────────────[0m
+[38;5;39;1m[0m
+[38;5;39;1m██████╗  █████╗ ██████╗ ██╗ █████╗ ███╗   ██╗ ██████╗███████╗[0m
+[38;5;39;1m██╔══██╗██╔══██╗██╔══██╗██║██╔══██╗████╗  ██║██╔════╝██╔════╝[0m
+[38;5;39;1m██████╔╝███████║██║  ██║██║███████║██╔██╗ ██║██║     █████╗[0m
+[38;5;39;1m██╔══██╗██╔══██║██║  ██║██║██╔══██║██║╚██╗██║██║     ██╔══╝[0m
+[38;5;39;1m██║  ██║██║  ██║██████╔╝██║██║  ██║██║ ╚████║╚██████╗███████╗[0m
+[38;5;39;1m╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝[0m
+[2m  vLLM inference server · AMD Radeon AI PRO R9700 · gfx1201 / RDNA4[0m
+[2m  radiance [0m[38;5;39mv1.15.1[0m
+
+[38;5;39;1m───[ GPUs ]──────────────────────────────────────────────────────[0m
+  detected : [32;1m1[0m GPU(s)[2m  (HIP_VISIBLE_DEVICES=0)[0m
+  [0] AMD Radeon AI PRO R9700    gfx1201    31.9 GiB   [32;1m✓ gfx1201[0m
+  arch check : [32;1mPASS[0m [2m(1/1 gfx1201)[0m
+
+[38;5;39;1m───[ RADIANCE optimizations ]────────────────────────────────────[0m
+  [2mfeature toggles (set to 0 to disable):[0m
+    [32;1mON [0m RADIANCE_USE_R4D           [2mhand-written gfx1201 kernels: attention, gated delta net, vision, all-reduce, skinny GEMM[0m
+    [32;1mON [0m RADIANCE_USE_R4D_AR        [2mP2P one-shot all-reduce for TP=2, byte-identical to RCCL[0m
+    [32;1mON [0m RADIANCE_USE_R4D_AR_QUANT  [2mcompressed all-reduce payload for large messages: rotated 6-bit (on; not RCCL-identical)[0m
+    [32;1mON [0m RADIANCE_PRESHUFFLE        [2mpreshuffled AITER FP8 blockscale GEMM[0m
+    [32;1mON [0m RADIANCE_FUSE_RMS_QUANT    [2mfold group-FP8 quant into the RMSNorm epilogue[0m
+    [32;1mON [0m RADIANCE_DYNAMIC_DRAFT     [2mper-request MTP draft-depth controller (needs speculative mtp)[0m
+    [33;1mOFF[0m RADIANCE_FAST_DRAFT        [2m2-bit MTP draft head behind an exact rerank (opt-in; needs speculative mtp)[0m
+
+  [2mdynamic drafting (RADIANCE_DYNAMIC_DRAFT):[0m
+        [2mper-slot confidence gate: draft while cum. confidence >= TAU, take a free-win[0m
+        [2mn-gram, else verify; batch schedule caps serial MTP forwards at concurrency.[0m
+        [2m·[0m RADIANCE_DRAFT_SCHEDULE = [38;5;39m1:8,2:7,4:6,8:5,16:4[0m  [2mbatch-size MTP-forward ceiling (bs:max_depth, carry-forward)[0m
+        [2m·[0m RADIANCE_DRAFT_TAU = [38;5;39m0.35[0m  [2mconfidence-product stop threshold[0m
+
+  [2mNUMA binding (RADIANCE_NUMA_BIND / --numa-bind):[0m
+        [2moff (set =auto or pass --numa-bind to pin to the GPU-local node)[0m
+
+  [2mstartup:[0m
+        [2m·[0m RADIANCE_RUN_BWTEST = [38;5;39m1[0m  [2mGPU topology + bandwidth sweep at startup (on; backgrounded, ~1 s; set 0 to skip)[0m
+        [2m·[0m RADIANCE_BANNER_PLAIN = [38;5;39m0[0m  [2mdisable ANSI color (also NO_COLOR)[0m
+
+  [2mbaked-in (always on; correctness + GEMM path):[0m
+    [32;1m•[0m block-FP8 GEMM dispatcher; preshuffle / AITER split-K / generic + tuned fp8-configs
+    [32;1m•[0m tuned fused-MoE Triton configs for fine-grained MoE (Qwen3.6-35B-A3B E=256,N=256; ~-12% TTFT prefill)
+    [32;1m•[0m bf16 / auto KV cache attention fit + tune (fits the RDNA4 64 KiB LDS at head_size 256)
+    [32;1m•[0m amdsmi gfx1201 GPU enumeration fix (device_count / platform detect)
+    [32;1m•[0m AITER enablement for gfx12x (upstream gates it to MI3xx / CDNA)
+    [32;1m•[0m native sampler fallback (AITER top-k/top-p kernel absent on RDNA4)
+    [32;1m•[0m MTP drafter unpad fix (enables disable_padded_drafter_batch single-stream path)
+    [32;1m•[0m tool-parser streaming vs non-streaming consistency (vLLM #47137)
+    [32;1m•[0m from_json Jinja filter for tool-calling chat templates
+
+  [2mAITER routing (VLLM_ROCM_USE_AITER*):[0m
+    [2mAITER=-[0m  [2mAITER_UATTN=-[0m  [2mAITER_MHA=-[0m  [2mAITER_MLA=-[0m  [2mAITER_MOE=-[0m  [2mAITER_LINEAR=-[0m  [2mAITER_RMSNORM=-[0m  [2mAITER_FP8BMM=-[0m
+
+[38;5;39;1m───[ component versions ]────────────────────────────────────────[0m
+    radiance      [38;5;39m1.15.1[0m
+    vllm          [38;5;39m0.34.0[0m
+    torch         [38;5;39m2.13.0+rocm10.1.0[0m
+    torchvision   [38;5;39m0.28.0+rocm10.1.0[0m
+    triton        [38;5;39m3.8.0[0m
+    aiter         [38;5;39m0.1.29.post1[0m
+    transformers  [38;5;39m5.22.2[0m
+    amdsmi        [2mnot detected[0m
+    hip           [38;5;39m7.16.26385[0m
+    rocm          [38;5;39m10.1.0[0m
+    python        [38;5;39m3.12.3[0m
+
+  [2mGPU topology + bandwidth sweep runs in the background; report follows below.[0m
+[38;5;39;1m──────────────────────────────────────────────────────────────[0m
+
+Module torchcodec.decoders was found but failed to import
+Traceback (most recent call last):
+  File "/opt/vllm/lib/python3.12/site-packages/vllm/utils/import_utils.py", line 413, in _has_module
+    if importlib.util.find_spec(module_name) is None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib.util>", line 92, in find_spec
+ModuleNotFoundError: No module named 'torchcodec'
+[radiance.gemm] skinny GEMM kernel ENABLED for M in [6,64]: 256x2048
+[aiter] [pid=1 pname=MainProcess] start build [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/build/module_aiter_core
+[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
+[aiter] [pid=1 pname=MainProcess] [32mfinish build [module_aiter_core], cost 16.4s [0m
+[aiter] import [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/module_aiter_core.so
+[radiance] preshuffle weight-shuffle-at-load hook installed
+[radiance] decode attn tune installed (verify-batch config, 1 module binding, wide=auto min_fill=0.5)
+[radiance] drafter attn tune installed (window-sliced split-KV for the DFlash drafter, segments=auto)
+[radiance] lookup draft: installed (V2 runner, DFlash2 speculator; enter 8 stay 3 hot 3)
+[radiance] fast-reduce hook armed (RADIANCE_USE_R4D_AR=1, all_reduce wrap)
+[radiance.draft] install failed (dynamic draft disabled): ModuleNotFoundError("No module named 'vllm.v1.spec_decode.llm_base_proposer'")
+[radiance.vit] head_dim-72 attention installed
+[radiance.vit] Gemma4 vision attention installed (head_dim 72)
+With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38] 
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.34.0
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38]   █▄█▀ █     █     █     █  model   /model
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:38] 
+(APIServer pid=1) INFO 11-28 14:05:54 [startup.py:96] non-default args: {'model_tag': '/model', 'default_chat_template_kwargs': {'reasoning_effort': 'medium'}, 'enable_auto_tool_choice': True, 'tool_call_parser': 'inkling', 'model': '/model', 'max_model_len': 307200, 'served_model_name': ['inkling2-mini'], 'reasoning_parser': 'inkling', 'gpu_memory_utilization': 0.92, 'kv_cache_dtype': 'fp8', 'enable_prefix_caching': True, 'limit_mm_per_prompt': {'image': 0}, 'max_num_seqs': 8, 'async_scheduling': False, 'speculative_config': {'method': 'dflash', 'model': '/models/inkling-2-mini-dflash2', 'num_speculative_tokens': 7, 'draft_sample_method': 'probabilistic', 'attention_backend': 'TRITON_ATTN', 'kv_cache_dtype': 'auto'}, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_token_budget': 5120, 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'cudagraph_decoder_replay': True, 'decoder_replay_cudagraph_capture_sizes': [], 'decoder_replay_trim_threshold': 768, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': None, 'use_breakable_cudagraph': None, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56, 64], 'prefill_cudagraph_capture_token_sizes': None, 'max_prefill_cudagraph_capture_tokens': None, 'decode_cudagraph_capture_request_sizes': None, 'max_decode_cudagraph_capture_requests': None, 'max_decode_cudagraph_capture_tokens': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(APIServer pid=1) INFO 11-28 14:06:11 [model.py:783] Resolved architecture: Inkling2LoopForConditionalGeneration
+(APIServer pid=1) INFO 11-28 14:06:11 [model.py:833] Defaulting to tokenizer_mode='inkling' for Inkling2LoopForConditionalGeneration
+(APIServer pid=1) INFO 11-28 14:06:11 [model.py:2399] Using max model len 307200
+[radiance.inkling2] decode_attn: splits=1 vec_kv=1 bulk=1 global(block_n=32,warps=8) local(block_n=32,warps=4)
+(APIServer pid=1) INFO 11-28 14:06:12 [model.py:1030] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(APIServer pid=1) INFO 11-28 14:06:12 [model.py:1087] Disabled mm_prefix attention mode because multimodal inputs are configuration-disabled. Attention backends without mm_prefix support may now be selected.
+(APIServer pid=1) INFO 11-28 14:06:12 [cache.py:514] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
+(APIServer pid=1) INFO 11-28 14:06:30 [model.py:783] Resolved architecture: DFlash2DraftModel
+(APIServer pid=1) INFO 11-28 14:06:30 [model.py:2399] Using max model len 1048576
+(APIServer pid=1) INFO 11-28 14:06:30 [speculative.py:1582] Overriding draft model max model len from 1048576 to 307200
+(APIServer pid=1) INFO 11-28 14:06:30 [kernel.py:578] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'], rotary_embedding=['native'], rotary_embedding_query_only=['native'])
+(APIServer pid=1) WARNING 11-28 14:06:30 [vllm.py:2434] max_num_scheduled_tokens is set to 2048 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(APIServer pid=1) WARNING 11-28 14:06:30 [vllm.py:2737] cudagraph_capture_sizes and max_cudagraph_capture_size are deprecated. Set the token counts of prefill CUDA graphs with prefill_cudagraph_capture_token_sizes or max_prefill_cudagraph_capture_tokens, and the request counts of decode CUDA graphs with decode_cudagraph_capture_request_sizes or max_decode_cudagraph_capture_requests.
+(APIServer pid=1) INFO 11-28 14:06:32 [numa_utils.py:575] Automatic NUMA binding unavailable on this host; starting unbound. Enable debug logging for the skip reason.
+Module torchcodec.decoders was found but failed to import
+Traceback (most recent call last):
+  File "/opt/vllm/lib/python3.12/site-packages/vllm/utils/import_utils.py", line 413, in _has_module
+    if importlib.util.find_spec(module_name) is None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib.util>", line 92, in find_spec
+ModuleNotFoundError: No module named 'torchcodec'
+[radiance.gemm] skinny GEMM kernel ENABLED for M in [6,64]: 256x2048
+[aiter] import [module_aiter_core] under /opt/vllm/lib/python3.12/site-packages/aiter/jit/module_aiter_core.so
+[radiance] preshuffle weight-shuffle-at-load hook installed
+[radiance] decode attn tune installed (verify-batch config, 1 module binding, wide=auto min_fill=0.5)
+[radiance] drafter attn tune installed (window-sliced split-KV for the DFlash drafter, segments=auto)
+[radiance] lookup draft: installed (V2 runner, DFlash2 speculator; enter 8 stay 3 hot 3)
+[radiance] fast-reduce hook armed (RADIANCE_USE_R4D_AR=1, all_reduce wrap)
+[radiance.draft] install failed (dynamic draft disabled): ModuleNotFoundError("No module named 'vllm.v1.spec_decode.llm_base_proposer'")
+[radiance.vit] head_dim-72 attention installed
+[radiance.vit] Gemma4 vision attention installed (head_dim 72)
+(EngineCore pid=426) INFO 11-28 14:06:48 [core.py:154] Initializing a V1 LLM engine (v0.34.0) with config: model='/model', speculative_config=SpeculativeConfig(method='dflash', model='/models/inkling-2-mini-dflash2', num_spec_tokens=7), tokenizer='/model', skip_tokenizer_init=False, tokenizer_mode=inkling, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=307200, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=inkling2, quantization_config=None, enforce_eager=False, aux_output_config=AuxOutputConfig(enable_return_routed_experts=False, max_bytes=None), kv_cache_dtype=fp8, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='inkling', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, custom_histogram_buckets=None, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=inkling2-mini, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+sparse_attn_indexer', 'none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::zaya_cca', 'vllm::qwen4_exp_ple_short_conv', 'vllm::qwen4_exp_qsa_with_output', 'vllm::qwen4_exp_qsa_prepare_with_output', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::qwen_gdn_attention_core_fused_norm_rocm', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::step5_csa_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_token_budget': 5120, 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'cudagraph_decoder_replay': True, 'decoder_replay_cudagraph_capture_sizes': [], 'decoder_replay_trim_threshold': 768, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'use_breakable_cudagraph': False, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56, 64], 'prefill_cudagraph_capture_token_sizes': [1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56, 64], 'max_prefill_cudagraph_capture_tokens': 64, 'decode_cudagraph_capture_request_sizes': [1, 2, 3, 4, 5, 6, 7, 8], 'max_decode_cudagraph_capture_requests': 8, 'max_decode_cudagraph_capture_tokens': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_mla_dual_rms_norm': False, 'fuse_rope_kvcache': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 64, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'], rotary_embedding=['native'], rotary_embedding_query_only=['native']), enable_flashinfer_autotune=True, enable_flashinfer_mm_encoder_autotune=False, enable_rocm_segmented_attn_autotune=False, enable_rocm_aiter_gemm_warmup=False, enable_cutedsl_warmup=True, enable_jit_warmup=True, monokernel=False, moe_backend='auto', step5_attention_backend='native', sparse_indexer_topk_backend='auto', flashinfer_sparse_mla_kernel='auto', linear_backend='auto', linear_backend_per_quant=None, rdna_hybrid_w4a16_prefill_dequant='disable', b12x_moe_uncompressed_scales=False)
+(EngineCore pid=426) INFO 11-28 14:06:48 [parallel_state.py:1981] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_0b83948065ac4e7b8689c5ba691c6f09 backend=nccl
+(EngineCore pid=426) INFO 11-28 14:06:48 [parallel_state.py:2461] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank 0, EPLB rank N/A
+[radiance.inkling2] decode_attn: splits=1 vec_kv=1 bulk=1 global(block_n=32,warps=8) local(block_n=32,warps=4)
+(EngineCore pid=426) INFO 11-28 14:06:50 [model_runner.py:421] Loading model from scratch...
+(EngineCore pid=426) WARNING 11-28 14:06:50 [vllm.py:3941] `torch.compile` is turned on, but the model /model does not support it. Please open an issue on GitHub if you want it to be supported.
+(EngineCore pid=426) INFO 11-28 14:06:50 [base_loader.py:100] Initializing model took 0.066546 seconds
+(EngineCore pid=426) INFO 11-28 14:06:50 [weight_utils.py:1082] Filesystem type for checkpoints: ZFS. Checkpoint size: 18.19 GiB. Available RAM: 12.79 GiB.
+(EngineCore pid=426) INFO 11-28 14:06:50 [weight_utils.py:1112] Auto-prefetch is disabled because the filesystem (ZFS) is not a recognized network FS (NFS/Lustre) and the checkpoint size (18.19 GiB) exceeds 90% of available RAM (12.79 GiB).
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:28<00:00, 28.99s/it]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:28<00:00, 29.00s/it]
+
+(EngineCore pid=426) INFO 11-28 14:07:19 [default_loader.py:581] Loading weights took 29.32 seconds
+RADIANCE_CODA_FP4_PROOF n=1 mxfp8->nvfp4 experts=128 bytes 1051 MB -> 573 MB
+RADIANCE_CODA_FP4_PROOF n=2 mxfp8->nvfp4 experts=128 bytes 1051 MB -> 573 MB
+[rank0]:[W1128 14:07:20.796291845 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.854852890 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.856352801 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.857786988 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.859607422 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.863404994 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.864812942 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.866230889 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.867651050 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.869078925 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.870481603 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.872125835 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.876059844 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.877464155 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.878876982 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.880288286 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.881675034 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.883089745 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.884713659 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.888736375 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.890165974 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.891570455 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.892975978 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.894382002 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.895780983 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.897406060 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.901403327 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.902793282 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.904221237 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.905631349 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.907042142 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.908453717 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.910085185 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.914061824 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.915422243 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.916817878 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.918235854 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.919624886 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.921017105 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.922641049 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.926806904 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.928227646 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.929611919 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.931032741 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.932431121 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.933838388 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:20.935479775 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.939468647 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.940853932 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.942253845 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.943643678 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.945051556 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.946451098 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.948083128 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.951994674 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.953403444 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.954790603 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.956196637 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.957587703 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.958980031 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.960604907 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.964597566 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.966017096 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.967419714 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.968915737 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.970354082 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.971757011 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.973383079 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.977439237 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.978838659 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.980261576 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.981573823 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.982960180 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.984363209 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.985974850 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.989960506 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.991345361 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.992759901 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.994184580 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.995578682 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.996964208 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.998616064 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.002578487 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.003962510 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.005348246 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.006753990 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.008154774 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.009525091 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.011144547 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.015122207 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.016489639 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.017873993 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.019280338 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.020556578 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.021950259 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.023564825 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.027558627 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.028942269 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.030363261 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.031768955 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.033173326 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.034527683 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.036129836 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.040117746 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.041506378 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.042886303 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.044283471 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.045558799 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.046920149 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.048541198 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.052532695 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.053926005 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.055338742 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.056755657 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.058155300 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.059529354 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.061051015 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 130023424, total: 34208743424).
+[rank0]:[W1128 14:07:21.062870527 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 44040192 bytes (free: 127926272, total: 34208743424).
+RADIANCE_CODA_FP4_PROOF n=3 mxfp8->nvfp4 experts=128 bytes 1051 MB -> 573 MB
+[rank0]:[W1128 14:07:21.133234210 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 169869312 bytes (free: 169869312, total: 34208743424).
+[rank0]:[W1128 14:07:21.145420769 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.154601575 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.158659046 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.160110506 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.161556004 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.162995100 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.164430470 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.165860039 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.167535670 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.171483936 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.172908304 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.174320641 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.175757693 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.177212389 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.178626879 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.180275410 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.184285541 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.185714299 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.187053137 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.188466705 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.189900080 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.191323247 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.193050055 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.197049176 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.198492200 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.199908624 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.201352760 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.202827353 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.204257182 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.205918426 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.209878734 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.211344461 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.212797313 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.214224738 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.215648465 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.217067163 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.218729349 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.222722099 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.224147590 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.225577439 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.227018369 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.228454610 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.229867617 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.231544200 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.235527812 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.236961819 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.238387471 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.239835093 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.241273268 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.242685614 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.244345205 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.248333205 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.249763185 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.251185760 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.252624737 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.254058132 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.255486188 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.257139707 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.261145571 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.262565492 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.263986885 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.265426773 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.266859658 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.268293134 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.269928890 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.273895981 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.275318356 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.276720363 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.278156985 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.279599297 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.281031691 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.282673869 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.286678100 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.288098892 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.289519965 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.290941509 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.292380384 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.293799583 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.295473882 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.299464558 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.300893645 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.302304429 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.303738305 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.305168775 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.306572385 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.308219603 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.312262246 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.313680934 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.315109070 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.316551924 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.318008773 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.319447229 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.321104095 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.325103537 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.326506806 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.327925143 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.329372896 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.330827231 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.332275404 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.333929225 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.337884744 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.339324873 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.340768538 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.342206232 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.343641290 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.345071580 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.346736872 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.350784965 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.352249911 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.353684839 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.355117694 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.356552592 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.357977662 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.359638306 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.363652325 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.365099416 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.366531710 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.367973903 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.369400756 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.370857936 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.372521134 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.376524433 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.377933183 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.379360237 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.380812077 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.382254310 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.383699147 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.385364619 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.389386753 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.390813507 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.392243556 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.393669408 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.395093246 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.396512915 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.398169551 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.402190283 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.403592570 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.405014444 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.406429566 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.407846100 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.409259728 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.410884324 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.414871552 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.416294358 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.417688029 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.419115234 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.420540204 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.421959232 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.423600098 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.427662398 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.429077399 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.430495396 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.431846106 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.433275735 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.434662754 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.436310142 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.440316717 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.441748941 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.443087678 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.444510164 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.445927800 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.447346237 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.448975070 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.452968341 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.454385546 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.455826105 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.457254482 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.458678530 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.460114741 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.461779261 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.465778382 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.467198093 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.468622261 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.470085423 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.471525020 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.472947936 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.474606385 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.478618431 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.480031308 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.481446239 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.482872201 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.484310937 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.485707493 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.487353759 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.491359312 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.492776127 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.494225954 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.495659971 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.497085011 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.498529427 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.500191062 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.504191315 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.505600556 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.507024273 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.508437161 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.509864004 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.511310815 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.512937173 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.516847067 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.518276706 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.519669014 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.521117699 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.522549812 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.523963882 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.525520348 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 132120576, total: 34208743424).
+[rank0]:[W1128 14:07:21.527319883 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 44040192 bytes (free: 132120576, total: 34208743424).
+RADIANCE_CODA_FP4_PROOF n=4 mxfp8->nvfp4 experts=128 bytes 1051 MB -> 573 MB
+[rank0]:[W1128 14:07:21.640450307 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 150994944 bytes (free: 165675008, total: 34208743424).
+[rank0]:[W1128 14:07:21.652225742 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 56623104 bytes (free: 121634816, total: 34208743424).
+[rank0]:[W1128 14:07:21.654338065 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 56623104 bytes (free: 150994944, total: 34208743424).
+[rank0]:[W1128 14:07:21.657230695 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 75497472 bytes (free: 180355072, total: 34208743424).
+[rank0]:[W1128 14:07:21.660381541 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 150994944 bytes (free: 180355072, total: 34208743424).
+[rank0]:[W1128 14:07:21.800273224 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 232783872 bytes (free: 301989888, total: 34208743424).
+[rank0]:[W1128 14:07:21.879268209 HIPCachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 463470592 bytes (free: 515899392, total: 34208743424).
+[radiance.inkling2.mxfp4dense] MODE=gemv: 49 weights registered after the target, 619 MiB of MXFP4
+(EngineCore pid=426) INFO 11-28 14:07:22 [utils.py:417] Backends selected for Inkling2LoopForConditionalGeneration (/model):
+(EngineCore pid=426) INFO 11-28 14:07:22 [utils.py:417]   layer     | count | backend                  | modules
+(EngineCore pid=426) INFO 11-28 14:07:22 [utils.py:417]   attention |    24 | INKLING_SCONV_SWA        | model.layers.[0-23].conv_state
+(EngineCore pid=426) INFO 11-28 14:07:22 [utils.py:417]   attention |    48 | FLASH_ATTN               | model.layers.[0-23].attn, model.layers.[6-17].attn.pass_caches.[0-1]
+(EngineCore pid=426) INFO 11-28 14:07:22 [utils.py:417]   linear    |    50 | unquantized [w=bfloat16] | model.embed_tokens, model.layers.[0-23].attn.{qkvr,wo_ud}, lm_head
+(EngineCore pid=426) INFO 11-28 14:07:22 [eagle3_utils.py:30] Using Eagle3 auxiliary layers from config: (5, 23, 41, 48)
+(EngineCore pid=426) INFO 11-28 14:07:22 [kernel.py:578] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'], rotary_embedding=['native'], rotary_embedding_query_only=['native'])
+(EngineCore pid=426) WARNING 11-28 14:07:22 [vllm.py:2434] max_num_scheduled_tokens is set to 2048 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+(EngineCore pid=426) WARNING 11-28 14:07:22 [compilation.py:1537] Op 'sparse_attn_indexer' doesn't exist (or wasn't imported/registered), enabling with '+sparse_attn_indexer' has no effect
+(EngineCore pid=426) INFO 11-28 14:07:22 [base_loader.py:100] Initializing model took 0.127301 seconds
+(EngineCore pid=426) INFO 11-28 14:07:22 [weight_utils.py:1082] Filesystem type for checkpoints: ZFS. Checkpoint size: 0.92 GiB. Available RAM: 12.07 GiB.
+(EngineCore pid=426) INFO 11-28 14:07:22 [weight_utils.py:1105] Auto-prefetch is disabled because the filesystem (ZFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 29.75it/s]
+
+(EngineCore pid=426) INFO 11-28 14:07:23 [default_loader.py:581] Loading weights took 1.45 seconds
+[radiance.inkling2] dflash_mxfp4: quantized 21 linear tensors (+fused_kv=True)
+[radiance.inkling2] dflash_head: released the dead shared bf16 lm_head
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:417] Backends selected for DFlash2Qwen3ForCausalLM (/models/inkling-2-mini-dflash2):
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:417]   layer     | count | backend                  | modules
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:417]   attention |     5 | TRITON_ATTN              | model.layers.[0-4].self_attn.attn
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:417]   linear    |    21 | _MXFP4DraftLinearMethod  | model.layers.[0-4].self_attn.{qkv_proj,o_proj}, model.layers.[0-4].mlp.{gate_up_proj,down_proj}, model.fc
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:417]   linear    |    13 | unquantized [w=bfloat16] | model.layers.[0-4].attention_conv.kernel_projection, model.layers.[0-4].mlp_conv.kernel_projection, model.candidate_selector.hidden_projection, model.embed_tokens, lm_head
+[radiance.w4a16] post-load: gate_up+silu fused 0, GDN qkvz+ba merged 0, drafter conv projections int4 0
+(EngineCore pid=426) INFO 11-28 14:07:23 [model_runner.py:470] Model loading took 15.14 GiB memory and 33.628838 seconds
+(EngineCore pid=426) INFO 11-28 14:07:23 [torch_utils.py:302] Reducing Torch threads from 8 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=426) INFO 11-28 14:07:23 [utils.py:428] Using LBNHC KV cache layout.
+(EngineCore pid=426) WARNING 11-28 14:07:23 [kv_cache_planning.py:522] Add 3 padding layers, may waste at most 60.00% KV cache memory
+RADIANCE_LOOPCD_PROOF loops=3/3 loopcd=0 omega=0.0 capture_ids=(5, 23, 41, 48)->(5, 23, 41, 48) mode=early_exit first=0 bank=none msg_scale=1.0
+(EngineCore pid=426) INFO 11-28 14:07:25 [caching.py:368] reconstructed serializable fn from standalone compile artifacts. num_artifacts=3 num_submods=6
+(EngineCore pid=426) INFO 11-28 14:07:25 [decorators.py:327] [dflash_head] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/3475c02ef72ba053a2b1aa32838910a07665faaf6b80bf48b23ef45f04f83e9f/rank_0_0/model
+(EngineCore pid=426) INFO 11-28 14:07:25 [monitor.py:62] [dflash_head] torch.compile took 0.28 s in total
+(EngineCore pid=426) INFO 11-28 14:07:25 [monitor.py:91] [dflash_head] Initial profiling/warmup run took 0.01 s
+(EngineCore pid=426) INFO 11-28 14:07:25 [caching.py:368] reconstructed serializable fn from standalone compile artifacts. num_artifacts=1 num_submods=1
+(EngineCore pid=426) INFO 11-28 14:07:25 [decorators.py:327] [dflash2_candidate_selector] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/008405ada0eda19b356d7749f26f966bd3e01d667339afdf87c0c0212b8741d9/rank_0_0/model
+(EngineCore pid=426) INFO 11-28 14:07:25 [monitor.py:62] [dflash2_candidate_selector] torch.compile took 0.01 s in total
+(EngineCore pid=426) INFO 11-28 14:07:25 [monitor.py:91] [dflash2_candidate_selector] Initial profiling/warmup run took 0.01 s
+(EngineCore pid=426) INFO 11-28 14:07:25 [gpu_worker.py:846] Available KV cache memory: 13.16 GiB
+(EngineCore pid=426) INFO 11-28 14:07:25 [kv_cache_utils.py:838] kv cache group sizes (16, 16, 16, 16, 16, 16, 128, 128, 128, 128, 128, 128, 64)
+(EngineCore pid=426) INFO 11-28 14:07:25 [kv_cache_utils.py:839] kv lcm block sizes 128
+(EngineCore pid=426) WARNING 11-28 14:07:25 [compilation.py:1687] Cudagraph mode FULL_AND_PIECEWISE requires piecewise capture, but the loaded model provides neither a compiled submodule nor breakable CUDA graphs. Overriding to FULL_DECODE_ONLY.
+(EngineCore pid=426) INFO 11-28 14:07:25 [kernel_warmup.py:298] JIT kernel warmup starting.
+JIT kernel warmup (40 compile keys):   0%|          | 0/4 [00:00<?, ?kernel/s]JIT kernel warmup (40 compile keys):  75%|███████▌  | 3/4 [00:00<00:00, 29.30kernel/s, _DecoratedTritonJitKernel (16 keys)]JIT kernel warmup (40 compile keys): 100%|██████████| 4/4 [00:00<00:00, 30.67kernel/s, _DecoratedTritonJitKernel (8 keys)] 
+(EngineCore pid=426) INFO 11-28 14:07:25 [kernel_warmup.py:308] JIT kernel warmup finished in 0.17s.
+(EngineCore pid=426) INFO 11-28 14:07:25 [_ll_router_common.py:28] cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled
+[radiance.dflash_skip] RADIANCE_DFLASH_PREFILL_WINDOW_SKIP ignored: prefix caching is on
+[radiance.attn_drafter] split-KV active: kv_mode=0 nqpkv=4 block_m=32
+[radiance] drafter attn plan: window=2048 q_len<=8 split-KV BLOCK_M=32 TILE=32 warps=4 splits=16 (seqs=8 tokens=64)
+[radiance] lookup draft: active (enter 8 stay 3 hot 3, sources > 2048 tokens back, point-mass draft distribution, steps 7, history from (8, 307200) int32)
+Capturing CUDA graphs (FULL):   0%|          | 0/8 [00:00<?, ?it/s]Capturing CUDA graphs (FULL):  12%|█▎        | 1/8 [00:00<00:01,  6.70it/s]Capturing CUDA graphs (FULL):  25%|██▌       | 2/8 [00:00<00:00,  6.76it/s]Capturing CUDA graphs (FULL):  38%|███▊      | 3/8 [00:00<00:00,  7.12it/s]Capturing CUDA graphs (FULL):  50%|█████     | 4/8 [00:00<00:00,  7.25it/s]Capturing CUDA graphs (FULL):  62%|██████▎   | 5/8 [00:00<00:00,  7.14it/s]Capturing CUDA graphs (FULL):  75%|███████▌  | 6/8 [00:00<00:00,  7.11it/s]Capturing CUDA graphs (FULL):  88%|████████▊ | 7/8 [00:00<00:00,  7.35it/s]Capturing CUDA graphs (FULL): 100%|██████████| 8/8 [00:01<00:00,  7.51it/s]
+(EngineCore pid=426) INFO 11-28 14:07:29 [speculator.py:179] Capturing model for DFlash2 speculator...
+Capturing dflash2 CUDA graphs (FULL):   0%|          | 0/8 [00:00<?, ?it/s]Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 8/8 [00:00<00:00, 74.05it/s]Capturing dflash2 CUDA graphs (FULL): 100%|██████████| 8/8 [00:00<00:00, 73.98it/s]
+(EngineCore pid=426) INFO 11-28 14:07:29 [model_runner.py:1256] Graph capturing finished in 2 secs, took 0.50 GiB
+(EngineCore pid=426) INFO 11-28 14:07:29 [gpu_worker.py:1229] Free memory on device (31.46/31.86 GiB) on startup. Desired GPU memory utilization is (0.92, 29.31 GiB). Actual usage is 15.53 GiB for consumed memory (weights + non-torch), 0.62 GiB for peak activation, and 0.5 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=13433098159` (12.51 GiB) to fit into requested memory, or `--kv-cache-memory=15737784320` (14.66 GiB) to fully utilize gpu memory. Current kv cache memory in use is 13.16 GiB.
+(EngineCore pid=426) INFO 11-28 14:07:30 [jit_monitor.py:87] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=426) INFO 11-28 14:07:30 [rocm_device_memory.py:174] Free device memory: 14.97 GiB reported, 0.46 GiB more by the exact VRAM count.
+(EngineCore pid=426) INFO 11-28 14:07:30 [extensible_kv_cache.py:700] Memory after warmup: 15.44 GiB free, 0.02 GiB committed to the KV cache, 2.36 GiB kept for transient activations (1.57 GiB allocated at peak, 2.36 GiB of torch reservation growth); 5168 KV cache blocks (10.09 GiB) fit within the requested 29.31 GiB. Torch may reserve up to 20.11 GiB.
+[radiance] R4D kernel selection: libr4d 0.5.0, 37 kernels built, 2 of 2 queries resolved
+[radiance]   gemm_nt   M=64 K=5120 dtype=bf16
+[radiance]             -> gemm_bf16_nt_m64
+[radiance]   attn_vit  head_dim=72 gqa=1 causal=0 q_dtype=bf16 kv_dtype=bf16
+[radiance]             -> attn_vit_h72_bf16
+(EngineCore pid=426) INFO 11-28 14:07:30 [kv_cache_utils.py:1123] GPU KV cache size: 470,961 tokens, Maximum concurrency for 307,200 tokens per request: 1.53x
+(EngineCore pid=426) INFO 11-28 14:07:30 [extensible_kv_cache.py:536] Extended KV cache to 5168 blocks (10.09 GiB).
+(EngineCore pid=426) INFO 11-28 14:07:30 [core.py:450] init engine (profile, create kv cache, warmup model) took 6.85 s (compilation: 0.30 s)
+(EngineCore pid=426) INFO 11-28 14:07:32 [kernel.py:578] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'], rotary_embedding=['native'], rotary_embedding_query_only=['native'])
+(APIServer pid=1) INFO 11-28 14:07:32 [entry.py:135] Supported tasks: ['generate']
+(APIServer pid=1) INFO 11-28 14:07:32 [factories.py:107] Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.
+(APIServer pid=1) INFO 11-28 14:07:32 [parser_manager.py:36] "auto" tool choice has been enabled.
+(APIServer pid=1) WARNING 11-28 14:07:32 [model.py:2116] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 1.0}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=1) INFO 11-28 14:07:32 [entry.py:139] Starting vLLM server on http://0.0.0.0:8000
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:189] Available routes are:
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /docs, Methods: HEAD, GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /load, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /version, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /kv_event_sources, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /health, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /metrics, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /tokenize, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /detokenize, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/models, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/systemone, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/decisions, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /ping, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /ping, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /invocations, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/responses, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/completions, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/messages, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /generative_scoring, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/chat/completions/render, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/messages/render, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/completions/render, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/responses/render, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/chat/completions/derender, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /v1/completions/derender, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /inference/v1/generate, Methods: POST (disabled)
+(APIServer pid=1) INFO 11-28 14:07:32 [launcher.py:199] Route: /inference/v1/abort_requests, Methods: POST (disabled)
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     172.17.0.1:58576 - "GET /health HTTP/1.1" 200 OK

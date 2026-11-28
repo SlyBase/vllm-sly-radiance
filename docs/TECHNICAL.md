@@ -945,8 +945,7 @@ OOM at capture with a fresh compile cache (34.08 GB capture vs 31.5 GB budget, i
 comparable (eager loses ~60 % to launch overhead on this hybrid model).
 
 **Not measured.** BetterBench per-category decode and the multi-turn chat replay for this change;
-the 1.14.2 graph-mode speed reference on this host; sampled GSM8K-200 (host python lacks pandas).
-Raw data: `experiments/inkdeep-20261128/`.
+the 1.14.2 graph-mode speed reference on this host. Raw data: `experiments/inkdeep-20261128/`.
 
 **Quality gate (window 2, 2026-11-28, same host and 210 W, published ghcr bits).** G0a/G0b = 1.15.1
 control first and last, G1 = 1.15.2 measured on its second start (fresh compile on the first):
@@ -968,3 +967,21 @@ aggregate 64–79 / 83–95 / 106–121 tok/s — sublinear batching, no c1 clif
 batch-keyed draft gate: native `dynamic_sd_lookup` is off, adaptive K is acceptance-EMA-keyed and
 unset in shipping, and the dynamic-draft controller fails to install on the pinned vLLM
 (`llm_base_proposer` module absent).
+
+**Sampled quality gate (window 3, 2026-11-28, same host and 210 W, published ghcr bits).** The
+greedy gate alone cannot see a sampling-path regression, so the same three-arm pattern ran the
+production sampling profile: GSM8K first 200 test items, `temperature 0.7, top_p 0.8, top_k 20,
+seed 1234`, 700-token cap, flexible-extract scoring (the repo's `gsmq.py`, copied into each
+container; host python still lacks pandas, the container has it). S0a/S0b = 1.15.1 control first
+and last, S1 = 1.15.2 on its second start:
+
+| arm | image | GSM8K-200 sampled |
+|---|---|---|
+| S0a | 1.15.1 (control first) | 0.895 |
+| S1 | 1.15.2 (candidate) | 0.880 |
+| S0b | 1.15.1 (control last) | 0.885 |
+
+The candidate sits 1.0 pp below the control mean (0.890); the controls themselves span 1.0 pp, so
+the difference is inside the same-start noise band of this 200-item sampled probe (binomial SE
+≈ 2.2 pp). No sampled regression attributable to the tile change. Raw per-item results, boot logs,
+env proofs and spec metrics: `experiments/inkdeep-20261128/out/S0a|S1|S0b/`, driver `w3.sh`.
