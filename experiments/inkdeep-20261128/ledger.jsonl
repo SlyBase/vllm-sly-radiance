@@ -1,0 +1,7 @@
+{"arm":"M0_micro","rc":1}
+{"arm":"C1","img":"vllm-sly-radiance:1.15.1-rocm10.1","env":"","rc":0,"secs":299}
+{"arm":"OLD","img":"vllm-sly-radiance:1.14.2-rocm10.1","env":"","rc":1,"secs":171}
+{"arm":"T","img":"vllm-sly-radiance:1.15.1-rocm10.1","env":"RADIANCE_INKLING2_DECODE_BLOCK_N=64 RADIANCE_INKLING2_DECODE_WARPS=4 RADIANCE_INKLING2_LOCAL_BLOCK_N=128 RADIANCE_INKLING2_LOCAL_WARPS=4","rc":0,"secs":322}
+{"arm":"D","img":"vllm-sly-radiance:1.15.1-rocm10.1","env":"RADIANCE_DFLASH_MXFP4=0","rc":0,"secs":410}
+{"arm":"A","img":"vllm-sly-radiance:1.15.1-rocm10.1","env":"RADIANCE_ADAPTIVE_K= RADIANCE_INKLING2_ADAPTIVE_K=","rc":0,"secs":304}
+{"arm":"C2","img":"vllm-sly-radiance:1.15.1-rocm10.1","env":"","rc":0,"secs":303}

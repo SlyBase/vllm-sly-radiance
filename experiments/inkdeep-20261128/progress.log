@@ -1,0 +1,22 @@
+10:00:34 PREFLIGHT OK
+10:03:18 window acquired, prod stopped
+10:03:18 === ARM M0_micro START (decode attn sweep) ===
+10:04:43 === ARM M0_micro DONE ===
+10:04:43 === ARM C1 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[] ===
+10:09:42 === ARM C1 DONE rc=0 ===
+10:09:42 === ARM OLD START img=vllm-sly-radiance:1.14.2-rocm10.1 env=[] ===
+10:12:33 container died during startup
+10:12:33 === ARM OLD DONE rc=1 ===
+10:12:33 === ARM T START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_BLOCK_N=64 RADIANCE_INKLING2_DECODE_WARPS=4 RADIANCE_INKLING2_LOCAL_BLOCK_N=128 RADIANCE_INKLING2_LOCAL_WARPS=4] ===
+10:17:13 PREFLIGHT OK (1 arms)
+10:17:55 === ARM T DONE rc=0 ===
+10:17:55 === ARM D START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_DFLASH_MXFP4=0] ===
+10:24:45 === ARM D DONE rc=0 ===
+10:24:45 === ARM A START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_ADAPTIVE_K= RADIANCE_INKLING2_ADAPTIVE_K=] ===
+10:29:49 === ARM A DONE rc=0 ===
+10:29:49 === ARM C2 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[] ===
+10:34:52 === ARM C2 DONE rc=0 ===
+10:34:52 ALL DONE
+10:34:52 RESTORE: prod + window release
+10:36:02 window acquired, prod stopped
+10:36:02 === ARM W2 START img=vllm-sly-radiance:1.15.1-rocm10.1 env=[RADIANCE_INKLING2_DECODE_WARPS=2] suites=mia,ctx ===

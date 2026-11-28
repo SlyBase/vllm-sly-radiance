@@ -1,0 +1,12 @@
+[radiance.inkling2] decode_attn: splits=1 vec_kv=1 bulk=1 global(block_n=32,warps=8) local(block_n=32,warps=4)
+units 32
+{"local": false, "ctx": 2000, "splits": [4, 64], "patched_vs_stock": 0.00391, "stock_vs_fp32ref": 0.00364, "patched_vs_fp32ref": 0.00364, "stock_us": 119.4, "patched_us": 58.0, "ok": false}
+{"local": false, "ctx": 8192, "splits": [4, 64], "patched_vs_stock": 0.00195, "stock_vs_fp32ref": 0.00176, "patched_vs_fp32ref": 0.00176, "stock_us": 368.0, "patched_us": 89.0, "ok": true}
+{"local": false, "ctx": 65536, "splits": [4, 64], "patched_vs_stock": 0.00195, "stock_us": 2997.0, "patched_us": 641.6, "ok": true}
+{"local": false, "ctx": 65536, "sweep_us": {"bn32_w2": 362.4, "bn32_w4": 420.4, "bn32_w8": 703.8, "bn64_w2": 627.0, "bn64_w4": 422.9, "bn64_w8": 692.8, "bn128_w2": 1598.2, "bn128_w4": 1375.5, "bn128_w8": 917.9}}
+{"local": false, "ctx": 150000, "splits": [4, 64], "patched_vs_stock": 0.00098, "stock_us": 6722.9, "patched_us": 1551.1, "ok": true}
+{"local": false, "ctx": 150000, "sweep_us": {"bn32_w2": 744.0, "bn32_w4": 948.3, "bn32_w8": 1650.9, "bn64_w2": 1332.1, "bn64_w4": 930.2, "bn64_w8": 1606.1, "bn128_w2": 2894.7, "bn128_w4": 2726.0, "bn128_w8": 2051.1}}
+{"local": true, "ctx": 2000, "splits": [9, 33], "patched_vs_stock": 0.00391, "stock_vs_fp32ref": 0.00676, "patched_vs_fp32ref": 0.00676, "stock_us": 59.7, "patched_us": 55.4, "ok": false}
+{"local": true, "ctx": 8192, "splits": [9, 33], "patched_vs_stock": 0.00781, "stock_vs_fp32ref": 0.00395, "patched_vs_fp32ref": 0.00397, "stock_us": 55.6, "patched_us": 54.4, "ok": false}
+{"local": true, "ctx": 65536, "splits": [9, 33], "patched_vs_stock": 0.00781, "stock_us": 58.7, "patched_us": 54.4, "ok": false}
+{"local": true, "ctx": 65536, "sweep_us": {"bn32_w2": 58.8, "bn32_w4": 55.5, "bn32_w8": 57.4, "bn64_w2": 89.7, "bn64_w4": 56.2, "bn64_w8": 57.3, "bn128_w2": 353.0, "bn128_w4": 69.7, "bn128_w8": 61.0}}

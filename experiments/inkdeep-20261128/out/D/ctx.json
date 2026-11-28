@@ -1,0 +1,1 @@
+[{"ctx": 7942, "cold_ttft_s": 11.2, "tok_s": 129.0, "steps_s": 43.1, "AL": 3.05}, {"ctx": 63696, "cold_ttft_s": 21.9, "tok_s": 91.9, "steps_s": 35.6, "AL": 2.58}, {"ctx": 149881, "cold_ttft_s": 49.3, "tok_s": 71.8, "steps_s": 27.1, "AL": 2.65}]

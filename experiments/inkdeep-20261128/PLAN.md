@@ -88,8 +88,40 @@ at 11.5 GB available during weight load). Drift floor ~3 %.
   exact-match (lc.py). No loss above noise.
 - Deliverables: open PR (CI green, no merge), provisional ghcr image (pull verified), ledger.
 
+## Window 1 results (2026-11-28 10:03-10:35 UTC, 210 W, raw in out/)
+
+| arm | MIA prose/code | ctx 8k tok/s (steps/s, AL) | ctx 64k | ctx 150k |
+|---|---|---|---|---|
+| C1 (1.15.1) | 193.4 / 264.0 | 127.0 (45.4, 2.79) | 98.5 (36.6, 2.72) | 71.3 (27.9, 2.56) |
+| T (old tiles 64/4+128/4) | 179.4 / 222.5 | 121.7 (43.9, 2.77) | 99.0 (39.1, 2.55) | **84.1 (33.2, 2.55)** |
+| D (bf16 drafter) | 195.8 / 247.8 | 129.0 (43.1, **3.05**) | 91.9 (35.6, 2.58) | 71.8 (27.1, 2.65) |
+| A (adaptive K off) | 193.1 / 262.9 | 126.3 (45.2, 2.79) | 97.9 (36.4, 2.72) | 70.9 (27.7, 2.56) |
+| C2 (control) | 192.6 / 262.0 | 126.4 (45.2, 2.79) | 97.9 (36.3, 2.72) | 70.9 (27.7, 2.56) |
+
+Attribution (VERDICT):
+- **150k steps/s loss = global decode tile warps 4->8.** T recovers +18 % (84.1 >= 80 target).
+  MXFP4 drafter neutral at depth (D ~= C1). Adaptive K neutral (A ~= C1).
+- Tile trade-off is real: (32,8) wins short ctx (T loses MIA code -15.7 %, 8k -4.2 %);
+  (64,4) wins depth. Single tile must serve all depths (cudagraph constexpr).
+- MXFP4 drafter: 8k steps +5.3 %, AL -8.5 % (3.05->2.79), MIA code +6.6 %, 8k tok/s -1.6 %.
+  Keep (MIA/code acceptance depends on it).
+- AL at 64k varies 2.55-2.72 across arms with unrelated knobs -> greedy trajectory noise,
+  small sample. Do not attribute AL deltas < ~0.15 at 64k/150k to a knob without repeats.
+- OLD (1.14.2) arm FAILED: VRAM OOM at KV init (C1's pool not freed yet, 130 MB free).
+  Retry as OLD2 with VRAM gate (w1b.sh). M0 ledger rc=1: local split-config tolerance flag
+  (patched_vs_stock 0.0078), fp32-ref error 0.004 fine; sweep data valid.
+
+M0 micro (T=8, us/call): global 64k: (32,2)=362 (32,4)=420 (64,4)=423 (32,8)=704;
+global 150k: (32,2)=744 (64,4)=930 (32,4)=948 (32,8)=1651. Local 64k: ~(32,4)=55 (128,4)=70.
+ISA probe (triton 3.9, gfx1201, BLOCK_N=32): warps=2 -> **154 VGPR spills**, warps=4 -> 53,
+warps=8 -> 0. Micro-optimum (32,2) violates the 0-spill ISA gate; depth is BW-bound so
+spills may still win end-to-end. W2/W4 arms decide; ISA test contract may need a documented
+relaxation for the chosen default.
+
 ## Rejected / do not reopen
 
 - VEC_KV=0 alone: neutral (ab-1151 B).
 - DECODE_SPLITS=0: collapses long context (ab-1151 C).
+- ADAPTIVE_K off: neutral end-to-end (window 1 A). Not the cause; do not reopen.
+- DFLASH_MXFP4=0 as the 150k fix: neutral at depth (window 1 D); costs MIA code -6 %.
 - (append after each arm)
