@@ -237,7 +237,7 @@ def main():
         ROOT / "nvidia/ops/attention_sm90.py",
         "        BLOCK_N=64 if block_m >= 128 else 128 if block_m <= 32 else 64,\n",
         "        BLOCK_N=(32 if torch.version.hip else 64) if block_m >= 128 else 128 if block_m <= 32 else 64,\n",
-        "else (32 if torch.version.hip else 64) if block_m >= 128",
+        "(32 if torch.version.hip else 64) if block_m >= 128",
         "inkling2 rel_attention: 32-key blocks for the prefill tile on ROCm",
     )
     apply(
