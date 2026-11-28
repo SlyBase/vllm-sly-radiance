@@ -1,0 +1,6 @@
+c=1 rep=1 wall=3.1s tokens=200 agg=63.7 tok/s
+c=1 rep=2 wall=2.5s tokens=200 agg=78.6 tok/s
+c=2 rep=1 wall=3.7s tokens=309 agg=82.9 tok/s
+c=2 rep=2 wall=3.5s tokens=331 agg=95.1 tok/s
+c=4 rep=1 wall=5.9s tokens=625 agg=106.1 tok/s
+c=4 rep=2 wall=4.9s tokens=589 agg=120.6 tok/s

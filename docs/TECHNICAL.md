@@ -945,4 +945,26 @@ OOM at capture with a fresh compile cache (34.08 GB capture vs 31.5 GB budget, i
 comparable (eager loses ~60 % to launch overhead on this hybrid model).
 
 **Not measured.** BetterBench per-category decode and the multi-turn chat replay for this change;
-the 1.14.2 graph-mode speed reference on this host. Raw data: `experiments/inkdeep-20261128/`.
+the 1.14.2 graph-mode speed reference on this host; sampled GSM8K-200 (host python lacks pandas).
+Raw data: `experiments/inkdeep-20261128/`.
+
+**Quality gate (window 2, 2026-11-28, same host and 210 W, published ghcr bits).** G0a/G0b = 1.15.1
+control first and last, G1 = 1.15.2 measured on its second start (fresh compile on the first):
+
+| metric | G0a | G1 | G0b |
+|---|---|---|---|
+| ctx 7942 tok/s | 126.9 | 130.5 | 125.8 |
+| ctx 63696 tok/s | 98.4 | 125.2 | 97.5 |
+| ctx 149881 tok/s | 71.4 | 109.4 | 70.5 |
+| MIA prose/code tok/s | 192.6/261.6 | 183.7/251.5 | 192.5/261.8 |
+| lc64 (Niklas, 100 needles) | 100/100 | 100/100 | 100/100 |
+| lc150 (Niklas, 100 needles) | 99/100 | 99/100 | 99/100 |
+| GSM8K-660 greedy (flexible) | 0.897 | 0.8879 | 0.897 |
+
+Control spread ≤ 1.3 % (noise floor); the candidate's +28 % / +54 % at depth sit far above it. lc150
+misses the same single item (id 364) in all three arms — item-specific, not a regression. GSM8K
+−0.9 pp is within the ±1.2 pp standard error. Concurrency probe at 64k (shared prefix, c1/c2/c4):
+aggregate 64–79 / 83–95 / 106–121 tok/s — sublinear batching, no c1 cliff. The tree has no
+batch-keyed draft gate: native `dynamic_sd_lookup` is off, adaptive K is acceptance-EMA-keyed and
+unset in shipping, and the dynamic-draft controller fails to install on the pinned vLLM
+(`llm_base_proposer` module absent).
