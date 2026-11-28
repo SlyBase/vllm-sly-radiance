@@ -249,3 +249,38 @@ def test_mutants_killed():
         assert st.k == 3, "probe-interval mutant survived (recovered without a probe)"
     finally:
         m.PROBE_INTERVAL = orig
+
+
+# ------------------------------------------- model-agnostic alias RADIANCE_ADAPTIVE_K
+
+@pytest.fixture()
+def clean_env(monkeypatch):
+    monkeypatch.delenv("RADIANCE_ADAPTIVE_K", raising=False)
+    monkeypatch.delenv("RADIANCE_INKLING2_ADAPTIVE_K", raising=False)
+    return monkeypatch
+
+
+@pytest.mark.parametrize("name", ["RADIANCE_ADAPTIVE_K", "RADIANCE_INKLING2_ADAPTIVE_K"])
+def test_either_knob_configures_state(clean_env, name):
+    clean_env.setenv(name, "3,5,7")
+    assert state_from_env().ks == (3, 5, 7)
+
+
+def test_generic_knob_wins_over_legacy(clean_env):
+    clean_env.setenv("RADIANCE_ADAPTIVE_K", "5")
+    clean_env.setenv("RADIANCE_INKLING2_ADAPTIVE_K", "3,5,7")
+    assert state_from_env().ks == (5,)
+
+
+def test_invalid_generic_knob_is_off(clean_env):
+    clean_env.setenv("RADIANCE_ADAPTIVE_K", "4")
+    assert state_from_env() is None
+
+
+def test_proof_line_once_per_state(clean_env, capsys):
+    clean_env.setenv("RADIANCE_ADAPTIVE_K", "3,5,7")
+    state_from_env()
+    assert "[radiance.adaptive_k] active: ks=(3, 5, 7)" in capsys.readouterr().err
+    clean_env.delenv("RADIANCE_ADAPTIVE_K")
+    state_from_env()
+    assert "adaptive_k" not in capsys.readouterr().err

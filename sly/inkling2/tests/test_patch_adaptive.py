@@ -141,3 +141,45 @@ def test_idempotent_includes_model_runner(tree):
     r2 = run(tree)
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert (tree / MR).read_text() == first, "second apply changed model_runner"
+
+
+# ------------------------------------- model-agnostic: real pinned scheduler / model_runner copies
+
+PINNED = Path("/opt/data/repos/vllm-sly-radiance/.dryrun/src/vllm/vllm")
+
+
+@pytest.fixture()
+def pinned_tree(tmp_path):
+    if not (PINNED / "v1/worker/gpu/model_runner.py").exists():
+        pytest.skip("pinned vLLM tree absent")
+    for rel in (SCHED, MR):
+        (tmp_path / "vllm" / rel[len("vllm/"):]).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(PINNED / rel[len("vllm/"):], tmp_path / rel)
+    return tmp_path
+
+
+def test_applies_without_inkling2_model_dir(pinned_tree):
+    assert not (pinned_tree / "vllm/models/inkling2").exists()
+    r1 = run(pinned_tree)
+    assert r1.returncode == 0 and "OK" in r1.stdout and "no models/inkling2" not in r1.stdout, r1.stdout + r1.stderr
+    for rel in (SCHED, MR):
+        ast.parse((pinned_tree / rel).read_text())
+    patched = {rel: (pinned_tree / rel).read_text() for rel in (SCHED, MR)}
+    r2 = run(pinned_tree)
+    assert r2.returncode == 0 and "OK" not in r2.stdout and "NOOP" in r2.stdout, r2.stdout
+    assert {rel: (pinned_tree / rel).read_text() for rel in (SCHED, MR)} == patched
+
+
+def test_query_lens_reads_generic_knob(pinned_tree, monkeypatch):
+    run(pinned_tree)
+    fn = _query_lens_fn(pinned_tree)
+    monkeypatch.delenv("RADIANCE_INKLING2_ADAPTIVE_K", raising=False)
+    monkeypatch.setenv("RADIANCE_ADAPTIVE_K", "3,5,7")
+    assert set(fn(_Cfg({8: 8}), 8)) == {4, 6, 8}
+    monkeypatch.setenv("RADIANCE_ADAPTIVE_K", "3")           # generic knob wins over the legacy one
+    monkeypatch.setenv("RADIANCE_INKLING2_ADAPTIVE_K", "3,5,7")
+    assert set(fn(_Cfg({8: 8}), 8)) == {4, 8}
+    monkeypatch.delenv("RADIANCE_ADAPTIVE_K")                # legacy knob still works alone
+    assert set(fn(_Cfg({8: 8}), 8)) == {4, 6, 8}
+    monkeypatch.setenv("RADIANCE_ADAPTIVE_K", "4")           # invalid -> no extra widths
+    assert fn(_Cfg({8: 8}), 8) == {8: 8}
