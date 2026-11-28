@@ -68,3 +68,38 @@ def test_second_run_is_a_noop(tree):
 def test_absent_model_is_a_noop(tmp_path):
     r = run(tmp_path, "patch_inkling2_decode_attn.py")
     assert r.returncode == 0 and "NOOP" in r.stdout
+
+
+# ---- prefill launch (sly/patch_inkling2_prefill_attn.py, stacked on the decode patch) ----------------------------
+
+
+def prefill_patched(tree):
+    patched(tree)
+    r = run(tree, "patch_inkling2_prefill_attn.py")
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r
+
+
+def test_prefill_hunks_land_and_parse(tree):
+    prefill_patched(tree)
+    kern = (tree / OPS / "attention_sm90.py").read_text()
+    ast.parse(kern)
+    assert "RADIANCE_INKLING2_PREFILL_BULK" in kern
+    assert "RADIANCE_INKLING2_PREFILL_BLOCK_N" in kern
+    assert "RADIANCE_INKLING2_PREFILL_LAZY" in kern and "            if LAZY:" in kern
+    # prefill (MODE_OUT_LSE) now runs the unmasked bulk loop, gated by both knobs; decode gating is unchanged
+    assert "BULK=_BULK and (_PREFILL_BULK or mode != MODE_OUT_LSE)" in kern
+    assert "mode != MODE_OUT_LSE and window == 0 and block_m <= 32" in kern
+
+
+def test_prefill_second_run_is_a_noop(tree):
+    prefill_patched(tree)
+    before = {p: p.read_text() for p in (tree / OPS).glob("attention*.py")}
+    r = run(tree, "patch_inkling2_prefill_attn.py")
+    assert r.returncode == 0 and "OK " not in r.stdout.replace("NOOP", "")
+    assert before == {p: p.read_text() for p in (tree / OPS).glob("attention*.py")}
+
+
+def test_prefill_absent_model_is_a_noop(tmp_path):
+    r = run(tmp_path, "patch_inkling2_prefill_attn.py")
+    assert r.returncode == 0 and "NOOP" in r.stdout
